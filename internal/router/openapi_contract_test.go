@@ -1,0 +1,236 @@
+package router_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+
+	userapp "github.com/gtkit/gin-api/internal/module/user/application"
+	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
+	"github.com/gtkit/gin-api/internal/router"
+
+	"github.com/gin-gonic/gin"
+)
+
+var openAPIMethods = map[string]struct{}{
+	"delete":  {},
+	"get":     {},
+	"head":    {},
+	"options": {},
+	"patch":   {},
+	"post":    {},
+	"put":     {},
+	"trace":   {},
+}
+
+type openAPIDocument struct {
+	OpenAPI string                                `json:"openapi"`
+	Info    openAPIInfo                           `json:"info"`
+	Paths   map[string]map[string]json.RawMessage `json:"paths"`
+}
+
+type openAPIInfo struct {
+	Title   string `json:"title"`
+	Version string `json:"version"`
+}
+
+type openAPIOperation struct {
+	OperationID string                     `json:"operationId"`
+	Responses   map[string]json.RawMessage `json:"responses"`
+}
+
+func TestOpenAPIContract(t *testing.T) {
+	t.Parallel()
+
+	document := loadOpenAPIDocument(t)
+	documentedOperations, operationIDs := documentedOpenAPIOperations(t, document)
+	registeredOperations := registeredRouteOperations()
+
+	tests := []struct {
+		name  string
+		check func() error
+	}{
+		{
+			name: "document metadata",
+			check: func() error {
+				if document.OpenAPI != "3.1.0" {
+					return fmt.Errorf("openapi = %q, want 3.1.0", document.OpenAPI)
+				}
+				if strings.TrimSpace(document.Info.Title) == "" || strings.TrimSpace(document.Info.Version) == "" {
+					return fmt.Errorf("info title and version must be non-empty")
+				}
+				return nil
+			},
+		},
+		{
+			name: "unique operation IDs",
+			check: func() error {
+				if len(operationIDs) != len(documentedOperations) {
+					return fmt.Errorf("operation IDs = %d, operations = %d", len(operationIDs), len(documentedOperations))
+				}
+				return nil
+			},
+		},
+		{
+			name: "registered route parity",
+			check: func() error {
+				differences := compareOperations(registeredOperations, documentedOperations)
+				if len(differences) > 0 {
+					return fmt.Errorf("route contract mismatch:\n%s", strings.Join(differences, "\n"))
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := tt.check(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCompareOperations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		registered map[string]struct{}
+		documented map[string]struct{}
+		want       []string
+	}{
+		{
+			name:       "matching operations",
+			registered: operationSet("GET /health"),
+			documented: operationSet("GET /health"),
+		},
+		{
+			name:       "missing documentation",
+			registered: operationSet("GET /health", "GET /ready"),
+			documented: operationSet("GET /health"),
+			want:       []string{"missing from OpenAPI: GET /ready"},
+		},
+		{
+			name:       "stale documentation",
+			registered: operationSet("GET /health"),
+			documented: operationSet("GET /health", "POST /legacy"),
+			want:       []string{"not registered by Gin: POST /legacy"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := compareOperations(tt.registered, tt.documented); !slices.Equal(got, tt.want) {
+				t.Fatalf("compareOperations() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func loadOpenAPIDocument(t *testing.T) openAPIDocument {
+	t.Helper()
+
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve OpenAPI contract test path")
+	}
+	contractPath := filepath.Join(filepath.Dir(filename), "..", "..", "api", "openapi.json")
+	content, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatalf("read OpenAPI contract: %v", err)
+	}
+
+	var document openAPIDocument
+	if err := json.Unmarshal(content, &document); err != nil {
+		t.Fatalf("decode OpenAPI contract: %v", err)
+	}
+	if len(document.Paths) == 0 {
+		t.Fatal("OpenAPI contract has no paths")
+	}
+
+	return document
+}
+
+func documentedOpenAPIOperations(t *testing.T, document openAPIDocument) (map[string]struct{}, map[string]struct{}) {
+	t.Helper()
+
+	operations := make(map[string]struct{})
+	operationIDs := make(map[string]struct{})
+	for path, pathItem := range document.Paths {
+		for method, rawOperation := range pathItem {
+			method = strings.ToLower(method)
+			if _, ok := openAPIMethods[method]; !ok {
+				continue
+			}
+
+			var operation openAPIOperation
+			if err := json.Unmarshal(rawOperation, &operation); err != nil {
+				t.Fatalf("decode OpenAPI operation %s %s: %v", strings.ToUpper(method), path, err)
+			}
+			if strings.TrimSpace(operation.OperationID) == "" {
+				t.Fatalf("OpenAPI operation %s %s has no operationId", strings.ToUpper(method), path)
+			}
+			if len(operation.Responses) == 0 {
+				t.Fatalf("OpenAPI operation %s %s has no responses", strings.ToUpper(method), path)
+			}
+			if _, exists := operationIDs[operation.OperationID]; exists {
+				t.Fatalf("duplicate OpenAPI operationId %q", operation.OperationID)
+			}
+
+			operations[strings.ToUpper(method)+" "+path] = struct{}{}
+			operationIDs[operation.OperationID] = struct{}{}
+		}
+	}
+
+	return operations, operationIDs
+}
+
+func registeredRouteOperations() map[string]struct{} {
+	authMiddleware := func(c *gin.Context) { c.Next() }
+	userModule := userhttp.NewModule(userapp.NewWithDeps(nil), authMiddleware)
+	engine := router.InitRouterWithVersionedModules("test", router.VersionedModules{
+		V1: []router.Module{userModule},
+	})
+	router.RegisterHealthRoutes(engine, nil)
+
+	operations := make(map[string]struct{})
+	for _, route := range engine.Routes() {
+		operations[route.Method+" "+route.Path] = struct{}{}
+	}
+	return operations
+}
+
+func compareOperations(registered, documented map[string]struct{}) []string {
+	differences := make([]string, 0)
+	for operation := range registered {
+		if _, ok := documented[operation]; !ok {
+			differences = append(differences, "missing from OpenAPI: "+operation)
+		}
+	}
+	for operation := range documented {
+		if _, ok := registered[operation]; !ok {
+			differences = append(differences, "not registered by Gin: "+operation)
+		}
+	}
+	slices.Sort(differences)
+	return differences
+}
+
+func operationSet(operations ...string) map[string]struct{} {
+	result := make(map[string]struct{}, len(operations))
+	for _, operation := range operations {
+		result[operation] = struct{}{}
+	}
+	return result
+}

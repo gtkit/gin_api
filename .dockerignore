@@ -1,0 +1,33 @@
+# 构建上下文采用 allowlist（先排除一切，再显式放行编译所需路径）。
+#
+# 为什么改用 allowlist：本项目无 go:embed，镜像构建实际只需要模块元数据与 Go 源码，
+# 外加 stage 2 从 builder 复制的两个 config 示例文件。逐项排除的写法必须穷举所有
+# 本地目录，任何新增本地目录都会默认泄漏进构建上下文（增大上下文，并有把本地文件
+# 带进镜像的风险）；allowlist 默认安全，新增本地目录无需维护本文件。
+#
+# 运行期真实配置一律挂载注入：env.yml、*.pem、*.key、*.crt 都不在放行清单内，
+# 因此天然被排除，不进构建上下文也不进镜像。
+*
+
+# 模块元数据（依赖层缓存依赖它先于源码 COPY）
+!go.mod
+!go.sum
+
+# Go 源码
+!main.go
+!version.go
+!cmd
+!internal
+!doc
+
+# stage 2 需要从 builder 复制的配置示例（非真实配置）
+!config/env.yml.example
+!config/README.md
+
+# 源码目录按整目录放行，会顺带把目录内的 Markdown 与 OS 产物一并带进上下文
+# （实测 doc/ 下的本地过程文档与 internal/.DS_Store 都进了上下文）。
+# 本项目无 go:embed（全仓零命中），编译只需要 .go 文件，因此显式排除这两类；
+# stage 2 确实需要的 config/README.md 在其后重新放行（后写的规则优先）。
+**/*.md
+**/.DS_Store
+!config/README.md

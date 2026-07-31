@@ -1,0 +1,28 @@
+.idea/
+# 外置运行配置：含明文密钥，绝不提交；本机与各部署机各自维护一份。
+# 列入忽略后 git clean -f -d 也不会清掉它（参照 config/env.yml.example 手动创建）。
+config/env/env.yml
+config/pem/*.pem
+/workspace/
+.Ds_Store
+# 部署产物：版本化二进制与软链（deployment.sh 管理）。
+# 必须忽略：deployment.sh 的 git clean -f -d 不带 -x，忽略项不会被清除，
+# 否则每次发布会把 releases/ 历史版本清光、回滚失效。
+/releases/
+# Go workspace：单模块仓库不需要，仅本机开发用（含本地 replace 目录），不提交。
+go.work
+go.work.sum
+*.md
+!/README.md
+!cmd/README.md
+!cmd/MODULE_GENERATOR.md
+!config/README.md
+!api/README.md
+!/SCAFFOLD.md
+!scripts/README.md
+*.log
+*.gz
+examples
+.cache
+.vscode/
+.DS_Store

@@ -1,0 +1,28 @@
+before_script:
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  - echo "${SSH_PRIVATE_KEY1}" | tr -d '\r'  > ~/.ssh/id_rsa_gitlab
+  - chmod 600 ~/.ssh/id_rsa_gitlab
+  - eval $(ssh-agent -s)
+  # 清除一些系统中复制出现的换行符\r，并重定向到/dev/null防止泄露
+  - ssh-add ~/.ssh/id_rsa_gitlab
+  - addKnowHosts="NO"
+  - KnowHostsNumber=0
+  - if [ ! -f ~/.ssh/known_hosts ]; then addKnowHosts="YES" ;fi
+  - if [ -f ~/.ssh/known_hosts ]; then KnowHostsNumber=`cat ~/.ssh/known_hosts | grep  gitlab.superjq.com]:47383 | wc -l`;fi
+  - if [ $addKnowHosts == "YES" -o $KnowHostsNumber -eq 0 ];then ssh-keyscan -t rsa -p 47383  gitlab.superjq.com >> ~/.ssh/known_hosts;fi
+
+after_script:
+  - rm  ~/.ssh/id_rsa_gitlab
+  - pkill -15 ssh-agent
+
+stages:
+  - deploy_main
+deploy_main:
+  stage: deploy_main
+  only:
+    - main
+  script:
+    - sh deployment.sh master /home/www/go-m-office
+  tags: ## 标签，指定 Runner
+    - gin_api
