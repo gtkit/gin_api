@@ -98,6 +98,12 @@ check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模
 	@ bash ./scripts/check-generator.sh --verify-scope
 	@ bash ./scripts/check-generator.sh
 
+migrate-verify: ## 连库验证迁移：自带固定版本 MySQL 容器，空库 up→down→up + 实际 schema 比对
+	@ bash ./scripts/migrate-verify.sh
+
+check-migration-files: ## 离线断言迁移文件完整性（不连库；镜像门禁第一步同款判据）
+	@ bash ./scripts/check-migration-files.sh database/migrations
+
 gen-appmeta: ## 由 project.mk 生成 internal/appmeta 身份常量（改身份先改 project.mk）
 	@ bash ./scripts/gen-appmeta.sh
 

@@ -18,6 +18,7 @@ go.work.sum
 !cmd/MODULE_GENERATOR.md
 !config/README.md
 !api/README.md
+!database/README.md
 !/SCAFFOLD.md
 !scripts/README.md
 *.log

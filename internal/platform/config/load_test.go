@@ -31,9 +31,9 @@ database:
   name: sleep
   username: root
   password: ""
-  maxidleconn: 50
   maxopenconn: 25
-  maxlifeseconds: 30
+  maxidleconn: 10
+  maxlifeseconds: 1800
 sms:
   enabled: true
 pay:

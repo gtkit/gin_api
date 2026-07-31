@@ -24,6 +24,14 @@
 !config/env.yml.example
 !config/README.md
 
+# 迁移文件：migratex 从**文件系统**读取 database/migrations，因此必须进镜像，
+# 否则镜像内 migrate up 找不到任何迁移。
+# allowlist 模式下必须逐层放行——只放行父目录不会带入其内容。
+# 刻意只放行 migrations 子目录：database/ 下的草稿、备份、导出快照不进上下文。
+!database
+!database/migrations
+!database/migrations/**
+
 # 源码目录按整目录放行，会顺带把目录内的 Markdown 与 OS 产物一并带进上下文
 # （实测 doc/ 下的本地过程文档与 internal/.DS_Store 都进了上下文）。
 # 本项目无 go:embed（全仓零命中），编译只需要 .go 文件，因此显式排除这两类；

@@ -56,6 +56,9 @@ COPY --from=builder /out/${APP_NAME} /app/bin/server
 # 只带入配置参照模板与说明，真实 env.yml/pem 由部署挂载（.dockerignore 已兜底排除）。
 COPY --from=builder /src/config/env.yml.example /app/config/env.yml.example
 COPY --from=builder /src/config/README.md /app/config/README.md
+# 迁移文件必须进镜像：migratex 从文件系统读取 database/migrations，
+# 镜像内没有它就跑不了 migrate up。
+COPY --from=builder /src/database/migrations /app/database/migrations
 
 RUN mkdir -p /app/config/env /app/config/pem /app/logs \
     && chown -R app:app /app

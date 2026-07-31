@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -27,13 +28,16 @@ func buildMigrationCommands() (*migrate.Commands, func(), error) {
 		return nil, nil, err
 	}
 
-	rt, err := bootstrap.NewRuntime(bootstrap.Options{UseMigrationCredentials: true})
+	// 最小装配：只要配置 + 日志 + 数据库。
+	// 此前走完整 NewRuntime，而 Redis 连不上会直接 panic——于是"Redis 挂了 ⇒ 数据库迁移也跑不了"，
+	// 两个无关依赖被绑死，而迁移恰恰是故障恢复时最需要能执行的操作。
+	rt, err := bootstrap.NewMigrationRuntime(context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
 
 	cmds, err := migrate.NewCommands(
-		rt.DB().Mdb(),
+		rt.DB().DB(),
 		// 必须是**当前项目自己的** module path：它是生成代码的 import 路径，
 		// 硬编码母版路径会让派生项目静默生成 import 母版的代码。
 		migrate.WithProjectName(modulePath),

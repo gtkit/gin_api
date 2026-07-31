@@ -82,6 +82,92 @@ type DatabaseConfig struct {
 	MaxIdleConn     int    `mapstructure:"maxidleconn"`
 	MaxOpenConn     int    `mapstructure:"maxopenconn"`
 	MaxLifeSeconds  int    `mapstructure:"maxlifeseconds"`
+	// MaxIdleTimeSeconds 是空闲连接的最长存活时间。
+	// 与 MaxLifeSeconds 一样必须为正：0 会被底层解释成"无限空闲"，等于无意关闭了
+	// 连接轮换——数据库侧单方面断开的连接会一直留在池里，直到某次请求才发现它已死。
+	MaxIdleTimeSeconds int `mapstructure:"maxidletimeseconds"`
+	// Charset / Collation 是连接与迁移**共用**的单一来源。
+	// 不依赖数据库环境默认值：同一份 SQL 在不同默认 collation 的实例上，
+	// 比较与排序结果会不同，而这种差异只在数据量上来后才暴露。
+	Charset   string `mapstructure:"charset"`
+	Collation string `mapstructure:"collation"`
+	// MinVersion 是受支持的最低 MySQL 版本（形如 "8.0"）。
+	// 它同时用于跳过 GORM 的版本探测（WithServerVersion）与启动期的实测校验。
+	MinVersion string `mapstructure:"min_version"`
+}
+
+// 数据库连接的默认值。留空时使用，避免存量配置因新增必填键而无法启动。
+//
+// 连接池默认值刻意都是正数：0 在底层的含义分别是"无限连接数"与"无限生命周期"，
+// 都不是安全的默认——前者让数据库被打满，后者让已被服务端单方面断开的连接一直留在池里。
+const (
+	DefaultDBCharset            = "utf8mb4"
+	DefaultDBCollation          = "utf8mb4_unicode_ci"
+	DefaultDBMinVersion         = "8.0"
+	DefaultDBMaxOpenConn        = 25
+	DefaultDBMaxIdleConn        = 10
+	DefaultDBMaxLifeSeconds     = 1800
+	DefaultDBMaxIdleTimeSeconds = 300
+)
+
+// EffectiveMaxOpenConn 返回生效的最大打开连接数。
+func (c DatabaseConfig) EffectiveMaxOpenConn() int {
+	if c.MaxOpenConn > 0 {
+		return c.MaxOpenConn
+	}
+	return DefaultDBMaxOpenConn
+}
+
+// EffectiveMaxIdleConn 返回生效的最大空闲连接数，且永不超过生效的打开上限。
+func (c DatabaseConfig) EffectiveMaxIdleConn() int {
+	idle := c.MaxIdleConn
+	if c.MaxOpenConn <= 0 && idle <= 0 {
+		idle = DefaultDBMaxIdleConn
+	}
+	if open := c.EffectiveMaxOpenConn(); idle > open {
+		return open
+	}
+	return idle
+}
+
+// EffectiveMaxLifeSeconds 返回生效的连接最大存活时间（秒）。
+func (c DatabaseConfig) EffectiveMaxLifeSeconds() int {
+	if c.MaxLifeSeconds > 0 {
+		return c.MaxLifeSeconds
+	}
+	return DefaultDBMaxLifeSeconds
+}
+
+// EffectiveCharset 返回生效的连接字符集。
+func (c DatabaseConfig) EffectiveCharset() string {
+	if s := strings.TrimSpace(c.Charset); s != "" {
+		return s
+	}
+	return DefaultDBCharset
+}
+
+// EffectiveCollation 返回生效的连接 collation。
+func (c DatabaseConfig) EffectiveCollation() string {
+	if s := strings.TrimSpace(c.Collation); s != "" {
+		return s
+	}
+	return DefaultDBCollation
+}
+
+// EffectiveMinVersion 返回受支持的最低 MySQL 版本。
+func (c DatabaseConfig) EffectiveMinVersion() string {
+	if s := strings.TrimSpace(c.MinVersion); s != "" {
+		return s
+	}
+	return DefaultDBMinVersion
+}
+
+// EffectiveMaxIdleTimeSeconds 返回生效的空闲连接最长存活时间（秒）。
+func (c DatabaseConfig) EffectiveMaxIdleTimeSeconds() int {
+	if c.MaxIdleTimeSeconds > 0 {
+		return c.MaxIdleTimeSeconds
+	}
+	return DefaultDBMaxIdleTimeSeconds
 }
 
 // DBCredentials 是一次数据库连接使用的凭据。
@@ -418,6 +504,36 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 	if database.Username == "" {
 		errs = append(errs, errors.New("database.username is required"))
 	}
+	// 连接池必须交叉校验，不能留到底层构造时才报错。
+	//
+	// 口径：未设置（零值）走 Effective* 的默认值，不算错误——否则省略这些键的存量部署
+	// 会因为一次校验加强而起不动，而它们原本工作正常。显式写了负数，或写出
+	// max_idle > max_open 这种自相矛盾的组合，才是必须拦下的真错误。
+	//
+	// max_idle > max_open 尤其危险：底层会静默把空闲上限压到打开上限，
+	// 于是配置写的和实际生效的不一致，而没有任何地方会告诉你。
+	if database.MaxOpenConn < 0 {
+		errs = append(errs, fmt.Errorf("database.maxopenconn must not be negative, got %d", database.MaxOpenConn))
+	}
+	if database.MaxIdleConn < 0 {
+		errs = append(errs, fmt.Errorf("database.maxidleconn must not be negative, got %d", database.MaxIdleConn))
+	}
+	if database.MaxOpenConn > 0 && database.MaxIdleConn > database.MaxOpenConn {
+		errs = append(errs, fmt.Errorf(
+			"database.maxidleconn (%d) must not exceed database.maxopenconn (%d)",
+			database.MaxIdleConn, database.MaxOpenConn))
+	}
+	if database.MaxLifeSeconds < 0 {
+		errs = append(errs, fmt.Errorf("database.maxlifeseconds must not be negative, got %d", database.MaxLifeSeconds))
+	}
+	if database.MaxIdleTimeSeconds < 0 {
+		errs = append(errs, fmt.Errorf(
+			"database.maxidletimeseconds must not be negative, got %d", database.MaxIdleTimeSeconds))
+	}
+	if err := validateMinVersion(database.EffectiveMinVersion()); err != nil {
+		errs = append(errs, err)
+	}
+
 	// 只配 migrate_password 而 migrate_username 为空是**非法组合**，不是「未启用」：
 	// 静默忽略密码并回退到运行凭据，会让运维以为迁移正在用独立账号执行——
 	// 那是危险的静默降级，必须 fail-fast。
