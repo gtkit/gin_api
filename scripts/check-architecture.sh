@@ -85,6 +85,30 @@ check_no_match \
   'github\.com/gtkit/logger' \
   internal/module/*/application internal/module/*/dto internal/models
 
+# 客户端 IP 只能经唯一 accessor 取值。
+#
+# 为什么这条规则必须存在：IP 同时是审计事实与限流输入，两处各自裸调 ClientIP() 时，
+# 任何一处加了归一化就会让"日志里的 IP"与"被限流的 IP"指向不同主体；
+# 收口后，后续给限流 key 做 HMAC、给观测做脱敏也只有一个改动点。
+#
+# accessor 自身是唯一豁免——它就是那个入口。
+#
+# 只匹配真实调用，不匹配注释：这条规则的正文本身就要在注释里解释 `c.ClientIP()` 为何危险，
+# 若把注释也算作违规，规则就会永远为真而无法归零，最终被人加豁免绕过。
+# 判据用「行首到调用之间不出现 //」来排除整行注释与行尾注释里的提及。
+CLIENTIP_ACCESSOR="internal/pkg/ginc/clientip.go"
+clientip_hits="$(mktemp)"
+find internal cmd -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE '^[^/]*[^/[:space:]]\.ClientIP\(\)' 2>/dev/null |
+  grep -v '^[^:]*:[0-9]*:[[:space:]]*//' |
+  grep -v "^${CLIENTIP_ACCESSOR}:" >>"$clientip_hits" || true
+if [ -s "$clientip_hits" ]; then
+  echo "FAIL: client IP must be read through ${CLIENTIP_ACCESSOR} (ginc.ClientIP), not by calling ClientIP() directly"
+  cat "$clientip_hits"
+  fail=1
+fi
+rm -f "$clientip_hits"
+
 while IFS= read -r -d '' file; do
   if grep -qE 'func .*mdbCtx' "$file" && ! grep -q 'dbtx.DB(ctx, r.db)' "$file"; then
     echo "FAIL: $file mdbCtx does not call dbtx.DB(ctx, r.db)"

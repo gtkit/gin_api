@@ -29,6 +29,7 @@ type Config struct {
 	Baidu    BaiduConfig    `mapstructure:"baidu"`
 	CORS     CORSConfig     `mapstructure:"cors"`
 	Pprof    PprofConfig    `mapstructure:"pprof"`
+	Proxy    ProxyConfig    `mapstructure:"proxy"`
 }
 
 type AppConfig struct {
@@ -42,6 +43,24 @@ type AppConfig struct {
 	Timezone            string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+}
+
+// ProxyConfig 描述本进程前面的反向代理拓扑。
+//
+// 为什么必须显式配置：Gin 默认 ForwardedByClientIP=true 且可信代理集合为 0.0.0.0/0，
+// 于是 c.ClientIP() 会直接采信客户端完全可控的 X-Forwarded-For / X-Real-IP——
+// 任何人都能零成本把自己伪造成任意 IP，访问日志与业务审计里的 IP 因此不可信。
+//
+// 本配置的默认值（两个空列表）语义是**不信任任何代理**：客户端 IP 只取真实 TCP peer 地址。
+// 部署在反向代理之后时必须把代理网段配进 TrustedProxies，否则记录到的会是代理自身的地址。
+// 这个代价是可见的（IP 全变成同一个，一眼能发现），而"默认信任全部"的错误是不可见的。
+type ProxyConfig struct {
+	// TrustedProxies 是可信代理的 CIDR 或单个 IP 列表。空 = 不信任任何代理。
+	// 生产环境拒绝 0.0.0.0/0 与 ::/0——它们等价于回到不安全默认值，只是写法更隐蔽。
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
+	// RemoteIPHeaders 是允许用于提取客户端 IP 的转发头，显式列出，不依赖框架默认值。
+	// 仅当请求的 TCP peer 落在 TrustedProxies 内时才会被采信。
+	RemoteIPHeaders []string `mapstructure:"remote_ip_headers"`
 }
 
 type DatabaseConfig struct {
@@ -304,6 +323,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	if err := validateJWTConfig(c.JWT); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateProxyConfig(c.Proxy, c.Env); err != nil {
 		errs = append(errs, err)
 	}
 

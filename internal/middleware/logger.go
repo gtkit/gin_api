@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 )
@@ -127,7 +128,7 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 			zap.String("method", method),
 			zap.String("path", path),
 			zap.String("query", redactQuery(c.Request.URL.RawQuery)),
-			zap.String("ip", c.ClientIP()),
+			zap.String("ip", ginc.ClientIP(c)),
 			zap.Duration("latency", time.Since(start)),
 			zap.String("requestId", requestid.Get(c)),
 			zap.String("userAgent", c.GetHeader("User-Agent")),

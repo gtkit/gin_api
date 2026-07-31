@@ -192,6 +192,9 @@ func buildEngine(inf infra, svc services, mw middlewares) *gin.Engine {
 		LogRequestBody:  cfg.Log.AccessRequestBody,
 		LogResponseBody: cfg.Log.AccessResponseBody,
 		MaxBodyBytes:    cfg.App.MaxBodyBytes,
+		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
+		TrustedProxies:  cfg.Proxy.TrustedProxies,
+		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,
 	})
 	router.RegisterHealthRoutes(engine, newHealthChecker(inf.dao))
 
@@ -244,6 +247,12 @@ func initLegacyRuntime(cfg *config.Config, opts Options) error {
 	checkJSONRuntime()
 
 	legacylog.InitAccessLog(cfg)
+
+	// 非生产允许 0.0.0.0/0 以便本地调试转发头，但不能让它无声地被带到预发环境。
+	// 生产环境该配置由 config.Validate 直接拒绝，走不到这里。
+	for _, w := range cfg.Proxy.Warnings(cfg.Env) {
+		logger.Warn(w)
+	}
 
 	logger.Infof("runtime initialized with env=%s", cfg.Env)
 	return nil

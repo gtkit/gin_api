@@ -93,7 +93,7 @@ func (h *Handler) Deactivate(c *gin.Context) {
 		UserID:     userID,
 		Reason:     req.Reason,
 		Channel:    req.Channel,
-		OperatorIP: c.ClientIP(),
+		OperatorIP: ginc.ClientIP(c),
 	})
 	// 幂等：重复注销视为成功，避免客户端因丢包重试报错。
 	if err == nil || errors.Is(err, application.ErrAlreadyDeactivated) {

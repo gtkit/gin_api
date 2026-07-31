@@ -25,6 +25,11 @@ type RouterOptions struct {
 	LogResponseBody bool
 	// MaxBodyBytes 全局请求体大小上限（字节）；<=0 时中间件兜底默认 10MB。
 	MaxBodyBytes int64
+	// TrustedProxies 是可信代理的 CIDR/IP 列表。**空 = 不信任任何代理**，
+	// 此时 ClientIP 只取真实 TCP peer 地址，客户端伪造的转发头一律忽略。
+	TrustedProxies []string
+	// RemoteIPHeaders 是允许用于提取客户端 IP 的转发头，仅在请求来自可信代理时才被采信。
+	RemoteIPHeaders []string
 }
 
 // InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
@@ -48,6 +53,16 @@ func InitRouterWithVersionedModules(envName string, modules VersionedModules, op
 
 	// 设置 Gin mode, 根据运行环境
 	gin.SetMode(ginModeFromEnv(envName))
+
+	// 可信代理边界必须无条件设置，不能依赖 Gin 默认值。
+	//
+	// Gin 默认 ForwardedByClientIP=true 且可信代理集合为 0.0.0.0/0——即**信任所有代理**，
+	// c.ClientIP() 会直接采信客户端完全可控的 X-Forwarded-For / X-Real-IP。
+	// 于是访问日志的 ip 与业务审计的操作者 IP 都能被零成本伪造。
+	//
+	// "不调用 SetTrustedProxies" 与 "传空列表" 在 Gin 里语义完全不同：前者沿用不安全默认，
+	// 后者才是"谁都不信任"。因此这里即使配置为空也显式调用。
+	applyTrustedProxies(engine, opt)
 
 	// 禁用重定向和方法不允许的处理
 	engine.RedirectTrailingSlash = false

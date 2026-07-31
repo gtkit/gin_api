@@ -20,7 +20,7 @@ import (
 func LimitIp(num int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 得到ip地址
-		ipAddr := c.ClientIP()
+		ipAddr := ginc.ClientIP(c)
 		ipkey := ipAddr + c.Request.Method + c.Request.URL.Path
 		// 限制每秒请求次数
 		limit := golimit.NewLimiter(ipkey, num)
