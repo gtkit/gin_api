@@ -33,10 +33,7 @@ func signLaravelTestToken(t *testing.T, userID int64) string {
 // TestAuthAcceptsLegacyLaravelToken 走完整中间件链路：
 // Ed25519 主验证失败 → 回退 Laravel HS256 验证 → 角色校验 → 用户校验 → SetUserID。
 func TestAuthAcceptsLegacyLaravelToken(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	laravelVerifier, err := jwtauth.NewLaravelVerifier(legacyLaravelTestSecret, "hs256", "user")
 	if err != nil {
@@ -71,10 +68,7 @@ func TestAuthAcceptsLegacyLaravelToken(t *testing.T) {
 // TestAuthRejectsLegacyLaravelTokenWhenFallbackDisabled 确认未启用 legacy 回退时，
 // 同一个 Laravel token 仍被 401 拒绝（组合 parser 不存在 legacy 分支）。
 func TestAuthRejectsLegacyLaravelTokenWhenFallbackDisabled(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	parser, err := jwtauth.NewFallbackParser(issuer, nil)
 	if err != nil {

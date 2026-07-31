@@ -11,7 +11,6 @@ import (
 	legacyclaims "github.com/gtkit/gojwt/claims"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
-	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 )
 
 type fakeUserVerifier struct {
@@ -24,10 +23,7 @@ func (f fakeUserVerifier) ValidateUser(context.Context, int64) (bool, error) {
 }
 
 func TestAuthAllowsValidToken(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -53,10 +49,7 @@ func TestAuthAllowsValidToken(t *testing.T) {
 }
 
 func TestAuthRejectsUnknownUser(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -82,10 +75,7 @@ func TestAuthRejectsUnknownUser(t *testing.T) {
 }
 
 func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -114,10 +104,7 @@ func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
 // TestAuthRejectsQueryTokenForSSERequest 守卫「query token 仅限 WebSocket 升级」：
 // 声明 Accept: text/event-stream 的普通请求不得凭 query token 通过鉴权。
 func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -143,10 +130,7 @@ func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
 }
 
 func TestAuthAllowsWebSocketQueryToken(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -172,10 +156,7 @@ func TestAuthAllowsWebSocketQueryToken(t *testing.T) {
 }
 
 func TestAuthRejectsQueryTokenForPlainRequest(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {
@@ -200,10 +181,7 @@ func TestAuthRejectsQueryTokenForPlainRequest(t *testing.T) {
 }
 
 func TestOptionalAuthAllowsMissingToken(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
@@ -222,10 +200,7 @@ func TestOptionalAuthAllowsMissingToken(t *testing.T) {
 }
 
 func TestOptionalAuthSetsUserIDWhenTokenIsPresent(t *testing.T) {
-	issuer, err := jwtauth.NewWithConfig(nil)
-	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
-	}
+	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
 	if err != nil {

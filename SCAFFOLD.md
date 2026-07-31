@@ -30,22 +30,48 @@ cd ./your-project
 
 ```bash
 # 预览将发生的改动（不落盘）
-go run . project init --name your-project --dry-run
+go run . project init --name your_project --dry-run
 
 # 实际执行
-go run . project init --name your-project
+go run . project init --name your_project
 ```
 
 `project init` 会：
 
-- 重写 `internal/appmeta` 身份常量（`CommandName`/`RuntimeName`/`ProjectName`/`MigrateLockName`）为 `--name`；
-- 清理母版遗留的过程性工作目录（保留工程规范文档）；
-- 删除母版的项目工作文档（findings/progress/task_plan/*BENCHMARK* 等）；
-- 重置 `Makefile` 的 `COVERAGE_MIN` 到起步地板（50.0）；
-- 丢弃母版 git 历史并为新项目建立首个提交；
+- 把 `--name` 写入 `project.mk`（应用身份的**唯一来源**：`APP_NAME` / `APP_DISPLAY_NAME`），
+  再执行 `make gen-appmeta` 生成 `internal/appmeta`，并校验生成物与来源零差异——
+  不直接正则改写生成产物，否则会形成第二个身份来源；
+- 删除母版所属环境的专属部署入口（`.gitlab-ci.yml` 与 `deployment.sh`）。它们绑定母版环境的
+  进程管理服务名、部署根路径与分支，不存在参数化后通用的形态，保留等于分发一条必然断裂的部署链——
+  **派生项目需自备部署入口**；
+- 以指定分支（`--branch`，默认 `main`）初始化 git 并建立首个提交；
 - 收尾自检 `go build ./...` + `make check`。
 
-**护栏**：工作区非纯净时拒绝执行；在母版自身（模块路径仍为 `github.com/gtkit/gin-api`）上拒绝执行；`--dry-run` 只预览不落盘、不动 git；可重复执行（幂等）。
+**明确不做**：不修改 `Makefile` 的 `COVERAGE_MIN`。派生代码主体与母版相同，没有覆盖率下降的事实依据，
+把门禁重置到更低的"起步地板"既无依据又违反覆盖率棘轮只升不降。派生项目直接继承母版已验证的门槛。
+
+**参数**
+
+| flag | 说明 |
+|------|------|
+| `--name` | 必填。须匹配 `^[a-z][a-z0-9_]{0,62}$`，在**任何文件被修改之前**校验 |
+| `--branch` | 初始分支名，默认 `main`；由 `git check-ref-format --branch` 判定，不读 `init.defaultBranch` |
+| `--dry-run` | 只预览不落盘、不动 git |
+| `--force-reinit-git` | 允许在已有 git 仓库上执行，**会永久丢弃现有 git 历史** |
+| `--no-commit` | 只初始化并暂存，不产生提交；该模式不要求 git 提交身份 |
+
+**护栏**
+
+- 项目名与分支名先于任何文件改动被校验（项目名会同时进入 Go 字符串字面量与 Make KV，
+  未校验即为字面量破坏与 Make 表达式注入面）；
+- **已有 git 仓库默认拒绝执行**——它会丢弃历史，而普通输入（gonew 产物）本来就没有 `.git`；
+  确需重建时显式传 `--force-reinit-git`；
+- `.git` 为普通文件（linked worktree）、符号链接或其他特殊类型时，**即使带 flag 也拒绝**；
+- 工作区非纯净时拒绝执行；在母版自身（模块路径仍为 `github.com/gtkit/gin-api`）上拒绝执行；
+- 执行前在项目根**之外**建立受影响文件与旧 git 的快照，任一阶段失败都逐字回滚
+  （含权限位；成功重建时旧 `.git/info/exclude` 会在首个 `git add` 之前写回，
+  保证本地忽略规则对首个提交依然生效）；
+- 可重复执行（幂等）。
 
 ## 之后
 

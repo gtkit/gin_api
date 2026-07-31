@@ -32,7 +32,7 @@ var (
 	initLogWithConfig  = legacylog.InitWithConfig
 	initNewsWithConfig = news.InitWithConfig
 	initFileWithConfig = file.InitWithConfig
-	initDAOWithConfig  = legacydao.NewWithConfig
+	initDAOWithConfig  = legacydao.NewWithCredentials
 	initJWTWithConfig  = legacyjwtauth.NewWithConfig
 	initVerify         = verify.New
 	checkJSONRuntime   = json.CheckJSON
@@ -230,12 +230,12 @@ func newTokenParser(cfg *config.Config, issuer legacyjwtauth.TokenParser) (middl
 	return legacyjwtauth.NewFallbackParser(issuer, laravelVerifier)
 }
 
-func initLegacyRuntime(cfg *config.Config) error {
+func initLegacyRuntime(cfg *config.Config, opts Options) error {
 	applyRuntimeTimezone(cfg)
 	initLogWithConfig(cfg)
 	initNewsWithConfig(cfg)
 	initFileWithConfig(cfg)
-	initDAOWithConfig(cfg)
+	initDAOWithConfig(cfg, resolveDBCredentials(cfg, opts))
 	// JWT issuer 不在此处创建：改由 NewRuntime 创建一次并持有，避免"预检创建一份又丢弃、
 	// 随后再创建一份"的冗余（见 runtime.go）。
 	if err := initVerify(); err != nil {
@@ -248,6 +248,29 @@ func initLegacyRuntime(cfg *config.Config) error {
 	logger.Infof("runtime initialized with env=%s", cfg.Env)
 	return nil
 }
+
+// resolveDBCredentials 决定本次装配的数据库连接使用哪套凭据。
+//
+// 只有 migrate 子命令会请求迁移凭据；server 恒走运行凭据。迁移凭据未配置时回退运行凭据
+// 并打印告警——不失败，因为存量部署尚未配置迁移凭据，直接 fail 会破坏它们。
+// 告警只说明"正在使用运行凭据"，绝不带用户名或密码。
+func resolveDBCredentials(cfg *config.Config, opts Options) config.DBCredentials {
+	if !opts.UseMigrationCredentials {
+		return cfg.Database.RuntimeCredentials()
+	}
+	if creds, ok := cfg.Database.MigrationCredentials(); ok {
+		return creds
+	}
+	logger.Warn(migrationFallbackWarning)
+	return cfg.Database.RuntimeCredentials()
+}
+
+// migrationFallbackWarning 是回退告警的固定文本。
+//
+// 刻意做成无格式化占位符的常量：告警绝不能带用户名或密码，而一旦允许拼接，
+// 就迟早有人为了"方便排障"把凭据加进来。测试锁住这一点。
+const migrationFallbackWarning = "migration is using the runtime database credentials: " +
+	"set database.migrate_username to grant DDL only to a dedicated account"
 
 func applyRuntimeTimezone(cfg *config.Config) {
 	if cfg == nil || strings.TrimSpace(cfg.App.Timezone) == "" {

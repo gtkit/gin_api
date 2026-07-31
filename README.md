@@ -117,57 +117,54 @@ CI 中不含质量 job，提交前由开发者自行运行上述入口。
 
 ### 生产发布
 
-GitLab CI 流水线示例（分支、Runner、路径均应在创建真实项目后重新配置）：推送
-`develop`/`master` → `quality`（`make check`）→ `deploy_*`（目标机 Runner 上执行）。
-SSH 私钥与 known_hosts 仅注入部署 job，质量 job 不接触部署凭据；两个示例部署共用目录，
-因此通过同一个 `resource_group` 串行执行。
+**部署脚本 `deployment.sh` 与 `.gitlab-ci.yml` 是本项目所属环境的专属方案，属外部冻结契约：
+本仓不修改它们、不声明其编排，构建产物向它们的既有约定收敛。** 派生项目（经 gonew + `project init`）
+不会继承这两个文件，需自备部署入口。
 
-```bash
-bash deployment.sh -b <分支> -e <环境标识> -p <RootPath>
-```
+当前契约（只读取、不修改）：
 
-`deployment.sh` 流程：git 拉取分支（CI 环境精确到触发流水线的 commit）→ 校验配置就位 →
-目标机执行 `GOWORK=off CGO_ENABLED=0 go build` 生成临时文件 → 新二进制执行 `doctor` →
-落盘为 `RootPath/releases/app_client-<sha>` → 同目录临时软链原子替换
-`RootPath/bin/app_client` → `supervisorctl restart` 并确认稳定处于 RUNNING → 清理旧版本。
-Supervisor 重启、状态检查或已启用的 HTTP 健康检查失败时，脚本会恢复旧软链并重启旧版本；
-首次发布失败且没有旧版本时会移除活动软链并停止服务。
+| 契约点 | 当前值 |
+|--------|--------|
+| CI 触发 | `.gitlab-ci.yml` `only: main`，唯一 job `deploy_main` |
+| CI 调用 | `sh deployment.sh master <RootPath>`（两个位置参数：分支、部署根路径） |
+| 二进制路径 | `deployment.sh` 要求 `<RootPath>/bin/gin_api` 可执行，缺失即中止 |
+| 进程管理 | supervisor 服务名 `gin_api` |
 
-**回滚**（免拉代码免构建，直接切回历史版本）：
+产物名来自 `project.mk` 的 `APP_NAME`：`make build` 输出 `bin/$(APP_NAME)`，当前为 `bin/gin_api`，
+与上表一致。改 `APP_NAME` 需同步确认部署侧约定。
 
-```bash
-bash deployment.sh -p <RootPath> -r <短sha>    # releases/ 中已有的版本
-```
+**CI 中不含任何质量门禁 job**，因此所有门禁都在本地执行（见「质量门禁」一节），提交前自行运行。
 
 目标机一次性准备：
 
-1. Go 工具链、Git、Supervisor；`RootPath` 下准备 `config/env/env.yml`（参照 example）与 `config/pem/`。
-2. supervisor program 指向软链（发布不改 supervisor 配置）：
+1. `RootPath` 下准备 `config/env/env.yml`（参照 `config/env.yml.example`）与 `config/pem/`。
+2. supervisor program 指向构建产物：
 
    ```ini
    [program:gin_api]
    directory=/home/www/gin-api
-   command=/home/www/gin-api/bin/app_client server
+   command=/home/www/gin-api/bin/gin_api server
    environment=APP_ROOT="/home/www/gin-api"
    user=www
    autorestart=true
    ```
 
-   改完执行 `supervisorctl update`。
-3. 在 GitLab CI 中配置 `SSH_PRIVATE_KEY1` 与经过核验的 `SSH_KNOWN_HOSTS`。脚手架不在流水线内
-   动态执行 `ssh-keyscan`，避免把网络返回值直接作为信任根。
-4. HTTP 健康检查默认关闭，因为脚手架不能假定端口。实际项目可设置
-   `HEALTHCHECK_URL=http://127.0.0.1:<端口>/health`；启用后目标机还需安装 `curl`。
-   重试次数、间隔与单次超时可通过 `HEALTHCHECK_ATTEMPTS`、`HEALTHCHECK_INTERVAL`、
-   `HEALTHCHECK_TIMEOUT` 覆盖。
+   改完执行 `supervisorctl reread && supervisorctl update`。
+3. 只改配置不改代码时不必跑部署脚本：编辑 `config/env/env.yml` 后
+   `supervisorctl restart gin_api` 即可（配置在进程启动时一次性装配，不重启不生效）。
 
 ### 本地 Docker 镜像打包（可选）
 
 ```bash
-make image    # 构建 gin_api:<当前commit短sha>，仅本地使用；服务器不运行 Docker
+make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服务器不运行 Docker
 ```
 
 镜像内不含 `config/env/env.yml`、PEM 私钥与 `.git`（`.dockerignore` 保证）；运行配置挂载注入。
+
+产物名由 `--build-arg APP_NAME` 决定（`make image` 从 `project.mk` 取），构建阶段显式断言其非空；
+**容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**——`ENTRYPOINT` 必须是 exec form
+（shell form 会让 shell 成为 PID 1，破坏信号转发与优雅关停），而 exec form 不做变量展开。
+宿主机侧的 `bin/$(APP_NAME)` 由冻结的部署脚本负责，与容器内路径互不牵连。
 
 ### 数据库集成测试（本地手动）
 

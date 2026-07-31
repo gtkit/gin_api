@@ -12,8 +12,15 @@ import (
 )
 
 // Options defines runtime startup options.
-// 配置改为从固定 config/env.yml 读取后，启动不再需要环境名参数；保留空结构以备将来扩展。
-type Options struct{}
+// 配置改为从固定 config/env.yml 读取后，启动不再需要环境名参数。
+type Options struct {
+	// UseMigrationCredentials 让本次装配的数据库连接优先使用迁移专用凭据。
+	//
+	// 只有 migrate 子命令置 true；server 永远为 false，因此运行账号不会因为配置了
+	// 迁移凭据而改变自身连接身份。迁移凭据未配置时回退运行凭据并告警（不失败，
+	// 避免破坏尚未配置迁移凭据的存量部署）。
+	UseMigrationCredentials bool
+}
 
 // App owns the process lifecycle and assembled runtime dependencies.
 type App struct {

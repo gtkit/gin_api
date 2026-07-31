@@ -19,13 +19,13 @@ type Runtime struct {
 }
 
 // NewRuntime builds runtime dependencies that can be reused by commands.
-func NewRuntime(_ Options) (*Runtime, error) {
+func NewRuntime(opts Options) (*Runtime, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := initLegacyRuntime(cfg); err != nil {
+	if err := initLegacyRuntime(cfg, opts); err != nil {
 		return nil, err
 	}
 

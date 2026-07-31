@@ -16,11 +16,20 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
-// NewWithConfig 使用 typed config 初始化数据层。
+// NewWithConfig 使用 typed config 初始化数据层，数据库连接使用**运行凭据**。
+// 服务进程走这条路径，永远不会拿到迁移凭据。
 func NewWithConfig(cfg *config.Config) {
+	NewWithCredentials(cfg, cfg.Database.RuntimeCredentials())
+}
+
+// NewWithCredentials 用调用方显式选定的数据库凭据初始化数据层。
+//
+// 凭据由调用方解析后传入，而不是把整个 *Config 交给底层去猜：同一份配置里有运行与迁移
+// 两套账号，底层无从判断本次该用哪个。
+func NewWithCredentials(cfg *config.Config, creds config.DBCredentials) {
 	daoDB = &dao{
 		rdb: initRedisWithConfig(cfg),
-		mdb: initMysqlWithConfig(cfg),
+		mdb: initMysqlWithConfig(cfg, creds),
 	}
 }
 
@@ -45,7 +54,7 @@ func gormLoggerOptions(cfg *config.Config) []zlogger.Option {
 	return opts
 }
 
-func initMysqlWithConfig(cfg *config.Config) *gorm.DB {
+func initMysqlWithConfig(cfg *config.Config, creds config.DBCredentials) *gorm.DB {
 	loggeropt := gormLoggerOptions(cfg)
 
 	// MustOpen 与旧版 orm.NewMysql 一致：启动连不上数据库直接 panic 快速退出。
@@ -53,8 +62,8 @@ func initMysqlWithConfig(cfg *config.Config) *gorm.DB {
 		ormx.WithHost(cfg.Database.Host),
 		ormx.WithPort(cfg.Database.Port),
 		ormx.WithDatabase(cfg.Database.Name),
-		ormx.WithUser(cfg.Database.Username),
-		ormx.WithPassword(cfg.Database.Password),
+		ormx.WithUser(creds.Username),
+		ormx.WithPassword(creds.Password),
 		ormx.WithPrepareStmt(true),
 		ormx.WithSkipDefaultTransaction(true),
 		ormx.WithGormLogger(zlogger.New(loggeropt...)),

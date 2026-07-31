@@ -236,7 +236,7 @@ func TestInitLegacyRuntimeAppliesConfiguredTimezone(t *testing.T) {
 	initNewsWithConfig = func(*config.Config) {}
 	buildMailClient = func(*config.Config) (*mailx.Client, error) { return nil, nil }
 	initFileWithConfig = func(*config.Config) {}
-	initDAOWithConfig = func(*config.Config) {}
+	initDAOWithConfig = func(*config.Config, config.DBCredentials) {}
 	initJWTWithConfig = func(*config.Config) (*gojwt.JwtEd25519, error) { return nil, nil }
 	initVerify = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}
@@ -244,7 +244,7 @@ func TestInitLegacyRuntimeAppliesConfiguredTimezone(t *testing.T) {
 	if err := initLegacyRuntime(&config.Config{
 		Env: "test",
 		App: config.AppConfig{Timezone: "Asia/Shanghai"},
-	}); err != nil {
+	}, Options{}); err != nil {
 		t.Fatalf("initLegacyRuntime returned error: %v", err)
 	}
 	if got := time.Local.String(); got != "Asia/Shanghai" {

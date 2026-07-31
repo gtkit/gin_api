@@ -1,6 +1,9 @@
-.PHONY: dev build check check-ci check-architecture check-openapi check-coverage check-generator gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-openapi check-coverage check-generator check-appmeta gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
-APP=gin_api
+## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
+## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
+## 注意：module path 与 COVERAGE_MIN 都不属于身份，不在 project.mk 里。
+include project.mk
 
 ## 服务监听端口（可覆盖：make port PORT=9000）
 PORT ?= 8008
@@ -8,7 +11,6 @@ PORT ?= 8008
 ENV = $(firstword $(filter-out $@,$(MAKECMDGOALS)))
 
 BIN_DIR := ./bin
-IMAGE ?= app-client
 
 Linux := CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN := go run -tags="sonic"
@@ -43,7 +45,7 @@ kill-port:
 ## 构建linux版本,需要安装upx
 build:
 	@mkdir -p $(BIN_DIR)
-	$(Linux) go build $(BUILD_FLAGS) -o $(BIN_DIR)/$(APP) . && upx -9 $(BIN_DIR)/$(APP)
+	$(Linux) go build $(BUILD_FLAGS) -o $(BIN_DIR)/$(APP_NAME) . && upx -9 $(BIN_DIR)/$(APP_NAME)
 
 GO_TARGETS ?= ./...
 LINT_TARGETS ?= ./...
@@ -70,7 +72,14 @@ test-integration: ## Run real-database integration tests locally (set REQUIRE_DB
 	go test -tags integration -race -count=1 -timeout=5m ./internal/repository/...
 
 image: ## Build the Docker image locally, tagged with the current commit short sha (requires Docker; servers do not run Docker)
-	docker build -t gin_api:$$(git rev-parse --short HEAD) .
+	## APP_NAME 只决定 builder 阶段的产物名；容器内路径固定为 /app/bin/server（exec-form
+	## ENTRYPOINT 不做变量展开，退回 shell form 会让 shell 成为 PID 1 并破坏优雅关停）。
+	## GOPROXY 透传本机设置：容器内默认 proxy 在部分网络不可达，回退 direct 又需要
+	## builder 镜像里并不存在的 git。
+	docker build \
+		--build-arg APP_NAME=$(APP_NAME) \
+		--build-arg GOPROXY=$$(go env GOPROXY) \
+		-t $(APP_NAME):$$(git rev-parse --short HEAD) .
 
 test-coverage: ## Run race-enabled tests and write an aggregate coverage profile
 	ALLOW_NO_LOOPBACK=$(ALLOW_NO_LOOPBACK) ./scripts/test-coverage.sh $(COVERAGE_PROFILE) $(GO_TARGETS)
@@ -84,9 +93,16 @@ check-architecture: ## 校验分层架构边界
 check-openapi: ## 校验 OpenAPI 文档结构及其与真实 Gin 路由的一致性
 	go test -count=1 -run '^TestOpenAPIContract$$' ./internal/router
 
-check-generator: ## 脚手架防腐冒烟：导出当前工作树生成模块并验证编译/传感器/goimports（含门禁自检）
+check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模块并验证编译/传感器/goimports（含门禁自检）
 	@ bash ./scripts/check-generator.sh --self-test
+	@ bash ./scripts/check-generator.sh --verify-scope
 	@ bash ./scripts/check-generator.sh
+
+gen-appmeta: ## 由 project.mk 生成 internal/appmeta 身份常量（改身份先改 project.mk）
+	@ bash ./scripts/gen-appmeta.sh
+
+check-appmeta: ## 校验 internal/appmeta 与 project.mk 零差异（防身份漂移）
+	@ bash ./scripts/gen-appmeta.sh --check
 
 MIGRATE = $(if $(filter dev,$(ENV)),$(RUN) .,$(BIN_DIR)/$(APP))
 
@@ -126,7 +142,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

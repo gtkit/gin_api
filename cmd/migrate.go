@@ -17,15 +17,26 @@ func init() {
 }
 
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
+//
+// UseMigrationCredentials：迁移是唯一需要 DDL 权限的路径，配置了迁移专用账号时用它，
+// 未配置则回退运行凭据并告警（不失败，避免破坏尚未配置迁移凭据的存量部署）。
 func buildMigrationCommands() (*migrate.Commands, func(), error) {
-	rt, err := bootstrap.NewRuntime(bootstrap.Options{})
+	// module path 必须先解析：解析失败时不该先把数据库连上再报错。
+	modulePath, err := resolveModulePath()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rt, err := bootstrap.NewRuntime(bootstrap.Options{UseMigrationCredentials: true})
 	if err != nil {
 		return nil, nil, err
 	}
 
 	cmds, err := migrate.NewCommands(
 		rt.DB().Mdb(),
-		migrate.WithProjectName("github.com/gtkit/gin-api"),
+		// 必须是**当前项目自己的** module path：它是生成代码的 import 路径，
+		// 硬编码母版路径会让派生项目静默生成 import 母版的代码。
+		migrate.WithProjectName(modulePath),
 		migrate.WithMigrationDir("database/migrations"),
 		migrate.WithDDLModels(
 			&models.User{},

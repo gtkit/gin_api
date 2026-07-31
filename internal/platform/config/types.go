@@ -45,15 +45,47 @@ type AppConfig struct {
 }
 
 type DatabaseConfig struct {
-	DBType         string `mapstructure:"dbtype"`
-	Host           string `mapstructure:"host"`
-	Port           string `mapstructure:"port"`
-	Name           string `mapstructure:"name"`
-	Username       string `mapstructure:"username"`
-	Password       string `mapstructure:"password"`
-	MaxIdleConn    int    `mapstructure:"maxidleconn"`
-	MaxOpenConn    int    `mapstructure:"maxopenconn"`
-	MaxLifeSeconds int    `mapstructure:"maxlifeseconds"`
+	DBType   string `mapstructure:"dbtype"`
+	Host     string `mapstructure:"host"`
+	Port     string `mapstructure:"port"`
+	Name     string `mapstructure:"name"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+	// MigrateUsername / MigratePassword 是可选的迁移专用凭据。
+	//
+	// 启用开关是**非空的 MigrateUsername**，不是单独的布尔字段：布尔开关会产生
+	// 「enabled=true 但用户名为空」和「enabled=false 但配了用户名」两种需要额外规则的矛盾组合。
+	// 密码允许为空（Socket 认证、受控本地环境是真实场景），因此密码不能作开关。
+	//
+	// 目的是让运行账号不必长期持有 DDL 权限：推荐运行账号只授 DML，DDL 只授迁移账号。
+	MigrateUsername string `mapstructure:"migrate_username"`
+	MigratePassword string `mapstructure:"migrate_password"`
+	MaxIdleConn     int    `mapstructure:"maxidleconn"`
+	MaxOpenConn     int    `mapstructure:"maxopenconn"`
+	MaxLifeSeconds  int    `mapstructure:"maxlifeseconds"`
+}
+
+// DBCredentials 是一次数据库连接使用的凭据。
+//
+// 让调用方先解析出本次要用的凭据再建连，而不是把整个 *Config 传下去让底层猜用途——
+// 同一份配置里有运行与迁移两套账号，底层无从判断该用哪个。
+type DBCredentials struct {
+	Username string
+	Password string
+}
+
+// RuntimeCredentials 返回服务进程使用的凭据。
+// 服务永远只用这一套，不会因为配置了迁移凭据而改变自身连接身份。
+func (c DatabaseConfig) RuntimeCredentials() DBCredentials {
+	return DBCredentials{Username: c.Username, Password: c.Password}
+}
+
+// MigrationCredentials 返回迁移使用的凭据；ok=false 表示未启用，调用方应回退到运行凭据并告警。
+func (c DatabaseConfig) MigrationCredentials() (DBCredentials, bool) {
+	if strings.TrimSpace(c.MigrateUsername) == "" {
+		return DBCredentials{}, false
+	}
+	return DBCredentials{Username: c.MigrateUsername, Password: c.MigratePassword}, true
 }
 
 type EmailConfig struct {
@@ -363,6 +395,14 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 	}
 	if database.Username == "" {
 		errs = append(errs, errors.New("database.username is required"))
+	}
+	// 只配 migrate_password 而 migrate_username 为空是**非法组合**，不是「未启用」：
+	// 静默忽略密码并回退到运行凭据，会让运维以为迁移正在用独立账号执行——
+	// 那是危险的静默降级，必须 fail-fast。
+	if strings.TrimSpace(database.MigrateUsername) == "" && database.MigratePassword != "" {
+		errs = append(errs, errors.New(
+			"database.migrate_password is set but database.migrate_username is empty: "+
+				"migration credentials are enabled by a non-empty migrate_username"))
 	}
 
 	return errors.Join(errs...)
