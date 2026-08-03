@@ -18,7 +18,7 @@ set -euo pipefail
 #
 # 单独提出来，让自检可以断言"恰好调用了这三个"——写死在调用点的话，
 # 自检只能验证退出码，而本次修复的缺陷正是"返回 0 但什么都没做"。
-GATE_COMMAND=(make check check-generator security-release)
+GATE_COMMAND=(make release-check)
 
 # RELEASE_TAG_RE 只认无前导零的稳定 SemVer，与破坏性门禁的基线选择同源。
 RELEASE_TAG_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -151,8 +151,8 @@ STUB
 
   check "a passing gate releases" "$status" "0"
   check "the gate is invoked exactly once" "$(wc -l < "$sandbox/gate.log" | tr -d ' ')" "1"
-  check "the gate runs all three checks" \
-    "$(cat "$sandbox/gate.log")" "check check-generator security-release"
+  check "the gate runs the aggregated release check" \
+    "$(cat "$sandbox/gate.log")" "release-check"
   check "an annotated tag is created" \
     "$(git -C "$sandbox/ok" cat-file -t "$(git -C "$sandbox/ok" rev-parse v1.2.4)" 2>/dev/null)" "tag"
   check "the tag reaches the remote" \

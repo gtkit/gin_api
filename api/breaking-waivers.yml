@@ -25,26 +25,6 @@ waivers:
       下一个发布 tag 之后基线更新，这条差异自然消失。
     expires: 2026-11-30
 
-  - id: W-0002
-    operation: GET /api/v1/user
-    rule: response_field_minimum_lowered
-    owner: xiaozhaofu
-    reason: >-
-      v0.1.0 的手写契约承诺 data.gender 落在 [0, 2]，但代码里没有任何东西保证它：
-      UserProfileResponse.Gender 是裸的 int8，响应路径不做校验，业务层也不限制取值。
-      那是一条只在文档里成立、运行时不兑现的承诺——比不承诺更糟，因为客户端会
-      据此写死枚举分支。生成的契约不再做无法兑现的承诺。若将来要恢复这个保证，
-      正确做法是让代码真正保证它（枚举类型 + 写入校验），而不是把数字写回文档。
-    expires: 2026-11-30
-
-  - id: W-0003
-    operation: GET /api/v1/user
-    rule: response_field_maximum_raised
-    owner: xiaozhaofu
-    reason: >-
-      与 W-0002 同一处：data.gender 的上界同样是 v0.1.0 手写契约的过度承诺。
-    expires: 2026-11-30
-
   - id: W-0004
     operation: PUT /api/v1/user
     rule: response_field_type_widened

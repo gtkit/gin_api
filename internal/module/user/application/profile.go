@@ -26,7 +26,7 @@ func toProfileResponse(user models.User) *dto.UserProfileResponse {
 	return &dto.UserProfileResponse{
 		ID:        user.ID,
 		Nickname:  user.Nickname,
-		Gender:    int8(user.Gender),
+		Gender:    dto.NormalizeGender(int8(user.Gender)),
 		Avatar:    user.Avatar,
 		Phone:     maskPhone(user.Phone),
 		Status:    int8(user.Status),

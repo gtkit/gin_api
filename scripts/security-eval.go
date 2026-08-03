@@ -41,7 +41,13 @@ func main() {
 	waiversPath := flag.String("waivers", "security/waivers.yml", "漏洞豁免登记表")
 	secretsPath := flag.String("secret-allowlist", "security/secret-allowlist.yml", "密钥假阳性登记表")
 	mode := flag.String("mode", "source", "source | release")
+	selfTest := flag.Bool("self-test", false, "自检：在临时 fixture 上验证各判定分支")
 	flag.Parse()
+
+	if *selfTest {
+		runSelfTest()
+		return
+	}
 
 	var problems []string
 
@@ -183,11 +189,23 @@ func readWaivers(path string) (map[string]waiver, error) {
 			return nil
 		}
 		// 字段不全的条目一律失败：没有负责人与到期日的豁免会变成永久豁免。
-		missing := []string{}
-		for name, v := range map[string]string{
+		required := map[string]string{
 			"scanner": cur.Scanner, "id": cur.ID, "component": cur.Component,
 			"owner": cur.Owner, "reason": cur.Reason, "expires": cur.Expires,
-		} {
+		}
+		// version 只对漏洞豁免必填。
+		//
+		// 锁版本会让每次依赖升级都需要重新评估豁免——**那个噪音正是想要的效果**：
+		// 升级后同一个 CVE 编号在新版本上可能是完全不同的可达路径，旧评估不该
+		// 自动延续。看到它吵而改回可选，等于把这条保护删掉。
+		//
+		// 密钥假阳性针对的是具体位置上的字符串，没有"受影响版本"这个概念。
+		if cur.Scanner != "gitleaks" {
+			required["version"] = cur.Version
+		}
+
+		missing := []string{}
+		for name, v := range required {
 			if strings.TrimSpace(v) == "" {
 				missing = append(missing, name)
 			}
@@ -196,7 +214,18 @@ func readWaivers(path string) (map[string]waiver, error) {
 			sort.Strings(missing)
 			return fmt.Errorf("%s 中的条目 %q 缺少字段：%s", path, cur.ID, strings.Join(missing, ", "))
 		}
-		out[waiverKey(cur.Scanner, cur.ID, cur.Component)] = cur
+
+		// 重复条目直接失败，不静默取其一。
+		//
+		// 静默覆盖后两条看起来都在生效，实际只有一条有效；若被覆盖的那条到期日
+		// 更早，它就不再参与过期检查——一条早该失效的豁免被静默复活。
+		key := waiverKey(cur.Scanner, cur.ID, cur.Component)
+		if prev, dup := out[key]; dup {
+			return fmt.Errorf(
+				"%s 中存在重复条目 %s（负责人 %s 与 %s）：重复会让其中一条静默失效，"+
+					"包括它的到期日", path, key, prev.Owner, cur.Owner)
+		}
+		out[key] = cur
 		cur = waiver{}
 		inItem = false
 		return nil
@@ -395,4 +424,122 @@ func readGitleaks(path string) ([]finding, error) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[security-eval] FAIL: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// 自检
+// ---------------------------------------------------------------------------
+// 这是唯一决定"发布能不能过"的判定逻辑，而它此前没有任何测试——
+// 一个没被验证过的判定器，它说通过时没人知道那意味着什么。
+//
+// 在临时目录里造 fixture，因此完全不触碰真实登记表与扫描产物。
+
+func runSelfTest() {
+	dir, err := os.MkdirTemp("", "security-eval-selftest")
+	if err != nil {
+		fatalf("self-test: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	failed := false
+	expect := func(name string, got, want any) {
+		if fmt.Sprint(got) == fmt.Sprint(want) {
+			fmt.Printf("[self-test] OK: %s\n", name)
+		} else {
+			fmt.Fprintf(os.Stderr, "[self-test] FAIL: %s => got %v, want %v\n", name, got, want)
+			failed = true
+		}
+	}
+
+	writeFile := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			fatalf("self-test write: %v", err)
+		}
+		return path
+	}
+
+	// --- 字段完整性 ---
+	full := `waivers:
+  - scanner: govulncheck
+    id: GO-1
+    component: example.com/x
+    version: v1.0.0
+    owner: someone
+    reason: pending upstream fix
+    expires: 2099-01-01
+`
+	if _, err := readWaivers(writeFile("full.yml", full)); err != nil {
+		expect("a complete vulnerability waiver parses", err, nil)
+	} else {
+		expect("a complete vulnerability waiver parses", "ok", "ok")
+	}
+
+	// version 缺失必须失败——这条此前完全没有被校验。
+	noVersion := strings.Replace(full, "    version: v1.0.0\n", "", 1)
+	_, err = readWaivers(writeFile("noversion.yml", noVersion))
+	expect("a vulnerability waiver without a version is rejected",
+		err != nil && strings.Contains(fmt.Sprint(err), "version"), true)
+
+	noOwner := strings.Replace(full, "    owner: someone\n", "", 1)
+	_, err = readWaivers(writeFile("noowner.yml", noOwner))
+	expect("a waiver without an owner is rejected",
+		err != nil && strings.Contains(fmt.Sprint(err), "owner"), true)
+
+	// 密钥假阳性不要求 version：它针对具体位置的字符串，没有版本概念。
+	secretEntry := `allowlist:
+  - rule: generic-api-key
+    fingerprint: abc:file.go:generic-api-key:1
+    owner: someone
+    reason: test placeholder
+    expires: 2099-01-01
+`
+	_, err = readWaivers(writeFile("secret.yml", secretEntry))
+	expect("a secret allowlist entry needs no version", err, nil)
+
+	// --- 重复检测 ---
+	dup := full + `  - scanner: govulncheck
+    id: GO-1
+    component: example.com/x
+    version: v1.0.0
+    owner: another
+    reason: duplicate
+    expires: 2030-01-01
+`
+	_, err = readWaivers(writeFile("dup.yml", dup))
+	expect("a duplicate waiver is rejected instead of silently overwriting",
+		err != nil && strings.Contains(fmt.Sprint(err), "重复"), true)
+
+	// --- 过期判定 ---
+	now := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+	expect("a past date is expired", expired("2026-08-02", now), true)
+	expect("today is not expired", expired("2026-08-03", now), false)
+	expect("a future date is not expired", expired("2099-01-01", now), false)
+
+	// --- 陈旧条目 ---
+	entries := map[string]waiver{"k1": {ID: "GO-1"}, "k2": {ID: "GO-2"}}
+	stale := staleEntries(entries, map[string]bool{"k1": true}, "waiver")
+	expect("an unused waiver is reported as stale", len(stale), 1)
+	fresh := staleEntries(entries, map[string]bool{"k1": true, "k2": true}, "waiver")
+	expect("fully used waivers are not stale", len(fresh), 0)
+
+	// --- 镜像漏洞分级 ---
+	image := `{"Results":[{"Target":"t","Vulnerabilities":[
+      {"VulnerabilityID":"C-1","PkgName":"a","InstalledVersion":"1","Severity":"CRITICAL"},
+      {"VulnerabilityID":"H-1","PkgName":"b","InstalledVersion":"1","Severity":"HIGH"},
+      {"VulnerabilityID":"M-1","PkgName":"c","InstalledVersion":"1","Severity":"MEDIUM"},
+      {"VulnerabilityID":"U-1","PkgName":"d","InstalledVersion":"1","Severity":"UNKNOWN"}]}]}`
+	found, ierr := readTrivyImage(writeFile("trivy.json", image))
+	expect("image scan parses", ierr, nil)
+	expect("only critical and high block the release", len(found), 2)
+
+	// 缺文件不是错误：source 模式本就不产出镜像扫描结果。
+	missing, merr := readTrivyImage(filepath.Join(dir, "absent.json"))
+	expect("a missing image report is not an error", merr, nil)
+	expect("a missing image report yields no findings", len(missing), 0)
+
+	if failed {
+		os.Exit(1)
+	}
+	fmt.Println("[self-test] OK: every decision branch behaves as specified")
 }

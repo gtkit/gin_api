@@ -1,9 +1,51 @@
 package dto
 
+// Gender 是对外暴露的性别取值。
+//
+// 用具名类型而不是裸 int8：契约因此可以声明合法取值集合，而客户端能据此
+// 生成类型安全的常量。裸整数只能声明成"某个整数"，调用方无从判断 3 是否合法。
+//
+// **承诺由代码兑现**：构造响应时经 NormalizeGender 收敛，未知值一律落到
+// GenderUnknown。此前契约声称 gender ∈ [0,2] 而代码里没有任何东西保证它——
+// 那是一条只在文档里成立的承诺，比不承诺更糟，因为客户端会据此写死枚举分支。
+type Gender int8
+
+const (
+	// GenderUnknown 是未知或未设置。
+	GenderUnknown Gender = iota
+	// GenderMale 男。
+	GenderMale
+	// GenderFemale 女。
+	GenderFemale
+)
+
+// SchemaEnumValues 让契约生成器产出枚举取值。
+//
+// 结构化实现 openapi.SchemaEnum，不 import 它——dto 不该依赖契约生成器。
+func (Gender) SchemaEnumValues() []any {
+	return []any{int(GenderUnknown), int(GenderMale), int(GenderFemale)}
+}
+
+// NormalizeGender 把任意底层取值收敛到合法枚举。
+//
+// 数据库里可能存在历史脏数据或将来新增而本版本不认识的取值。直接透传会让
+// 响应违反契约声明的枚举，而客户端的 switch 会落到 default 或直接报错；
+// 收敛到"未知"是唯一对老客户端安全的处置。
+func NormalizeGender(value int8) Gender {
+	switch g := Gender(value); g {
+	case GenderMale, GenderFemale:
+		return g
+	case GenderUnknown:
+		return GenderUnknown
+	default:
+		return GenderUnknown
+	}
+}
+
 type UserProfileResponse struct {
 	ID        int64  `json:"id"`
 	Nickname  string `json:"nickname"`
-	Gender    int8   `json:"gender"`
+	Gender    Gender `json:"gender"`
 	Avatar    string `json:"avatar"`
 	Phone     string `json:"phone"`
 	Status    int8   `json:"status"`

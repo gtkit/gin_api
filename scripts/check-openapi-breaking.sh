@@ -386,6 +386,35 @@ JSON
     failed=1
   fi
 
+  # 反向：把范围约束换成枚举是**收紧**，不是放宽。
+  # enum 穷举了全部合法值，比上下界更强；报出来是误报，而误报会让门禁被绕过。
+  cat > "$sandbox/enum.json" <<'JSON'
+{"paths":{"/y/{id}":{"post":{"operationId":"doY",
+  "parameters":[{"name":"id","in":"path","required":true},
+                {"name":"trace","in":"header","required":false},
+                {"name":"drop","in":"query","required":true}],
+  "requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Q"}},
+                            "application/xml":{"schema":{"$ref":"#/components/schemas/Q"}}}},
+  "responses":{"200":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/S"}}}}}}}},
+ "components":{"schemas":{
+   "Q":{"type":"object","additionalProperties":true,
+        "properties":{"kind":{"type":"string","enum":["a","b","c"]},
+                      "size":{"type":"integer","minimum":0,"maximum":100},
+                      "note":{"type":"string","minLength":1,"maxLength":200},
+                      "code":{"type":"string","pattern":"^[a-z]+$"},
+                      "ts":{"type":"integer","format":"int64"}}},
+   "S":{"type":"object","required":["state","score"],
+        "properties":{"state":{"type":"string","enum":["ok"]},
+                      "score":{"type":"integer","enum":[0,5,10]}}}}}}
+JSON
+  if run_diff "$sandbox/base2.json" "$sandbox/enum.json" >/dev/null 2>&1; then
+    echo "[self-test] OK: replacing a numeric range with an enum is not a widening"
+  else
+    echo "[self-test] FAIL: an enum tightening was reported as breaking:"
+    run_diff "$sandbox/base2.json" "$sandbox/enum.json" 2>&1 | sed 's/^/    /'
+    failed=1
+  fi
+
   # 反向：补齐一条原本缺失的约束不该被当成放宽。
   # 只在**两侧都声明**时才比较 format，否则"补上精度信息"会被误报。
   cat > "$sandbox/safe2.json" <<'JSON'

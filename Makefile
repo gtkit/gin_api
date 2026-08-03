@@ -1,9 +1,11 @@
-.PHONY: dev build check check-ci check-architecture check-loopback-tests check-image-digests check-release-wiring check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-loopback-tests check-image-digests check-security-eval check-release-wiring release-check check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
 ## 注意：module path 与 COVERAGE_MIN 都不属于身份，不在 project.mk 里。
 include project.mk
+# 供应链工具的固定版本与摘要（GOLANGCI_LINT_VERSION / *_IMAGE）。
+include security/toolchain.mk
 
 ## 服务监听端口（可覆盖：make port PORT=9000）
 PORT ?= 8008
@@ -66,7 +68,11 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
 COVERAGE_MIN ?= 70.0
 tool: ## Lint Go code with the installed golangci-lint
-	@ echo "▶️ golangci-lint run"
+	## 版本必须与 security/toolchain.mk 声明一致。
+	## 声明了却不执行等于没声明：工具版本漂移会让同一份代码在不同机器上得到
+	## 不同的检查结果，而那种差异最先表现为"我这里是好的"。
+	@ bash ./scripts/check-tool-version.sh golangci-lint "$(GOLANGCI_LINT_VERSION)"
+	@ echo "▶️ golangci-lint run ($(GOLANGCI_LINT_VERSION))"
 	golangci-lint run $(LINT_TARGETS)
 	@ echo "✅ golangci-lint run"
 
@@ -143,6 +149,9 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
+check-security-eval: ## 安全判定逻辑自检（它是唯一决定发布能否通过的逻辑）
+	@ GOWORK=off go run ./scripts/security-eval.go --self-test
+
 check-image-digests: ## 所有镜像引用必须钉不可变摘要
 	@ bash ./scripts/check-image-digests.sh --self-test
 	@ bash ./scripts/check-image-digests.sh
@@ -192,9 +201,24 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-package-vars check-loopback-tests check-image-digests check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-package-vars check-loopback-tests check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
+
+release-check: ## 发布门禁：日常门禁 + 数据库/迁移真实验证 + 供应链
+	## 比 `make check` 多出的部分都依赖 Docker 或真实数据库。
+	## `make check` 刻意不依赖它们——那是为了任何环境都能复现；
+	## 但发布本就允许依赖（供应链门禁已经在用），把数据库验证留在发布路径之外，
+	## 意味着仓储层与迁移的回归可以直接进入发布。
+	@ $(MAKE) check-ci
+	@ $(MAKE) check-migration-files
+	## REQUIRE_DB_INTEGRATION=1 把"跳过"变成"失败"：
+	## 集成测试默认在无数据库时跳过，那在日常是便利，在发布时是漏洞——
+	## 跳过等于没跑，却仍然记为通过。
+	@ REQUIRE_DB_INTEGRATION=1 $(MAKE) test-integration
+	@ $(MAKE) migrate-verify
+	@ $(MAKE) security-release
+	@ echo "✅ release-check"
 
 
 tag: ## 发布：bump 版本 → 门禁 → annotated tag → 原子推送

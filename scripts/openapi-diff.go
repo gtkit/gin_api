@@ -305,15 +305,23 @@ func constraintFindings(key, side, name string, base, cur field) []finding {
 		}
 	}
 
+	// 新增枚举约束会让范围约束变得冗余：enum 穷举了全部合法值，是比上下界
+	// **更强**的约束。此时范围字段消失不是放宽，报出来是误报——
+	// 而误报会让整条门禁被加豁免绕过。
+	tightenedByEnum := base.enum == nil && cur.enum != nil
+
 	// 数值范围：请求侧下界上移 / 上界下移是收紧，响应侧反之。
-	if request {
+	switch {
+	case tightenedByEnum:
+		// 约束方式从范围换成枚举，跳过范围比较。
+	case request:
 		if tightened(base.minimum, cur.minimum, true) {
 			report("minimum_raised", describeFloat(base.minimum)+" -> "+describeFloat(cur.minimum))
 		}
 		if tightened(base.maximum, cur.maximum, false) {
 			report("maximum_lowered", describeFloat(base.maximum)+" -> "+describeFloat(cur.maximum))
 		}
-	} else {
+	default:
 		if tightened(cur.minimum, base.minimum, true) {
 			report("minimum_lowered", describeFloat(base.minimum)+" -> "+describeFloat(cur.minimum))
 		}
