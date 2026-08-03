@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# release.sh —— 发布流程：bump 版本 → 门禁 → annotated tag → 原子推送。
+#
+# **为什么不写在 Makefile 配方里**：GNU make 的 `-n`（dry-run）对包含 `$(MAKE)`
+# 的命令行不生效，而发布配方必然要调用门禁。实测 `make -n gittag` 会真实执行
+# 前置校验——工作区干净时它会一路改写版本文件、提交、打 tag 并推送。
+# 发布是不可逆的外向操作，而 dry-run 正是使用者用来确认安全的手段。
+#
+# 移出来还有两个附带好处：流程可被单步调试，以及可以有真正的自检
+# （见 --self-test：它观察门禁**被调用**这一事实，而不是只看退出码）。
+#
+# 用法：
+#   release.sh              执行发布
+#   release.sh --self-test  自检：在一次性沙盒里证明门禁确实被调用
+set -euo pipefail
+
+# GATE_COMMAND 是发布必须通过的门禁。
+#
+# 单独提出来，让自检可以断言"恰好调用了这三个"——写死在调用点的话，
+# 自检只能验证退出码，而本次修复的缺陷正是"返回 0 但什么都没做"。
+GATE_COMMAND=(make check check-generator security-release)
+
+# RELEASE_TAG_RE 只认无前导零的稳定 SemVer，与破坏性门禁的基线选择同源。
+RELEASE_TAG_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+die() { echo "$*" >&2; exit 1; }
+
+# preflight 在**产生任何副作用之前**做完全部前置校验。
+#
+# 顺序是硬要求：若在改写版本文件之后才发现 tag 已存在，会留下
+# "版本已改但未发布"的中间状态，而那种状态需要人工判断如何回退。
+preflight() {
+  [ -z "$(git status --porcelain)" ] || {
+    echo "工作区或索引不干净，发布前必须完全干净：" >&2
+    git status --short >&2
+    exit 1
+  }
+
+  branch="$(git symbolic-ref --short HEAD 2>/dev/null)" ||
+    die "当前处于 detached HEAD，拒绝发布：无法确定要推送的分支"
+
+  current="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v')"
+  [ -n "$current" ] || die "version.go 中未找到版本号"
+  echo "$current" | grep -qE "$RELEASE_TAG_RE" ||
+    die "当前版本 $current 不是无前导零的稳定 SemVer"
+
+  local maj min patch
+  maj="${current%%.*}"
+  patch="${current##*.}"
+  min="${current#*.}"; min="${min%.*}"
+  new="v${maj}.${min}.$((patch + 1))"
+
+  ! git rev-parse -q --verify "refs/tags/$new" >/dev/null ||
+    die "tag $new 已存在，拒绝重复发布"
+}
+
+run_release() {
+  local branch current new
+  preflight
+
+  printf 'Bump: v%s -> %s (branch %s)\n' "$current" "$new" "$branch"
+
+  # ① 先在本地生成 release commit——此时绝不推送、绝不打 tag。
+  #    门禁必须跑在**最终 commit** 上，否则验证的是一份不会被发布的树。
+  sed -E -i.bak 's/(const Version = ")([^"]+)(")/\1'"$new"'\3/' version.go
+  rm -f version.go.bak
+  git add version.go
+  git commit -m "chore(release): $new"
+
+  # ② 门禁失败时保留本地 commit、不建 tag、不碰远端。
+  if ! "${GATE_COMMAND[@]}"; then
+    echo ""
+    echo "发布门禁失败。本地 release commit 已保留，未创建 tag、未推送任何内容。" >&2
+    echo "修复后可 git reset --soft HEAD~1 撤销该 commit，或修好后重跑 make tag。" >&2
+    exit 1
+  fi
+
+  # ③ 门禁全绿后才创建 annotated tag。
+  git tag -a "$new" -m "release $new"
+
+  # ④ 用显式 refspec 原子推送分支与 tag。
+  #    不依赖 push.default 或远端 HEAD 推导；服务端不支持 atomic 或分支非
+  #    fast-forward 时整体失败，绝不退化成两次 push——那会留下
+  #    「有 release commit、无 tag」的半发布状态。
+  git push --atomic origin "HEAD:refs/heads/$branch" "refs/tags/$new:refs/tags/$new"
+  printf 'Done: %s pushed to %s\n' "$new" "$branch"
+}
+
+# ---------- 自检 ----------
+
+# run_self_test 证明门禁**确实被调用**，以及失败时确实不发布。
+#
+# 只验证退出码是不够的：本次修复的缺陷正是"命令返回 0 但什么都没做"，
+# 那种缺陷会和只看退出码的自检一起通过。因此这里用 PATH 前置的 make stub
+# 把调用记录下来，再断言记录的内容。
+run_self_test() {
+  local sandbox script
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" EXIT
+
+  local failed=0
+  check() {
+    if [ "$2" = "$3" ]; then
+      echo "[self-test] OK: $1"
+    else
+      echo "[self-test] FAIL: $1 => got '$2', want '$3'"
+      failed=1
+    fi
+  }
+
+  # make stub：记录调用参数，按 GATE_EXIT 决定成败。
+  mkdir -p "$sandbox/bin"
+  cat > "$sandbox/bin/make" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$GATE_LOG"
+exit "${GATE_EXIT:-0}"
+STUB
+  chmod +x "$sandbox/bin/make"
+
+  # 每个用例一个**独立的** bare 远端。
+  #
+  # 共用一个会产生串扰：先前用例推上去的 tag 会让"失败时什么都没推"这条
+  # 断言看到别人的产物而误判。一个自己会串扰的自检，说明不了任何事。
+  setup_repo() {
+    local dir="$1" version="${2:-v1.2.3}"
+    rm -rf "$dir" "$dir.remote.git"
+    git init -q --bare "$dir.remote.git"
+    mkdir -p "$dir"
+    git init -q "$dir"
+    git -C "$dir" config user.email release@local
+    git -C "$dir" config user.name release
+    git -C "$dir" config commit.gpgsign false
+    printf 'package main\n\nconst Version = "%s"\n' "$version" > "$dir/version.go"
+    git -C "$dir" add -A
+    git -C "$dir" commit -qm init
+    git -C "$dir" remote add origin "$dir.remote.git"
+  }
+
+  run_in() {
+    local dir="$1" exit_code="$2"
+    ( cd "$dir" && PATH="$sandbox/bin:$PATH" GATE_LOG="$sandbox/gate.log" \
+        GATE_EXIT="$exit_code" bash "$script" >"$sandbox/out.txt" 2>&1 )
+  }
+
+  # --- 用例 1：门禁通过 → 建 tag + 推送 ---
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/ok"
+  run_in "$sandbox/ok" 0 && status=0 || status=$?
+
+  check "a passing gate releases" "$status" "0"
+  check "the gate is invoked exactly once" "$(wc -l < "$sandbox/gate.log" | tr -d ' ')" "1"
+  check "the gate runs all three checks" \
+    "$(cat "$sandbox/gate.log")" "check check-generator security-release"
+  check "an annotated tag is created" \
+    "$(git -C "$sandbox/ok" cat-file -t "$(git -C "$sandbox/ok" rev-parse v1.2.4)" 2>/dev/null)" "tag"
+  check "the tag reaches the remote" \
+    "$(git -C "$sandbox/ok.remote.git" tag -l v1.2.4)" "v1.2.4"
+  # 分支名取自仓库本身：init.defaultBranch 因人而异，写死 master 会让
+  # 这条断言在别人机器上失败，而那与被测行为无关。
+  check "the branch reaches the remote" \
+    "$(git -C "$sandbox/ok.remote.git" rev-parse --verify -q \
+       "refs/heads/$(git -C "$sandbox/ok" symbolic-ref --short HEAD)" >/dev/null && echo yes || echo no)" "yes"
+  check "the version file is bumped" \
+    "$(grep -c 'v1.2.4' "$sandbox/ok/version.go")" "1"
+
+  # --- 用例 2：门禁失败 → 无 tag、无推送、保留本地 commit ---
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/fail"
+  run_in "$sandbox/fail" 1 && status=0 || status=$?
+
+  check "a failing gate blocks the release" "$status" "1"
+  check "no tag is created on failure" \
+    "$(git -C "$sandbox/fail" tag -l | wc -l | tr -d ' ')" "0"
+  check "nothing is pushed on failure" \
+    "$(git -C "$sandbox/fail.remote.git" for-each-ref | wc -l | tr -d ' ')" "0"
+  check "the release commit is kept for retry" \
+    "$(git -C "$sandbox/fail" log -1 --pretty=%s)" "chore(release): v1.2.4"
+
+  # --- 用例 3：四种前置条件各自拒绝且零副作用 ---
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/dirty"
+  echo "stray" > "$sandbox/dirty/untracked.txt"
+  run_in "$sandbox/dirty" 0 && status=0 || status=$?
+  check "a dirty tree is rejected" "$status" "1"
+  check "a dirty tree produces no commit" \
+    "$(git -C "$sandbox/dirty" log --oneline | wc -l | tr -d ' ')" "1"
+  check "a dirty tree never reaches the gate" \
+    "$(wc -l < "$sandbox/gate.log" | tr -d ' ')" "0"
+
+  setup_repo "$sandbox/detached"
+  git -C "$sandbox/detached" checkout -q --detach HEAD
+  run_in "$sandbox/detached" 0 && status=0 || status=$?
+  check "a detached HEAD is rejected" "$status" "1"
+
+  setup_repo "$sandbox/exists"
+  git -C "$sandbox/exists" tag v1.2.4
+  run_in "$sandbox/exists" 0 && status=0 || status=$?
+  check "an existing tag is rejected" "$status" "1"
+  check "an existing tag produces no new commit" \
+    "$(git -C "$sandbox/exists" log --oneline | wc -l | tr -d ' ')" "1"
+
+  setup_repo "$sandbox/badver" "v01.2.3"
+  run_in "$sandbox/badver" 0 && status=0 || status=$?
+  check "a non-canonical SemVer is rejected" "$status" "1"
+
+  if [ "$failed" -ne 0 ]; then
+    exit 1
+  fi
+  echo "[self-test] OK: the release gate is provably invoked, and failure never publishes"
+}
+
+case "${1:-}" in
+  --self-test) run_self_test ;;
+  "")          run_release ;;
+  *)           die "用法: $(basename "$0") [--self-test]" ;;
+esac

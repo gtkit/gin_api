@@ -1,11 +1,23 @@
 #!/usr/bin/env sh
-# test-coverage.sh — 跑 race 测试并生成聚合 coverage profile（与 check-coverage.sh 配套）。
+# test-coverage.sh — 跑 race 测试并生成 coverage profile（与 check-coverage.sh 配套）。
 #
 # 用法：test-coverage.sh <coverage-profile> [go-package ...]（缺省包为 ./...）
-# 行为：默认对目标包整体跑 go test -race -covermode=atomic 输出到 profile。
-#   受限沙箱下（ALLOW_NO_LOOPBACK=1，禁止绑定回环端口）：先跑其余包，再对依赖本地 listener 的
-#   internal/middleware 只跑显式列出的沙箱安全用例，
-#   最后把各段 profile 合并成一个 atomic profile。正常开发与 CI 不设该变量，始终跑完整测试。
+#
+# **一次全量 go test，不按包分组**。哪些测试需要绑定回环端口，由测试自己经
+# `testutil.RequireLoopback` 声明，受限环境下它们自行跳过。
+#
+# 此前这里维护一份"哪些包、哪些测试名会绑端口"的黑名单。那是一处**必然漂移的
+# 重复来源**，而实测证明它已经漂移到完全失效：名单里的三个测试名早已随代码删除
+# 而不复存在，`grep -Ev` 因此一个测试都没排除——middleware 在"受限路径"下仍是
+# 77 个全跑，internal/bootstrap 整包更是从未被处理。
+#
+# 后果比漏配更糟：那段代码制造了"受限环境已被特殊处理"的假象，于是
+# "受限环境实测 62.5%" 这个门禁依据，实际上一直是正常环境的数字。
+#
+# 现在这件事只记录在测试自己身上，并由 scripts/check-loopback-tests.go 强制。
+#
+# ALLOW_NO_LOOPBACK=1 经环境直接传给 go test，让受限路径在**任意机器上都可复现**——
+# 覆盖率门禁的下界因此第一次可以被验证，而不是只能被声称。
 set -eu
 
 if [ "$#" -lt 1 ]; then
@@ -21,56 +33,10 @@ fi
 
 mkdir -p "$(dirname "$profile")"
 
-if [ "${ALLOW_NO_LOOPBACK:-0}" != "1" ]; then
-  go test -race -count=1 -timeout=5m -covermode=atomic -coverprofile="$profile" "$@"
-  exit 0
+go test -race -count=1 -timeout=5m -covermode=atomic -coverprofile="$profile" "$@"
+
+if [ "${ALLOW_NO_LOOPBACK:-0}" = "1" ]; then
+  echo "coverage profile created on the restricted path (loopback tests skipped): $profile"
+else
+  echo "coverage profile created: $profile"
 fi
-
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/go-service-coverage.XXXXXX")"
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
-
-all_packages="$tmpdir/all-packages.txt"
-regular_packages="$tmpdir/regular-packages.txt"
-go list "$@" > "$all_packages"
-
-while IFS= read -r package; do
-  case "$package" in
-    */internal/middleware)
-      ;;
-    *)
-      printf '%s\n' "$package" >> "$regular_packages"
-      ;;
-  esac
-done < "$all_packages"
-
-parts=""
-if [ -s "$regular_packages" ]; then
-  regular_profile="$tmpdir/regular.out"
-  xargs go test -race -count=1 -timeout=5m -covermode=atomic -coverprofile="$regular_profile" < "$regular_packages"
-  parts="$regular_profile"
-fi
-
-run_selected_package() {
-  package="$1"
-  exclude_pattern="$2"
-  output="$3"
-  tests="$(go test -list '^Test' "$package" | grep '^Test' | grep -Ev "$exclude_pattern" | paste -sd '|' -)"
-  if [ -z "$tests" ]; then
-    echo "no sandbox-safe tests found for $package" >&2
-    exit 1
-  fi
-
-  go test -race -count=1 -timeout=5m -covermode=atomic -coverprofile="$output" -run "^(${tests})$" "$package"
-  parts="$parts $output"
-}
-
-run_selected_package ./internal/middleware \
-  '^TestFallbackWithGincache_(NormalFlow|RedisDownDBDown|GincacheHitBypassesFallback)$' \
-  "$tmpdir/middleware.out"
-
-printf '%s\n' 'mode: atomic' > "$profile"
-for part in $parts; do
-  sed '1{/^mode: /d;}' "$part" >> "$profile"
-done
-
-echo "coverage profile created with restricted loopback exclusions: $profile"

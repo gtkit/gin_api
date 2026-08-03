@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-loopback-tests check-release-wiring check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -51,12 +51,20 @@ GO_TARGETS ?= ./...
 LINT_TARGETS ?= ./...
 COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
-# remove-unused-infra-packages 删除 15 个零引用包与死脚本后基线上移：
-# 受限环境（ALLOW_NO_LOOPBACK=1，跳过 loopback 监听类测试）实测 62.5%，是下界；
-# loopback-allowed 完整跑（CI 正常网络）待 CI 复核（删包前为 61.8%，删包后应不低于受限值）。
-# 门禁取 62.0%——低于受限下界，保证受限沙箱与 CI 两种环境 make check 都能通过。
-# 阶段目标：62 -> 65 -> 72 -> 80；每次提高前必须先让代码在“受限环境”也实际达标。
-COVERAGE_MIN ?= 62.0
+#
+# 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
+#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：71.7%  ← 下界
+#   正常路径（loopback 可用）：                          72.0%
+#
+# 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
+# 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
+# 所谓受限路径实际就是全量跑，那个数字是正常环境的数字。现在受限判定由
+# testutil.RequireLoopback 在测试内部完成，标志在任意机器上都真正生效，
+# 上面两个数字因此可以被任何人重新测出来，而不是只能被声称。
+#
+# 门禁取 70.0：低于受限下界 1.7 个点，留给测试波动与环境差异，同时不再虚高于实际。
+# 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
+COVERAGE_MIN ?= 70.0
 tool: ## Lint Go code with the installed golangci-lint
 	@ echo "▶️ golangci-lint run"
 	golangci-lint run $(LINT_TARGETS)
@@ -135,6 +143,10 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
+check-loopback-tests: ## 绑端口的测试必须自行声明依赖（防受限环境静默失效）
+	@ GOWORK=off go run scripts/check-loopback-tests.go --self-test
+	@ GOWORK=off go run scripts/check-loopback-tests.go internal cmd
+
 check-appmeta: ## 校验 internal/appmeta 与 project.mk 零差异（防身份漂移）
 	@ bash ./scripts/gen-appmeta.sh --check
 
@@ -176,45 +188,17 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-package-vars check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-package-vars check-loopback-tests check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 
 
-gittag:
-	@set -e; \
-	: "① 前置校验——任何一步不满足都不得进入发布流程"; \
-	if [ -n "$$(git status --porcelain)" ]; then \
-		echo "工作区或索引不干净，发布前必须完全干净："; git status --short; exit 1; \
-	fi; \
-	branch=$$(git symbolic-ref --short HEAD 2>/dev/null) || { \
-		echo "当前处于 detached HEAD，拒绝发布：无法确定要推送的分支"; exit 1; }; \
-	current=$$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v'); \
-	if [ -z "$$current" ]; then echo "version.go 中未找到版本号"; exit 1; fi; \
-	echo "$$current" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$' || { \
-		echo "当前版本 $$current 不是无前导零的稳定 SemVer"; exit 1; }; \
-	maj=$$(echo $$current | cut -d. -f1); min=$$(echo $$current | cut -d. -f2); patch=$$(echo $$current | cut -d. -f3); \
-	new="v$$maj.$$min.$$(expr $$patch + 1)"; \
-	if git rev-parse -q --verify "refs/tags/$$new" >/dev/null; then \
-		echo "tag $$new 已存在，拒绝重复发布"; exit 1; \
-	fi; \
-	printf "Bump: v%s -> %s (branch %s)\n" "$$current" "$$new" "$$branch"; \
-	: "② 先在本地生成 release commit——但此时绝不推送、绝不打 tag"; \
-	sed -E -i.bak 's/(const Version = ")([^"]+)(")/\1'"$$new"'\3/' version.go; \
-	rm -f version.go.bak; \
-	git add version.go; \
-	git commit -m "chore(release): $$new"; \
-	: "③ 在**最终 commit** 上跑全部门禁。失败时保留本地 commit、不建 tag、不碰远端"; \
-	if ! $(MAKE) check check-generator security-release; then \
-		echo ""; \
-		echo "发布门禁失败。本地 release commit 已保留，未创建 tag、未推送任何内容。"; \
-		echo "修复后可 git reset --soft HEAD~1 撤销该 commit，或修好后重跑 make tag。"; \
+tag: ## 发布：bump 版本 → 门禁 → annotated tag → 原子推送
+	@ bash ./scripts/release.sh
+
+check-release-wiring: ## 证明发布入口是真实目标，且门禁确实被调用
+	@ if $(MAKE) -n tag 2>&1 | grep -q "Nothing to be done"; then \
+		echo "FAIL: 'make tag' is a no-op that exits 0 — the release gate would be silently skipped" >&2; \
 		exit 1; \
-	fi; \
-	: "④ 门禁全绿后才创建 annotated tag"; \
-	git tag -a "$$new" -m "release $$new"; \
-	: "⑤ 用显式 refspec 原子推送分支与 tag"; \
-	: "   不依赖 push.default / 远端 HEAD 推导；服务端不支持 atomic 或分支非 fast-forward 时整体失败，"; \
-	: "   绝不退化成两次 push——那会留下「有 release commit、无 tag」的半发布状态"; \
-	git push --atomic origin "HEAD:refs/heads/$$branch" "refs/tags/$$new:refs/tags/$$new"; \
-	printf "Done: %s pushed to %s\n" "$$new" "$$branch"
+	fi
+	@ bash ./scripts/release.sh --self-test

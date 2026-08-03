@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/testutil"
 )
 
 // writeSelfSignedCert 生成一对自签名证书文件，有效期由调用方指定。
@@ -86,6 +88,7 @@ func TestPrebindBindsPortBeforeServing(t *testing.T) {
 
 // TestPrebindReportsPortConflict 验证端口冲突以可读错误返回而不是 panic。
 func TestPrebindReportsPortConflict(t *testing.T) {
+	testutil.RequireLoopback(t)
 	t.Parallel()
 
 	held, err := net.Listen("tcp", "127.0.0.1:0")
@@ -181,6 +184,7 @@ func TestPrebindTLSValidation(t *testing.T) {
 // 留下的话，进程退出前那个端口一直被占着，紧接着的重启会因端口冲突再次失败——
 // 一个配置问题因此变成一次需要人工介入的故障。
 func TestPrebindTLSFailureDoesNotLeaveListener(t *testing.T) {
+	testutil.RequireLoopback(t)
 	t.Parallel()
 
 	now := time.Now()

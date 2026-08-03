@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/testutil"
+
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
@@ -55,6 +57,7 @@ func TestPprofDisabledReturnsNoHandle(t *testing.T) {
 // 进程照常启动，配置里写着 enabled，而端点根本不存在。排障的人会
 // 对着一个不存在的地址反复尝试。
 func TestPprofBindFailureIsAStartupError(t *testing.T) {
+	testutil.RequireLoopback(t)
 	resetProfileRates(t)
 
 	held, err := net.Listen("tcp", "127.0.0.1:0")
@@ -79,6 +82,7 @@ func TestPprofBindFailureIsAStartupError(t *testing.T) {
 // 端点根本不存在，却让整个进程持续承担 block/mutex 采样开销，
 // 是纯粹的浪费——而它在监控上只表现为"莫名其妙的性能下降"。
 func TestPprofBindFailureDoesNotEnableSampling(t *testing.T) {
+	testutil.RequireLoopback(t)
 	resetProfileRates(t)
 
 	held, err := net.Listen("tcp", "127.0.0.1:0")
@@ -102,6 +106,7 @@ func TestPprofBindFailureDoesNotEnableSampling(t *testing.T) {
 
 // TestPprofServesAndShutsDownCleanly 验证端点真的可访问，且关停后端口释放。
 func TestPprofServesAndShutsDownCleanly(t *testing.T) {
+	testutil.RequireLoopback(t)
 	resetProfileRates(t)
 
 	h, err := startPprofServer(config.PprofConfig{Enabled: true, Host: "127.0.0.1", Port: "0"})

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/testutil"
+
 	"github.com/gtkit/gin-api/internal/router/routespec"
 
 	"github.com/gin-gonic/gin"
@@ -150,6 +152,7 @@ func TestRouteTimeoutRejectsUnspecifiedPolicy(t *testing.T) {
 
 // startRealServer 起一个真实的 httptest.Server 并返回其地址。
 func startRealServer(t *testing.T, engine *gin.Engine) string {
+	testutil.RequireLoopback(t)
 	t.Helper()
 	srv := httptest.NewServer(engine)
 	t.Cleanup(srv.Close)
@@ -257,6 +260,7 @@ func TestWriteDeadlineSurvivesResponseBodyLogging(t *testing.T) {
 //
 // 因此这条测试必须在**同一条连接**上连续发两个请求。
 func TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline(t *testing.T) {
+	testutil.RequireLoopback(t)
 	gin.SetMode(gin.TestMode)
 
 	shortMW, err := RouteTimeout(cooperativePolicy(150*time.Millisecond, 100*time.Millisecond))

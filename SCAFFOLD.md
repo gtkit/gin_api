@@ -209,3 +209,8 @@ make security-release    # 发版前：追加全历史密钥扫描，禁止跳�
 
 刻意**不并入 `make check`**：安全扫描依赖网络与 Docker，并入会让 `make check` 在离线环境失败，
 最终逼人绕过整个门禁。`make tag` 会强制执行 `security-release`。
+
+发布流程在 `scripts/release.sh`，**不写在 Makefile 配方里**：GNU make 的 `-n`（dry-run）
+对含 `$(MAKE)` 的配方行不生效，把发布逻辑放在那里会让一次"我先看看会发生什么"的
+dry-run 真实地改版本、提交、打 tag 并推送。`make check` 里的 `check-release-wiring`
+每次都会证明发布入口是真实目标、且三道门禁确实被调用——而不是只看退出码。
