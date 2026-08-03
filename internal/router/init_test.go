@@ -4,21 +4,41 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
 type testModule struct {
+	name   string
 	called bool
 }
 
-func (m *testModule) RegisterRoutes(group *gin.RouterGroup) {
+func (m *testModule) Name() string {
+	if m.name == "" {
+		return "module.test"
+	}
+	return m.name
+}
+
+func (m *testModule) Routes() []routespec.RouteSpec {
 	m.called = true
-	group.GET("/health", func(c *gin.Context) {
-		c.Status(http.StatusNoContent)
-	})
+	return []routespec.RouteSpec{{
+		Method:  http.MethodGet,
+		Path:    "/probe",
+		Handler: func(c *gin.Context) { c.Status(http.StatusNoContent) },
+		// 测试模块同样必须显式声明策略——零值会被 compile 拒绝，
+		// 这正是描述符要保证的性质。
+		AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessPublic},
+		TimeoutPolicy: routespec.TimeoutPolicy{
+			Mode:       routespec.TimeoutCooperative,
+			Deadline:   time.Second,
+			WriteGrace: time.Second,
+		},
+	}}
 }
 
 func TestGinModeFromEnv(t *testing.T) {
@@ -49,7 +69,10 @@ func TestInitRouterUsesExplicitEnv(t *testing.T) {
 	defer gin.SetMode(oldMode)
 
 	module := &testModule{}
-	engine := InitRouterWithModules("prod", []Module{module})
+	engine, err := InitRouterWithModules("prod", []Module{module})
+	if err != nil {
+		t.Fatalf("InitRouterWithModules returned error: %v", err)
+	}
 	if engine == nil {
 		t.Fatal("expected engine")
 	}
@@ -60,7 +83,7 @@ func TestInitRouterUsesExplicitEnv(t *testing.T) {
 		t.Fatalf("gin mode = %q, want %q", gin.Mode(), gin.ReleaseMode)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil)
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNoContent {
@@ -72,12 +95,15 @@ func TestInitRouterWithVersionedModulesRegistersV1AndV2(t *testing.T) {
 	oldMode := gin.Mode()
 	defer gin.SetMode(oldMode)
 
-	v1Module := &testModule{}
-	v2Module := &testModule{}
-	engine := InitRouterWithVersionedModules("prod", VersionedModules{
+	v1Module := &testModule{name: "module.v1"}
+	v2Module := &testModule{name: "module.v2"}
+	engine, err := InitRouterWithVersionedModules("prod", VersionedModules{
 		V1: []Module{v1Module},
 		V2: []Module{v2Module},
 	})
+	if err != nil {
+		t.Fatalf("InitRouterWithVersionedModules returned error: %v", err)
+	}
 	if engine == nil {
 		t.Fatal("expected engine")
 	}
@@ -85,14 +111,14 @@ func TestInitRouterWithVersionedModulesRegistersV1AndV2(t *testing.T) {
 		t.Fatalf("expected both modules to be called, v1=%v v2=%v", v1Module.called, v2Module.called)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/probe", nil)
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("v1 status = %d, want %d", recorder.Code, http.StatusNoContent)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/v2/health", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/v2/probe", nil)
 	recorder = httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusNoContent {

@@ -49,7 +49,7 @@ func TestOpenAPIContract(t *testing.T) {
 
 	document := loadOpenAPIDocument(t)
 	documentedOperations, operationIDs := documentedOpenAPIOperations(t, document)
-	registeredOperations := registeredRouteOperations()
+	registeredOperations := registeredRouteOperations(t)
 
 	tests := []struct {
 		name  string
@@ -196,13 +196,23 @@ func documentedOpenAPIOperations(t *testing.T, document openAPIDocument) (map[st
 	return operations, operationIDs
 }
 
-func registeredRouteOperations() map[string]struct{} {
-	authMiddleware := func(c *gin.Context) { c.Next() }
-	userModule := userhttp.NewModule(userapp.NewWithDeps(nil), authMiddleware)
-	engine := router.InitRouterWithVersionedModules("test", router.VersionedModules{
+// registeredRouteOperations 构建**真实**的 engine 并读回它实际注册的路由。
+//
+// 系统探针现在也是 RouteSpec 的一部分，因此不再需要额外的旁路注册调用——
+// 这正是"唯一 registrar"要达到的效果：想拿到全部路由，只有一条路径。
+func registeredRouteOperations(tb testing.TB) map[string]struct{} {
+	tb.Helper()
+
+	userModule := userhttp.NewModule(userapp.NewWithDeps(nil))
+	engine, err := router.InitRouterWithVersionedModules("test", router.VersionedModules{
 		V1: []router.Module{userModule},
+	}, router.RouterOptions{
+		// 声明了 AccessAuthenticated 的路由必须有鉴权实现，否则 registrar 拒绝启动。
+		AuthMiddleware: func(c *gin.Context) { c.Next() },
 	})
-	router.RegisterHealthRoutes(engine, nil)
+	if err != nil {
+		tb.Fatalf("build engine: %v", err)
+	}
 
 	operations := make(map[string]struct{})
 	for _, route := range engine.Routes() {

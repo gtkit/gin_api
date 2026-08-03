@@ -19,10 +19,15 @@ type stubChecker struct {
 func (s *stubChecker) PingDB(_ context.Context) error    { return s.dbErr }
 func (s *stubChecker) PingRedis(_ context.Context) error { return s.redisErr }
 
+// newTestEngine 走与生产完全相同的装配路径：系统探针现在是 RouteSpec 的一部分，
+// 不再由旁路注册产生，因此测试也必须经 registrar 拿到 engine。
 func newTestEngine(checker HealthChecker) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	RegisterHealthRoutes(engine, checker)
+	engine, err := InitRouterWithVersionedModules("test", VersionedModules{},
+		RouterOptions{HealthChecker: checker})
+	if err != nil {
+		panic(err)
+	}
 	return engine
 }
 

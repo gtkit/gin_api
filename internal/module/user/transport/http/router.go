@@ -1,25 +1,76 @@
 package http
 
 import (
-	userapp "github.com/gtkit/gin-api/internal/module/user/application"
+	"net/http"
+	"time"
 
-	"github.com/gin-gonic/gin"
+	userapp "github.com/gtkit/gin-api/internal/module/user/application"
+	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
-// UserModule 实现 router.Module 接口。
+// 本模块路由的业务超时预算。
+//
+// 显式声明而不是继承某个全局默认：不同模块的合理预算本就不同，
+// 而"全局默认"会让所有路由跟着最慢的那条走。
+const (
+	userDeadline   = 5 * time.Second
+	userWriteGrace = 2 * time.Second
+)
+
+// UserModule 贡献 user 模块的路由契约。
+//
+// 它不再接收 *gin.RouterGroup、也不自己注册路由与中间件：访问控制、超时、限流
+// 全部声明在描述符上，由中央 registrar 统一校验并翻译成 handler chain。
+// 模块因此不需要知道版本前缀与中间件顺序，也无法绕过契约注册路由。
 type UserModule struct {
-	service        *userapp.Service
-	authMiddleware gin.HandlerFunc
+	service *userapp.Service
 }
 
-func NewModule(service *userapp.Service, authMiddleware gin.HandlerFunc) *UserModule {
-	return &UserModule{service: service, authMiddleware: authMiddleware}
+func NewModule(service *userapp.Service) *UserModule {
+	return &UserModule{service: service}
 }
 
-func (m *UserModule) RegisterRoutes(router *gin.RouterGroup) {
+// Name 用于编译错误定位。
+func (m *UserModule) Name() string { return "module.user" }
+
+// Routes 返回 user 模块的路由契约。
+//
+// 路径是模块内相对路径；`/api/v1` 之类的版本前缀由中央 registrar 添加。
+func (m *UserModule) Routes() []routespec.RouteSpec {
 	handler := NewHandler(m.service)
-	group := router.Group("/user").Use(m.authMiddleware)
-	group.GET("", handler.Get)
-	group.PUT("", handler.Update)
-	group.POST("/deactivate", handler.Deactivate)
+	timeout := routespec.TimeoutPolicy{
+		Mode:       routespec.TimeoutCooperative,
+		Deadline:   userDeadline,
+		WriteGrace: userWriteGrace,
+	}
+	// 三条路由都要求已认证身份。
+	//
+	// 此前这是靠 group.Use(authMiddleware) 表达的——一旦有人新增路由时忘了挂进
+	// 同一个 group，它就会静默变成公开接口，而代码看上去毫无异常。
+	// 写进描述符后，漏写访问策略会被注册期直接拒绝（零值非法）。
+	authenticated := routespec.AccessPolicy{Mode: routespec.AccessAuthenticated}
+
+	return []routespec.RouteSpec{
+		{
+			Method:        http.MethodGet,
+			Path:          "/user",
+			Handler:       handler.Get,
+			AccessPolicy:  authenticated,
+			TimeoutPolicy: timeout,
+		},
+		{
+			Method:        http.MethodPut,
+			Path:          "/user",
+			Handler:       handler.Update,
+			AccessPolicy:  authenticated,
+			TimeoutPolicy: timeout,
+		},
+		{
+			Method:        http.MethodPost,
+			Path:          "/user/deactivate",
+			Handler:       handler.Deactivate,
+			AccessPolicy:  authenticated,
+			TimeoutPolicy: timeout,
+		},
+	}
 }

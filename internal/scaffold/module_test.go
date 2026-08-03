@@ -37,7 +37,15 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"), "type Service struct")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"), "maxListPageSize     = 100")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service_test.go"), "func TestServiceList")
-	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "transport", "http", "router.go"), "group := router.Group(\"/admin\")")
+	// 生成的模块必须产出 RouteSpec，而不是自行注册路由——
+	// 后者会绕过访问策略与超时预算，也不会出现在双向契约测试里。
+	routerFile := filepath.Join(root, "internal", "module", "admin", "transport", "http", "router.go")
+	assertFileContains(t, routerFile, "func (m *AdminModule) Routes() []routespec.RouteSpec {")
+	assertFileContains(t, routerFile, `Path:          "/admin"`)
+	assertFileContains(t, routerFile, `Path:          "/admin/:id"`)
+	// 策略必须显式声明：零值会在启动期被拒绝，生成物不能留下未声明的策略。
+	assertFileContains(t, routerFile, "routespec.AccessPolicy{Mode: routespec.AccessPublic}")
+	assertFileContains(t, routerFile, "Mode:       routespec.TimeoutCooperative")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "transport", "http", "handler_test.go"), "func TestHandlerList")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "func (r *Repository) Get")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "Limit(limit)")

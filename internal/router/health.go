@@ -14,6 +14,15 @@ import (
 // 每个依赖独立计时，慢依赖不会吃掉其它依赖的预算。
 const readyDepTimeout = 2 * time.Second
 
+// 探针的请求级超时预算。
+//
+// 刻意比业务路由短得多：探针的意义是快速回答"我还行吗"，
+// 一个要等好几秒才失败的探针会让编排器的判定同样迟钝，摘流也就跟着变慢。
+const (
+	healthProbeDeadline   = 3 * time.Second
+	healthProbeWriteGrace = 2 * time.Second
+)
+
 // 对外只暴露固定状态标签，绝不回传底层错误串。
 const (
 	statusOK          = "ok"
@@ -25,15 +34,6 @@ const (
 type HealthChecker interface {
 	PingDB(ctx context.Context) error
 	PingRedis(ctx context.Context) error
-}
-
-// RegisterHealthRoutes 在 engine 根路径注册健康探针端点。
-//
-//	GET /health  — 存活探针（liveness），总是返回 200。
-//	GET /ready   — 就绪探针（readiness），检查 DB + Redis。
-func RegisterHealthRoutes(engine *gin.Engine, checker HealthChecker) {
-	engine.GET("/health", healthHandler)
-	engine.GET("/ready", readyHandler(checker))
 }
 
 func healthHandler(c *gin.Context) {

@@ -85,6 +85,50 @@ check_no_match \
   'github\.com/gtkit/logger' \
   internal/module/*/application internal/module/*/dto internal/models
 
+# 路由只能经中央 registrar 注册。
+#
+# Gin 的 IRoutes 有十余个注册入口（GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/Any/Match
+# 与四个 Static*）。任何一个被业务代码直接调用，都会产生一条绕过 RouteSpec 的路由——
+# 它没有访问策略、没有超时预算，也不会出现在双向契约测试里，却真实对外服务。
+#
+# 用"唯一入口白名单"而不是"逐个方法黑名单"：后者是黑名单，框架加一个新方法就漏一个。
+# 判据因此是——除 registrar 文件外，全仓生产代码不得出现任何路由注册调用。
+#
+# NoRoute / NoMethod 显式豁免：它们注册的是 404/405 兜底 handler 而非路由，
+# 不进 RouteSpec 集合，双向契约检查也把它们排除。
+#
+# 判据要求第一个实参是路径字面量（以 " 开头且紧跟 / 或收尾引号）——路由注册的第一个参数
+# 总是路径。不这样限定的话，zap.Any("k", v) 之类同名方法会被误报，
+# 而一条永远为真的规则最终只会被人加豁免绕过。
+ROUTE_REGISTRAR="internal/router/registrar.go"
+route_hits="$(mktemp)"
+find internal cmd -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE '\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|Match|Handle|Static|StaticFS|StaticFile|StaticFileFS)\("(/|")' 2>/dev/null |
+  grep -v '^[^:]*:[0-9]*:[[:space:]]*//' |
+  grep -v "^${ROUTE_REGISTRAR}:" |
+  grep -v '^internal/router/routespec/pathtree\.go:' >>"$route_hits" || true
+if [ -s "$route_hits" ]; then
+  echo "FAIL: routes must be registered through ${ROUTE_REGISTRAR} from a RouteSpec, not by calling gin registration methods directly"
+  cat "$route_hits"
+  fail=1
+fi
+rm -f "$route_hits"
+
+# 模块 transport 不得自行分组或挂路由级中间件。
+#
+# 各模块只返回带完整相对路径的 []RouteSpec；前缀拼接与 handler chain 顺序由中央
+# registrar 统一负责。模块自己 Group/Use 正是"新增路由忘了挂中间件就静默公开"的成因。
+transport_hits="$(mktemp)"
+find internal/module -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE '\.(Group|Use)\(' 2>/dev/null |
+  grep -v '^[^:]*:[0-9]*:[[:space:]]*//' >>"$transport_hits" || true
+if [ -s "$transport_hits" ]; then
+  echo "FAIL: module transport must not call Group/Use; contribute RouteSpec instead"
+  cat "$transport_hits"
+  fail=1
+fi
+rm -f "$transport_hits"
+
 # 客户端 IP 只能经唯一 accessor 取值。
 #
 # 为什么这条规则必须存在：IP 同时是审计事实与限流输入，两处各自裸调 ClientIP() 时，

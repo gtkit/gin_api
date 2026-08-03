@@ -1,12 +1,10 @@
 package router
 
 import (
-	"strings"
-
 	"github.com/gtkit/gin-api/internal/appmeta"
 	middleware "github.com/gtkit/gin-api/internal/middleware"
-	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/router/routespec"
 
 	"github.com/gin-gonic/gin"
 )
@@ -30,25 +28,52 @@ type RouterOptions struct {
 	TrustedProxies []string
 	// RemoteIPHeaders 是允许用于提取客户端 IP 的转发头，仅在请求来自可信代理时才被采信。
 	RemoteIPHeaders []string
+	// HealthChecker 供系统探针路由使用。为 nil 时 /ready 一律报未就绪——
+	// 装配错误必须表现为"未就绪"，而不是让错配的实例被纳入流量。
+	HealthChecker HealthChecker
+	// AuthMiddleware 实现 AccessAuthenticated。声明了该模式却没提供它，
+	// 会在注册期直接失败——绝不把要求鉴权的路由当公开路由服务。
+	AuthMiddleware gin.HandlerFunc
 }
 
 // InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
-//
-// 新增模块只需在 providers.go 中将 Module 实现追加到切片，
-// 路由层无需任何改动。
-func InitRouterWithModules(envName string, modules []Module) *gin.Engine {
-	return InitRouterWithVersionedModules(envName, VersionedModules{V1: modules})
+func InitRouterWithModules(envName string, modules []Module, opts ...RouterOptions) (*gin.Engine, error) {
+	return InitRouterWithVersionedModules(envName, VersionedModules{V1: modules}, opts...)
 }
 
 // InitRouterWithVersionedModules 创建支持多版本 API 分组的 Gin engine。
 //
-// 当前默认支持 v1 和 v2；如果某个版本没有模块，路由层不会注册该分组。
-func InitRouterWithVersionedModules(envName string, modules VersionedModules, opts ...RouterOptions) *gin.Engine {
+// 返回 error 而不是 panic：路由契约不合法是**装配错误**，应当让启动失败并给出
+// 可定位的原因；panic 会崩在半配置好的 engine 上，且错误信息只有一个栈。
+//
+// 严格的两阶段：先把全部贡献编译并校验通过，再触碰生产 engine。
+// 边注册边校验的话，Gin 在路径树冲突时会直接 panic，而此时 engine 已被写入一半。
+func InitRouterWithVersionedModules(
+	envName string, modules VersionedModules, opts ...RouterOptions,
+) (*gin.Engine, error) {
 	var opt RouterOptions
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
 
+	contributions := []routespec.Contribution{
+		{Source: "system", Prefix: "", Routes: systemRoutes(opt.HealthChecker)},
+	}
+	contributions = append(contributions, moduleContributions(appmeta.APIV1Path, modules.V1)...)
+	contributions = append(contributions, moduleContributions(appmeta.APIV2Path, modules.V2)...)
+
+	compiled, err := routespec.Compile(contributions)
+	if err != nil {
+		return nil, describeCompileError(err)
+	}
+	index := routespec.BuildIndex(compiled)
+
+	access := accessMiddleware{authenticate: opt.AuthMiddleware}
+	if err := validateAccessSupport(compiled, access); err != nil {
+		return nil, describeCompileError(err)
+	}
+
+	// —— 自此才开始触碰生产 engine ——
 	engine := gin.New()
 
 	// 设置 Gin mode, 根据运行环境
@@ -68,32 +93,29 @@ func InitRouterWithVersionedModules(envName string, modules VersionedModules, op
 	engine.RedirectTrailingSlash = false
 	engine.HandleMethodNotAllowed = true
 
-	// 注册全局处理函数，处理 405 和 404 错误
-	engine.NoMethod(noMethod)
-	engine.NoRoute(noRoute)
-
 	// 初始化中间件
 	middleware.InitMiddleware(engine, opt.AllowedOrigins, middleware.AccessLogOptions{
 		LogRequestBody:  opt.LogRequestBody,
 		LogResponseBody: opt.LogResponseBody,
 	}, opt.MaxBodyBytes)
 
-	// 注册模块分组
-	registerModuleGroup(engine, appmeta.APIV1Path, modules.V1)
-	registerModuleGroup(engine, appmeta.APIV2Path, modules.V2)
+	installFallbacks(engine, index)
+	registerCompiledRoutes(engine, compiled, access)
 
-	return engine
+	return engine, nil
 }
 
-func registerModuleGroup(engine *gin.Engine, path string, modules []Module) {
-	if len(modules) == 0 {
-		return
-	}
-
-	group := engine.Group(path)
+// moduleContributions 把模块封装成带来源标识的贡献。
+func moduleContributions(prefix string, modules []Module) []routespec.Contribution {
+	out := make([]routespec.Contribution, 0, len(modules))
 	for _, m := range modules {
-		m.RegisterRoutes(group)
+		out = append(out, routespec.Contribution{
+			Source: m.Name(),
+			Prefix: prefix,
+			Routes: m.Routes(),
+		})
 	}
+	return out
 }
 
 // ginModeFromEnv 将运行环境映射为 gin mode。
@@ -109,17 +131,4 @@ func ginModeFromEnv(envName string) string {
 	default:
 		return gin.DebugMode
 	}
-}
-
-// 找不到路由.
-func noRoute(c *gin.Context) {
-	if strings.Contains(c.Request.URL.Path, ".") {
-		return
-	}
-	resp.NotFoundError(c, "unknown route")
-}
-
-// 方法不允许.
-func noMethod(c *gin.Context) {
-	resp.NotAllowedMethod(c, "method not allowed")
 }

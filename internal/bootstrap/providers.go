@@ -89,7 +89,11 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 	}
 
 	// 4. 路由引擎：组装路由切片并初始化 Gin 引擎。
-	engine := buildEngine(inf, svc, mw)
+	//    路由契约不合法属装配错误，在此透传为启动失败。
+	engine, err := buildEngine(inf, svc, mw)
+	if err != nil {
+		return nil, err
+	}
 
 	// 5. Worker：后台任务。
 	return &providerSet{
@@ -174,17 +178,17 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 
 // buildEngine 组装 v1 模块路由切片并初始化 Gin engine（含健康检查路由）。
 // 新增模块时只需在 v1Modules 切片里追加一行（scaffold 生成器经 modules 标记注入）。
-func buildEngine(inf infra, svc services, mw middlewares) *gin.Engine {
+func buildEngine(inf infra, svc services, mw middlewares) (*gin.Engine, error) {
 	cfg := inf.cfg
 
 	// 组装模块路由切片——新增模块只需在此追加一行。
 	v1Modules := []router.Module{
-		userhttp.NewModule(svc.verifier, mw.auth),
+		userhttp.NewModule(svc.verifier),
 		// scaffold:modules
 	}
 	// var v2Modules []router.Module
 
-	engine := router.InitRouterWithVersionedModules(string(cfg.Env), router.VersionedModules{
+	engine, err := router.InitRouterWithVersionedModules(string(cfg.Env), router.VersionedModules{
 		V1: v1Modules,
 		// V2: v2Modules,
 	}, router.RouterOptions{
@@ -195,10 +199,15 @@ func buildEngine(inf infra, svc services, mw middlewares) *gin.Engine {
 		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,
+		// 系统探针与鉴权都经描述符统一装配，不再旁路注册、不再由模块自己 Use。
+		HealthChecker:  newHealthChecker(inf.dao),
+		AuthMiddleware: mw.auth,
 	})
-	router.RegisterHealthRoutes(engine, newHealthChecker(inf.dao))
+	if err != nil {
+		return nil, err
+	}
 
-	return engine
+	return engine, nil
 }
 
 // buildWorkers 组装进程级后台任务。

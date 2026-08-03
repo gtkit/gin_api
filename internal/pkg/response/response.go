@@ -117,8 +117,20 @@ func NotFoundError(c *gin.Context, errmsg string) {
 	Err(c, goerr.New(nil, goerr.StatusNotFound(), errmsg))
 }
 
+// MethodNotAllowedCode 是方法不允许对客户端暴露的业务错误码。
+const MethodNotAllowedCode int32 = 10010405
+
+// NotAllowedMethod 返回 405。
+//
+// 此前它走 StatusRequestFail()，实际发出的是 **400**——客户端无从区分
+// "请求格式错误"与"这个路径不支持该方法"，配上 Allow 头更是自相矛盾
+// （Allow 是 405 的语义，HTTP 也要求 405 必须带 Allow）。
+// 调用方负责在此之前写好 Allow 头。
 func NotAllowedMethod(c *gin.Context, errmsg string) {
-	Err(c, goerr.New(nil, goerr.StatusRequestFail(), errmsg))
+	if errmsg == "" {
+		errmsg = "method not allowed"
+	}
+	respJSON(c, http.StatusMethodNotAllowed, NewResponse(MethodNotAllowedCode, errmsg, nil))
 }
 
 func normalizeData(data any) any {

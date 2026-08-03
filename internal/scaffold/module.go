@@ -1146,9 +1146,17 @@ func NewService(db *gorm.DB) *{{.AppAlias}}.Service {
 const transportRouterTemplate = `package http
 
 import (
-	{{.AppAlias}} "{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
+	"net/http"
+	"time"
 
-	"github.com/gin-gonic/gin"
+	{{.AppAlias}} "{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
+	"{{.ProjectModulePath}}/internal/router/routespec"
+)
+
+// 本模块路由的业务超时预算。按实际情况调整。
+const (
+	{{.ServiceVar}}Deadline   = 5 * time.Second
+	{{.ServiceVar}}WriteGrace = 2 * time.Second
 )
 
 type {{.StructName}}Module struct {
@@ -1159,11 +1167,42 @@ func NewModule(service *{{.AppAlias}}.Service) *{{.StructName}}Module {
 	return &{{.StructName}}Module{service: service}
 }
 
-func (m *{{.StructName}}Module) RegisterRoutes(router *gin.RouterGroup) {
+// Name 用于路由编译失败时定位来源。
+func (m *{{.StructName}}Module) Name() string { return "module.{{.PackageName}}" }
+
+// Routes 返回本模块的路由契约。
+//
+// 模块只声明"这条路由是什么、要什么策略"，不自行注册、不挂中间件、不拼版本前缀——
+// handler chain 与前缀由中央 registrar 统一构造。
+//
+// 策略字段没有默认值：AccessPolicy / TimeoutPolicy 的零值会在启动期被拒绝。
+// 这是刻意的——"漏写访问策略"若默认为公开，一个本该鉴权的接口就会静默暴露。
+// 生成的路由默认是 AccessPublic，请按实际需要改成 AccessAuthenticated 等。
+func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 	handler := NewHandler(m.service)
-	group := router.Group("/{{.RoutePath}}")
-	group.GET("", handler.List)
-	group.GET("/:id", handler.Get)
+	timeout := routespec.TimeoutPolicy{
+		Mode:       routespec.TimeoutCooperative,
+		Deadline:   {{.ServiceVar}}Deadline,
+		WriteGrace: {{.ServiceVar}}WriteGrace,
+	}
+	access := routespec.AccessPolicy{Mode: routespec.AccessPublic}
+
+	return []routespec.RouteSpec{
+		{
+			Method:        http.MethodGet,
+			Path:          "/{{.RoutePath}}",
+			Handler:       handler.List,
+			AccessPolicy:  access,
+			TimeoutPolicy: timeout,
+		},
+		{
+			Method:        http.MethodGet,
+			Path:          "/{{.RoutePath}}/:id",
+			Handler:       handler.Get,
+			AccessPolicy:  access,
+			TimeoutPolicy: timeout,
+		},
+	}
 }
 `
 
