@@ -10,7 +10,4 @@ const (
 	CommandName = "gin_api"
 	// RuntimeName 是运行时展示名称，取自 project.mk 的 APP_DISPLAY_NAME。
 	RuntimeName = "Gin API"
-	// DefaultAvatarURL 是默认头像地址。母版不内置任何具体业务的外部资源；
-	// 由各项目按需在配置或此处填入自己的默认头像。
-	DefaultAvatarURL = ""
 )

@@ -30,6 +30,8 @@ type Config struct {
 	CORS     CORSConfig     `mapstructure:"cors"`
 	Pprof    PprofConfig    `mapstructure:"pprof"`
 	Proxy    ProxyConfig    `mapstructure:"proxy"`
+	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
+	Modules ModuleConfigs `mapstructure:"modules"`
 }
 
 type AppConfig struct {
@@ -43,6 +45,27 @@ type AppConfig struct {
 	Timezone            string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// DrainWaitSeconds 是优雅关停时「/ready 翻成 503」与「关闭 HTTP 监听」之间的等待秒数。
+	//
+	// 它等的是**负载均衡器的传播延迟**：本实例已经宣告自己不再就绪，但 LB 还需要
+	// 一次探测周期才会把它摘出转发目标。这段时间不等，那期间到达的请求会直接
+	// 收到连接错误，而不是被优雅地处理完。
+	//
+	// <=0 时兜底为 DefaultDrainWait。取值应不小于 LB 的探测间隔。
+	DrainWaitSeconds int `mapstructure:"drain_wait_seconds"`
+}
+
+// DefaultDrainWait 是未配置 drain_wait_seconds 时的等待时长。
+//
+// 5s 覆盖常见 LB（Nginx upstream check / k8s readinessProbe）的默认探测间隔。
+const DefaultDrainWait = 5 * time.Second
+
+// EffectiveDrainWait 返回生效的 LB 传播等待时长。
+func (a AppConfig) EffectiveDrainWait() time.Duration {
+	if a.DrainWaitSeconds <= 0 {
+		return DefaultDrainWait
+	}
+	return time.Duration(a.DrainWaitSeconds) * time.Second
 }
 
 // ProxyConfig 描述本进程前面的反向代理拓扑。
@@ -294,6 +317,17 @@ type RedisConfig struct {
 	Password string `mapstructure:"password"`
 	DBs      []int  `mapstructure:"dbs"`
 	Prefix   string `mapstructure:"prefix"`
+
+	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，
+	// 不在本层复制一份可能与上游漂移的默认值。填了就必须自洽（见 validateRedisConfig）。
+	//
+	// 单位统一用毫秒而不是秒：Redis 的合理超时普遍在百毫秒量级，
+	// 用秒做单位会让"最小可表达值"就已经过大。
+	PoolSize       int `mapstructure:"pool_size"`
+	MinIdleConns   int `mapstructure:"min_idle_conns"`
+	DialTimeoutMS  int `mapstructure:"dial_timeout_ms"`
+	ReadTimeoutMS  int `mapstructure:"read_timeout_ms"`
+	WriteTimeoutMS int `mapstructure:"write_timeout_ms"`
 }
 
 type JWTConfig struct {
@@ -412,6 +446,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	if err := validateProxyConfig(c.Proxy, c.Env); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateModuleConfigs(c.Modules); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -555,8 +592,69 @@ func validateRedisConfig(redis RedisConfig) error {
 	if len(redis.DBs) == 0 {
 		errs = append(errs, errors.New("redis.dbs must not be empty"))
 	}
+	if hasDuplicateInts(redis.DBs) {
+		// 重复 DB 号不会报错，只是白白建一份重复的连接池，且让 dbs 的长度不再等于实际 DB 数。
+		errs = append(errs, errors.New("redis.dbs contains duplicate database numbers"))
+	}
+	for _, db := range redis.DBs {
+		if db < 0 {
+			errs = append(errs, fmt.Errorf("redis.dbs contains a negative database number %d", db))
+			break
+		}
+	}
+
+	errs = append(errs, validateRedisPool(redis)...)
 
 	return errors.Join(errs...)
+}
+
+// validateRedisPool 做池与超时的**交叉**校验。
+//
+// 单字段合法不等于组合合法：min_idle_conns 大于 pool_size 时，go-redis 永远无法把空闲连接
+// 补到目标值，表现为持续的建连尝试——一个只在压测或高峰期才显形的配置错误。
+// 这类错误在启动时是零成本可判的，留到运行期就要靠猜。
+func validateRedisPool(redis RedisConfig) []error {
+	var errs []error
+
+	if redis.PoolSize < 0 {
+		errs = append(errs, fmt.Errorf("redis.pool_size must not be negative, got %d", redis.PoolSize))
+	}
+	if redis.MinIdleConns < 0 {
+		errs = append(errs, fmt.Errorf("redis.min_idle_conns must not be negative, got %d", redis.MinIdleConns))
+	}
+	if redis.PoolSize > 0 && redis.MinIdleConns > redis.PoolSize {
+		errs = append(errs, fmt.Errorf(
+			"redis.min_idle_conns (%d) must not exceed redis.pool_size (%d): "+
+				"the pool can never reach the idle target and will retry connections forever",
+			redis.MinIdleConns, redis.PoolSize))
+	}
+
+	for _, tc := range []struct {
+		key   string
+		value int
+	}{
+		{"redis.dial_timeout_ms", redis.DialTimeoutMS},
+		{"redis.read_timeout_ms", redis.ReadTimeoutMS},
+		{"redis.write_timeout_ms", redis.WriteTimeoutMS},
+	} {
+		if tc.value < 0 {
+			errs = append(errs, fmt.Errorf("%s must not be negative, got %d", tc.key, tc.value))
+		}
+	}
+
+	return errs
+}
+
+// hasDuplicateInts 报告切片中是否存在重复元素。
+func hasDuplicateInts(values []int) bool {
+	seen := make(map[int]struct{}, len(values))
+	for _, v := range values {
+		if _, dup := seen[v]; dup {
+			return true
+		}
+		seen[v] = struct{}{}
+	}
+	return false
 }
 
 func validateSMSConfig(sms SMSConfig, aliyunSMS AliyunSMSConfig) error {

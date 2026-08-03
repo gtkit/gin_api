@@ -4,11 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/appmeta"
-	"github.com/gtkit/gin-api/internal/pkg/paging"
-
 	"github.com/gtkit/json"
-	"gorm.io/gorm"
 )
 
 // UserStatus 表示用户状态。
@@ -43,11 +39,6 @@ type User struct {
 	Profile *UserProfile `gorm:"foreignKey:UserID;references:ID" json:"-"`
 
 	BaseTimeField
-}
-
-type UserListPaging struct {
-	List   []*User       `json:"list"`
-	Paging paging.Paging `json:"paging"`
 }
 
 const (
@@ -86,17 +77,4 @@ func (user *User) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary 将 JSON 反序列化为用户。
 func (user *User) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, user)
-}
-
-// BeforeCreate 在创建用户前补齐默认头像。
-func (user *User) BeforeCreate(tx *gorm.DB) error {
-	if user.Avatar == "" {
-		user.Avatar = getDefaultAvatar(user.Gender)
-	}
-
-	return nil
-}
-
-func getDefaultAvatar(_ UserGender) string {
-	return appmeta.DefaultAvatarURL
 }

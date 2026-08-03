@@ -27,9 +27,18 @@ const (
 )
 
 type httpServer interface {
-	ListenAndServe() error
-	ListenAndServeTLS(certFile, keyFile string) error
+	// Serve 在**已绑定**的监听器上提供服务。
+	//
+	// 只暴露 Serve 而不是 ListenAndServe：端口绑定与 TLS 校验必须在
+	// worker 启动屏障**之前**完成，否则一个端口占用会发生在
+	// required one-shot 的不可逆副作用之后。
+	Serve(l net.Listener) error
+	ServeTLS(l net.Listener, certFile, keyFile string) error
 	Shutdown(ctx context.Context) error
+	// Close 立即关闭监听与全部连接，不等在途请求。
+	// 强制关停路径（第二个信号）与 Shutdown 超时后都要用它，
+	// 否则一个挂死的 handler 能让进程在"优雅关停"里无限滞留。
+	Close() error
 }
 
 // HTTPConfig wraps bootstrap HTTP server configuration.
@@ -106,19 +115,37 @@ func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       cfg.IdleTimeout,
+		// MaxHeaderBytes 必须显式设置。
+		//
+		// net/http 的默认值是 1 MiB——单个连接就能让服务端为请求头分配 1 MiB，
+		// 而请求头在被解析完之前不受任何业务中间件约束（MaxBytesLimit 只管 body）。
+		// 几千个并发连接即可把内存吃光，且访问日志里什么都看不到，
+		// 因为这些请求根本没走到 handler。
+		MaxHeaderBytes: defaultMaxHeaderBytes,
 	}
 }
 
-func serveHTTPServer(server httpServer, cfg HTTPConfig) error {
-	addr := net.JoinHostPort(cfg.Host, cfg.Port)
+// defaultMaxHeaderBytes 是请求头（含请求行）的总上限。
+//
+// 64 KiB 远超任何正常请求：常见的大头是 Cookie 与 Authorization，
+// 二者相加通常在 8 KiB 以内。
+const defaultMaxHeaderBytes = 64 << 10
+
+// serveHTTPServer 在预绑定的监听器上开始服务。
+//
+// 只走 Serve/ServeTLS：ListenAndServe 会自己绑端口，那就把绑定失败推迟到了
+// 启动屏障之后——而屏障之前的 required one-shot 可能已经产生不可逆副作用。
+func serveHTTPServer(server httpServer, cfg HTTPConfig, listener net.Listener) error {
+	addr := listener.Addr().String()
 
 	if cfg.EnableTLS {
 		logger.Infof("https server starting on %s", addr)
-		return normalizeServeError(server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile))
+		// 证书已在预绑定阶段校验过；这里再传一次路径由 net/http 完成实际装载。
+		return normalizeServeError(server.ServeTLS(listener, cfg.CertFile, cfg.KeyFile))
 	}
 
 	logger.Infof("http server starting on %s", addr)
-	return normalizeServeError(server.ListenAndServe())
+	return normalizeServeError(server.Serve(listener))
 }
 
 func shutdownHTTPServer(ctx context.Context, server httpServer, cfg HTTPConfig) error {

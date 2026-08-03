@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gtkit/ormx"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
@@ -37,15 +38,30 @@ var strictSQLModes = []string{"STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"}
 //     不受 ctx 约束。跳过它消除这次不可控往返；但 WithServerVersion 只是告诉 GORM 按该
 //     版本配置方言、**不验证数据库真是该版本**，所以必须自己补一次受 ctx 约束的校验。
 //     只做前一半会把"版本不符"从启动报错变成运行期怪异 SQL 行为——比不跳过更糟。
-//  3. **返回成功之前本函数仍然拥有该连接**：任何 post-open 校验失败都必须在函数内部关闭
+//  3. **GORM logger 经参数注入**：日志配置不属于数据库配置，本函数不从整份配置里取。
+//     传 nil 表示不挂 logger（迁移等一次性场景）。
+//  4. **返回成功之前本函数仍然拥有该连接**：任何 post-open 校验失败都必须在函数内部关闭
 //     底层连接后再返回，否则连接池泄漏——调用方拿到的是 nil，没有可关闭的句柄。
-func OpenDB(ctx context.Context, dbCfg config.DatabaseConfig, creds config.DBCredentials) (*ormx.Client, error) {
+func OpenDB(
+	ctx context.Context,
+	dbCfg config.DatabaseConfig,
+	creds config.DBCredentials,
+	gormLogger gormlogger.Interface,
+) (*ormx.Client, error) {
 	minVersion, err := parseMinVersion(dbCfg.EffectiveMinVersion())
 	if err != nil {
 		return nil, fmt.Errorf("invalid database.min_version: %w", err)
 	}
 
-	client, err := ormx.Open(ctx, buildOpenOptions(dbCfg, creds)...)
+	opts := buildOpenOptions(dbCfg, creds)
+	if gormLogger != nil {
+		// GORM logger 由调用方注入而不是在本函数内构造：它需要 log 配置，
+		// 而本函数只接收数据库配置——把整份 *Config 传进来就等于让底层去猜用途，
+		// 那正是凭据选择要避免的形态。
+		opts = append(opts, ormx.WithGormLogger(gormLogger))
+	}
+
+	client, err := ormx.Open(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

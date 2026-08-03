@@ -153,6 +153,29 @@ if [ -s "$clientip_hits" ]; then
 fi
 rm -f "$clientip_hits"
 
+# 基础设施连接不得有包级后门。
+#
+# 旧实现在 platform/data 里放了一个包级 daoDB，配套 DB()/Mdb()/Rdb()/DBClose() 这组
+# 无接收者的取值函数。后果是任何包在任何时刻都能拿到连接句柄：
+#   - "谁负责关闭"没有唯一答案，关停顺序无从保证；
+#   - 测试之间经同一个全局互相污染，且无法并行；
+#   - 依赖关系不出现在任何函数签名里，装配图变成隐式的。
+#
+# 判据：这些包级取值函数不得再出现。连接只经 Resources 的方法取用，
+# 由持有者按建立的逆序关闭。
+#
+# 只匹配**声明**（func 开头且无接收者）而不是调用点：这样规则的正文与注释里
+# 可以自由提及这些名字，规则本身才能归零而不被豁免绕过。
+dao_backdoor_hits="$(mktemp)"
+find internal/platform/data -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE '^func (DB|Mdb|Rdb|RdbExec|DBClose)\(' 2>/dev/null >>"$dao_backdoor_hits" || true
+if [ -s "$dao_backdoor_hits" ]; then
+  echo "FAIL: package-level connection accessors are forbidden; take handles from Resources methods instead"
+  cat "$dao_backdoor_hits"
+  fail=1
+fi
+rm -f "$dao_backdoor_hits"
+
 while IFS= read -r -d '' file; do
   if grep -qE 'func .*mdbCtx' "$file" && ! grep -q 'dbtx.DB(ctx, r.db)' "$file"; then
     echo "FAIL: $file mdbCtx does not call dbtx.DB(ctx, r.db)"

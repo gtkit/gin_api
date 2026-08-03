@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-openapi check-coverage check-generator check-appmeta gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -107,10 +107,32 @@ check-migration-files: ## 离线断言迁移文件完整性（不连库；镜像
 gen-appmeta: ## 由 project.mk 生成 internal/appmeta 身份常量（改身份先改 project.mk）
 	@ bash ./scripts/gen-appmeta.sh
 
+dev-up: ## 拉起本地开发依赖（MySQL/Redis）并等待健康
+	@ test -f .env || { echo "缺少 .env：先 cp compose.env.example .env 并填写密码"; exit 1; }
+	docker compose up -d --wait
+
+dev-down: ## 停止本地开发依赖，**保留数据卷**
+	docker compose down
+
+dev-reset: ## 删除本地开发依赖及其数据卷（不可恢复，需二次确认）
+	@ echo "⚠️  这会删除本地开发库的**全部数据**（gin-api-dev-mysql-data / gin-api-dev-redis-data）。"
+	@ echo "    确认请输入 yes:"
+	@ read ans; [ "$$ans" = "yes" ] || { echo "已取消"; exit 1; }; \
+	docker compose down -v
+
+security-source: ## 供应链门禁（日常）：发布候选快照的漏洞与密钥扫描
+	@ bash ./scripts/security-gate.sh source
+
+security-release: ## 供应链门禁（发版前）：追加全历史密钥扫描；禁止 SKIP_VULNCHECK
+	@ bash ./scripts/security-gate.sh release
+
+check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
+	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
+
 check-appmeta: ## 校验 internal/appmeta 与 project.mk 零差异（防身份漂移）
 	@ bash ./scripts/gen-appmeta.sh --check
 
-MIGRATE = $(if $(filter dev,$(ENV)),$(RUN) .,$(BIN_DIR)/$(APP))
+MIGRATE = $(if $(filter dev,$(ENV)),$(RUN) .,$(BIN_DIR)/$(APP_NAME))
 
 ## 环境占位目标：允许 `make migrate-xxx <env>` 把环境名作为第二个目标传入(dev/test/prod)
 prod test:
@@ -139,39 +161,54 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 	@if [ "$(ENV)" = "dev" ]; then \
 		$(RUN) . migrate up; \
 	else \
-		echo "⚠️  即将用 $(BIN_DIR)/$(APP) 对配置指向的库执行 migrate up"; \
+		echo "⚠️  即将用 $(BIN_DIR)/$(APP_NAME) 对配置指向的库执行 migrate up"; \
 		echo "    请先确认已备份、已用 make migrate-pretend prod 预览。继续请输入 yes:"; \
 		read ans; [ "$$ans" = "yes" ] || { echo "已取消"; exit 1; }; \
-		$(BIN_DIR)/$(APP) migrate up; \
+		$(BIN_DIR)/$(APP_NAME) migrate up; \
 	fi
 
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-package-vars check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 
 
 gittag:
-	git tag --sort=-version:refname | head -1
-
-tag:
-	@current=$$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v'); \
-	if [ -z "$$current" ]; then echo "version not found in version.go"; exit 1; fi; \
-	maj=$$(echo $$current | cut -d. -f1); \
-	min=$$(echo $$current | cut -d. -f2); \
-	patch=$$(echo $$current | cut -d. -f3); \
-	newpatch=$$(expr $$patch + 1); \
-	new="v$$maj.$$min.$$newpatch"; \
-	printf "Bump: v%s -> %s\n" "$$current" "$$new"; \
+	@set -e; \
+	: "① 前置校验——任何一步不满足都不得进入发布流程"; \
+	if [ -n "$$(git status --porcelain)" ]; then \
+		echo "工作区或索引不干净，发布前必须完全干净："; git status --short; exit 1; \
+	fi; \
+	branch=$$(git symbolic-ref --short HEAD 2>/dev/null) || { \
+		echo "当前处于 detached HEAD，拒绝发布：无法确定要推送的分支"; exit 1; }; \
+	current=$$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v'); \
+	if [ -z "$$current" ]; then echo "version.go 中未找到版本号"; exit 1; fi; \
+	echo "$$current" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$' || { \
+		echo "当前版本 $$current 不是无前导零的稳定 SemVer"; exit 1; }; \
+	maj=$$(echo $$current | cut -d. -f1); min=$$(echo $$current | cut -d. -f2); patch=$$(echo $$current | cut -d. -f3); \
+	new="v$$maj.$$min.$$(expr $$patch + 1)"; \
+	if git rev-parse -q --verify "refs/tags/$$new" >/dev/null; then \
+		echo "tag $$new 已存在，拒绝重复发布"; exit 1; \
+	fi; \
+	printf "Bump: v%s -> %s (branch %s)\n" "$$current" "$$new" "$$branch"; \
+	: "② 先在本地生成 release commit——但此时绝不推送、绝不打 tag"; \
 	sed -E -i.bak 's/(const Version = ")([^"]+)(")/\1'"$$new"'\3/' version.go; \
+	rm -f version.go.bak; \
 	git add version.go; \
 	git commit -m "chore(release): $$new"; \
-	printf "Release: %s\n" "$$new"; \
-	git push origin HEAD; \
+	: "③ 在**最终 commit** 上跑全部门禁。失败时保留本地 commit、不建 tag、不碰远端"; \
+	if ! $(MAKE) check check-generator security-release; then \
+		echo ""; \
+		echo "发布门禁失败。本地 release commit 已保留，未创建 tag、未推送任何内容。"; \
+		echo "修复后可 git reset --soft HEAD~1 撤销该 commit，或修好后重跑 make tag。"; \
+		exit 1; \
+	fi; \
+	: "④ 门禁全绿后才创建 annotated tag"; \
 	git tag -a "$$new" -m "release $$new"; \
-	printf "Tag: %s\n" "$$new"; \
-	git push origin "$$new"; \
-	printf "Done\n"
-	rm -f version.go.bak
+	: "⑤ 用显式 refspec 原子推送分支与 tag"; \
+	: "   不依赖 push.default / 远端 HEAD 推导；服务端不支持 atomic 或分支非 fast-forward 时整体失败，"; \
+	: "   绝不退化成两次 push——那会留下「有 release commit、无 tag」的半发布状态"; \
+	git push --atomic origin "HEAD:refs/heads/$$branch" "refs/tags/$$new:refs/tags/$$new"; \
+	printf "Done: %s pushed to %s\n" "$$new" "$$branch"

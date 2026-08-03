@@ -46,7 +46,7 @@ func NewMigrationRuntime(ctx context.Context) (*MigrationRuntime, error) {
 	defer cancel()
 
 	creds := resolveDBCredentials(cfg, Options{UseMigrationCredentials: true})
-	client, err := openDBForMigration(openCtx, cfg.Database, creds)
+	client, err := openDBForMigration(openCtx, cfg.Database, creds, legacydao.NewGormLogger(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("open database for migration: %w", err)
 	}

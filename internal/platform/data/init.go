@@ -1,36 +1,20 @@
 package dao
 
 import (
-	"context"
-	"fmt"
-	"time"
-
 	"github.com/gtkit/gin-api/internal/platform/config"
 
 	logger "github.com/gtkit/logger/v2"
-	"github.com/gtkit/ormx"
 	"github.com/gtkit/ormx/zlogger"
-	"github.com/gtkit/redisx"
-	"go.uber.org/zap"
-	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
-// NewWithConfig 使用 typed config 初始化数据层，数据库连接使用**运行凭据**。
-// 服务进程走这条路径，永远不会拿到迁移凭据。
-func NewWithConfig(cfg *config.Config) {
-	NewWithCredentials(cfg, cfg.Database.RuntimeCredentials())
-}
-
-// NewWithCredentials 用调用方显式选定的数据库凭据初始化数据层。
+// NewGormLogger 构造进程共用的 GORM 日志实现。
 //
-// 凭据由调用方解析后传入，而不是把整个 *Config 交给底层去猜：同一份配置里有运行与迁移
-// 两套账号，底层无从判断本次该用哪个。
-func NewWithCredentials(cfg *config.Config, creds config.DBCredentials) {
-	daoDB = &dao{
-		rdb: initRedisWithConfig(cfg),
-		mdb: initMysqlWithConfig(cfg, creds),
-	}
+// 导出它而不是让各调用点自己拼 zlogger 选项：参数化查询是一条安全属性
+// （日志里绝不出现手机号、邮箱等真实绑定值），复制一份选项就意味着
+// 迟早有一份忘了开。server 与 migrate 两条路径共用同一个构造。
+func NewGormLogger(cfg *config.Config) gormlogger.Interface {
+	return zlogger.New(gormLoggerOptions(cfg)...)
 }
 
 // gormLoggerOptions 构造 GORM zlogger 选项。
@@ -52,45 +36,4 @@ func gormLoggerOptions(cfg *config.Config) []zlogger.Option {
 	}
 
 	return opts
-}
-
-func initMysqlWithConfig(cfg *config.Config, creds config.DBCredentials) *gorm.DB {
-	loggeropt := gormLoggerOptions(cfg)
-
-	// MustOpen 与旧版 orm.NewMysql 一致：启动连不上数据库直接 panic 快速退出。
-	client := ormx.MustOpen(context.Background(),
-		ormx.WithHost(cfg.Database.Host),
-		ormx.WithPort(cfg.Database.Port),
-		ormx.WithDatabase(cfg.Database.Name),
-		ormx.WithUser(creds.Username),
-		ormx.WithPassword(creds.Password),
-		ormx.WithPrepareStmt(true),
-		ormx.WithSkipDefaultTransaction(true),
-		ormx.WithGormLogger(zlogger.New(loggeropt...)),
-		ormx.WithMaxOpenConns(cfg.Database.MaxOpenConn),
-		ormx.WithMaxIdleConns(cfg.Database.MaxIdleConn),
-		ormx.WithConnMaxLifetime(time.Duration(cfg.Database.MaxLifeSeconds)*time.Second),
-	)
-
-	logger.Info("mysql connect success",
-		zap.String("host", cfg.Database.Host),
-		zap.String("database", cfg.Database.Name))
-	return client.DB()
-}
-
-// initRedisWithConfig 初始化多 DB Redis 客户端。
-// 不传 WithKeyPrefix，保持 key 原样直通，与旧版 gtkit/redis 行为一致。
-// 与 MySQL 的 MustOpen 一致：启动连不上 Redis 直接 panic 快速退出。
-func initRedisWithConfig(cfg *config.Config) *redisx.Client {
-	client, err := redisx.NewClient(
-		redisx.WithAddr(cfg.Redis.Addr),
-		redisx.WithPassword(cfg.Redis.Password),
-		redisx.WithInitDBs(cfg.Redis.DBs...),
-	)
-	if err != nil {
-		panic(fmt.Errorf("init redis client: %w", err))
-	}
-
-	logger.Info("redis connect success", zap.Ints("dbs", cfg.Redis.DBs))
-	return client
 }

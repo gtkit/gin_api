@@ -24,9 +24,9 @@ func TestMigrationRuntimeDoesNotWireUnrelatedInfra(t *testing.T) {
 		symbol string
 		why    string
 	}{
-		{"initRedisWithConfig", "Redis 与迁移无关，且连不上会 panic"},
+		{"NewResources", "Resources 会连带建立 Redis 等与迁移无关的连接"},
 		{"initJWTWithConfig", "令牌签发器与迁移无关"},
-		{"initLegacyRuntime", "完整装配会连带初始化全部基础设施"},
+		{"initProcessRuntime", "完整装配会连带初始化全部进程级设施"},
 		{"NewRuntime", "完整 Runtime 正是此前阻断迁移的原因"},
 		{"buildMailClient", "邮件客户端与迁移无关"},
 		{"initFileWithConfig", "文件能力与迁移无关"},

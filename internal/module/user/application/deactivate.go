@@ -13,9 +13,6 @@ var (
 	ErrUserNotFound = errors.New("user not found")
 	// ErrAlreadyDeactivated 表示用户已是注销态，幂等返回。
 	ErrAlreadyDeactivated = errors.New("user already deactivated")
-	// ErrDeactivateUnavailable 表示当前 Service 未注入事务能力，无法执行注销。
-	// 仅在 NewWithDeps（仅 repo）构造的实例上出现；生产经 runtime 注入 TxManager。
-	ErrDeactivateUnavailable = errors.New("deactivate: tx not configured")
 )
 
 // deactivatedNickname 注销后对客展示的占位昵称（业务文案，由 application 决定）。
@@ -45,14 +42,17 @@ type DeactivateInput struct {
 //
 // 任一步失败整事务回滚。SQL 细节下沉到 repository，本层只做业务编排。
 func (s *Service) Deactivate(ctx context.Context, in DeactivateInput) error {
-	if s.tx == nil || s.recorder == nil {
-		return ErrDeactivateUnavailable
-	}
 	if in.UserID <= 0 {
 		return ErrUserNotFound
 	}
 
-	return s.tx.Do(ctx, func(ctx context.Context) error {
+	// 审计分两层，边界不同：
+	//   业务事实（user_deactivations 记录）必须与注销**原子提交**——它是申诉与合规的依据，
+	//     事务回滚了却留下一条"已注销"记录，比没有记录更糟。
+	//   操作日志是 best-effort，且在**事务之外**打印：日志后端卡住时，
+	//     若在事务内调用就会连带把数据库事务与行锁一起拖住，
+	//     于是"日志系统抖动"升级成"注销接口全线阻塞"。日志失败绝不回滚业务。
+	if err := s.tx.Do(ctx, func(ctx context.Context) error {
 		user, found, err := s.repo.LockByID(ctx, in.UserID)
 		if err != nil {
 			return err
@@ -86,7 +86,11 @@ func (s *Service) Deactivate(ctx context.Context, in DeactivateInput) error {
 			return err
 		}
 
-		s.auditf("user %d deactivated via channel=%s reason_len=%d", user.ID, in.Channel, len(in.Reason))
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	s.auditf("user %d deactivated via channel=%s reason_len=%d", in.UserID, in.Channel, len(in.Reason))
+	return nil
 }

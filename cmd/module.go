@@ -27,6 +27,8 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 	var dryRun bool
 	var noBootstrap bool
 	var fields []string
+	var access string
+	var public bool
 
 	cmd := &cobra.Command{
 		Use:   "module <name>",
@@ -51,6 +53,8 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 				DryRun:    dryRun,
 				Bootstrap: !noBootstrap,
 				Fields:    fields,
+				Access:    access,
+				Public:    public,
 			})
 			if err != nil {
 				return commandError("generate module scaffold", err)
@@ -65,6 +69,10 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview scaffold changes without writing files")
 	cmd.Flags().BoolVar(&noBootstrap, "no-bootstrap", false, "skip updating internal/bootstrap/providers.go to register the generated module")
 	cmd.Flags().StringSliceVar(&fields, "field", nil, "repeatable field definition in name:type format, e.g. --field nickname:string")
+	cmd.Flags().StringVar(&access, "access", "",
+		"access policy for the generated routes: authenticated|optional|admin|custom (mutually exclusive with --public)")
+	cmd.Flags().BoolVar(&public, "public", false,
+		"declare the generated routes as deliberately public (mutually exclusive with --access)")
 
 	return cmd
 }

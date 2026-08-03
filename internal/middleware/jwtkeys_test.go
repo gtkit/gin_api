@@ -4,10 +4,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	gojwt "github.com/gtkit/gojwt"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
 // testJWTConfig 生成一对**临时** Ed25519 密钥并返回指向它们的配置。
@@ -45,4 +48,17 @@ func newTestIssuer(t *testing.T) *gojwt.JwtEd25519 {
 		t.Fatalf("NewWithConfig returned error: %v", err)
 	}
 	return issuer
+}
+
+// mustAuthenticate 构造认证中间件，装配失败直接让用例失败。
+//
+// 生产代码返回 error 而非 panic（装配错误应在启动期表达），
+// 测试里用这个 helper 保持调用点简洁。
+func mustAuthenticate(t *testing.T, v sharedauth.UserVerifier, p TokenParser, optional bool) gin.HandlerFunc {
+	t.Helper()
+	h, err := Authenticate(AuthOptions{Verifier: v, Parser: p, AllowMissingToken: optional})
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	return h
 }

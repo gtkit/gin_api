@@ -93,3 +93,64 @@ go run . project init --name your_project
 5. 跑 `make check` 确认全绿。
 
 > 注意：代码里 `legacylog` / `legacydao` / `initLegacyRuntime` / `NewLegacyWorker` 只是现有基础设施（日志 / DAO / worker）的命名，**与 Laravel 无关，不要动**。
+
+## 预置能力清单
+
+逐项标注状态，避免"以为它已经在工作"或"以为它是示例可以删"两类误解。
+
+### 【默认开启】开箱即生效，无需接线
+
+| 能力 | 位置 | 说明 |
+|------|------|------|
+| 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
+| 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
+| 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
+| 路由契约 | `internal/router/routespec` | 访问/超时策略零值即拒绝；双向契约测试防旁路路由 |
+| 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
+| 认证与授权分离 | `internal/middleware` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403 |
+| 请求体上限 / 413 契约 | `internal/middleware/maxbody.go` | 声明长度与 chunked 两条路径都覆盖 |
+| 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
+| 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
+| 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |
+| 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
+
+### 【注册位 — 需要接线才生效】
+
+| 能力 | 如何启用 |
+|------|---------|
+| 后台任务 | 在 `providers.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
+| 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `RouteSpec.AccessPolicy.AuthorizerID` 对齐 |
+| `role.admin` 授权 | **当前是恒拒绝占位**（无权威角色源），所有请求 403。接入角色表/IAM 后替换该 adapter，RouteSpec 无需改动 |
+| 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
+| Laravel 存量 token 兼容 | 配 `jwt.legacy_laravel.enabled`；终态应删除，见下节清单 |
+| pprof | 配 `pprof.enabled`；生产强制回环绑定 |
+
+### 【示例 — 可按需删除】
+
+| 内容 | 说明 |
+|------|------|
+| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者 |
+| `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
+| 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
+
+### 本地开发依赖（可选）
+
+```bash
+cp compose.env.example .env    # 填本机密码；.env 不入库
+make dev-up                    # 拉起 MySQL/Redis 并等待健康
+make dev-down                  # 停止，保留数据卷
+make dev-reset                 # 删除数据卷（需二次确认）
+```
+
+**这套编排只用于本地开发与测试**，不是生产部署方案，也不替代已冻结的 `deployment.sh` / `.gitlab-ci.yml`。
+端口只绑 `127.0.0.1`——开发库口令通常很弱，绑 `0.0.0.0` 会把它暴露到局域网。
+
+### 供应链门禁
+
+```bash
+make security-source     # 日常：发布候选快照的漏洞与密钥扫描
+make security-release    # 发版前：追加全历史密钥扫描，禁止跳过漏洞扫描
+```
+
+刻意**不并入 `make check`**：安全扫描依赖网络与 Docker，并入会让 `make check` 在离线环境失败，
+最终逼人绕过整个门禁。`make tag` 会强制执行 `security-release`。

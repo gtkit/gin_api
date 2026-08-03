@@ -1,5 +1,9 @@
-// Package doc 以脚手架内置的 user 参考模块为例，说明业务逻辑在当前
+// Package user 是脚手架内置的参考模块。本文件说明业务逻辑在当前
 // 「模块化 + 显式装配」结构下的分层落地方式。
+//
+// 它随模块一起存在：说明与被说明的代码放在同一个目录，模块被删除时
+// 说明一并消失。此前它是一个独立的 doc 包，于是 user 模块被替换后，
+// 那份描述会留在仓库里继续描述一个已经不存在的结构。
 //
 // 分层口径以项目分层规范文档为单一来源；本文件只是 user 模块
 // （资料查询/更新、会员校验、账号注销）这一具体场景的落地说明，供新增模块时对照参考
@@ -44,7 +48,7 @@
 // │       └── router.go               ← UserModule 实现 router.Module，注册 /user 路由
 // │                                     （worker/ 为可选目录，母版未内置实例，见下「后台任务」）
 // │
-// └── runtime/module/user/module.go   ← 装配 NewService(db)：注入 repo + dbtx.Manager 得到 application.Service
+// └── runtime/module/user/module.go   ← 装配 NewService(db)：注入 repo + dbtx.Manager 得到 application.Service（依赖不全即报错）
 //
 // =====================================================================
 // application 应用层能力（Service）
@@ -75,19 +79,18 @@
 // 后台任务：机制在 bootstrap，母版不内置业务实例
 // =====================================================================
 //
-// bootstrap/worker.go 提供 Worker 接口（Name / Start）、WorkerManager（并发启动、
-// 失败上报、等待退出）与 NewLegacyWorker（把 func(ctx) error 适配成 Worker）。
-// buildWorkers 是装配第五阶段，母版默认返回空集合，只留 scaffold:module-workers
+// bootstrap 提供 Worker 接口（Name / Kind / Required / Lifecycle / Prepare / Run / Cleanup）
+// 与 WorkerManager（注册期校验声明、分阶段启动、Cleanup 恰好一次、按类别分相关停）。
+// buildWorkers 是装配的一个阶段，母版默认返回空集合，只留 scaffold:module-workers
 // 标记作为注册位——按业务需要在标记前追加一行 Worker 构造即可，无需改动函数签名。
 //
 // 新增 worker 遵守两条边界：放在 module/<m>/worker/ 下；只依赖 application，
 // 不直连 repository / gorm（scripts/check-architecture.sh 检查该规则）。
-// 任一 worker 的 Start 返回非 nil 错误，进程按 worker failed 退出，不做静默重启。
 //
-// 关停顺序（app.go，改动前先看 spec）：workerCtx 经 context.WithoutCancel 从信号 ctx
-// 独立派生，启动 workers → HTTP、关停 HTTP → workers。这样 HTTP 优雅关停期间在飞请求
-// 写入的任务仍能被 worker 消费；若让 workerCtx 跟随信号 ctx，worker 会先于 HTTP 退出
-// 而丢任务。该顺序由 bootstrap-module-assembly spec 与 app_test.go 用例共同锁定。
+// 关停顺序由 runtime-state-machine spec 约束：
+// 停 producer → 等 LB 传播 → 关 HTTP → drain consumer → 停 bootstrap → 清理 → 关资源。
+// producer 必须先停（否则它在 HTTP 关停期间继续生产任务），consumer 必须后停
+// （否则 HTTP 关停期间在飞请求写入的任务会丢）。
 //
 // =====================================================================
 // 依赖关系（单向）
@@ -104,7 +107,7 @@
 //	module/<m>/worker（如有）──▶ application/Service（不直连 repository）
 //
 //	runtime/module/user.NewService(db) 负责把上述装配起来：
-//	  userrepo.New(db) + userdeactivation.New(db) + dbtx.NewManager(db) → application.NewServiceWithTx。
+//	  userrepo.New(db) + userdeactivation.New(db) + dbtx.NewManager(db) → application.NewService。
 //	bootstrap/providers.go 再把 Service 接到 userhttp.NewModule（HTTP 路由）上；
 //	  后台任务经 buildWorkers 的 scaffold:module-workers 标记按需接入。
-package doc
+package user

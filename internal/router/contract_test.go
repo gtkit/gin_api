@@ -55,7 +55,7 @@ func TestRouteContractIsBidirectional(t *testing.T) {
 	engine := buildContractEngine(t)
 
 	declared := map[string]struct{}{}
-	for _, r := range systemRoutes(&stubChecker{}) {
+	for _, r := range systemRoutes(&stubChecker{}, nil, false) {
 		declared[r.Method+" "+r.Path] = struct{}{}
 	}
 	for _, r := range (contractModule{}).Routes() {
@@ -199,7 +199,7 @@ func TestAuthenticatedRouteRunsAuthMiddleware(t *testing.T) {
 func TestSystemRoutesAreDeclaredNotBypassed(t *testing.T) {
 	t.Parallel()
 
-	specs := systemRoutes(&stubChecker{})
+	specs := systemRoutes(&stubChecker{}, nil, false)
 	paths := make([]string, 0, len(specs))
 	for _, s := range specs {
 		paths = append(paths, s.Path)

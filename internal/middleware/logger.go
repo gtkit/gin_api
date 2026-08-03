@@ -5,10 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -29,13 +27,6 @@ type AccessLogOptions struct {
 	LogRequestBody bool
 	// LogResponseBody 开启后记录经脱敏的响应体。
 	LogResponseBody bool
-}
-
-// skipExts 不需要记录访问日志的静态资源后缀。
-var skipExts = []string{
-	".css", ".js", ".png", ".jpg", ".jpeg",
-	".gif", ".ico", ".svg", ".woff", ".woff2",
-	".ttf", ".map", ".json",
 }
 
 // bodyLogCaptureLimit 是 body 日志捕获的内存上界：比 maxBodyLogSize 多 1 字节，
@@ -66,14 +57,13 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
-		// 跳过静态资源。
-		for _, ext := range skipExts {
-			if strings.HasSuffix(path, ext) {
-				c.Next()
-				return
-			}
-		}
-
+		// 不按后缀跳过任何请求。
+		//
+		// 旧实现跳过 .css/.js/.json 等后缀，理由是"静态资源不必记录"。
+		// 但路径是**客户端完全可控的**：给任意 API 路径加一个 .json 后缀，
+		// 那次请求就不再产生访问记录——攻击者据此可以让自己的探测与越权尝试
+		// 在访问日志里完全消失。而本仓库是纯 JSON API，根本不提供静态资源，
+		// 这条规则从一开始就只有副作用。
 		start := time.Now()
 		method := c.Request.Method
 		writeMethod := method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE"
@@ -130,7 +120,7 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 			zap.String("query", redactQuery(c.Request.URL.RawQuery)),
 			zap.String("ip", ginc.ClientIP(c)),
 			zap.Duration("latency", time.Since(start)),
-			zap.String("requestId", requestid.Get(c)),
+			zap.String("requestId", RequestIDFromContext(c)),
 			zap.String("userAgent", c.GetHeader("User-Agent")),
 		}
 
@@ -147,7 +137,10 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 		switch {
 		case status >= 500:
 			accessLogger.Error(path, fields...)
-		case status > 400:
+		case status >= 400:
+			// 含 400 本身：参数校验失败同样是客户端错误，
+			// 旧实现的 `> 400` 会把它记成 Info，于是一次持续的坏请求风暴
+			// 在按级别过滤的日志视图里完全看不见。
 			accessLogger.Warn(path, fields...)
 		default:
 			accessLogger.Info(path, fields...)

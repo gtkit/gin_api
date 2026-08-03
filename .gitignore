@@ -27,3 +27,6 @@ examples
 .cache
 .vscode/
 .DS_Store
+
+# 本地开发依赖的密码，绝不入库
+.env

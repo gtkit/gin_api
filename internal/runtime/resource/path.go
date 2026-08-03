@@ -6,8 +6,17 @@ import (
 	"runtime"
 )
 
+// ResolvePath 把配置里的相对路径解析为实际存在的绝对路径。
+//
+// 绝对路径**原样返回**：它已经完全指定了目标，再拼任何前缀都会指向另一个位置
+// （filepath.Join("/app", "/var/log/x") == "/app/var/log/x"）。
+// 配置本身允许绝对路径（生产日志路径校验就要求绝对路径位于 APP_ROOT 下），
+// 因此这条分支不是防御性代码，而是真实会走到的路径。
 func ResolvePath(rel string) string {
 	rel = filepath.Clean(rel)
+	if filepath.IsAbs(rel) {
+		return rel
+	}
 	candidates := buildPathCandidates(rel)
 
 	for _, candidate := range candidates {

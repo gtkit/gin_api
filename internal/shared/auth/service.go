@@ -12,9 +12,14 @@ type UserVerifier interface {
 	ValidateUser(ctx context.Context, userID int64) (bool, error)
 }
 
-// VIPVerifier 定义会员中间件需要的 VIP 校验能力。
-// 该接口只暴露“当前用户是否具备有效会员资格”的结果，
-// 具体会员状态字段、到期时间判断等细节由实现方自行封装。
+// VIPVerifier 定义会员资格校验能力。
+//
+// 返回 (bool, error) 而不是裸 bool，与 UserVerifier 保持同一契约：
+// 仓储故障与"确实不是会员"是两件不同的事。裸 bool 会把"数据库挂了"折叠成
+// "不是会员"，于是一次基础设施故障表现为全体会员突然失去权益，
+// 而客户端看到的是一个正常的业务拒绝，既不会重试也不会触发告警。
+//
+// 调用方应把 error 映射为 503。
 type VIPVerifier interface {
-	ValidateVIP(ctx context.Context, userID int64) bool
+	ValidateVIP(ctx context.Context, userID int64) (bool, error)
 }

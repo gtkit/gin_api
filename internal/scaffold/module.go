@@ -55,6 +55,10 @@ type GenerateOptions struct {
 	DryRun    bool
 	Bootstrap bool
 	Fields    []string
+	// Access / Public 严格二选一，且都不给会报错。
+	// 访问策略是安全决策，刻意不设默认值——默认值等于允许"没想过"这个状态存在。
+	Access string
+	Public bool
 }
 
 type GenerateResult struct {
@@ -62,6 +66,8 @@ type GenerateResult struct {
 	Created []string
 	Updated []string
 	Skipped []string
+	// Notes 是必须让使用者看到的后续动作说明（如占位 authorizer 需要替换）。
+	Notes []string
 }
 
 type moduleField struct {
@@ -84,8 +90,14 @@ type moduleTemplateData struct {
 	RepoAlias         string
 	RuntimeAlias      string
 	ServiceVar        string
-	Fields            []moduleField
-	NeedsModelTime    bool
+	// ConfigTypeName 是模块配置子树的类型名（生成在 platform/config 包内）。
+	ConfigTypeName string
+	// ConfigFieldName 是它在 ModuleConfigs 里的字段名。
+	ConfigFieldName string
+	// AccessPolicyExpr 是写进生成代码的访问策略字面量，由 --access/--public 决定。
+	AccessPolicyExpr string
+	Fields           []moduleField
+	NeedsModelTime   bool
 }
 
 type generatedFile struct {
@@ -117,10 +129,6 @@ func NewModuleGenerator(startDir string) (*ModuleGenerator, error) {
 	return &ModuleGenerator{root: root, modulePath: modulePath, now: time.Now}, nil
 }
 
-func (g *ModuleGenerator) Generate(rawName string, force bool) (*GenerateResult, error) {
-	return g.GenerateWithOptions(rawName, GenerateOptions{Force: force, Bootstrap: true})
-}
-
 func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptions) (*GenerateResult, error) {
 	if g == nil {
 		return nil, fmt.Errorf("module generator is nil")
@@ -131,7 +139,15 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 		return nil, err
 	}
 
+	// 访问策略先于任何文件生成解析：它是安全决策，没做选择就不该产出任何东西。
+	choice, err := ResolveAccessChoice(opts.Access, opts.Public, data.PackageName)
+	if err != nil {
+		return nil, err
+	}
+	data.AccessPolicyExpr = choice.Expr
+
 	result := &GenerateResult{}
+	result.Notes = append(result.Notes, choice.Note)
 	result.DryRun = opts.DryRun
 	files := g.generatedFiles(data)
 	migrationFiles, err := g.generatedMigrationFiles(data)
@@ -152,12 +168,116 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 	}
 
 	if opts.Bootstrap {
+		// 配置注册先于 providers：providers 的 service 构造行引用
+		// inf.cfg.Modules.<Name>，那个字段必须已经存在。
+		if err := g.updateModuleConfigs(data, opts.DryRun, result); err != nil {
+			return nil, err
+		}
+		if err := g.updateConfigExample(data, opts.DryRun, result); err != nil {
+			return nil, err
+		}
 		if err := g.updateProviders(data, opts.DryRun, result); err != nil {
 			return nil, err
 		}
 	}
 
 	return result, nil
+}
+
+// updateModuleConfigs 把模块的配置字段与校验器接进 platform/config。
+//
+// 两处注入缺一不可：
+//   - 字段进 ModuleConfigs —— 否则根层严格解码会把该模块的整段配置判为未知键，
+//     进程直接启动失败；
+//   - 校验器进 validateModuleConfigs —— 严格解码只保证"字段名认识"，
+//     不保证取值有意义，缺了它 `page_size: -1` 会一路带到运行期。
+func (g *ModuleGenerator) updateModuleConfigs(data moduleTemplateData, dryRun bool, result *GenerateResult) error {
+	path := filepath.Join(g.root, "internal", "platform", "config", "modules.go")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", g.rel(path), err)
+	}
+
+	fieldsMarker, validatorsMarker := moduleConfigMarkers()
+	fieldLine := fmt.Sprintf("\t%s %s `mapstructure:\"%s\"`\n",
+		data.ConfigFieldName, data.ConfigTypeName, data.PackageName)
+	validatorLine := fmt.Sprintf("\tif err := validate%s(m.%s); err != nil {\n\t\terrs = append(errs, err)\n\t}\n",
+		data.ConfigTypeName, data.ConfigFieldName)
+
+	updated, changedField, err := ensureLineBefore(string(content), fieldLine, fieldsMarker)
+	if err != nil {
+		return fmt.Errorf("update module config field: %w", err)
+	}
+
+	updated, changedValidator, err := ensureLineBefore(updated, validatorLine, validatorsMarker)
+	if err != nil {
+		return fmt.Errorf("update module config validator: %w", err)
+	}
+
+	if !changedField && !changedValidator {
+		result.Skipped = append(result.Skipped, g.rel(path))
+		return nil
+	}
+	if dryRun {
+		result.Updated = append(result.Updated, g.rel(path))
+		return nil
+	}
+
+	formatted, err := formatWithImports(path, g.modulePath, []byte(updated))
+	if err != nil {
+		return fmt.Errorf("format %s: %w", g.rel(path), err)
+	}
+	if err := os.WriteFile(path, formatted, 0o644); err != nil { //nolint:gosec // generated Go source files are expected to be user-readable.
+		return fmt.Errorf("write %s: %w", g.rel(path), err)
+	}
+
+	result.Updated = append(result.Updated, g.rel(path))
+	return nil
+}
+
+// moduleConfigMarkers 返回 platform/config 中的两个注入锚点。
+func moduleConfigMarkers() (fields, validators string) {
+	return "\t// scaffold:module-config-fields\n",
+		"\t// scaffold:module-config-validators\n"
+}
+
+// configExampleMarker 是 config/env.yml.example 中模块配置区的锚点。
+const configExampleMarker = "  # scaffold:module-config-example\n"
+
+// updateConfigExample 在配置模板里给新模块补一段示例。
+//
+// 示例必须与字段同批产出：模板是使用者唯一的配置参照，一个存在于代码里
+// 却不在模板里的配置项，等于没人知道它可以配。
+func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bool, result *GenerateResult) error {
+	path := filepath.Join(g.root, "config", "env.yml.example")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", g.rel(path), err)
+	}
+
+	block := fmt.Sprintf(
+		"  %s:\n    enabled: false                 # 是否启用 %s 模块的可选能力\n"+
+			"    page_size: 20                  # 列表默认分页大小；<=0 时兜底 20，上界由代码固定\n",
+		data.PackageName, data.PackageName)
+
+	updated, changed, err := ensureLineBefore(string(content), block, configExampleMarker)
+	if err != nil {
+		return fmt.Errorf("update config example: %w", err)
+	}
+	if !changed {
+		result.Skipped = append(result.Skipped, g.rel(path))
+		return nil
+	}
+	if dryRun {
+		result.Updated = append(result.Updated, g.rel(path))
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil { //nolint:gosec // config template is expected to be user-readable.
+		return fmt.Errorf("write %s: %w", g.rel(path), err)
+	}
+
+	result.Updated = append(result.Updated, g.rel(path))
+	return nil
 }
 
 func (g *ModuleGenerator) generatedFiles(data moduleTemplateData) []generatedFile {
@@ -222,6 +342,15 @@ func (g *ModuleGenerator) generatedFiles(data moduleTemplateData) []generatedFil
 		{
 			path:           filepath.Join(g.root, "internal", "runtime", "module", data.PackageName, "module.go"),
 			template:       runtimeModuleTemplate,
+			allowOverwrite: true,
+			formatGo:       true,
+		},
+		{
+			// 模块配置类型生成在 platform/config **自身**的文件里：
+			// 基础设施层反向 import internal/module/* 会让依赖方向倒转，
+			// 且任一模块的编译错误会连带让配置加载不可用。
+			path:           filepath.Join(g.root, "internal", "platform", "config", "module_"+data.PackageName+".go"),
+			template:       moduleConfigTemplate,
 			allowOverwrite: true,
 			formatGo:       true,
 		},
@@ -293,7 +422,8 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 	runtimeImport := fmt.Sprintf("\t%s \"%s/internal/runtime/module/%s\"\n", data.RuntimeAlias, data.ProjectModulePath, data.PackageName)
 	httpImport := fmt.Sprintf("\t%s \"%s/internal/module/%s/transport/http\"\n", data.HTTPAlias, data.ProjectModulePath, data.PackageName)
 	fieldLine := fmt.Sprintf("\t%s *%s.Service\n", data.ServiceVar, data.AppAlias)
-	serviceLine := fmt.Sprintf("\tsvc.%s = %s.NewService(inf.mysqlDB)\n", data.ServiceVar, data.RuntimeAlias)
+	serviceLine := fmt.Sprintf("\tsvc.%s = %s.NewService(inf.mysqlDB, inf.cfg.Modules.%s)\n",
+		data.ServiceVar, data.RuntimeAlias, data.ConfigFieldName)
 	moduleLine := fmt.Sprintf("\t\t%s.NewModule(svc.%s),\n", data.HTTPAlias, data.ServiceVar)
 
 	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := providersMarkers()
@@ -500,6 +630,8 @@ func newModuleTemplateData(rawName string, fieldSpecs []string, projectModulePat
 		RepoAlias:         aliasBase + "repo",
 		RuntimeAlias:      aliasBase + "runtime",
 		ServiceVar:        lowerFirst(structName) + "Service",
+		ConfigTypeName:    structName + "ModuleConfig",
+		ConfigFieldName:   structName,
 		Fields:            fields,
 		NeedsModelTime:    needsModelTime(fields),
 	}, nil
@@ -722,6 +854,48 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+const moduleConfigTemplate = `package config
+
+import "fmt"
+
+// {{.ConfigTypeName}} 是 {{.PackageName}} 模块的配置子树。
+//
+// 类型与 mapstructure tag 定义在 config 包内，而不是 import 该模块——
+// 基础设施层反向依赖 internal/module/* 会让依赖方向倒转。
+//
+// 生成的字段只是**起点**：按模块实际需要增删。每加一个字段，
+// 同步在 validate{{.ConfigTypeName}} 里给出它的语义约束（严格解码只保证
+// 字段名认识，不保证取值有意义），并在 config/env.yml.example 里给出示例。
+type {{.ConfigTypeName}} struct {
+	// Enabled 控制该模块的可选能力是否启用。
+	Enabled bool ` + "`" + `mapstructure:"enabled"` + "`" + `
+	// PageSize 是列表接口的默认分页大小。
+	PageSize int ` + "`" + `mapstructure:"page_size"` + "`" + `
+}
+
+// Default{{.StructName}}PageSize 是未配置 page_size 时的取值。
+const Default{{.StructName}}PageSize = 20
+
+// EffectivePageSize 返回生效的分页大小。
+//
+// 用"未设置时取默认值"而不是"必填"：脚手架生成的模块要能在
+// 完全不写配置的情况下跑起来，否则每加一个模块都会让现有部署启动失败。
+func (c {{.ConfigTypeName}}) EffectivePageSize() int {
+	if c.PageSize <= 0 {
+		return Default{{.StructName}}PageSize
+	}
+	return c.PageSize
+}
+
+// validate{{.ConfigTypeName}} 校验 {{.PackageName}} 模块配置的语义。
+func validate{{.ConfigTypeName}}(c {{.ConfigTypeName}}) error {
+	if c.PageSize < 0 {
+		return fmt.Errorf("modules.{{.PackageName}}.page_size must not be negative, got %d", c.PageSize)
+	}
+	return nil
+}
+`
+
 const modelTemplate = `package models
 
 import (
@@ -896,11 +1070,35 @@ var Err{{.StructName}}NotFound = errors.New("{{.PackageName}}: not found")
 
 type Service struct {
 	repo {{.StructName}}Repository
+	// pageSize 是未显式指定分页大小时的默认值，由 runtime 层从配置注入。
+	pageSize int
+}
+
+// ServiceOption 配置 Service 的可选策略。
+//
+// 只有**真正可选**的策略走 option；必需依赖走构造参数，
+// 否则"依赖是否齐全"会从编译期问题退化成运行期问题。
+type ServiceOption func(*Service)
+
+// WithPageSize 注入默认分页大小（<=0 时保留内置默认值）。
+//
+// application 不 import platform/config：配置的读取与翻译在 runtime 层完成，
+// 否则业务编排会绑死在一份具体的配置结构上，单测也必须先造一个完整 Config 才能跑。
+func WithPageSize(size int) ServiceOption {
+	return func(s *Service) {
+		if size > 0 {
+			s.pageSize = size
+		}
+	}
 }
 
 // NewWithDeps 创建 {{.StructName}} application service。
-func NewWithDeps(repo {{.StructName}}Repository) *Service {
-	return &Service{repo: repo}
+func NewWithDeps(repo {{.StructName}}Repository, opts ...ServiceOption) *Service {
+	s := &Service{repo: repo, pageSize: defaultListPageSize}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ListQuery 是与传输协议无关的分页查询参数。
@@ -911,7 +1109,7 @@ type ListQuery struct {
 
 // List 返回有界分页列表。
 func (s *Service) List(ctx context.Context, query ListQuery) (dto.{{.StructName}}ListResponse, error) {
-	query = normalizeListQuery(query)
+	query = s.normalizeListQuery(query)
 	offset := (query.Page - 1) * query.PageSize
 	list, total, err := s.repo.List(ctx, offset, query.PageSize)
 	if err != nil {
@@ -952,17 +1150,33 @@ func (s *Service) Get(ctx context.Context, id int64) (dto.{{.StructName}}Respons
 	return to{{.StructName}}Response(entity), nil
 }
 
-func normalizeListQuery(query ListQuery) ListQuery {
+// normalizeListQuery 收敛分页参数。
+//
+// 上界 maxListPageSize 无条件生效，**配置也不能突破**：它挡的是
+// "一次请求把整张表拉出来"，而那既是内存风险也是慢查询来源。
+func (s *Service) normalizeListQuery(query ListQuery) ListQuery {
 	if query.Page <= 0 {
 		query.Page = defaultListPage
 	}
 	if query.PageSize <= 0 {
-		query.PageSize = defaultListPageSize
+		query.PageSize = s.effectivePageSize()
 	}
 	if query.PageSize > maxListPageSize {
 		query.PageSize = maxListPageSize
 	}
 	return query
+}
+
+// effectivePageSize 返回生效的默认分页大小。
+// 零值 Service（未经构造函数）也安全：回退到内置默认值。
+func (s *Service) effectivePageSize() int {
+	if s.pageSize <= 0 {
+		return defaultListPageSize
+	}
+	if s.pageSize > maxListPageSize {
+		return maxListPageSize
+	}
+	return s.pageSize
 }
 
 func to{{.StructName}}Response(entity *models.{{.StructName}}) dto.{{.StructName}}Response {
@@ -1131,6 +1345,7 @@ const runtimeModuleTemplate = `package {{.PackageName}}
 
 import (
 	{{.AppAlias}} "{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
+	"{{.ProjectModulePath}}/internal/platform/config"
 	{{.RepoAlias}} "{{.ProjectModulePath}}/internal/repository/{{.PackageName}}"
 
 	"gorm.io/gorm"
@@ -1138,8 +1353,15 @@ import (
 
 // NewService 在 runtime 层装配 {{.PackageName}} service：db→repo→application service，
 // 使 application 不依赖 gorm / repository。
-func NewService(db *gorm.DB) *{{.AppAlias}}.Service {
-	return {{.AppAlias}}.NewWithDeps({{.RepoAlias}}.New(db))
+//
+// 配置在**这一层**被读取并翻译成 application 的选项：application 不 import
+// platform/config，否则业务编排会绑死在一份具体的配置结构上，
+// 单测也必须先造一个完整 Config 才能跑。
+func NewService(db *gorm.DB, cfg config.{{.ConfigTypeName}}) *{{.AppAlias}}.Service {
+	return {{.AppAlias}}.NewWithDeps(
+		{{.RepoAlias}}.New(db),
+		{{.AppAlias}}.WithPageSize(cfg.EffectivePageSize()),
+	)
 }
 `
 
@@ -1185,7 +1407,7 @@ func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 		Deadline:   {{.ServiceVar}}Deadline,
 		WriteGrace: {{.ServiceVar}}WriteGrace,
 	}
-	access := routespec.AccessPolicy{Mode: routespec.AccessPublic}
+	access := {{.AccessPolicyExpr}}
 
 	return []routespec.RouteSpec{
 		{

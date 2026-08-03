@@ -49,14 +49,3 @@ func TestGormLoggerOptionsParameterizeQueries(t *testing.T) {
 		})
 	}
 }
-
-func TestRdbReturnsNilWhenRedisNotInitialized(t *testing.T) {
-	d := &dao{}
-
-	if got := d.Rdb(0); got != nil {
-		t.Fatalf("Rdb(0) on uninitialized dao = %v, want nil", got)
-	}
-	if err := d.RdbClose(); err != nil {
-		t.Fatalf("RdbClose() on uninitialized dao = %v, want nil", err)
-	}
-}

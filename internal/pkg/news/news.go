@@ -21,10 +21,6 @@ type Notifier struct {
 	errorLogger   func(msg string)
 }
 
-var (
-	defaultNotifier = NewWithConfig(nil)
-)
-
 func NewWithConfig(cfg *config.Config) *Notifier {
 	n := &Notifier{
 		now:           func() string { return time.Now().Format(time.DateTime) },
@@ -39,13 +35,12 @@ func NewWithConfig(cfg *config.Config) *Notifier {
 	return n
 }
 
-func InitWithConfig(cfg *config.Config) {
-	defaultNotifier = NewWithConfig(cfg)
-}
-
 func (n *Notifier) Warn(url string, args ...string) {
+	// nil 接收者直接返回而不是回退到某个包级默认实例：
+	// 包级默认实例正是本次要消灭的东西——它与 log 包内自行构造的那个并存，
+	// 形成两套配置可能不同的通知器，而调用方无从知道自己用的是哪一个。
 	if n == nil {
-		n = defaultNotifier
+		return
 	}
 
 	if url == "" {
@@ -60,18 +55,12 @@ func (n *Notifier) Warn(url string, args ...string) {
 
 func (n *Notifier) ErrRecord(msg string) {
 	if n == nil {
-		n = defaultNotifier
+		return
 	}
 
 	n.errorLogger(msg)
 	n.Warn("", msg)
 }
-
-func Warn(url string, args ...string) {
-	defaultNotifier.Warn(url, args...)
-}
-
-func ErrRecord(msg string) { defaultNotifier.ErrRecord(msg) }
 
 func SendPicMsg(ctx context.Context, newsApp newslib.AppNewser, openids, shotname string) error {
 	openidSlice := strings.Split(openids, ",")
@@ -86,15 +75,3 @@ func SendPicMsg(ctx context.Context, newsApp newslib.AppNewser, openids, shotnam
 	}
 	return nil
 }
-
-func resetNewsHooksForTest() {
-	defaultNotifier = NewWithConfig(nil)
-}
-
-func setNewsURLGetterForTest(fn func() string) { defaultNotifier.defaultURL = fn() }
-func setEnvNameForTest(fn func() string)       { defaultNotifier.envName = fn() }
-func setNewsNowForTest(fn func() string)       { defaultNotifier.now = fn }
-func setWebhookSenderForTest(fn func(url string, args ...string) error) {
-	defaultNotifier.webhookSender = fn
-}
-func setNewsErrorLoggerForTest(fn func(msg string)) { defaultNotifier.errorLogger = fn }

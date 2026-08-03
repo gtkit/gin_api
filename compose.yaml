@@ -1,0 +1,68 @@
+# compose.yaml —— **仅用于本地开发与测试**的依赖编排。
+#
+# 这不是生产部署方案，也不替代已冻结的 deployment.sh / .gitlab-ci.yml。
+# 它只做一件事：在本机拉起 MySQL 与 Redis，让 make migrate-verify、
+# 集成测试与本地联调有一套版本固定、可重复销毁的依赖。
+#
+# 三条硬约束：
+#   1. **只绑 127.0.0.1**：绑 0.0.0.0 会把无密码/弱密码的开发库暴露到局域网，
+#      在咖啡馆或共享办公网络里就是一个开放的数据库端口。
+#   2. **密码来自本地未跟踪的 .env**：模板不含任何真实密码。
+#   3. **版本固定**：浮动 tag 会让"本地能过、CI 不过"变成无法复现的问题。
+#
+# 用法：
+#   cp compose.env.example .env    # 填本地密码；.env 已被 .gitignore 排除
+#   make dev-up                    # 拉起并等待健康
+#   make dev-down                  # 停止，**保留数据卷**
+#   make dev-reset                 # 带二次确认地删除数据卷
+
+services:
+  mysql:
+    # 与 make migrate-verify 使用同一版本：门禁与本地环境必须一致，
+    # 否则"本地能跑通的迁移在门禁里失败"会变成经常性的困惑。
+    image: mysql:8.0
+    container_name: gin-api-dev-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DEV_MYSQL_ROOT_PASSWORD:?set DEV_MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${DEV_MYSQL_DATABASE:-gin_api_dev}
+    ports:
+      # 只绑回环：开发库通常口令很弱，绝不能对局域网可见。
+      - "127.0.0.1:${DEV_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # 必须用真实连接而不是 mysqladmin ping：镜像初始化期会先起一个临时服务器，
+      # 那时 ping 就已经成功——那是假就绪信号，随后临时服务器会被关掉。
+      test: ["CMD-SHELL", "mysql -uroot -p\"$$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: gin-api-dev-redis
+    command: ["redis-server", "--requirepass", "${DEV_REDIS_PASSWORD:?set DEV_REDIS_PASSWORD in .env}"]
+    ports:
+      - "127.0.0.1:${DEV_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    environment:
+      REDIS_PASSWORD: ${DEV_REDIS_PASSWORD}
+
+volumes:
+  # 具名卷而非匿名卷：dev-down 之后数据仍在，重新 up 不必重建库。
+  # 想真正清空必须走带二次确认的 dev-reset。
+  mysql-data:
+    name: gin-api-dev-mysql-data
+  redis-data:
+    name: gin-api-dev-redis-data

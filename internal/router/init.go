@@ -1,10 +1,13 @@
 package router
 
 import (
+	"fmt"
+
 	"github.com/gtkit/gin-api/internal/appmeta"
 	middleware "github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/router/routespec"
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,9 +34,21 @@ type RouterOptions struct {
 	// HealthChecker 供系统探针路由使用。为 nil 时 /ready 一律报未就绪——
 	// 装配错误必须表现为"未就绪"，而不是让错配的实例被纳入流量。
 	HealthChecker HealthChecker
-	// AuthMiddleware 实现 AccessAuthenticated。声明了该模式却没提供它，
-	// 会在注册期直接失败——绝不把要求鉴权的路由当公开路由服务。
+	// ProcessStatus 提供进程自身的就绪信息（draining 相位、已降级/已失效的能力）。
+	// 为 nil 时 readiness 只看依赖存活——那会让一个正在 draining 的实例
+	// 或一个 required worker 已经死掉的实例继续报告 ready。
+	ProcessStatus ProcessStatus
+	// RedisRequired 声明 Redis 对本进程是否必需，与资源装配用的是同一份推导结果。
+	// 它决定 Redis 故障映射到 503（required）还是 200+degraded（optional）。
+	RedisRequired bool
+	// AuthMiddleware 实现 AccessAuthenticated 与 AccessAuthorized 的认证段。
+	// 声明了该模式却没提供它，会在注册期直接失败——绝不把要求鉴权的路由当公开路由服务。
 	AuthMiddleware gin.HandlerFunc
+	// OptionalAuthMiddleware 实现 AccessOptionalAuthenticated。
+	OptionalAuthMiddleware gin.HandlerFunc
+	// Authorizers 是具名授权实现的注册表，AccessAuthorized 按 ID 解析。
+	// 注册表在 compile 前冻结，运行期不可变。
+	Authorizers *sharedauth.AuthorizerRegistry
 }
 
 // InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
@@ -57,7 +72,7 @@ func InitRouterWithVersionedModules(
 	}
 
 	contributions := []routespec.Contribution{
-		{Source: "system", Prefix: "", Routes: systemRoutes(opt.HealthChecker)},
+		{Source: "system", Prefix: "", Routes: systemRoutes(opt.HealthChecker, opt.ProcessStatus, opt.RedisRequired)},
 	}
 	contributions = append(contributions, moduleContributions(appmeta.APIV1Path, modules.V1)...)
 	contributions = append(contributions, moduleContributions(appmeta.APIV2Path, modules.V2)...)
@@ -68,7 +83,17 @@ func InitRouterWithVersionedModules(
 	}
 	index := routespec.BuildIndex(compiled)
 
-	access := accessMiddleware{authenticate: opt.AuthMiddleware}
+	authorizers := opt.Authorizers
+	if authorizers == nil {
+		authorizers = sharedauth.NewAuthorizerRegistry()
+	}
+	// 冻结后运行期不可再注册或替换：路由集合与授权实现都是启动期事实。
+	authorizers.Freeze()
+	access := accessMiddleware{
+		authenticate:         opt.AuthMiddleware,
+		authenticateOptional: opt.OptionalAuthMiddleware,
+		authorizers:          authorizers,
+	}
 	if err := validateAccessSupport(compiled, access); err != nil {
 		return nil, describeCompileError(err)
 	}
@@ -93,11 +118,14 @@ func InitRouterWithVersionedModules(
 	engine.RedirectTrailingSlash = false
 	engine.HandleMethodNotAllowed = true
 
-	// 初始化中间件
-	middleware.InitMiddleware(engine, opt.AllowedOrigins, middleware.AccessLogOptions{
+	// 初始化中间件。失败即装配失败：request ID 生成器要读进程随机源，
+	// 读不到就只能退回弱随机，而那会让跨实例的日志关联失效。
+	if err := middleware.InitMiddleware(engine, opt.AllowedOrigins, middleware.AccessLogOptions{
 		LogRequestBody:  opt.LogRequestBody,
 		LogResponseBody: opt.LogResponseBody,
-	}, opt.MaxBodyBytes)
+	}, opt.MaxBodyBytes); err != nil {
+		return nil, fmt.Errorf("init global middleware: %w", err)
+	}
 
 	installFallbacks(engine, index)
 	registerCompiledRoutes(engine, compiled, access)

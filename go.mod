@@ -3,11 +3,9 @@ module github.com/gtkit/gin-api
 go 1.26
 
 require (
-	github.com/gin-contrib/requestid v1.0.6
 	github.com/gin-contrib/timeout v1.2.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gtkit/goerr v1.2.8
 	github.com/gtkit/golimit v1.0.8
 	github.com/gtkit/verify v1.2.4
@@ -20,9 +18,6 @@ require (
 )
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
-	github.com/allegro/bigcache/v3 v3.1.0
-	github.com/gtkit/gincache v1.1.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/json v1.0.0
 	github.com/gtkit/logger/v2 v2.3.0
@@ -51,7 +46,6 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.61.0 // indirect
-	github.com/yuin/gopher-lua v1.1.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.8.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
@@ -68,6 +62,8 @@ require (
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/wneessen/go-mail v0.8.1 // indirect
 	golang.org/x/mod v0.38.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
+	golang.org/x/vuln v1.6.0 // indirect
 )
 
 require (
@@ -99,8 +95,10 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.29.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+tool golang.org/x/vuln/cmd/govulncheck

@@ -1,0 +1,17 @@
+# 包级变量重新绑定的**显式登记表**。
+#
+# 传感器要求：每一处重绑定要么删除，要么在此登记并写明所有者与理由。
+# 未登记的重绑定一律失败——这样"又多了一个可变全局"不可能悄悄发生。
+#
+# 格式：<文件路径>:<变量名>  # <所有者> — <理由>
+# 匹配按 文件路径 + 变量名，不含行号：行号会随无关改动漂移，
+# 让登记表变成需要频繁维护的噪声，最终被人整体放宽。
+
+cmd/registry.go:rootCommandFactories   # cmd — 命令自注册表，只在各命令文件的 init() 里追加，NewRootCmd 之后只读
+cmd/registry.go:dbCommandFactories     # cmd — 同上，db 命令组的自注册表
+
+internal/pkg/console/console.go:consoleWriter  # pkg/console — 测试期重定向输出，save/restore 成对，仅测试路径调用
+internal/pkg/console/console.go:exitFunc       # pkg/console — 同上，测试期替换退出函数
+
+internal/pkg/log/logger.go:newLogger   # pkg/log — 测试期替换 logger 构造器，save/restore 成对
+internal/pkg/log/logger.go:accessLog    # pkg/log — access logger 单例，仅 InitAccessLog 在启动期设置一次

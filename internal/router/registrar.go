@@ -7,8 +7,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/gtkit/goerr"
+
+	"github.com/gtkit/gin-api/internal/middleware"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/router/routespec"
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
 // registerCompiledRoutes 是全仓**唯一**允许向 engine 注册路由的地方。
@@ -30,18 +34,46 @@ func registerCompiledRoutes(engine *gin.Engine, routes []routespec.CompiledRoute
 // 补齐。在此之前，描述符已经能表达它们，但 compile 阶段会拒绝没有对应实现的模式，
 // 因此不存在"声明了却没生效"的窗口。
 type accessMiddleware struct {
+	// authenticate 实现 AccessAuthenticated / AccessAuthorized 的认证段。
 	authenticate gin.HandlerFunc
+	// authenticateOptional 实现 AccessOptionalAuthenticated：缺 token 放行，
+	// 但带了非法 token 仍须拒绝。
+	authenticateOptional gin.HandlerFunc
+	// authorizers 是具名授权实现，AccessAuthorized 按 ID 解析。
+	authorizers *sharedauth.AuthorizerRegistry
 }
 
 // chainFor 按访问策略构造该路由的 handler 链。
 //
-// 顺序是固定的：鉴权在前、业务 handler 在后。链的构造收敛在这里，
-// 而不是让每个模块自己 Use——后者正是"新增路由忘了挂中间件就静默公开"的成因。
+// 顺序固定为 认证 → 授权 → 业务 handler。授权必须在认证之后：
+// 它消费已认证的 principal，拿不到身份时一律拒绝而非放行。
+//
+// 链的构造收敛在这里，而不是让每个模块自己 Use——后者正是
+// "新增路由忘了挂中间件就静默公开"的成因。
 func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
-	if spec.AccessPolicy.Mode == routespec.AccessAuthenticated {
+	switch spec.AccessPolicy.Mode {
+	case routespec.AccessAuthenticated:
 		return []gin.HandlerFunc{m.authenticate, spec.Handler}
+	case routespec.AccessOptionalAuthenticated:
+		return []gin.HandlerFunc{m.authenticateOptional, spec.Handler}
+	case routespec.AccessAuthorized:
+		authorizer, _ := m.authorizers.Lookup(spec.AccessPolicy.AuthorizerID)
+		authorize, err := middleware.Authorize(authorizer, spec.AccessPolicy.AuthorizerID)
+		if err != nil {
+			// 走不到这里：validateAccessSupport 已在 compile 阶段确认过可解析。
+			// 万一走到，唯一安全的行为是拒绝一切，绝不放行。
+			authorize = denyEverything
+		}
+		return []gin.HandlerFunc{m.authenticate, authorize, spec.Handler}
+	default:
+		return []gin.HandlerFunc{spec.Handler}
 	}
-	return []gin.HandlerFunc{spec.Handler}
+}
+
+// denyEverything 是装配异常时的兜底 handler：拒绝而不是放行。
+func denyEverything(c *gin.Context) {
+	resp.Error(c, goerr.New(nil, goerr.StatusPermission(), "authorization is not available"))
+	c.Abort()
 }
 
 // validateAccessSupport 确认每条路由声明的访问模式都有对应实现。
@@ -58,6 +90,25 @@ func validateAccessSupport(routes []routespec.CompiledRoute, mw accessMiddleware
 				errs = append(errs, fmt.Errorf(
 					"%s %s requires authentication but no authentication middleware was provided",
 					r.Spec.Method, r.FullPath))
+			}
+		case routespec.AccessOptionalAuthenticated:
+			if mw.authenticateOptional == nil {
+				errs = append(errs, fmt.Errorf(
+					"%s %s allows optional authentication but no optional authentication middleware was provided",
+					r.Spec.Method, r.FullPath))
+			}
+		case routespec.AccessAuthorized:
+			if mw.authenticate == nil {
+				errs = append(errs, fmt.Errorf(
+					"%s %s requires authentication before authorization but none was provided",
+					r.Spec.Method, r.FullPath))
+			}
+			// 引用了不存在的 authorizer 必须在启动期发现：
+			// 留到请求期才发现时，该路由的安全行为是未定义的。
+			if _, ok := mw.authorizers.Lookup(r.Spec.AccessPolicy.AuthorizerID); !ok {
+				errs = append(errs, fmt.Errorf(
+					"%s %s references authorizer %q, which is not registered (registered: %v)",
+					r.Spec.Method, r.FullPath, r.Spec.AccessPolicy.AuthorizerID, mw.authorizers.IDs()))
 			}
 		default:
 			errs = append(errs, fmt.Errorf(
@@ -110,7 +161,7 @@ func methodNotAllowedHandler(index *routespec.RouteIndex) gin.HandlerFunc {
 //
 // 探针的超时预算刻意比业务路由短得多：探针的意义是快速回答"我还行吗"，
 // 一个要等好几秒才失败的探针会让编排器的判定同样迟钝。
-func systemRoutes(checker HealthChecker) []routespec.RouteSpec {
+func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired bool) []routespec.RouteSpec {
 	probeTimeout := routespec.TimeoutPolicy{
 		Mode:       routespec.TimeoutCooperative,
 		Deadline:   healthProbeDeadline,
@@ -127,7 +178,7 @@ func systemRoutes(checker HealthChecker) []routespec.RouteSpec {
 		{
 			Method:        http.MethodGet,
 			Path:          "/ready",
-			Handler:       readyHandler(checker),
+			Handler:       readyHandler(checker, status, redisRequired),
 			AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy: probeTimeout,
 		},

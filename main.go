@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,6 +22,12 @@ func main() {
 	// 手工按 NumCPU-1 覆盖会在容器里读到宿主核数而严重超配，且会关闭该自动行为。
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "execute cobra command: %v\n", err)
+		// 命令可以声明自己的退出码（doctor 用 0/2/1 区分"全通/仅降级/失败"）。
+		// 统一退成 1 会让脚本无法区分"这台机器少了一项可选能力"与"它根本不能干活"。
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			os.Exit(coded.ExitCode())
+		}
 		os.Exit(1)
 	}
 }

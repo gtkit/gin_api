@@ -46,7 +46,7 @@ func TestAuthAcceptsLegacyLaravelToken(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, parser))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		if got := ginc.UserIDFromContext(c); got != 42 {
 			t.Fatalf("user id = %d, want 42", got)
@@ -77,7 +77,7 @@ func TestAuthRejectsLegacyLaravelTokenWhenFallbackDisabled(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, parser))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})

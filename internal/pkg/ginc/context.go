@@ -3,7 +3,11 @@
 // 只应被 transport/http、router、middleware 引用。
 package ginc
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
+
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
+)
 
 // userIDKey 是用户 ID 在 gin context 中的键。
 // gin v1.12 的 Keys 为 map[any]any，故用私有空结构体类型而非字符串，
@@ -18,4 +22,27 @@ func SetUserID(c *gin.Context, userID int64) {
 // UserIDFromContext 从 gin context 读取用户 ID；未设置时返回 0。
 func UserIDFromContext(c *gin.Context) int64 {
 	return c.GetInt64(userIDKey{})
+}
+
+// principalKey 是已认证主体在 Gin context 里的键。
+const principalKey = "auth.principal"
+
+// SetPrincipal 记录本次请求已认证的主体。
+func SetPrincipal(c *gin.Context, p sharedauth.Principal) {
+	c.Set(principalKey, p)
+}
+
+// PrincipalFromContext 取出已认证主体。
+//
+// ok=false 表示本次请求尚未通过认证——调用方**绝不能**把它解释成"允许"。
+func PrincipalFromContext(c *gin.Context) (sharedauth.Principal, bool) {
+	if c == nil {
+		return sharedauth.Principal{}, false
+	}
+	v, exists := c.Get(principalKey)
+	if !exists {
+		return sharedauth.Principal{}, false
+	}
+	p, ok := v.(sharedauth.Principal)
+	return p, ok
 }

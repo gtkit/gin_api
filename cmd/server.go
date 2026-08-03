@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
@@ -29,14 +28,18 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "server",
 		Short: "Run the HTTP server and workers",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			app, err := bootstrap.NewApp(bootstrap.Options{})
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// 用 cmd.Context() 而不是 context.Background()：装配与运行共用同一棵 ctx，
+			// 上层取消（含 cobra 的 ExecuteContext）才能同时作用于资源建立与运行阶段。
+			ctx := cmd.Context()
+
+			app, err := bootstrap.NewApp(ctx, bootstrap.Options{})
 			if err != nil {
 				return commandError("bootstrap app", err)
 			}
 			fmt.Printf("\x1b[32m%s\x1b[0m", _UI)
 
-			return commandError("run app", app.Run(context.Background()))
+			return commandError("run app", app.Run(ctx))
 		},
 	}
 }

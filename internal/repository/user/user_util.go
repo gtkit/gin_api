@@ -8,7 +8,6 @@ import (
 	"github.com/gtkit/gin-api/internal/models"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // Get 按主键查询用户。
@@ -46,30 +45,4 @@ func (r *Repository) ExistsByID(ctx context.Context, id int64) (bool, error) {
 		return false, fmt.Errorf("check user exists by id %d: %w", id, err)
 	}
 	return count > 0, nil
-}
-
-// CreateOrUpdate 创建或更新.
-func (r *Repository) CreateOrUpdate(ctx context.Context, user *models.User, primarykey string, updatekey []string) error {
-	return r.mdbCtx(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: primarykey}},
-		DoUpdates: clause.AssignmentColumns(updatekey),
-	}).Create(&user).Error
-}
-
-// UpdateVipStatus 更新 用户会员状态。
-func (r *Repository) UpdateVipStatus(ctx context.Context, userId int64, status models.VipStatus) error {
-	return r.mdbCtx(ctx).Model(models.User{}).Where("id = ?", userId).Update("vip_status", status).Error
-}
-
-// GetVIPInfo 查询用户会员信息.
-func (r *Repository) GetVIPInfo(ctx context.Context, userID int64) (*models.User, error) {
-	var user models.User
-	err := r.mdbCtx(ctx).
-		Select("id", "vip_status", "vip_level", "vip_expire_at").
-		Where("id = ? AND deleted_at IS NULL", userID).
-		First(&user).Error
-	if err != nil {
-		return nil, fmt.Errorf("get vip info: %w", err)
-	}
-	return &user, nil
 }

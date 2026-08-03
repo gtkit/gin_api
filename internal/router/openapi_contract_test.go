@@ -1,6 +1,7 @@
 package router_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gtkit/gin-api/internal/models"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	"github.com/gtkit/gin-api/internal/router"
@@ -203,7 +205,7 @@ func documentedOpenAPIOperations(t *testing.T, document openAPIDocument) (map[st
 func registeredRouteOperations(tb testing.TB) map[string]struct{} {
 	tb.Helper()
 
-	userModule := userhttp.NewModule(userapp.NewWithDeps(nil))
+	userModule := userhttp.NewModule(newContractUserService(tb))
 	engine, err := router.InitRouterWithVersionedModules("test", router.VersionedModules{
 		V1: []router.Module{userModule},
 	}, router.RouterOptions{
@@ -243,4 +245,49 @@ func operationSet(operations ...string) map[string]struct{} {
 		result[operation] = struct{}{}
 	}
 	return result
+}
+
+// contractUserRepo 是契约测试用的空壳仓储：本测试只关心「路由表 ↔ OpenAPI 契约」，
+// 不触发任何 handler 逻辑，因此各方法返回零值即可。
+//
+// 它存在的唯一原因是 application.NewService 现在拒绝不完整依赖——
+// 这正是期望的行为：连测试都不能再随手传 nil 装出一个半残的 service。
+type contractUserRepo struct{}
+
+func (contractUserRepo) ExistsByID(context.Context, int64) (bool, error) { return false, nil }
+func (contractUserRepo) Get(context.Context, string) (models.User, bool, error) {
+	return models.User{}, false, nil
+}
+func (contractUserRepo) Update(context.Context, int64, map[string]any) error { return nil }
+func (contractUserRepo) LockByID(context.Context, int64) (*models.User, bool, error) {
+	return nil, false, nil
+}
+func (contractUserRepo) AnonymizeForDeactivation(context.Context, int64, string, string) error {
+	return nil
+}
+func (contractUserRepo) SoftDeleteProfile(context.Context, int64) error { return nil }
+
+type contractDeactRecorder struct{}
+
+func (contractDeactRecorder) Create(context.Context, *models.UserDeactivation) error { return nil }
+
+type contractTxManager struct{}
+
+func (contractTxManager) Do(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+
+// newContractUserService 装出一个依赖齐全但全为空实现的 user service。
+func newContractUserService(tb testing.TB) *userapp.Service {
+	tb.Helper()
+
+	svc, err := userapp.NewService(userapp.Deps{
+		Repo:     contractUserRepo{},
+		Recorder: contractDeactRecorder{},
+		Tx:       contractTxManager{},
+	})
+	if err != nil {
+		tb.Fatalf("build contract user service: %v", err)
+	}
+	return svc
 }

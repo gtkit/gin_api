@@ -54,13 +54,21 @@ func (f AuthorizerFunc) Authorize(
 	return f(ctx, principal, request)
 }
 
-// DenyAll 是一个恒拒绝的 authorizer。
+// DenyAllAuthorizer 是恒拒绝的占位实现。
 //
-// 用作尚未接入权威数据源的占位实现：生成的模块因此可编译、可启动，
+// 用于尚未接入权威数据源的授权点：生成的模块因此可编译、可启动，
 // 但所有请求都被拒绝——不留 TODO、不默许放行。
-// "先放行、以后再补" 的占位会在补上之前一直是一个敞开的授权缺口。
-func DenyAll(reason string) Authorizer {
-	return AuthorizerFunc(func(context.Context, Principal, AuthorizationRequest) (bool, error) {
-		return false, nil
-	})
+// "先放行、以后再补"的占位会在补上之前一直是一个敞开的授权缺口，
+// 而且它不会以任何方式提醒你它还没做完。
+type DenyAllAuthorizer struct {
+	// Reason 说明为什么还没有真实实现，出现在启动日志与拒绝原因里，
+	// 使"为什么这个接口一直 403"能被立刻定位，而不是变成一桩悬案。
+	Reason string
 }
+
+func (d DenyAllAuthorizer) Authorize(context.Context, Principal, AuthorizationRequest) (bool, error) {
+	return false, nil
+}
+
+// DenyAll 构造一个带说明的恒拒绝 authorizer。
+func DenyAll(reason string) DenyAllAuthorizer { return DenyAllAuthorizer{Reason: reason} }

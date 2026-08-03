@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	newslib "github.com/gtkit/news"
-
-	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
 type fakeAppNewser struct {
@@ -24,23 +22,38 @@ func (f *fakeAppNewser) SendTextMsg(context.Context, string, string) error { ret
 
 var _ newslib.AppNewser = (*fakeAppNewser)(nil)
 
-func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
-	resetNewsHooksForTest()
-	setNewsURLGetterForTest(func() string { return "https://example.invalid/hook" })
-	setEnvNameForTest(func() string { return "TEST-ENV" })
-	setNewsNowForTest(func() string { return "2026-03-22 22:00:00" })
+// newTestNotifier 直接构造一个 Notifier 实例。
+//
+// 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
+// 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
+func newTestNotifier(url, env, now string, sender func(string, ...string) error, errLogger func(string)) *Notifier {
+	n := NewWithConfig(nil)
+	n.defaultURL = url
+	n.envName = env
+	n.now = func() string { return now }
+	if sender != nil {
+		n.webhookSender = sender
+	}
+	if errLogger != nil {
+		n.errorLogger = errLogger
+	}
+	return n
+}
 
+func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	called := false
 	var gotURL string
 	var gotArgs []string
-	setWebhookSenderForTest(func(url string, args ...string) error {
-		called = true
-		gotURL = url
-		gotArgs = append([]string(nil), args...)
-		return nil
-	})
 
-	Warn("", "body")
+	n := newTestNotifier("https://example.invalid/hook", "TEST-ENV", "2026-03-22 22:00:00",
+		func(url string, args ...string) error {
+			called = true
+			gotURL = url
+			gotArgs = append([]string(nil), args...)
+			return nil
+		}, nil)
+
+	n.Warn("", "body")
 
 	if !called {
 		t.Fatal("expected webhook sender to be called")
@@ -56,6 +69,16 @@ func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	}
 }
 
+// TestNilNotifierIsSafeAndSilent 锁住 nil 接收者的行为。
+//
+// 此前 nil 会回退到包级 defaultNotifier——那让"我没有配置通知器"
+// 与"我用的是某个全局配置"变成同一件事，调用方无从分辨。
+func TestNilNotifierIsSafeAndSilent(t *testing.T) {
+	var n *Notifier
+	n.Warn("https://example.invalid/hook", "body")
+	n.ErrRecord("msg")
+}
+
 func TestSendPicMsgSkipsBlankOpenIDs(t *testing.T) {
 	app := &fakeAppNewser{}
 
@@ -66,54 +89,5 @@ func TestSendPicMsgSkipsBlankOpenIDs(t *testing.T) {
 	want := []string{"u1:shot.png", "u2:shot.png"}
 	if !reflect.DeepEqual(app.sent, want) {
 		t.Fatalf("sent=%v want=%v", app.sent, want)
-	}
-}
-
-func TestErrRecordLogsAndWarns(t *testing.T) {
-	resetNewsHooksForTest()
-	logged := ""
-	warned := []string{}
-	setNewsErrorLoggerForTest(func(msg string) { logged = msg })
-	setWebhookSenderForTest(func(url string, args ...string) error {
-		warned = append(warned, args...)
-		return nil
-	})
-	setNewsURLGetterForTest(func() string { return "https://example.invalid/hook" })
-	setEnvNameForTest(func() string { return "ENV" })
-	setNewsNowForTest(func() string { return "NOW" })
-
-	ErrRecord("boom")
-
-	if logged != "boom" {
-		t.Fatalf("expected logger to receive message, got %q", logged)
-	}
-	if len(warned) == 0 {
-		t.Fatal("expected warn sender to be called")
-	}
-}
-
-func TestInitWithConfigSetsDefaultURLAndEnvName(t *testing.T) {
-	resetNewsHooksForTest()
-	InitWithConfig(&config.Config{
-		Env:  "prod",
-		News: config.NewsConfig{FSURL: "https://example.invalid/hook"},
-	})
-	setNewsNowForTest(func() string { return "2026-03-23 12:00:00" })
-
-	var gotURL string
-	var gotArgs []string
-	setWebhookSenderForTest(func(url string, args ...string) error {
-		gotURL = url
-		gotArgs = append([]string(nil), args...)
-		return nil
-	})
-
-	Warn("", "body")
-
-	if gotURL != "https://example.invalid/hook" {
-		t.Fatalf("gotURL = %q", gotURL)
-	}
-	if len(gotArgs) == 0 || !strings.Contains(gotArgs[0], "prod") {
-		t.Fatalf("title = %#v", gotArgs)
 	}
 }

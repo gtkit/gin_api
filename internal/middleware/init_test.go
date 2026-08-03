@@ -15,7 +15,9 @@ import (
 func TestInitMiddlewareEnforcesMaxBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	InitMiddleware(engine, nil, AccessLogOptions{}, 16) // 16 字节上限
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 16); err != nil { // 16 字节上限
+		t.Fatalf("InitMiddleware: %v", err)
+	}
 
 	engine.POST("/echo", func(c *gin.Context) {
 		_, _ = io.ReadAll(c.Request.Body)
@@ -34,7 +36,9 @@ func TestInitMiddlewareEnforcesMaxBody(t *testing.T) {
 func TestInitMiddlewareAllowsWithinLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	InitMiddleware(engine, nil, AccessLogOptions{}, 1024)
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 1024); err != nil {
+		t.Fatalf("InitMiddleware: %v", err)
+	}
 
 	engine.POST("/echo", func(c *gin.Context) {
 		_, _ = io.ReadAll(c.Request.Body)

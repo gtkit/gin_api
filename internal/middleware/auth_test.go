@@ -32,7 +32,7 @@ func TestAuthAllowsValidToken(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -58,7 +58,7 @@ func TestAuthRejectsUnknownUser(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: false}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: false}, issuer, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -85,7 +85,7 @@ func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	// verifier 因基础设施故障返回 error：必须是 503，不能是 401。
-	engine.Use(Auth(fakeUserVerifier{err: errors.New("db down")}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{err: errors.New("db down")}, issuer, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -113,7 +113,7 @@ func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -129,7 +129,12 @@ func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
 	}
 }
 
-func TestAuthAllowsWebSocketQueryToken(t *testing.T) {
+// TestAuthRejectsWebSocketQueryToken 锁住被删掉的 query-token 旁路。
+//
+// 此前 WebSocket 升级请求可以从 query 读 token。那是一个**零消费者的安全敞口**：
+// 仓库里没有任何 WebSocket 端点，而 query 会进访问日志、Referer 与浏览器历史。
+// 将来引入 WS 时须单独设计（如一次性票据换取连接），不复活 query token。
+func TestAuthRejectsWebSocketQueryToken(t *testing.T) {
 	issuer := newTestIssuer(t)
 
 	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
@@ -139,7 +144,7 @@ func TestAuthAllowsWebSocketQueryToken(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
 	engine.GET("/ws", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -150,8 +155,9 @@ func TestAuthAllowsWebSocketQueryToken(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d (query token must not be accepted, not even for upgrades)",
+			recorder.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -165,7 +171,7 @@ func TestAuthRejectsQueryTokenForPlainRequest(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Auth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -185,7 +191,7 @@ func TestOptionalAuthAllowsMissingToken(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(OptionalAuth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, true))
 	engine.GET("/public", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -209,7 +215,7 @@ func TestOptionalAuthSetsUserIDWhenTokenIsPresent(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(OptionalAuth(fakeUserVerifier{valid: true}, issuer))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, true))
 	engine.GET("/public", func(c *gin.Context) {
 		if got := ginc.UserIDFromContext(c); got != 42 {
 			t.Fatalf("user id = %d, want 42", got)

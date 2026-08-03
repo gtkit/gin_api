@@ -2,7 +2,10 @@ package application
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/models"
@@ -26,19 +29,60 @@ func WithAuditLogger(audit AuditLogger) ServiceOption {
 	return func(s *Service) { s.audit = audit }
 }
 
-// NewWithDeps 仅注入 UserRepository，用于不涉及注销的单元测试；
-// 此构造下 recorder/tx 为 nil，调用 Deactivate 返回 ErrDeactivateUnavailable。
-func NewWithDeps(repo UserRepository) *Service {
-	return &Service{repo: repo, now: time.Now}
+// Deps 是 Service 的**必需**依赖。
+//
+// 用一个结构体承载而不是多个构造函数：此前 NewWithDeps 只注入 repo，
+// recorder/tx 留空，于是"依赖是否齐全"变成运行期才知道的事——
+// 调用 Deactivate 会返回一个"未配置事务能力"的错误。
+//
+// 那个错误码是**装配缺陷的运行期表现**，不是业务语义。调用方拿到它无从处理：
+// 既不能重试，也不能提示用户，只能说明部署装错了。现在缺失在装配期即失败，
+// 问题从"上线后某个接口返回怪错误"前移到"进程起不来"。
+type Deps struct {
+	Repo     UserRepository
+	Recorder DeactivationRecorder
+	Tx       TxManager
 }
 
-// NewServiceWithTx 注入完整依赖（生产装配与注销单测用）。
-func NewServiceWithTx(repo UserRepository, recorder DeactivationRecorder, tx TxManager, opts ...ServiceOption) *Service {
-	s := &Service{repo: repo, recorder: recorder, tx: tx, now: time.Now}
+// ErrIncompleteDeps 表示装配缺少必需依赖。
+//
+// 它只可能在进程启动的装配路径上出现，永远不会到达请求处理链——
+// 因此不需要（也不应该）有对应的对客错误码。
+var ErrIncompleteDeps = errors.New("user application: incomplete dependencies")
+
+// NewService 注入必需依赖并应用可选策略。
+//
+// 返回 error 而不是 panic：装配失败要沿 bootstrap 的错误链上抛，
+// 由启动流程统一报告并退出，与本仓库其它装配点（路由注册、授权注册表）一致。
+// panic 会绕过既有的关停编排，把一个可诊断的配置问题变成一段栈回溯。
+//
+// 也不接受"缺了就降级为 nil 依赖"：那正是本次要消灭的形态——
+// 装配缺陷推迟到第一个真实请求才暴露。
+//
+// opts 只用于**真正可选**的策略（如审计日志实现）。必需依赖走 option
+// 就等于把"是否齐全"重新变成运行期才知道的事。
+func NewService(deps Deps, opts ...ServiceOption) (*Service, error) {
+	var missing []string
+	if deps.Repo == nil {
+		missing = append(missing, "Repo")
+	}
+	if deps.Recorder == nil {
+		missing = append(missing, "Recorder")
+	}
+	if deps.Tx == nil {
+		missing = append(missing, "Tx")
+	}
+	if len(missing) > 0 {
+		// 一次报全部缺失字段，而不是遇到第一个就返回：装配问题通常成串出现，
+		// 逐个暴露意味着修一次重启一次。
+		return nil, fmt.Errorf("%w: missing %s", ErrIncompleteDeps, strings.Join(missing, ", "))
+	}
+
+	s := &Service{repo: deps.Repo, recorder: deps.Recorder, tx: deps.Tx, now: time.Now}
 	for _, opt := range opts {
 		opt(s)
 	}
-	return s
+	return s, nil
 }
 
 // auditf 写审计日志；未注入 AuditLogger 时静默跳过（审计缺失不影响业务事务）。
@@ -69,24 +113,28 @@ func (s *Service) ValidateUser(ctx context.Context, userID int64) (bool, error) 
 	return exists, nil
 }
 
-// ValidateVIP 校验用户是否具备有效会员资格。
-// 判定规则与当前业务口径保持一致：
-// 1. 用户必须存在；
-// 2. vip_status 必须为 active；
-// 3. 若存在 vip_expire_at，则过期时间必须晚于当前时刻。
-func (s *Service) ValidateVIP(ctx context.Context, userID int64) bool {
-	// 查询失败或用户不存在都视为不具备有效会员资格：ValidateVIP 契约为 bool，
-	// 无法上抛 error，但仓储层已不再吞错，这里是有意为之的降级判定。
+// ValidateVIP 报告用户是否具备有效会员资格：用户存在、vip_status 为 active、
+// 且 vip_expire_at 为空或晚于当前时刻。
+//
+// 返回 (bool, error) 而不是裸 bool：仓储故障与"确实不是会员"是两件不同的事。
+// 裸 bool 契约会把"数据库挂了"折叠成"不是会员"，于是一次基础设施故障
+// 表现为全体会员突然失去权益，而客户端看到的是一个正常的业务拒绝，不会重试也不会告警。
+//
+// 调用方应把 error 映射为 503，与 ValidateUser 的契约一致。
+func (s *Service) ValidateVIP(ctx context.Context, userID int64) (bool, error) {
 	user, found, err := s.repo.Get(ctx, strconv.FormatInt(userID, 10))
-	if err != nil || !found {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("validate vip: %w", err)
+	}
+	if !found {
+		return false, nil
 	}
 	if user.VipStatus != models.VipStatusActive {
-		return false
+		return false, nil
 	}
 	if user.VipExpireAt != nil && !user.VipExpireAt.After(s.currentTime()) {
-		return false
+		return false, nil
 	}
 
-	return true
+	return true, nil
 }

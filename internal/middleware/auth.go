@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"errors"
-	"net/http"
+	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,95 +15,164 @@ import (
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
+// tokenHeaderName 是本项目唯一接受的 token 载体。
+//
+// 刻意不接受 query 参数：query 会进访问日志、Referer 与浏览器历史，是长期泄漏面。
+// 此前为 WebSocket 升级请求开的 query 旁路已删除——仓库里没有任何 WebSocket 端点，
+// 那是一个零消费者的安全敞口。将来引入 WS 时须单独设计（如一次性票据换取连接），
+// 不复活 query token。
+const tokenHeaderName = "App-Token"
+
+// maxTokenBytes 是 token 的长度上限。
+//
+// 上限在**解析与缓存之前**生效：没有上限时，攻击者可以用超长字符串迫使
+// 解析器与缓存做无谓的工作，也会把巨大的字段写进日志。
+const maxTokenBytes = 8 << 10 // 8 KiB
+
 type TokenParser interface {
 	ParseToken(string, ...gojwt.ParserOption) (*jwtclaims.Claims, error)
 }
 
-// Auth authenticates requests with an injected JWT parser and user verifier.
-func Auth(verifier sharedauth.UserVerifier, parser TokenParser) gin.HandlerFunc {
-	return newAuthMiddleware(verifier, parser, false)
+// AuthOptions 是认证中间件的依赖。
+type AuthOptions struct {
+	Verifier sharedauth.UserVerifier
+	Parser   TokenParser
+	// AllowMissingToken 对应"可选认证"：缺失 token 时放行；
+	// 但**一旦提供了 token，非法就必须拒绝**——否则攻击者只要发一个坏 token
+	// 就能绕过校验以匿名身份继续。
+	AllowMissingToken bool
 }
 
-// OptionalAuth authenticates requests only when the client sends a token.
-func OptionalAuth(verifier sharedauth.UserVerifier, parser TokenParser) gin.HandlerFunc {
-	return newAuthMiddleware(verifier, parser, true)
-}
-
-func newAuthMiddleware(verifier sharedauth.UserVerifier, parser TokenParser, allowMissingToken bool) gin.HandlerFunc {
-	if verifier == nil {
-		panic("verifier must be provided")
+// Authenticate 构造认证中间件。
+//
+// 返回 error 而不是 panic：依赖缺失是装配错误，应当在启动期以错误表达；
+// 生产请求路径上的 panic 会把一个可预防的配置问题变成运行期崩溃。
+//
+// 本中间件**只做认证**（你是谁），不做任何业务角色判定（你能做什么）。
+// 此前它硬编码校验 ClientRole，后果有二：任何不含该角色的 token 在认证阶段就被拒绝，
+// 于是 admin/custom 之类的授权模式根本没有机会执行；而且"角色不符"被表达为 401，
+// 客户端据此重新登录也无济于事——它实际是 403。
+func Authenticate(opts AuthOptions) (gin.HandlerFunc, error) {
+	if opts.Verifier == nil {
+		return nil, errors.New("authentication middleware requires a user verifier")
 	}
-	if parser == nil {
-		panic("token parser must be provided")
+	if opts.Parser == nil {
+		return nil, errors.New("authentication middleware requires a token parser")
 	}
 
 	return func(c *gin.Context) {
 		token, err := tokenFromHeader(c)
 		if err != nil {
-			if allowMissingToken {
+			// 只有"完全没带 token"才允许匿名继续；带了但不合法一律拒绝。
+			if opts.AllowMissingToken && errors.Is(err, errTokenAbsent) {
 				c.Next()
 				return
 			}
-
-			resp.Error(c, goerr.New(err, goerr.StatusAuthHeader()))
-			c.Abort()
-
+			abortWith(c, goerr.New(err, goerr.StatusAuthHeader()))
 			return
 		}
 
-		claims, err := parser.ParseToken(token)
+		claims, err := opts.Parser.ParseToken(token)
 		if err != nil {
-			resp.Error(c, goerr.New(err, goerr.StatusAuth(), "token parse failed"))
-			c.Abort()
-
+			abortWith(c, goerr.New(err, goerr.StatusAuth(), "token parse failed"))
+			return
+		}
+		if claims == nil || claims.UserID <= 0 {
+			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "token subject is invalid"))
 			return
 		}
 
-		if err := claims.VerifyRole(sharedauth.ClientRole); err != nil {
-			resp.Error(c, goerr.New(err, goerr.StatusAuth(), "role is invalid"))
-			c.Abort()
-
-			return
-		}
-
-		ok, err := verifier.ValidateUser(c.Request.Context(), claims.UserID)
+		ok, err := opts.Verifier.ValidateUser(c.Request.Context(), claims.UserID)
 		if err != nil {
 			// 基础设施故障（如 DB 不可用）不能伪装成鉴权失败：返回 503，
 			// 让客户端/网关按"服务暂时不可用"重试，而不是误判为"用户无效"(401)。
-			resp.Error(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "user verification unavailable"))
-			c.Abort()
-
+			abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "user verification unavailable"))
 			return
 		}
 		if !ok {
-			resp.Error(c, goerr.New(nil, goerr.StatusAuth(), "user is unavailable"))
-			c.Abort()
-
+			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "user is unavailable"))
 			return
 		}
 
 		ginc.SetUserID(c, claims.UserID)
+		ginc.SetPrincipal(c, sharedauth.Principal{UserID: claims.UserID, Roles: claims.Roles})
 		c.Next()
+	}, nil
+}
+
+// Authorize 构造授权中间件，判定已认证主体能否执行本次请求。
+//
+// 它只消费**已经认证过**的 principal，不重复解析 token——
+// 重复解析既浪费，也可能让两个阶段的判定不一致。
+func Authorize(authorizer sharedauth.Authorizer, authorizerID string) (gin.HandlerFunc, error) {
+	if authorizer == nil {
+		return nil, fmt.Errorf("authorization middleware requires an authorizer for %q", authorizerID)
+	}
+
+	return func(c *gin.Context) {
+		principal, ok := ginc.PrincipalFromContext(c)
+		if !ok {
+			// 授权必须排在认证之后。走到这里说明装配顺序错了，
+			// 而"没有身份"绝不能被解释成"允许"。
+			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "authorization requires an authenticated principal"))
+			return
+		}
+
+		allowed, err := authorizer.Authorize(c.Request.Context(), principal, authorizationRequest(c))
+		if err != nil {
+			// 依赖故障不是拒绝：把"角色数据源挂了"映射成 403，
+			// 会让一次基础设施故障表现为全体用户突然失去权限。
+			abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "authorization unavailable"))
+			return
+		}
+		if !allowed {
+			abortWith(c, goerr.New(nil, goerr.StatusPermission(), "permission denied"))
+			return
+		}
+		c.Next()
+	}, nil
+}
+
+// authorizationRequest 把 Gin 请求翻译成中立的授权输入。
+//
+// 只取路由模式与路径参数：用模式而非实际路径，才能作为低基数 metrics label；
+// 不传 *gin.Context，避免授权实现读 body 或写响应。
+func authorizationRequest(c *gin.Context) sharedauth.AuthorizationRequest {
+	params := make(map[string]string, len(c.Params))
+	for _, p := range c.Params {
+		params[p.Key] = p.Value
+	}
+	return sharedauth.AuthorizationRequest{
+		Method:       c.Request.Method,
+		RoutePattern: c.FullPath(),
+		PathParams:   params,
 	}
 }
+
+func abortWith(c *gin.Context, err error) {
+	resp.Error(c, err)
+	c.Abort()
+}
+
+// errTokenAbsent 区分"完全没带 token"与"带了但不合法"。
+//
+// 这个区分是可选认证模式的正确性前提：只有前者可以匿名放行，
+// 后者若也放行，攻击者发一个坏 token 就能绕过校验。
+var errTokenAbsent = errors.New("token is absent")
 
 func tokenFromHeader(c *gin.Context) (string, error) {
-	token := c.Request.Header.Get("App-Token")
-	if token == "" {
-		// 仅 WebSocket 升级请求允许从 query 读 token：浏览器 WebSocket API 无法自定义请求头。
-		// SSE 若也需要 query token，须绑定到明确路由白名单再放行（浏览器 EventSource 同样
-		// 无法自定义请求头，但 Accept: text/event-stream 可被普通请求伪造，不能单独作为依据）。
-		if isWebSocketUpgrade(c.Request) {
-			token = c.Request.URL.Query().Get("App-Token")
-		}
-		if token == "" {
-			return "", errors.New("App-Token header is empty")
-		}
+	raw := c.Request.Header.Get(tokenHeaderName)
+	if raw == "" {
+		return "", fmt.Errorf("%w: %s header is empty", errTokenAbsent, tokenHeaderName)
 	}
-
-	return token, nil
-}
-
-func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+	// 长度检查放在最前：先于任何解析与缓存，避免超长输入迫使下游做无谓的工作。
+	if len(raw) > maxTokenBytes {
+		return "", fmt.Errorf("%s header exceeds %d bytes", tokenHeaderName, maxTokenBytes)
+	}
+	// 首尾空白一律拒绝而不是修剪：修剪会让 " abc" 与 "abc" 成为同一个 token，
+	// 从而在缓存键、审计与限流键上产生歧义。
+	if strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, " \t\r\n") {
+		return "", fmt.Errorf("%s header contains whitespace", tokenHeaderName)
+	}
+	return raw, nil
 }

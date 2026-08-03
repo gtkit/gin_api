@@ -21,7 +21,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 		return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC)
 	}
 
-	result, err := generator.Generate("admin", false)
+	result, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true})
 	if err != nil {
 		t.Fatalf("Generate returned error: %v", err)
 	}
@@ -53,12 +53,40 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql"), "CREATE TABLE IF NOT EXISTS `admins`")
 	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.down.sql"), "DROP TABLE IF EXISTS `admins`")
 
+	// 配置能力注册的**四处**必须同批产出。缺任一处的后果都很具体：
+	//   缺类型      → runtime 装配引用一个不存在的类型，编译不过；
+	//   缺字段      → 根层严格解码把该模块整段配置判为未知键，进程启动失败；
+	//   缺校验器    → 严格解码只认字段名，`page_size: -1` 一路带到运行期；
+	//   缺示例 YAML → 配置项存在于代码里却没人知道可以配。
+	configTypePath := filepath.Join(root, "internal", "platform", "config", "module_admin.go")
+	assertFileContains(t, configTypePath, "type AdminModuleConfig struct")
+	assertFileContains(t, configTypePath, "`mapstructure:\"page_size\"`")
+	assertFileContains(t, configTypePath, "func validateAdminModuleConfig(c AdminModuleConfig) error")
+
+	modulesPath := filepath.Join(root, "internal", "platform", "config", "modules.go")
+	assertFileContains(t, modulesPath, "Admin AdminModuleConfig `mapstructure:\"admin\"`")
+	assertFileContains(t, modulesPath, "validateAdminModuleConfig(m.Admin)")
+
+	examplePath := filepath.Join(root, "config", "env.yml.example")
+	assertFileContains(t, examplePath, "  admin:")
+	assertFileContains(t, examplePath, "page_size: 20")
+
+	// runtime 层读配置并翻译成 application 选项；application 不 import platform/config。
+	runtimePath := filepath.Join(root, "internal", "runtime", "module", "admin", "module.go")
+	assertFileContains(t, runtimePath, "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) *adminapp.Service")
+	assertFileContains(t, runtimePath, "adminapp.WithPageSize(cfg.EffectivePageSize())")
+	// 判据针对 **import 行**而不是文本出现：注释里必须能自由解释
+	// "application 为什么不 import platform/config"，否则这条规则会因为
+	// 自己的说明而永远为真，最终只能被加豁免绕过。
+	assertFileNotContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"),
+		`"github.com/gtkit/gin-api/internal/platform/config"`)
+
 	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
 	assertFileContains(t, providersPath, "adminapp \"github.com/gtkit/gin-api/internal/module/admin/application\"")
 	assertFileContains(t, providersPath, "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\"")
 	assertFileContains(t, providersPath, "adminhttp \"github.com/gtkit/gin-api/internal/module/admin/transport/http\"")
 	assertFileContains(t, providersPath, "adminService *adminapp.Service")
-	assertFileContains(t, providersPath, "svc.adminService = adminruntime.NewService(inf.mysqlDB)")
+	assertFileContains(t, providersPath, "svc.adminService = adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
 	assertFileContains(t, providersPath, "adminhttp.NewModule(svc.adminService)")
 
 	// 生成的代码必须符合架构边界（与 scripts/check-architecture.sh 一致）。
@@ -70,7 +98,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileNotContains(t, handlerPath, "gorm.io/gorm")
 	modelPath := filepath.Join(root, "internal", "models", "admin.go")
 	assertFileNotContains(t, modelPath, "*gorm.DB")
-	assertFileContains(t, filepath.Join(root, "internal", "runtime", "module", "admin", "module.go"), "func NewService(db *gorm.DB) *adminapp.Service")
+	assertFileContains(t, filepath.Join(root, "internal", "runtime", "module", "admin", "module.go"), "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) *adminapp.Service")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository.go"), "dbtx.DB(ctx, r.db)")
 }
 
@@ -95,10 +123,10 @@ func TestModuleGeneratorGenerateIsIdempotentAndPreservesExistingModel(t *testing
 		return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC)
 	}
 
-	if _, err := generator.Generate("admin", false); err != nil {
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true}); err != nil {
 		t.Fatalf("first Generate returned error: %v", err)
 	}
-	if _, err := generator.Generate("admin", true); err != nil {
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: true, Bootstrap: true, Public: true}); err != nil {
 		t.Fatalf("second Generate returned error: %v", err)
 	}
 
@@ -147,6 +175,7 @@ func TestModuleGeneratorGenerateWithFields(t *testing.T) {
 
 	_, err = generator.GenerateWithOptions("staff_member", GenerateOptions{
 		Bootstrap: true,
+		Public:    true,
 		Fields: []string{
 			"nickname:string",
 			"status:uint8",
@@ -238,7 +267,7 @@ func TestModuleGeneratorDryRunDoesNotWriteFiles(t *testing.T) {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 
-	result, err := generator.GenerateWithOptions("dry_run_demo", GenerateOptions{DryRun: true, Bootstrap: true})
+	result, err := generator.GenerateWithOptions("dry_run_demo", GenerateOptions{DryRun: true, Bootstrap: true, Public: true})
 	if err != nil {
 		t.Fatalf("GenerateWithOptions returned error: %v", err)
 	}
@@ -280,7 +309,7 @@ func TestModuleGeneratorBootstrapFalseDoesNotModifyProviders(t *testing.T) {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 
-	result, err := generator.GenerateWithOptions("no_bootstrap_demo", GenerateOptions{Bootstrap: false})
+	result, err := generator.GenerateWithOptions("no_bootstrap_demo", GenerateOptions{Bootstrap: false, Public: true})
 	if err != nil {
 		t.Fatalf("GenerateWithOptions returned error: %v", err)
 	}
@@ -350,7 +379,7 @@ func TestModuleGeneratorMissingWorkerMarkerFails(t *testing.T) {
 		t.Fatalf("NewModuleGenerator returned error: %v", err)
 	}
 
-	_, err = generator.Generate("admin", false)
+	_, err = generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true})
 	if err == nil {
 		t.Fatal("Generate returned nil error with missing worker marker")
 	}
@@ -377,7 +406,7 @@ func TestModuleGeneratorDoesNotRegisterWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModuleGenerator returned error: %v", err)
 	}
-	if _, err := generator.Generate("admin", false); err != nil {
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true}); err != nil {
 		t.Fatalf("Generate returned error: %v", err)
 	}
 
@@ -420,7 +449,7 @@ func TestModuleGeneratorMissingProviderMarkerDoesNotRewriteFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModuleGenerator returned error: %v", err)
 	}
-	if _, err := generator.Generate("admin", false); err == nil {
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true}); err == nil {
 		t.Fatal("Generate returned nil error with missing provider marker")
 	}
 
@@ -447,7 +476,7 @@ func TestModuleGeneratorProvidersGoimportsClean(t *testing.T) {
 		return time.Date(2026, 3, 24, 13, 14, 15, 0, time.UTC)
 	}
 
-	if _, err := generator.Generate("admin", false); err != nil {
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true}); err != nil {
 		t.Fatalf("Generate returned error: %v", err)
 	}
 
@@ -519,10 +548,11 @@ import (
 
 type infra struct {
 	mysqlDB any
+	cfg     any
 }
 
 type services struct {
-	verifier *userapp.Service
+	user *userapp.Service
 	// scaffold:module-service-fields
 }
 
@@ -532,7 +562,7 @@ type middlewares struct {
 
 func buildServices(inf infra) services {
 	var svc services
-	svc.verifier = userruntime.NewService(inf.mysqlDB)
+	svc.user = userruntime.NewService(inf.mysqlDB)
 	// scaffold:module-services
 	return svc
 }
@@ -550,6 +580,25 @@ func buildWorkers(_ services) {
 	// scaffold:module-workers
 }
 `,
+		// config 锚点文件：模块配置字段与校验器的注入点。
+		"internal/platform/config/modules.go": `package config
+
+import "errors"
+
+type ModuleConfigs struct {
+	// scaffold:module-config-fields
+}
+
+func validateModuleConfigs(m ModuleConfigs) error {
+	var errs []error
+
+	// scaffold:module-config-validators
+
+	return errors.Join(errs...)
+}
+`,
+		// 配置模板锚点：示例必须与字段同批产出。
+		"config/env.yml.example": "modules:\n  # scaffold:module-config-example\n",
 	}
 
 	for name, content := range files {
@@ -586,5 +635,71 @@ func assertFileNotContains(t *testing.T, path, unwanted string) {
 	}
 	if strings.Contains(string(content), unwanted) {
 		t.Fatalf("expected %s NOT to contain %q, got %q", path, unwanted, string(content))
+	}
+}
+
+// TestModuleConfigAnchorsAreRequired 是配置注册锚点的**负向证明**。
+//
+// 逐个破坏锚点后生成必须失败。没有这一步，上面那组"四处同步"的正向断言
+// 可能因为别的原因恒真（例如注入逻辑根本没跑、而断言的内容恰好来自模板），
+// 从而失去鉴别力。
+func TestModuleConfigAnchorsAreRequired(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		file   string
+		anchor string
+		why    string
+	}{
+		{
+			name:   "config field anchor",
+			file:   filepath.Join("internal", "platform", "config", "modules.go"),
+			anchor: "// scaffold:module-config-fields",
+			why:    "字段缺失会让根层严格解码把该模块整段配置判为未知键",
+		},
+		{
+			name:   "config validator anchor",
+			file:   filepath.Join("internal", "platform", "config", "modules.go"),
+			anchor: "// scaffold:module-config-validators",
+			why:    "校验器缺失会让非法取值一路带到运行期",
+		},
+		{
+			name:   "config example anchor",
+			file:   filepath.Join("config", "env.yml.example"),
+			anchor: "# scaffold:module-config-example",
+			why:    "示例缺失会让配置项存在于代码里却没人知道可以配",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := createProjectFixture(t)
+			path := filepath.Join(root, tc.file)
+
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", tc.file, err)
+			}
+			if !bytes.Contains(content, []byte(tc.anchor)) {
+				t.Fatalf("fixture %s does not contain anchor %q; the test itself is stale", tc.file, tc.anchor)
+			}
+			broken := bytes.ReplaceAll(content, []byte(tc.anchor), []byte("// scaffold-BROKEN"))
+			if err := os.WriteFile(path, broken, 0o644); err != nil {
+				t.Fatalf("write broken fixture: %v", err)
+			}
+
+			generator, err := NewModuleGenerator(root)
+			if err != nil {
+				t.Fatalf("NewModuleGenerator: %v", err)
+			}
+			generator.now = func() time.Time { return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC) }
+
+			if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Bootstrap: true, Public: true}); err == nil {
+				t.Fatalf("generation succeeded with anchor %q removed; %s", tc.anchor, tc.why)
+			}
+		})
 	}
 }

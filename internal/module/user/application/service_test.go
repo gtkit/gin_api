@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,10 +57,81 @@ func (f *fakeUserRepo) SoftDeleteProfile(context.Context, int64) error {
 	return nil
 }
 
+// newTestService 构造依赖齐全的 Service。
+//
+// 必需依赖缺一即装配失败，所以用例除了自己关心的 repo 之外，
+// 其余依赖一律用不产生副作用的 fake 填满，而不是留 nil。
+func newTestService(t *testing.T, repo UserRepository, opts ...ServiceOption) *Service {
+	t.Helper()
+
+	svc, err := NewService(Deps{
+		Repo:     repo,
+		Recorder: &fakeDeactRecorder{},
+		Tx:       &fakeTxManager{},
+	}, opts...)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
+}
+
+// TestNewServiceRejectsIncompleteDeps 是装配期 fail-closed 的正向证明：
+// 任一必需依赖缺失都必须在构造时报错，且错误信息点名缺了哪个字段。
+//
+// 没有这条，"依赖不全"会重新退化成运行期 nil panic 或某个含义不明的业务错误码。
+func TestNewServiceRejectsIncompleteDeps(t *testing.T) {
+	t.Parallel()
+
+	full := Deps{Repo: &fakeUserRepo{}, Recorder: &fakeDeactRecorder{}, Tx: &fakeTxManager{}}
+
+	cases := []struct {
+		name     string
+		mutate   func(*Deps)
+		wantErr  bool
+		wantName string
+	}{
+		{name: "complete deps", mutate: func(*Deps) {}, wantErr: false},
+		{name: "missing repo", mutate: func(d *Deps) { d.Repo = nil }, wantErr: true, wantName: "Repo"},
+		{name: "missing recorder", mutate: func(d *Deps) { d.Recorder = nil }, wantErr: true, wantName: "Recorder"},
+		{name: "missing tx", mutate: func(d *Deps) { d.Tx = nil }, wantErr: true, wantName: "Tx"},
+		{name: "zero deps", mutate: func(d *Deps) { *d = Deps{} }, wantErr: true, wantName: "Repo, Recorder, Tx"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			deps := full
+			tc.mutate(&deps)
+
+			svc, err := NewService(deps)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("NewService() error = %v, want nil", err)
+				}
+				if svc == nil {
+					t.Fatal("NewService() returned nil service without error")
+				}
+				return
+			}
+
+			if !errors.Is(err, ErrIncompleteDeps) {
+				t.Fatalf("NewService() error = %v, want ErrIncompleteDeps", err)
+			}
+			if svc != nil {
+				t.Fatal("NewService() returned a service alongside an error; assembly must fail closed")
+			}
+			if !strings.Contains(err.Error(), tc.wantName) {
+				t.Fatalf("error %q does not name the missing dependency %q", err, tc.wantName)
+			}
+		})
+	}
+}
+
 func TestValidateUser(t *testing.T) {
 	t.Parallel()
 
-	service := NewWithDeps(&fakeUserRepo{exists: true})
+	service := newTestService(t, &fakeUserRepo{exists: true})
 	ok, err := service.ValidateUser(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("ValidateUser returned error: %v", err)
@@ -74,7 +146,7 @@ func TestValidateUser(t *testing.T) {
 func TestValidateUserSurfacesRepoError(t *testing.T) {
 	t.Parallel()
 
-	service := NewWithDeps(&fakeUserRepo{exists: true, existsErr: errors.New("db down")})
+	service := newTestService(t, &fakeUserRepo{exists: true, existsErr: errors.New("db down")})
 	ok, err := service.ValidateUser(context.Background(), 42)
 	if err == nil {
 		t.Fatal("ValidateUser error = nil on repo failure, want error surfaced")
@@ -137,8 +209,12 @@ func TestValidateVIP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			service := NewWithDeps(&fakeUserRepo{user: tc.user})
-			if got := service.ValidateVIP(context.Background(), 42); got != tc.want {
+			service := newTestService(t, &fakeUserRepo{user: tc.user})
+			got, err := service.ValidateVIP(context.Background(), 42)
+			if err != nil {
+				t.Fatalf("ValidateVIP() error = %v, want nil", err)
+			}
+			if got != tc.want {
 				t.Fatalf("ValidateVIP() = %v, want %v", got, tc.want)
 			}
 		})
@@ -167,24 +243,48 @@ func TestValidateVIPExpiryBoundaryWithInjectedClock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			service := NewWithDeps(&fakeUserRepo{user: models.User{
+			service := newTestService(t, &fakeUserRepo{user: models.User{
 				BaseID:      models.BaseID{ID: 42},
 				VipStatus:   models.VipStatusActive,
 				VipExpireAt: timePtr(tc.expire),
 			}})
 			service.now = func() time.Time { return fixed } // 白盒注入固定时钟
 
-			if got := service.ValidateVIP(context.Background(), 42); got != tc.want {
+			got, err := service.ValidateVIP(context.Background(), 42)
+			if err != nil {
+				t.Fatalf("ValidateVIP() error = %v, want nil", err)
+			}
+			if got != tc.want {
 				t.Fatalf("ValidateVIP() at boundary = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
+// TestValidateVIPSurfacesRepoError 验证仓储故障上抛 error，而不是被折叠成
+// "不是会员"。折叠会让一次数据库抖动表现为全体会员静默失去权益——
+// 客户端看到的是一个正常的业务拒绝，既不重试也不触发告警。
+func TestValidateVIPSurfacesRepoError(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t, &fakeUserRepo{
+		user:   models.User{BaseID: models.BaseID{ID: 42}, VipStatus: models.VipStatusActive},
+		getErr: errors.New("db down"),
+	})
+
+	ok, err := service.ValidateVIP(context.Background(), 42)
+	if err == nil {
+		t.Fatal("ValidateVIP() error = nil on repo failure, want error surfaced")
+	}
+	if ok {
+		t.Fatal("ValidateVIP() = true on repo error, want false")
+	}
+}
+
 func TestProfileMapsUser(t *testing.T) {
 	t.Parallel()
 
-	service := NewWithDeps(&fakeUserRepo{
+	service := newTestService(t, &fakeUserRepo{
 		user: models.User{
 			BaseID:    models.BaseID{ID: 9},
 			Nickname:  "u1",
@@ -216,7 +316,7 @@ func TestUpdateProfilePartial(t *testing.T) {
 	t.Parallel()
 
 	repo := &fakeUserRepo{}
-	service := NewWithDeps(repo)
+	service := newTestService(t, repo)
 
 	err := service.UpdateProfile(context.Background(), 7, UpdateProfileCommand{
 		NickName: "newnick",
@@ -251,7 +351,7 @@ func TestUpdateProfileEmitsValidColumns(t *testing.T) {
 	t.Parallel()
 
 	repo := &fakeUserRepo{}
-	service := NewWithDeps(repo)
+	service := newTestService(t, repo)
 	gender := int8(1)
 	if err := service.UpdateProfile(context.Background(), 7, UpdateProfileCommand{
 		NickName: "n",
@@ -281,7 +381,7 @@ func TestUpdateProfileNoFields(t *testing.T) {
 	t.Parallel()
 
 	repo := &fakeUserRepo{}
-	service := NewWithDeps(repo)
+	service := newTestService(t, repo)
 
 	if err := service.UpdateProfile(context.Background(), 7, UpdateProfileCommand{}); err != nil {
 		t.Fatalf("UpdateProfile returned error: %v", err)

@@ -7,7 +7,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
-	gojwt "github.com/gtkit/gojwt"
+	"github.com/gtkit/gojwt"
 )
 
 const (
