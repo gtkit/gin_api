@@ -102,8 +102,8 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 
 - `previous` 最多 8 个：无 kid 的存量令牌只能逐个尝试，没有上限就是无界成本；
 - 密钥集在**进程生命周期内不可变**，不做热重载——轮换靠重启；
-- `jwt.legacy_no_kid_accept_until` 是无 kid 存量令牌的**绝对** RFC3339 截止时刻，默认空即不接受。取值应为「切换时刻 + 旧令牌最大 TTL」，**迁移完成后删除该配置**；
-- 它与 `jwt.laravel_legacy_accept_until` 是两个独立维度，分别删除。
+- `jwt.unkeyed_token_accept_until` 是无 kid 存量令牌的**绝对** RFC3339 截止时刻，默认空即不接受。取值应为「切换时刻 + 旧令牌最大 TTL」，**迁移完成后删除该配置**；
+- 它与 `jwt.laravel_accept_until` 是两个独立维度，分别删除。
 
 ## 限流的两条使用约束
 
@@ -126,18 +126,18 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 
 ## 移除 Laravel 兼容层（手动清单）
 
-母版内置了 Laravel（tymon/jwt-auth）存量 token 的**单向兼容验证**，默认经 `cfg.JWT.LegacyLaravel.Enabled` 关闭。绿地新项目通常不需要它。`project init` **不会自动删除**（涉及多文件源码编辑，自动手术脆弱），请按下面清单手动移除：
+母版内置了 Laravel（tymon/jwt-auth）存量 token 的**单向兼容验证**，默认经 `cfg.JWT.Laravel.Enabled` 关闭。绿地新项目通常不需要它。`project init` **不会自动删除**（涉及多文件源码编辑，自动手术脆弱），请按下面清单手动移除：
 
 1. 删除文件：
-   - `internal/pkg/jwtauth/legacy.go`
-   - `internal/pkg/jwtauth/legacy_test.go`
-   - `internal/middleware/auth_legacy_test.go`
-2. 简化 `internal/bootstrap/providers.go` 的 `newTokenParser`：去掉 legacy 分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
-3. 删除 `internal/platform/config/types.go` 中的 `LegacyLaravelJWTConfig` 类型、`JWT.LegacyLaravel` 字段及其校验分支。
-4. 清理相关测试用例：`internal/bootstrap/providers_token_test.go`、`internal/bootstrap/providers_phases_test.go` 中的 legacy 开启态用例，`internal/platform/config/load_test.go` 的 `TestValidateLegacyLaravelJWTConfig`。
+   - `internal/pkg/jwtauth/laravel.go`
+   - `internal/pkg/jwtauth/laravel_test.go`
+   - `internal/middleware/auth_laravel_test.go`
+2. 简化 `internal/bootstrap/providers.go` 的 `newTokenParser`：去掉 Laravel 回退分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
+3. 删除 `internal/platform/config/types.go` 中的 `LaravelJWTConfig` 类型、`JWT.Laravel` 字段及其校验分支。
+4. 清理相关测试用例：`internal/bootstrap/providers_token_test.go`、`internal/bootstrap/providers_phases_test.go` 中的 Laravel 回退开启态用例，`internal/platform/config/load_test.go` 的 `TestValidateLaravelJWTConfig`。
 5. 跑 `make check` 确认全绿。
 
-> 注意：代码里 `legacylog` / `legacydao` / `initLegacyRuntime` / `NewLegacyWorker` 只是现有基础设施（日志 / DAO / worker）的命名，**与 Laravel 无关，不要动**。
+> 注意：代码里 `applog` / `data` / `initProcessRuntime` 只是现有基础设施（日志 / DAO / worker）的命名，**与 Laravel 无关，不要动**。
 
 ## 预置能力清单
 
@@ -172,7 +172,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `RouteSpec.AccessPolicy.AuthorizerID` 对齐 |
 | `role.admin` 授权 | **当前是恒拒绝占位**（无权威角色源），所有请求 403。接入角色表/IAM 后替换该 adapter，RouteSpec 无需改动 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
-| Laravel 存量 token 兼容 | 配 `jwt.legacy_laravel.enabled`；终态应删除，见下节清单 |
+| Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在 `RouteSpec.RateLimitPolicyID` 引用策略 ID |
 

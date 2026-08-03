@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
@@ -171,3 +172,33 @@ func ginModeFromEnv(envName string) string {
 		return gin.DebugMode
 	}
 }
+
+// CompiledRoutesFor 编译给定模块集合并返回路由描述符，**不触碰任何 engine**。
+//
+// 供 OpenAPI 生成使用：契约必须来自与生产完全相同的编译路径。
+// 让生成器自己遍历模块的话，它与 registrar 就成了两套来源——
+// 而两套来源迟早分叉，分叉的表现是"文档里有的接口线上没有"或反过来。
+func CompiledRoutesFor(modules VersionedModules) ([]routespec.CompiledRoute, error) {
+	contributions := []routespec.Contribution{
+		// 系统探针的 handler 在契约层无关紧要，但 compile 拒绝 nil handler，
+		// 因此传一个空实现的 checker——描述符本身（方法/路径/策略）不受影响。
+		{Source: "system", Prefix: "", Routes: systemRoutes(contractOnlyChecker{}, nil, false)},
+	}
+	contributions = append(contributions, moduleContributions(appmeta.APIV1Path, modules.V1)...)
+	contributions = append(contributions, moduleContributions(appmeta.APIV2Path, modules.V2)...)
+
+	compiled, err := routespec.Compile(contributions)
+	if err != nil {
+		return nil, describeCompileError(err)
+	}
+	return compiled, nil
+}
+
+// contractOnlyChecker 是契约生成用的空实现。
+//
+// 它只为满足"handler 非 nil"这条编译期约束而存在，永远不会被调用——
+// 生成契约不需要执行任何探针。
+type contractOnlyChecker struct{}
+
+func (contractOnlyChecker) PingDB(context.Context) error    { return nil }
+func (contractOnlyChecker) PingRedis(context.Context) error { return nil }

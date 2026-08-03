@@ -242,6 +242,9 @@ func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired boo
 			Handler:       healthHandler,
 			AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy: probeTimeout,
+			OperationID:   "getHealth",
+			Tags:          []string{"Health"},
+			Summary:       "Liveness probe",
 		},
 		{
 			Method:        http.MethodGet,
@@ -249,6 +252,10 @@ func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired boo
 			Handler:       readyHandler(checker, status, redisRequired),
 			AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy: probeTimeout,
+			OperationID:   "getReadiness",
+			Tags:          []string{"Health"},
+			Summary:       "Readiness probe",
+			Responses:     map[string]string{"503": "Not ready to receive traffic"},
 		},
 	}
 }

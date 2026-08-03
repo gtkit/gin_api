@@ -12,10 +12,10 @@ import (
 	"github.com/gtkit/gin-api/internal/middleware"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
-	legacyjwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
-	legacylog "github.com/gtkit/gin-api/internal/pkg/log"
+	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	legacydao "github.com/gtkit/gin-api/internal/platform/data"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/router"
 	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -31,8 +31,8 @@ import (
 )
 
 var (
-	initLogWithConfig = legacylog.InitWithConfig
-	initJWTWithConfig = legacyjwtauth.Assemble
+	initLogWithConfig = applog.InitWithConfig
+	initJWTWithConfig = jwtauth.Assemble
 	initVerify        = verify.New
 	checkJSONRuntime  = json.CheckJSON
 	buildMailClient   = newMailClientFromConfig
@@ -48,7 +48,7 @@ type providerSet struct {
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
 type infra struct {
-	resources  *legacydao.Resources
+	resources  *data.Resources
 	cfg        *config.Config
 	mysqlDB    *gorm.DB
 	httpConfig HTTPConfig
@@ -200,7 +200,7 @@ func buildServices(inf infra) (services, error) {
 }
 
 // buildMiddlewares 构建路由所需的鉴权中间件。
-// legacy Laravel 兼容开启时，token parser 注入回退组合校验（只验不签，过渡期兼容）。
+// Laravel 存量 token 兼容开启时，token parser 注入回退组合校验（只验不签，过渡期兼容）。
 func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 	tokenParser, err := newTokenParser(runtime.Config(), runtime.TokenParser())
 	if err != nil {
@@ -329,20 +329,20 @@ func buildWorkers(_ services) (*WorkerManager, error) {
 }
 
 // newTokenParser 按配置装配注入 Auth 中间件的 token parser：
-// jwt.legacy_laravel 关闭时保持裸 Ed25519 issuer（与现状一致）；
+// jwt.laravel 关闭时保持裸 Ed25519 issuer（与现状一致）；
 // 开启时包一层 Laravel 存量 token 回退验证（只验不签，过渡期兼容）。
-func newTokenParser(cfg *config.Config, issuer legacyjwtauth.TokenParser) (middleware.TokenParser, error) {
-	legacyCfg := cfg.JWT.LegacyLaravel
-	if !legacyCfg.Enabled {
+func newTokenParser(cfg *config.Config, issuer jwtauth.TokenParser) (middleware.TokenParser, error) {
+	laravelCfg := cfg.JWT.Laravel
+	if !laravelCfg.Enabled {
 		return issuer, nil
 	}
 
-	laravelVerifier, err := legacyjwtauth.NewLaravelVerifier(legacyCfg.Secret, legacyCfg.Algorithm, sharedauth.ClientRole)
+	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelCfg.Secret, laravelCfg.Algorithm, sharedauth.ClientRole)
 	if err != nil {
-		return nil, fmt.Errorf("init legacy laravel verifier: %w", err)
+		return nil, fmt.Errorf("init laravel verifier: %w", err)
 	}
 
-	return legacyjwtauth.NewFallbackParser(issuer, laravelVerifier)
+	return jwtauth.NewFallbackParser(issuer, laravelVerifier)
 }
 
 // initProcessRuntime 初始化**进程级、无连接**的运行时设施：时区、日志、校验器、JSON 实现。
@@ -360,7 +360,7 @@ func initProcessRuntime(cfg *config.Config) error {
 	}
 	checkJSONRuntime()
 
-	legacylog.InitAccessLog(cfg)
+	applog.InitAccessLog(cfg)
 
 	// 非生产允许 0.0.0.0/0 以便本地调试转发头，但不能让它无声地被带到预发环境。
 	// 生产环境该配置由 config.Validate 直接拒绝，走不到这里。
@@ -412,6 +412,6 @@ func applyRuntimeTimezone(cfg *config.Config) {
 //
 // 它**不关闭任何连接**：连接由 Resources.Close 按建立的逆序释放。
 func closeProcessRuntime() {
-	legacylog.SyncAccessLog()
+	applog.SyncAccessLog()
 	logger.Sync()
 }

@@ -108,8 +108,8 @@ func validateJWTCutoffs(jwt JWTConfig, _ Env) []error {
 		key   string
 		value string
 	}{
-		{"jwt.legacy_no_kid_accept_until", jwt.LegacyNoKIDAcceptUntil},
-		{"jwt.laravel_legacy_accept_until", jwt.LaravelLegacyAcceptUntil},
+		{"jwt.unkeyed_token_accept_until", jwt.UnkeyedTokenAcceptUntil},
+		{"jwt.laravel_accept_until", jwt.LaravelAcceptUntil},
 	} {
 		raw := strings.TrimSpace(c.value)
 		if raw == "" {

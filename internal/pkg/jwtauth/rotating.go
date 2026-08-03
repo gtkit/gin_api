@@ -24,8 +24,8 @@ var (
 	ErrTokenExpired = errors.New("jwtauth: token is expired")
 	// ErrUnknownKID 表示令牌声明了一个本进程不认识的 kid。
 	ErrUnknownKID = errors.New("jwtauth: unknown key id")
-	// ErrLegacyCutoffPassed 表示无 kid 的存量令牌已过接受期限。
-	ErrLegacyCutoffPassed = errors.New("jwtauth: tokens without a key id are no longer accepted")
+	// ErrUnkeyedTokenRejected 表示无 kid 的存量令牌已过接受期限。
+	ErrUnkeyedTokenRejected = errors.New("jwtauth: tokens without a key id are no longer accepted")
 )
 
 // IssuerOptions 是签发侧的必需配置。
@@ -47,11 +47,11 @@ type ParserOptions struct {
 	Audiences []string
 	// ClockSkew 允许的时钟偏移，上限固定为 maxClockSkew。
 	ClockSkew time.Duration
-	// LegacyNoKIDAcceptUntil 是无 kid 存量令牌的**绝对**接受截止时刻。
+	// UnkeyedTokenAcceptUntil 是无 kid 存量令牌的**绝对**接受截止时刻。
 	//
 	// 零值表示不接受任何无 kid 令牌。用绝对时刻而不是时长：
 	// 用时长的话每次重启都会自动顺延，兼容口就变成永久的。
-	LegacyNoKIDAcceptUntil time.Time
+	UnkeyedTokenAcceptUntil time.Time
 }
 
 // RotatingTokenIssuer 只用 active 密钥签发，header 必带 kid。

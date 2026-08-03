@@ -421,7 +421,7 @@ func TestModuleGeneratorDoesNotRegisterWorker(t *testing.T) {
 	if !strings.Contains(got, "func buildWorkers(_ services) {\n\t// scaffold:module-workers\n}") {
 		t.Fatalf("buildWorkers 被意外注入内容:\n%s", got)
 	}
-	if strings.Contains(got, "adminworker") || strings.Contains(got, "NewLegacyWorker") {
+	if strings.Contains(got, "adminworker") || strings.Contains(got, "NewFuncWorker") {
 		t.Fatal("生成器不应向 buildWorkers 注入 worker 注册行")
 	}
 

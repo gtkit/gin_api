@@ -147,24 +147,24 @@ func TestValidateJWTCutoffs(t *testing.T) {
 		{
 			name: "valid near-future no-kid cutoff",
 			mutate: func(c *JWTConfig) {
-				c.LegacyNoKIDAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+				c.UnkeyedTokenAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 			},
 		},
 		{
 			name: "valid near-future laravel cutoff",
 			mutate: func(c *JWTConfig) {
-				c.LaravelLegacyAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+				c.LaravelAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 			},
 		},
 		{
 			name:    "non-RFC3339 rejected",
-			mutate:  func(c *JWTConfig) { c.LegacyNoKIDAcceptUntil = "2026-08-03" },
+			mutate:  func(c *JWTConfig) { c.UnkeyedTokenAcceptUntil = "2026-08-03" },
 			wantErr: true, wantHint: "RFC3339",
 		},
 		{
 			name: "far-future cutoff rejected",
 			mutate: func(c *JWTConfig) {
-				c.LegacyNoKIDAcceptUntil = time.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339)
+				c.UnkeyedTokenAcceptUntil = time.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339)
 			},
 			wantErr: true, wantHint: "indistinguishable from a permanent one",
 		},
@@ -172,9 +172,9 @@ func TestValidateJWTCutoffs(t *testing.T) {
 			// 两条分别校验：一条非法不该被另一条掩盖。
 			name: "laravel far-future rejected independently",
 			mutate: func(c *JWTConfig) {
-				c.LaravelLegacyAcceptUntil = time.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339)
+				c.LaravelAcceptUntil = time.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339)
 			},
-			wantErr: true, wantHint: "laravel_legacy_accept_until",
+			wantErr: true, wantHint: "laravel_accept_until",
 		},
 	}
 

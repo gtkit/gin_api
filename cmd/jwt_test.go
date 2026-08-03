@@ -195,10 +195,10 @@ func TestJWTCommandNeverPrintsPrivateKeyMaterial(t *testing.T) {
 	}
 }
 
-// TestLegacyJWTCommandFails 验证旧的无子命令用法失败并给出迁移提示。
+// TestBareJWTCommandFails 验证不带子命令的旧用法失败并给出迁移提示。
 //
 // 旧行为是直接覆盖默认密钥文件——在轮换语义下那是破坏性的。
-func TestLegacyJWTCommandFails(t *testing.T) {
+func TestBareJWTCommandFails(t *testing.T) {
 	t.Parallel()
 
 	cmd := newJWTCmd(&rootOptions{})
@@ -209,7 +209,7 @@ func TestLegacyJWTCommandFails(t *testing.T) {
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("the legacy `jwt` usage succeeded; it must fail with a migration hint")
+		t.Fatal("the bare `jwt` usage succeeded; it must fail with a migration hint")
 	}
 	if !strings.Contains(err.Error(), "jwt generate") {
 		t.Fatalf("error %q does not point at the new subcommand", err)

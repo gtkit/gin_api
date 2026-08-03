@@ -15,33 +15,33 @@ import (
 )
 
 // TestResolveInfraRequiresDao 覆盖 spec 场景「基础设施未就绪时中止装配」：
-// Runtime 的 legacy DAO 为 nil 时，resolveInfra 必须返回错误且不继续后续阶段。
+// Runtime 的 laravel DAO 为 nil 时，resolveInfra 必须返回错误且不继续后续阶段。
 func TestResolveInfraRequiresDao(t *testing.T) {
 	t.Parallel()
 
 	rt := &Runtime{config: &config.Config{}}
 	if _, err := resolveInfra(rt); err == nil {
-		t.Fatal("resolveInfra expected error when legacy dao is nil, got nil")
+		t.Fatal("resolveInfra expected error when laravel dao is nil, got nil")
 	}
 }
 
 // TestBuildMiddlewares 覆盖 spec 场景「token parser 在中间件阶段装配」：
-// legacy 关闭时正常装配 auth；legacy 开启但密钥为空时错误在本阶段被透传。
+// laravel 关闭时正常装配 auth；laravel 开启但密钥为空时错误在本阶段被透传。
 func TestBuildMiddlewares(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
-		legacy  config.LegacyLaravelJWTConfig
+		laravel config.LaravelJWTConfig
 		wantErr bool
 	}{
 		{
-			name:   "legacy disabled wires auth middleware",
-			legacy: config.LegacyLaravelJWTConfig{},
+			name:    "laravel disabled wires auth middleware",
+			laravel: config.LaravelJWTConfig{},
 		},
 		{
-			name:    "legacy enabled with empty secret propagates error",
-			legacy:  config.LegacyLaravelJWTConfig{Enabled: true},
+			name:    "laravel enabled with empty secret propagates error",
+			laravel: config.LaravelJWTConfig{Enabled: true},
 			wantErr: true,
 		},
 	}
@@ -52,9 +52,9 @@ func TestBuildMiddlewares(t *testing.T) {
 
 			// 必须给一个真实的 JWT 装配：parser 缺失时 Authenticate 会
 			// 直接拒绝装配（fail-closed），那正是期望的行为，
-			// 但它会掩盖本用例真正要验的 legacy 分支。
+			// 但它会掩盖本用例真正要验的 laravel 分支。
 			cfg := jwtTestConfig(t)
-			cfg.JWT.LegacyLaravel = tt.legacy
+			cfg.JWT.Laravel = tt.laravel
 			assembly, err := jwtauth.Assemble(cfg)
 			if err != nil {
 				t.Fatalf("Assemble: %v", err)

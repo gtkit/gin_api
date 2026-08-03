@@ -13,7 +13,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 )
 
-const legacyLaravelTestSecret = "legacy-laravel-test-secret"
+const laravelTestSecret = "laravel-laravel-test-secret"
 
 func signLaravelTestToken(t *testing.T, userID int64) string {
 	t.Helper()
@@ -22,7 +22,7 @@ func signLaravelTestToken(t *testing.T, userID int64) string {
 		"sub": userID,
 		"exp": time.Now().Add(time.Hour).Unix(),
 		"iat": time.Now().Unix(),
-	}).SignedString([]byte(legacyLaravelTestSecret))
+	}).SignedString([]byte(laravelTestSecret))
 	if err != nil {
 		t.Fatalf("sign laravel test token: %v", err)
 	}
@@ -30,12 +30,12 @@ func signLaravelTestToken(t *testing.T, userID int64) string {
 	return token
 }
 
-// TestAuthAcceptsLegacyLaravelToken 走完整中间件链路：
+// TestAuthAcceptsLaravelToken 走完整中间件链路：
 // Ed25519 主验证失败 → 回退 Laravel HS256 验证 → 角色校验 → 用户校验 → SetUserID。
-func TestAuthAcceptsLegacyLaravelToken(t *testing.T) {
+func TestAuthAcceptsLaravelToken(t *testing.T) {
 	primary := newTestParser(t)
 
-	laravelVerifier, err := jwtauth.NewLaravelVerifier(legacyLaravelTestSecret, "hs256", "user")
+	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelTestSecret, "hs256", "user")
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}
@@ -65,9 +65,9 @@ func TestAuthAcceptsLegacyLaravelToken(t *testing.T) {
 	}
 }
 
-// TestAuthRejectsLegacyLaravelTokenWhenFallbackDisabled 确认未启用 legacy 回退时，
-// 同一个 Laravel token 仍被 401 拒绝（组合 parser 不存在 legacy 分支）。
-func TestAuthRejectsLegacyLaravelTokenWhenFallbackDisabled(t *testing.T) {
+// TestAuthRejectsLaravelTokenWhenFallbackDisabled 确认未启用 laravel 回退时，
+// 同一个 Laravel token 仍被 401 拒绝（组合 parser 不存在 laravel 分支）。
+func TestAuthRejectsLaravelTokenWhenFallbackDisabled(t *testing.T) {
 	primary := newTestParser(t)
 
 	parser, err := jwtauth.NewFallbackParser(primary, nil)

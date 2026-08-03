@@ -26,9 +26,12 @@ func (contractModule) Routes() []routespec.RouteSpec {
 	h := func(c *gin.Context) { c.Status(http.StatusNoContent) }
 
 	return []routespec.RouteSpec{
-		{Method: http.MethodGet, Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
-		{Method: http.MethodPost, Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
-		{Method: http.MethodGet, Path: "/thing/:id", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+		{Method: http.MethodGet,
+			OperationID: "op1", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+		{Method: http.MethodPost,
+			OperationID: "op2", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+		{Method: http.MethodGet,
+			OperationID: "op3", Path: "/thing/:id", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
 	}
 }
 
@@ -162,7 +165,8 @@ func (authRequiringModule) Name() string { return "module.auth" }
 
 func (authRequiringModule) Routes() []routespec.RouteSpec {
 	return []routespec.RouteSpec{{
-		Method: http.MethodGet, Path: "/secret",
+		Method:      http.MethodGet,
+		OperationID: "op4", Path: "/secret",
 		Handler:       func(c *gin.Context) { c.Status(http.StatusOK) },
 		AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
 		TimeoutPolicy: routespec.TimeoutPolicy{Mode: routespec.TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},

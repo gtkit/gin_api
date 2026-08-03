@@ -13,9 +13,9 @@ import (
 	"github.com/gtkit/gojwt/claims"
 )
 
-// legacySigningMethods 将配置算法名映射为 golang-jwt 的签名方法。
-// 只允许 HMAC 家族：legacy 验证器与 Laravel（tymon/jwt-auth）共享对称 secret。
-var legacySigningMethods = map[string]jwtv5.SigningMethod{
+// laravelSigningMethods 将配置算法名映射为 golang-jwt 的签名方法。
+// 只允许 HMAC 家族：本验证器与 Laravel（tymon/jwt-auth）共享同一把对称 secret。
+var laravelSigningMethods = map[string]jwtv5.SigningMethod{
 	"hs256": jwtv5.SigningMethodHS256,
 	"hs384": jwtv5.SigningMethodHS384,
 	"hs512": jwtv5.SigningMethodHS512,
@@ -37,19 +37,19 @@ type LaravelVerifier struct {
 // role 是验证通过后合成进 claims 的客户端角色，由装配方传入（如 sharedauth.ClientRole）。
 func NewLaravelVerifier(secret, algorithm, role string) (*LaravelVerifier, error) {
 	if strings.TrimSpace(secret) == "" {
-		return nil, errors.New("legacy laravel verifier: secret is required")
+		return nil, errors.New("laravel verifier: secret is required")
 	}
 	if strings.TrimSpace(role) == "" {
-		return nil, errors.New("legacy laravel verifier: role is required")
+		return nil, errors.New("laravel verifier: role is required")
 	}
 
 	alg := strings.ToLower(strings.TrimSpace(algorithm))
 	if alg == "" {
 		alg = "hs256"
 	}
-	method, ok := legacySigningMethods[alg]
+	method, ok := laravelSigningMethods[alg]
 	if !ok {
-		return nil, fmt.Errorf("legacy laravel verifier: algorithm %q is not supported (hs256|hs384|hs512)", algorithm)
+		return nil, fmt.Errorf("laravel verifier: algorithm %q is not supported (hs256|hs384|hs512)", algorithm)
 	}
 
 	return &LaravelVerifier{
@@ -73,10 +73,10 @@ func (v *LaravelVerifier) ParseToken(
 
 	mapClaims := jwtv5.MapClaims{}
 	if _, err := parser.ParseWithClaims(tokenString, mapClaims, v.keyFunc); err != nil {
-		return nil, fmt.Errorf("parse legacy laravel token: %w", err)
+		return nil, fmt.Errorf("parse laravel token: %w", err)
 	}
 
-	userID, err := legacyUserID(mapClaims)
+	userID, err := laravelUserID(mapClaims)
 	if err != nil {
 		return nil, err
 	}
@@ -106,40 +106,40 @@ func (v *LaravelVerifier) adaptClaims(mapClaims jwtv5.MapClaims, userID int64) *
 	return adapted
 }
 
-// legacyUserID 从 tymon 的 sub claim 提取用户主键。
+// laravelUserID 从 tymon 的 sub claim 提取用户主键。
 // tymon 依 PHP 侧序列化差异可能把 sub 编码为 JSON 数字或字符串，两种都接受；
 // 缺失、非整数、非正数一律报错，绝不放行 UserID==0 的 claims。
-func legacyUserID(mapClaims jwtv5.MapClaims) (int64, error) {
+func laravelUserID(mapClaims jwtv5.MapClaims) (int64, error) {
 	raw, ok := mapClaims["sub"]
 	if !ok {
-		return 0, errors.New("legacy laravel token: sub claim is missing")
+		return 0, errors.New("laravel token: sub claim is missing")
 	}
 
 	var userID int64
 	switch sub := raw.(type) {
 	case float64:
 		if sub != math.Trunc(sub) {
-			return 0, fmt.Errorf("legacy laravel token: sub %v is not an integer", sub)
+			return 0, fmt.Errorf("laravel token: sub %v is not an integer", sub)
 		}
 		userID = int64(sub)
 	case json.Number:
 		parsed, err := sub.Int64()
 		if err != nil {
-			return 0, fmt.Errorf("legacy laravel token: sub %q is not an integer: %w", sub.String(), err)
+			return 0, fmt.Errorf("laravel token: sub %q is not an integer: %w", sub.String(), err)
 		}
 		userID = parsed
 	case string:
 		parsed, err := strconv.ParseInt(strings.TrimSpace(sub), 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("legacy laravel token: sub %q is not an integer: %w", sub, err)
+			return 0, fmt.Errorf("laravel token: sub %q is not an integer: %w", sub, err)
 		}
 		userID = parsed
 	default:
-		return 0, fmt.Errorf("legacy laravel token: sub has unsupported type %T", raw)
+		return 0, fmt.Errorf("laravel token: sub has unsupported type %T", raw)
 	}
 
 	if userID <= 0 {
-		return 0, fmt.Errorf("legacy laravel token: sub %d must be positive", userID)
+		return 0, fmt.Errorf("laravel token: sub %d must be positive", userID)
 	}
 
 	return userID, nil

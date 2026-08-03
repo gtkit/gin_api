@@ -3,7 +3,7 @@
   "info": {
     "title": "gin_api",
     "version": "1.0.0",
-    "description": "Public HTTP contract for the scaffold health probes and current user module."
+    "description": "Public HTTP contract generated from the route descriptors."
   },
   "tags": [
     {
@@ -14,59 +14,13 @@
     }
   ],
   "paths": {
-    "/health": {
-      "get": {
-        "operationId": "getHealth",
-        "tags": ["Health"],
-        "summary": "Liveness probe",
-        "responses": {
-          "200": {
-            "description": "Process is alive",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ready": {
-      "get": {
-        "operationId": "getReadiness",
-        "tags": ["Health"],
-        "summary": "Database and Redis readiness probe",
-        "responses": {
-          "200": {
-            "description": "Dependencies are ready",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReadinessResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "At least one dependency is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReadinessResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/user": {
       "get": {
         "operationId": "getCurrentUserProfile",
-        "tags": ["User"],
-        "summary": "Get the authenticated user profile",
+        "tags": [
+          "User"
+        ],
+        "summary": "Get the current user profile",
         "security": [
           {
             "AppToken": []
@@ -74,54 +28,39 @@
         ],
         "responses": {
           "200": {
-            "description": "Profile response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserProfileEnvelope"
-                }
-              }
-            }
+            "description": "Successful response"
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "description": "Missing or invalid credentials"
           },
           "500": {
-            "$ref": "#/components/responses/InternalError"
+            "description": "Internal error"
           }
         }
       },
       "put": {
         "operationId": "updateCurrentUserProfile",
-        "tags": ["User"],
-        "summary": "Update the authenticated user profile",
+        "tags": [
+          "User"
+        ],
+        "summary": "Update the current user profile",
         "security": [
           {
             "AppToken": []
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UserUpdateRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/EmptySuccess"
+            "description": "Successful response"
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "description": "Missing or invalid credentials"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Request payload failed validation"
           },
           "500": {
-            "$ref": "#/components/responses/InternalError"
+            "description": "Internal error"
           }
         }
       }
@@ -129,35 +68,58 @@
     "/api/v1/user/deactivate": {
       "post": {
         "operationId": "deactivateCurrentUser",
-        "tags": ["User"],
-        "summary": "Deactivate the authenticated user account",
+        "tags": [
+          "User"
+        ],
+        "summary": "Deactivate the current user account",
         "security": [
           {
             "AppToken": []
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UserDeactivateRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "$ref": "#/components/responses/EmptySuccess"
+            "description": "Successful response"
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "description": "Missing or invalid credentials"
           },
           "422": {
-            "$ref": "#/components/responses/ValidationError"
+            "description": "Request payload failed validation"
           },
           "500": {
-            "$ref": "#/components/responses/InternalError"
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness probe",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness probe",
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "503": {
+            "description": "Not ready to receive traffic"
           }
         }
       }
@@ -169,218 +131,6 @@
         "type": "apiKey",
         "in": "header",
         "name": "App-Token"
-      }
-    },
-    "responses": {
-      "EmptySuccess": {
-        "description": "Successful operation with no response payload",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/EmptyEnvelope"
-            }
-          }
-        }
-      },
-      "Unauthorized": {
-        "description": "Authentication failed",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ErrorEnvelope"
-            }
-          }
-        }
-      },
-      "ValidationError": {
-        "description": "Request validation failed",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ErrorEnvelope"
-            }
-          }
-        }
-      },
-      "InternalError": {
-        "description": "Internal server error",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ErrorEnvelope"
-            }
-          }
-        }
-      }
-    },
-    "schemas": {
-      "HealthResponse": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["status"],
-        "properties": {
-          "status": {
-            "type": "string",
-            "const": "ok"
-          }
-        }
-      },
-      "ReadinessResponse": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["status"],
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": ["ok", "unavailable"]
-          },
-          "checks": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "ResponseBase": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["code", "msg", "data"],
-        "properties": {
-          "code": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "msg": {
-            "type": "string"
-          },
-          "data": {}
-        }
-      },
-      "EmptyData": {
-        "type": "array",
-        "maxItems": 0,
-        "items": {
-          "type": "integer"
-        }
-      },
-      "EmptyEnvelope": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ResponseBase"
-          },
-          {
-            "type": "object",
-            "required": ["data"],
-            "properties": {
-              "data": {
-                "$ref": "#/components/schemas/EmptyData"
-              }
-            }
-          }
-        ]
-      },
-      "ErrorEnvelope": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ResponseBase"
-          },
-          {
-            "type": "object",
-            "required": ["data"],
-            "properties": {
-              "data": {
-                "$ref": "#/components/schemas/EmptyData"
-              }
-            }
-          }
-        ]
-      },
-      "UserProfileEnvelope": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ResponseBase"
-          },
-          {
-            "type": "object",
-            "required": ["data"],
-            "properties": {
-              "data": {
-                "$ref": "#/components/schemas/UserProfile"
-              }
-            }
-          }
-        ]
-      },
-      "UserProfile": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "nickname", "gender", "avatar", "phone", "status", "vip_status", "vip_level"],
-        "properties": {
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "nickname": {
-            "type": "string"
-          },
-          "gender": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 2
-          },
-          "avatar": {
-            "type": "string"
-          },
-          "phone": {
-            "type": "string"
-          },
-          "status": {
-            "type": "integer"
-          },
-          "vip_status": {
-            "type": "integer"
-          },
-          "vip_level": {
-            "type": "integer"
-          }
-        }
-      },
-      "UserUpdateRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "minProperties": 1,
-        "properties": {
-          "nick_name": {
-            "type": "string",
-            "minLength": 1
-          },
-          "gender": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 2
-          },
-          "avatar": {
-            "type": "string",
-            "format": "uri"
-          }
-        }
-      },
-      "UserDeactivateRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["channel"],
-        "properties": {
-          "reason": {
-            "type": "string",
-            "maxLength": 255
-          },
-          "channel": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 32
-          }
-        }
       }
     }
   }

@@ -10,16 +10,16 @@ import (
 )
 
 const (
-	testLegacySecret = "test-laravel-jwt-secret"
-	testLegacyRole   = "user"
+	testLaravelSecret = "test-laravel-jwt-secret"
+	testLaravelRole   = "user"
 )
 
-func signLegacyToken(t *testing.T, secret string, method jwtv5.SigningMethod, mapClaims jwtv5.MapClaims) string {
+func signLaravelToken(t *testing.T, secret string, method jwtv5.SigningMethod, mapClaims jwtv5.MapClaims) string {
 	t.Helper()
 
 	token, err := jwtv5.NewWithClaims(method, mapClaims).SignedString([]byte(secret))
 	if err != nil {
-		t.Fatalf("sign legacy token: %v", err)
+		t.Fatalf("sign laravel token: %v", err)
 	}
 
 	return token
@@ -46,13 +46,13 @@ func TestNewLaravelVerifier(t *testing.T) {
 		role      string
 		wantErr   bool
 	}{
-		{name: "default algorithm", secret: testLegacySecret, algorithm: "", role: testLegacyRole},
-		{name: "uppercase algorithm accepted", secret: testLegacySecret, algorithm: "HS384", role: testLegacyRole},
-		{name: "hs512 accepted", secret: testLegacySecret, algorithm: "hs512", role: testLegacyRole},
-		{name: "empty secret rejected", secret: "   ", algorithm: "hs256", role: testLegacyRole, wantErr: true},
-		{name: "empty role rejected", secret: testLegacySecret, algorithm: "hs256", role: "", wantErr: true},
-		{name: "asymmetric algorithm rejected", secret: testLegacySecret, algorithm: "rs256", role: testLegacyRole, wantErr: true},
-		{name: "none algorithm rejected", secret: testLegacySecret, algorithm: "none", role: testLegacyRole, wantErr: true},
+		{name: "default algorithm", secret: testLaravelSecret, algorithm: "", role: testLaravelRole},
+		{name: "uppercase algorithm accepted", secret: testLaravelSecret, algorithm: "HS384", role: testLaravelRole},
+		{name: "hs512 accepted", secret: testLaravelSecret, algorithm: "hs512", role: testLaravelRole},
+		{name: "empty secret rejected", secret: "   ", algorithm: "hs256", role: testLaravelRole, wantErr: true},
+		{name: "empty role rejected", secret: testLaravelSecret, algorithm: "hs256", role: "", wantErr: true},
+		{name: "asymmetric algorithm rejected", secret: testLaravelSecret, algorithm: "rs256", role: testLaravelRole, wantErr: true},
+		{name: "none algorithm rejected", secret: testLaravelSecret, algorithm: "none", role: testLaravelRole, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -91,7 +91,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "numeric sub accepted",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 123, "exp": validExp, "iat": now.Unix()})
 			},
 			wantUserID: 123,
@@ -99,7 +99,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "string sub accepted",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": "456", "exp": validExp})
 			},
 			wantUserID: 456,
@@ -107,46 +107,46 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "expired token rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 123, "exp": now.Add(-time.Hour).Unix()})
 			},
-			wantErr: "parse legacy laravel token",
+			wantErr: "parse laravel token",
 		},
 		{
 			name: "token without exp rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 123})
 			},
-			wantErr: "parse legacy laravel token",
+			wantErr: "parse laravel token",
 		},
 		{
 			name: "wrong secret rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, "other-secret", jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, "other-secret", jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 123, "exp": validExp})
 			},
-			wantErr: "parse legacy laravel token",
+			wantErr: "parse laravel token",
 		},
 		{
 			name: "algorithm mismatch rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS512,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS512,
 					jwtv5.MapClaims{"sub": 123, "exp": validExp})
 			},
-			wantErr: "parse legacy laravel token",
+			wantErr: "parse laravel token",
 		},
 		{
 			name: "none algorithm rejected",
 			token: func(t *testing.T) string {
 				return signNoneToken(t, jwtv5.MapClaims{"sub": 123, "exp": validExp})
 			},
-			wantErr: "parse legacy laravel token",
+			wantErr: "parse laravel token",
 		},
 		{
 			name: "missing sub rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"exp": validExp})
 			},
 			wantErr: "sub claim is missing",
@@ -154,7 +154,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "zero sub rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 0, "exp": validExp})
 			},
 			wantErr: "must be positive",
@@ -162,7 +162,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "negative string sub rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": "-5", "exp": validExp})
 			},
 			wantErr: "must be positive",
@@ -170,7 +170,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "non-integer string sub rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": "abc", "exp": validExp})
 			},
 			wantErr: "is not an integer",
@@ -178,7 +178,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "fractional sub rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": 12.5, "exp": validExp})
 			},
 			wantErr: "is not an integer",
@@ -186,14 +186,14 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		{
 			name: "unsupported sub type rejected",
 			token: func(t *testing.T) string {
-				return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+				return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 					jwtv5.MapClaims{"sub": true, "exp": validExp})
 			},
 			wantErr: "unsupported type",
 		},
 	}
 
-	verifier, err := NewLaravelVerifier(testLegacySecret, "hs256", testLegacyRole)
+	verifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}
@@ -219,8 +219,8 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 			if parsed.UserID != tt.wantUserID {
 				t.Fatalf("UserID = %d, want %d", parsed.UserID, tt.wantUserID)
 			}
-			if err := parsed.VerifyRole(testLegacyRole); err != nil {
-				t.Fatalf("VerifyRole(%q) returned error: %v", testLegacyRole, err)
+			if err := parsed.VerifyRole(testLaravelRole); err != nil {
+				t.Fatalf("VerifyRole(%q) returned error: %v", testLaravelRole, err)
 			}
 			if parsed.Subject == "" {
 				t.Fatal("Subject is empty, want user id string")

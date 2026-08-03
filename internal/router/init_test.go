@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,9 +28,12 @@ func (m *testModule) Name() string {
 func (m *testModule) Routes() []routespec.RouteSpec {
 	m.called = true
 	return []routespec.RouteSpec{{
-		Method:  http.MethodGet,
-		Path:    "/probe",
-		Handler: func(c *gin.Context) { c.Status(http.StatusNoContent) },
+		Method: http.MethodGet,
+		// operationId 由模块名派生：同一个 testModule 类型会被实例化成
+		// v1/v2 两个模块，写死会撞上 compile 的全局唯一约束。
+		OperationID: "probe_" + strings.ReplaceAll(m.Name(), ".", "_"),
+		Path:        "/probe",
+		Handler:     func(c *gin.Context) { c.Status(http.StatusNoContent) },
 		// 测试模块同样必须显式声明策略——零值会被 compile 拒绝，
 		// 这正是描述符要保证的性质。
 		AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessPublic},

@@ -204,8 +204,8 @@ log:
 			wantKey: "unknown_section",
 		},
 		{
-			name:    "legacy jwt.secret rejected",
-			extra:   "jwt:\n  active:\n    kid: k\n    private_key_path: a\n    public_key_path: b\n  issuer: i\n  audiences: [\"app\"]\n  secret: legacy\n",
+			name:    "laravel jwt.secret rejected",
+			extra:   "jwt:\n  active:\n    kid: k\n    private_key_path: a\n    public_key_path: b\n  issuer: i\n  audiences: [\"app\"]\n  secret: laravel\n",
 			wantKey: "secret",
 		},
 		{
@@ -468,49 +468,49 @@ func TestValidateEnvWhitelist(t *testing.T) {
 	}
 }
 
-func TestValidateLegacyLaravelJWTConfig(t *testing.T) {
+func TestValidateLaravelJWTConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name        string
-		legacy      LegacyLaravelJWTConfig
+		laravel     LaravelJWTConfig
 		wantErrText string
 	}{
 		{
-			name:   "disabled empty block passes",
-			legacy: LegacyLaravelJWTConfig{},
+			name:    "disabled empty block passes",
+			laravel: LaravelJWTConfig{},
 		},
 		{
-			name:   "disabled ignores invalid algorithm",
-			legacy: LegacyLaravelJWTConfig{Algorithm: "rs256"},
+			name:    "disabled ignores invalid algorithm",
+			laravel: LaravelJWTConfig{Algorithm: "rs256"},
 		},
 		{
-			name:   "enabled with secret and default algorithm passes",
-			legacy: LegacyLaravelJWTConfig{Enabled: true, Secret: "laravel-secret"},
+			name:    "enabled with secret and default algorithm passes",
+			laravel: LaravelJWTConfig{Enabled: true, Secret: "laravel-secret"},
 		},
 		{
-			name:   "enabled with uppercase hs512 passes",
-			legacy: LegacyLaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "HS512"},
+			name:    "enabled with uppercase hs512 passes",
+			laravel: LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "HS512"},
 		},
 		{
 			name:        "enabled without secret rejected",
-			legacy:      LegacyLaravelJWTConfig{Enabled: true},
-			wantErrText: "jwt.legacy_laravel.secret",
+			laravel:     LaravelJWTConfig{Enabled: true},
+			wantErrText: "jwt.laravel.secret",
 		},
 		{
 			name:        "enabled with blank secret rejected",
-			legacy:      LegacyLaravelJWTConfig{Enabled: true, Secret: "   "},
-			wantErrText: "jwt.legacy_laravel.secret",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: "   "},
+			wantErrText: "jwt.laravel.secret",
 		},
 		{
 			name:        "enabled with asymmetric algorithm rejected",
-			legacy:      LegacyLaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "rs256"},
-			wantErrText: "jwt.legacy_laravel.algorithm",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "rs256"},
+			wantErrText: "jwt.laravel.algorithm",
 		},
 		{
 			name:        "enabled with none algorithm rejected",
-			legacy:      LegacyLaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "none"},
-			wantErrText: "jwt.legacy_laravel.algorithm",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "none"},
+			wantErrText: "jwt.laravel.algorithm",
 		},
 	}
 
@@ -519,7 +519,7 @@ func TestValidateLegacyLaravelJWTConfig(t *testing.T) {
 			t.Parallel()
 
 			cfg := validConfigForTest()
-			cfg.JWT.LegacyLaravel = tt.legacy
+			cfg.JWT.Laravel = tt.laravel
 
 			err := cfg.Validate()
 			if tt.wantErrText == "" {

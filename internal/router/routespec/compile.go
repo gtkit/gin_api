@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// operationIDPattern 约束 operationId 的字符集。
+//
+// 必须是合法的标识符形状：它会成为生成客户端里的方法名，
+// 带空格或斜杠的值在多数生成器里要么报错、要么被静默改写。
+var operationIDPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,63}$`)
+
 // allowedMethods 是模块可声明的 HTTP 方法白名单。
 //
 // 刻意不含 OPTIONS：预检响应必须由 CORS 策略统一派生，模块各写各的会产生两套预检来源。
@@ -54,6 +60,8 @@ func Compile(contributions []Contribution) ([]CompiledRoute, error) {
 		compiled []CompiledRoute
 		errs     []error
 		seen     = make(map[string]string) // "METHOD FULLPATH" -> source
+		// operations 保证 operationId 全局唯一。
+		operations = make(map[string]string) // operationId -> source
 	)
 
 	for _, c := range contributions {
@@ -73,6 +81,13 @@ func Compile(contributions []Contribution) ([]CompiledRoute, error) {
 				continue
 			}
 			seen[key] = c.Source
+
+			if prev, dup := operations[spec.OperationID]; dup {
+				errs = append(errs, fmt.Errorf(
+					"%s: duplicate operation id %q (already used by %s)", where, spec.OperationID, prev))
+				continue
+			}
+			operations[spec.OperationID] = c.Source
 
 			compiled = append(compiled, CompiledRoute{FullPath: full, Spec: spec})
 		}
@@ -111,6 +126,11 @@ func validateSpec(spec RouteSpec) error {
 	}
 	if err := validateTimeoutMethodConstraint(spec.Method, spec.TimeoutPolicy); err != nil {
 		errs = append(errs, err)
+	}
+	if !operationIDPattern.MatchString(spec.OperationID) {
+		errs = append(errs, fmt.Errorf(
+			"operation id %q must match %s: it names the generated client method, so it has to be "+
+				"a stable identifier", spec.OperationID, operationIDPattern.String()))
 	}
 	if spec.RateLimitPolicyID != "" && !rateLimitPolicyIDPattern.MatchString(spec.RateLimitPolicyID) {
 		errs = append(errs, fmt.Errorf(

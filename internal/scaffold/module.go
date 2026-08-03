@@ -1413,6 +1413,9 @@ func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 		{
 			Method:        http.MethodGet,
 			Path:          "/{{.RoutePath}}",
+			OperationID:   "list{{.StructName}}",
+			Tags:          []string{"{{.StructName}}"},
+			Summary:       "List {{.StructName}} records",
 			Handler:       handler.List,
 			AccessPolicy:  access,
 			TimeoutPolicy: timeout,
@@ -1420,6 +1423,9 @@ func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 		{
 			Method:        http.MethodGet,
 			Path:          "/{{.RoutePath}}/:id",
+			OperationID:   "get{{.StructName}}",
+			Tags:          []string{"{{.StructName}}"},
+			Summary:       "Get a {{.StructName}} by id",
 			Handler:       handler.Get,
 			AccessPolicy:  access,
 			TimeoutPolicy: timeout,

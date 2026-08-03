@@ -18,7 +18,8 @@ func okTimeout() TimeoutPolicy {
 
 func specOK() RouteSpec {
 	return RouteSpec{
-		Method: http.MethodGet, Path: "/thing", Handler: noopHandler,
+		Method:      http.MethodGet,
+		OperationID: "op12", Path: "/thing", Handler: noopHandler,
 		AccessPolicy: okAccess(), TimeoutPolicy: okTimeout(),
 	}
 }
@@ -261,8 +262,10 @@ func TestCompileDetectsPathTreeConflict(t *testing.T) {
 
 	byID := specOK()
 	byID.Path = "/thing/:id"
+	byID.OperationID = "getThingByID"
 	byName := specOK()
 	byName.Path = "/thing/:name"
+	byName.OperationID = "getThingByName"
 
 	_, err := Compile([]Contribution{
 		{Source: "module.a", Prefix: "/api/v1", Routes: []RouteSpec{byID, byName}},

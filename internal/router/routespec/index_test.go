@@ -2,13 +2,17 @@ package routespec
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
 
+// idxSpec 构造一条测试路由。operationId 由 method+path 派生，
+// 保证同一批 spec 内部唯一（compile 强制全局唯一）。
 func idxSpec(method, path string) RouteSpec {
 	return RouteSpec{
 		Method: method, Path: path, Handler: noopHandler,
+		OperationID:   idxOperationID(method, path),
 		AccessPolicy:  AccessPolicy{Mode: AccessPublic},
 		TimeoutPolicy: TimeoutPolicy{Mode: TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},
 	}
@@ -160,4 +164,15 @@ func TestNilRouteIndexIsSafe(t *testing.T) {
 	if got := idx.AllowHeaderValue("/anything"); got != "" {
 		t.Fatalf("nil index must produce no Allow header, got %q", got)
 	}
+}
+
+// idxOperationID 从 method 与 path 派生一个合法的 operationId。
+func idxOperationID(method, path string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, path)
+	return strings.ToLower(method) + "_" + cleaned
 }

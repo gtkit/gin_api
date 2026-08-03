@@ -71,7 +71,8 @@ func TestRouteRateLimitRejectsBeyondBurst(t *testing.T) {
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/limited",
+			Method:      http.MethodGet,
+			OperationID: "op6", Path: "/limited",
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
@@ -133,7 +134,8 @@ func TestRouteRateLimitSeparatesSubjects(t *testing.T) {
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/limited",
+			Method:      http.MethodGet,
+			OperationID: "op7", Path: "/limited",
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
@@ -176,7 +178,8 @@ func TestUnknownRateLimitPolicyFailsAssembly(t *testing.T) {
 
 	_, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/limited",
+			Method:      http.MethodGet,
+			OperationID: "op8", Path: "/limited",
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
@@ -200,7 +203,8 @@ func TestRateLimitPolicyWithoutRegistryFailsAssembly(t *testing.T) {
 
 	_, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/limited",
+			Method:      http.MethodGet,
+			OperationID: "op9", Path: "/limited",
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
@@ -230,7 +234,8 @@ func TestUserScopedPolicyOnPublicRouteFailsAssembly(t *testing.T) {
 
 	_, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/public",
+			Method:      http.MethodGet,
+			OperationID: "op10", Path: "/public",
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
@@ -262,7 +267,8 @@ func TestUserScopedRateLimitRunsAfterAuthentication(t *testing.T) {
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
-			Method: http.MethodGet, Path: "/me",
+			Method:      http.MethodGet,
+			OperationID: "op11", Path: "/me",
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),

@@ -14,24 +14,24 @@ type TokenParser interface {
 	ParseToken(ctx context.Context, tokenString string, opts ...jwtv5.ParserOption) (*claims.Claims, error)
 }
 
-// FallbackParser 组合主验证器与可选的 Laravel legacy 验证器：
-// 先走主验证（Ed25519），失败且 legacy 存在时回退。
+// FallbackParser 组合主验证器与可选的 Laravel Laravel 验证器：
+// 先走主验证（Ed25519），失败且 Laravel 验证器存在时回退。
 // 每个验证器只接受自己钉死的算法，不按 token header 的 alg 预分流（那等于信任攻击者输入）。
 type FallbackParser struct {
 	primary TokenParser
-	legacy  *LaravelVerifier
+	laravel *LaravelVerifier
 }
 
-// NewFallbackParser 创建组合 parser。legacy 传 nil 表示不启用回退（行为等同裸 primary）。
-func NewFallbackParser(primary TokenParser, legacy *LaravelVerifier) (*FallbackParser, error) {
+// NewFallbackParser 创建组合 parser。laravel 传 nil 表示不启用回退（行为等同裸 primary）。
+func NewFallbackParser(primary TokenParser, laravel *LaravelVerifier) (*FallbackParser, error) {
 	if primary == nil {
 		return nil, errors.New("fallback parser: primary token parser is required")
 	}
 
-	return &FallbackParser{primary: primary, legacy: legacy}, nil
+	return &FallbackParser{primary: primary, laravel: laravel}, nil
 }
 
-// ParseToken 先用主验证器解析；主验证失败且 legacy 启用时回退 legacy。
+// ParseToken 先用主验证器解析；主验证失败且 Laravel 回退已启用时再试一次。
 // 两路都失败时返回 errors.Join 的联合错误，两类客户端的失败原因都保留在日志链上。
 func (p *FallbackParser) ParseToken(
 	ctx context.Context, tokenString string, opts ...jwtv5.ParserOption,
@@ -40,14 +40,14 @@ func (p *FallbackParser) ParseToken(
 	if primaryErr == nil {
 		return parsed, nil
 	}
-	if p.legacy == nil {
+	if p.laravel == nil {
 		return nil, primaryErr
 	}
 
-	parsed, legacyErr := p.legacy.ParseToken(ctx, tokenString, opts...)
-	if legacyErr == nil {
+	parsed, laravelErr := p.laravel.ParseToken(ctx, tokenString, opts...)
+	if laravelErr == nil {
 		return parsed, nil
 	}
 
-	return nil, errors.Join(primaryErr, legacyErr)
+	return nil, errors.Join(primaryErr, laravelErr)
 }

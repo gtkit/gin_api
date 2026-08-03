@@ -33,7 +33,7 @@ func TestNewFallbackParserRequiresPrimary(t *testing.T) {
 func TestFallbackParserParseToken(t *testing.T) {
 	t.Parallel()
 
-	legacyVerifier, err := NewLaravelVerifier(testLegacySecret, "hs256", testLegacyRole)
+	laravelVerifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}
@@ -41,15 +41,15 @@ func TestFallbackParserParseToken(t *testing.T) {
 	primaryClaims := &claims.Claims{UserID: 42}
 	primaryErr := errors.New("primary parse failed")
 
-	legacyToken := func(t *testing.T) string {
-		return signLegacyToken(t, testLegacySecret, jwtv5.SigningMethodHS256,
+	laravelToken := func(t *testing.T) string {
+		return signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256,
 			jwtv5.MapClaims{"sub": 7, "exp": time.Now().Add(time.Hour).Unix()})
 	}
 
 	tests := []struct {
 		name       string
 		primary    *stubTokenParser
-		legacy     *LaravelVerifier
+		laravel    *LaravelVerifier
 		token      func(t *testing.T) string
 		wantUserID int64
 		wantErrIs  error
@@ -58,31 +58,31 @@ func TestFallbackParserParseToken(t *testing.T) {
 		{
 			name:       "primary success returns primary claims",
 			primary:    &stubTokenParser{parsed: primaryClaims},
-			legacy:     legacyVerifier,
-			token:      legacyToken,
+			laravel:    laravelVerifier,
+			token:      laravelToken,
 			wantUserID: 42,
 		},
 		{
-			name:       "primary failure falls back to legacy",
+			name:       "primary failure falls back to laravel",
 			primary:    &stubTokenParser{err: primaryErr},
-			legacy:     legacyVerifier,
-			token:      legacyToken,
+			laravel:    laravelVerifier,
+			token:      laravelToken,
 			wantUserID: 7,
 		},
 		{
-			name:      "primary failure without legacy returns primary error",
+			name:      "primary failure without laravel returns primary error",
 			primary:   &stubTokenParser{err: primaryErr},
-			legacy:    nil,
-			token:     legacyToken,
+			laravel:   nil,
+			token:     laravelToken,
 			wantErrIs: primaryErr,
 		},
 		{
 			name:       "both failures return joined error",
 			primary:    &stubTokenParser{err: primaryErr},
-			legacy:     legacyVerifier,
+			laravel:    laravelVerifier,
 			token:      func(*testing.T) string { return "not-a-jwt" },
 			wantErrIs:  primaryErr,
-			wantErrSub: "parse legacy laravel token",
+			wantErrSub: "parse laravel token",
 		},
 	}
 
@@ -90,7 +90,7 @@ func TestFallbackParserParseToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			parser, err := NewFallbackParser(tt.primary, tt.legacy)
+			parser, err := NewFallbackParser(tt.primary, tt.laravel)
 			if err != nil {
 				t.Fatalf("NewFallbackParser returned error: %v", err)
 			}

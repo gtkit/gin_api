@@ -395,16 +395,16 @@ type JWTConfig struct {
 	ClockSkewSeconds int `mapstructure:"clock_skew_seconds"`
 	// CacheMaxEntries 是验签结果缓存的容量；0 禁用，负值即配置错误。
 	CacheMaxEntries int `mapstructure:"cache_max_entries"`
-	// LegacyNoKIDAcceptUntil 是无 kid 存量令牌的**绝对** RFC3339 截止时刻。
+	// UnkeyedTokenAcceptUntil 是无 kid 存量令牌的**绝对** RFC3339 截止时刻。
 	//
 	// 用绝对时刻而不是时长：时长会让每次重启都自动顺延，兼容口因此变成永久的。
 	// 默认空 = 不接受任何无 kid 令牌。
-	LegacyNoKIDAcceptUntil string `mapstructure:"legacy_no_kid_accept_until"`
-	// LaravelLegacyAcceptUntil 是 Laravel 存量令牌的绝对截止时刻。
+	UnkeyedTokenAcceptUntil string `mapstructure:"unkeyed_token_accept_until"`
+	// LaravelAcceptUntil 是 Laravel 存量令牌的绝对截止时刻。
 	//
 	// 与上一条**分开**：两者是不同的兼容维度（缺 kid vs 不同算法族），
 	// 共用一个开关会让其中一条的删除被另一条阻塞。
-	LaravelLegacyAcceptUntil string `mapstructure:"laravel_legacy_accept_until"`
+	LaravelAcceptUntil string `mapstructure:"laravel_accept_until"`
 	// PrivateKeyPath / PublicKeyPath 是**已废弃**的单密钥路径。
 	//
 	// 保留字段是为了让旧配置得到一条可读的迁移错误，而不是严格解码给出的
@@ -413,13 +413,13 @@ type JWTConfig struct {
 	PublicKeyPath  string `mapstructure:"public_key_path"`
 	// TokenTTLHours 是签发 token 的有效期（小时）；<=0 时兜底为 720（30 天）。
 	TokenTTLHours int `mapstructure:"token_ttl_hours"`
-	// LegacyLaravel 是旧 Laravel（tymon/jwt-auth）存量 token 的过渡期兼容开关：
+	// Laravel 是旧 Laravel（tymon/jwt-auth）存量 token 的过渡期兼容开关：
 	// 只验不签，Laravel 下线且存量 token 全部过期后整块删除。
-	LegacyLaravel LegacyLaravelJWTConfig `mapstructure:"legacy_laravel"`
+	Laravel LaravelJWTConfig `mapstructure:"laravel"`
 }
 
-// LegacyLaravelJWTConfig 配置 Laravel 存量 token 的单向兼容验证。
-type LegacyLaravelJWTConfig struct {
+// LaravelJWTConfig 配置 Laravel 存量 token 的单向兼容验证。
+type LaravelJWTConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// Algorithm 是验签算法白名单中的单一取值：hs256 | hs384 | hs512（大小写不敏感）；
 	// 留空按 hs256。验证器只接受该算法，不信任 token header 的 alg 声明。
@@ -537,23 +537,23 @@ func (c *Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// legacyLaravelAlgorithms 是 legacy 验证器允许的 HMAC 算法白名单。
-var legacyLaravelAlgorithms = []string{"hs256", "hs384", "hs512"}
+// laravelAlgorithms 是 Laravel 存量 token 验证器允许的 HMAC 算法白名单。
+var laravelAlgorithms = []string{"hs256", "hs384", "hs512"}
 
 func validateJWTConfig(jwt JWTConfig) error {
-	legacy := jwt.LegacyLaravel
-	if !legacy.Enabled {
+	laravel := jwt.Laravel
+	if !laravel.Enabled {
 		return nil
 	}
 
 	var errs []error
 
-	if strings.TrimSpace(legacy.Secret) == "" {
-		errs = append(errs, errors.New("jwt.legacy_laravel.secret is required when jwt.legacy_laravel.enabled is true"))
+	if strings.TrimSpace(laravel.Secret) == "" {
+		errs = append(errs, errors.New("jwt.laravel.secret is required when jwt.laravel.enabled is true"))
 	}
-	alg := strings.ToLower(strings.TrimSpace(legacy.Algorithm))
-	if alg != "" && !slices.Contains(legacyLaravelAlgorithms, alg) {
-		errs = append(errs, fmt.Errorf("jwt.legacy_laravel.algorithm %q is invalid: must be one of %s", legacy.Algorithm, strings.Join(legacyLaravelAlgorithms, "|")))
+	alg := strings.ToLower(strings.TrimSpace(laravel.Algorithm))
+	if alg != "" && !slices.Contains(laravelAlgorithms, alg) {
+		errs = append(errs, fmt.Errorf("jwt.laravel.algorithm %q is invalid: must be one of %s", laravel.Algorithm, strings.Join(laravelAlgorithms, "|")))
 	}
 
 	return errors.Join(errs...)

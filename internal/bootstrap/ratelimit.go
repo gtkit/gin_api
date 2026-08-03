@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	legacydao "github.com/gtkit/gin-api/internal/platform/data"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 
@@ -27,7 +27,7 @@ type rateLimitAssembly struct {
 // 任何一条策略非法即启动失败：限流配置错误的表现是"限额不是你以为的那个值"，
 // 而那在生产上只有被打穿或被误杀时才会发现。
 func buildRateLimits(
-	ctx context.Context, cfg *config.Config, resources *legacydao.Resources,
+	ctx context.Context, cfg *config.Config, resources *data.Resources,
 ) (rateLimitAssembly, error) {
 	if cfg == nil || len(cfg.RateLimit.Policies) == 0 {
 		return rateLimitAssembly{}, nil
@@ -72,7 +72,7 @@ func buildRateLimits(
 func buildLimiter(
 	ctx context.Context,
 	policy routespec.RateLimitPolicy,
-	resources *legacydao.Resources,
+	resources *data.Resources,
 	redisBackend **ratelimit.RedisBackend,
 	keyPrefix string,
 ) (ratelimit.Limiter, error) {

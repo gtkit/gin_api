@@ -1,0 +1,17 @@
+# OpenAPI 破坏性变更豁免。
+#
+# 每条豁免必须**逐项声明**——不提供全局关闭开关：一个能被整体关掉的门禁
+# 在第一次挡路时就会被关掉，之后再也不会被打开。
+#
+# 字段全部必填：
+#   id         唯一编号
+#   operation  "METHOD /path"，必须与门禁输出里的 operation 完全一致
+#   rule       规则类别（endpoint_removed / operation_id_changed /
+#              security_tightened / response_status_removed）
+#   owner      负责人
+#   reason     为什么这次破坏是有意的
+#   expires    到期日期（YYYY-MM-DD）。过期即门禁失败——
+#              一条永不过期的豁免与删掉这条规则没有区别。
+#
+# 当前为空：没有已知的有意破坏性变更。
+waivers: []

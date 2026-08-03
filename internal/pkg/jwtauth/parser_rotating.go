@@ -140,8 +140,8 @@ func (p *Parser) keyFunc(token *jwtv5.Token) (any, error) {
 	}
 
 	// 无 kid 的存量 token：只在明确的截止时刻之前接受。
-	if !p.legacyNoKIDAllowed() {
-		return nil, ErrLegacyCutoffPassed
+	if !p.unkeyedTokenAllowed() {
+		return nil, ErrUnkeyedTokenRejected
 	}
 	return p.orderedKeyFunc(token)
 }
@@ -159,12 +159,12 @@ func (p *Parser) orderedKeyFunc(*jwtv5.Token) (any, error) {
 	return jwtv5.VerificationKeySet{Keys: keys}, nil
 }
 
-// legacyNoKIDAllowed 报告当前是否仍接受无 kid 的令牌。
-func (p *Parser) legacyNoKIDAllowed() bool {
-	if p.opts.LegacyNoKIDAcceptUntil.IsZero() {
+// unkeyedTokenAllowed 报告当前是否仍接受无 kid 的令牌。
+func (p *Parser) unkeyedTokenAllowed() bool {
+	if p.opts.UnkeyedTokenAcceptUntil.IsZero() {
 		return false
 	}
-	return p.now().Before(p.opts.LegacyNoKIDAcceptUntil)
+	return p.now().Before(p.opts.UnkeyedTokenAcceptUntil)
 }
 
 // verifyClaims 校验标准与业务 claims。
@@ -244,8 +244,8 @@ func normalizeParseError(err error) error {
 		return nil
 	case errors.Is(err, ErrUnknownKID):
 		return ErrUnknownKID
-	case errors.Is(err, ErrLegacyCutoffPassed):
-		return ErrLegacyCutoffPassed
+	case errors.Is(err, ErrUnkeyedTokenRejected):
+		return ErrUnkeyedTokenRejected
 	case errors.Is(err, jwtv5.ErrTokenExpired):
 		return fmt.Errorf("%w: %w", ErrTokenExpired, err)
 	default:

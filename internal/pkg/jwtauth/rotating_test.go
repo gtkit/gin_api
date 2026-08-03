@@ -207,7 +207,7 @@ func TestPreviousKeyStillVerifies(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	legacyToken, err := oldIssuer.Issue(ctx, 7)
+	laravelToken, err := oldIssuer.Issue(ctx, 7)
 	if err != nil {
 		t.Fatalf("Issue with the old key: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestPreviousKeyStillVerifies(t *testing.T) {
 		t.Fatalf("NewParser(rotated): %v", err)
 	}
 
-	if _, err := rotatedParser.ParseToken(ctx, legacyToken); err != nil {
+	if _, err := rotatedParser.ParseToken(ctx, laravelToken); err != nil {
 		t.Fatalf("a token signed by the previous key no longer verifies: %v", err)
 	}
 }
@@ -274,7 +274,7 @@ func TestNoKIDTokenRequiresExplicitCutoff(t *testing.T) {
 
 	// 手工签一个**不带 kid** 的令牌，模拟存量。
 	now := time.Now()
-	legacy := jwtv5.NewWithClaims(jwtv5.SigningMethodEdDSA, &claims.Claims{
+	laravel := jwtv5.NewWithClaims(jwtv5.SigningMethodEdDSA, &claims.Claims{
 		RegisteredClaims: jwtv5.RegisteredClaims{
 			ID:        "abc",
 			IssuedAt:  jwtv5.NewNumericDate(now),
@@ -284,9 +284,9 @@ func TestNoKIDTokenRequiresExplicitCutoff(t *testing.T) {
 		UserID:  9,
 		TokenID: "abc",
 	})
-	token, err := legacy.SignedString(key.Private)
+	token, err := laravel.SignedString(key.Private)
 	if err != nil {
-		t.Fatalf("sign legacy token: %v", err)
+		t.Fatalf("sign laravel token: %v", err)
 	}
 
 	ctx := context.Background()
@@ -296,34 +296,34 @@ func TestNoKIDTokenRequiresExplicitCutoff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewParser: %v", err)
 		}
-		if _, err := parser.ParseToken(ctx, token); !errors.Is(err, ErrLegacyCutoffPassed) {
-			t.Fatalf("error = %v, want ErrLegacyCutoffPassed", err)
+		if _, err := parser.ParseToken(ctx, token); !errors.Is(err, ErrUnkeyedTokenRejected) {
+			t.Fatalf("error = %v, want ErrUnkeyedTokenRejected", err)
 		}
 	})
 
 	t.Run("accepted before the cutoff", func(t *testing.T) {
 		parser, err := NewParser(set, ParserOptions{
 			Issuer: "gin-api", Audiences: []string{"app"},
-			LegacyNoKIDAcceptUntil: time.Now().Add(time.Hour),
+			UnkeyedTokenAcceptUntil: time.Now().Add(time.Hour),
 		}, 0)
 		if err != nil {
 			t.Fatalf("NewParser: %v", err)
 		}
 		if _, err := parser.ParseToken(ctx, token); err != nil {
-			t.Fatalf("a legacy token was rejected inside the acceptance window: %v", err)
+			t.Fatalf("a laravel token was rejected inside the acceptance window: %v", err)
 		}
 	})
 
 	t.Run("rejected after the cutoff", func(t *testing.T) {
 		parser, err := NewParser(set, ParserOptions{
 			Issuer: "gin-api", Audiences: []string{"app"},
-			LegacyNoKIDAcceptUntil: time.Now().Add(-time.Hour),
+			UnkeyedTokenAcceptUntil: time.Now().Add(-time.Hour),
 		}, 0)
 		if err != nil {
 			t.Fatalf("NewParser: %v", err)
 		}
-		if _, err := parser.ParseToken(ctx, token); !errors.Is(err, ErrLegacyCutoffPassed) {
-			t.Fatalf("error = %v, want ErrLegacyCutoffPassed after the window closed", err)
+		if _, err := parser.ParseToken(ctx, token); !errors.Is(err, ErrUnkeyedTokenRejected) {
+			t.Fatalf("error = %v, want ErrUnkeyedTokenRejected after the window closed", err)
 		}
 	})
 }
@@ -404,7 +404,7 @@ func TestRefreshRotatesToActiveKID(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	legacyToken, err := oldIssuer.Issue(ctx, 11, "user")
+	laravelToken, err := oldIssuer.Issue(ctx, 11, "user")
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestRefreshRotatesToActiveKID(t *testing.T) {
 		Issuer: "gin-api", Audiences: []string{"app"}, TTL: time.Hour,
 	})
 
-	refreshed, err := rotatedIssuer.Refresh(ctx, legacyToken)
+	refreshed, err := rotatedIssuer.Refresh(ctx, laravelToken)
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}

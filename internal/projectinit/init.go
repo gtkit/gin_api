@@ -49,8 +49,8 @@ const appmetaPath = "internal/appmeta/meta.go"
 // （没有目标环境事实的默认 CD 同样必然失败）。
 var motherDeploymentFiles = []string{".gitlab-ci.yml", "deployment.sh"}
 
-// legacyRemovalNote 收尾提示：Laravel 兼容层需按文档手动移除（不自动源码手术）。
-const legacyRemovalNote = "如无需 Laravel 存量 token 兼容，请按 SCAFFOLD.md 的「移除 Laravel 兼容层」清单手动移除 Laravel-legacy JWT 层。"
+// laravelRemovalNote 收尾提示：Laravel 兼容层需按文档手动移除（不自动源码手术）。
+const laravelRemovalNote = "如无需 Laravel 存量 token 兼容，请按 SCAFFOLD.md 的「移除 Laravel 兼容层」清单手动移除 Laravel 兼容层。"
 
 // deploymentNote 说明派生项目为何不再包含母版的部署入口。
 const deploymentNote = "已删除母版所属环境的专属部署入口（CI 配置与部署脚本）：它们绑定母版环境的进程管理服务名、部署根路径与分支，不存在参数化后通用的形态。派生项目需自备部署入口。"
@@ -167,7 +167,7 @@ func (i *Initializer) Run(opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	result.Notes = append(result.Notes, deploymentNote, legacyRemovalNote)
+	result.Notes = append(result.Notes, deploymentNote, laravelRemovalNote)
 	if opts.NoCommit {
 		result.Notes = append(result.Notes, noCommitNote)
 	}
@@ -253,7 +253,7 @@ func (i *Initializer) planDryRun(opts Options, result *Result) {
 			result.Deleted = append(result.Deleted, rel)
 		}
 	}
-	result.Notes = append(result.Notes, deploymentNote, legacyRemovalNote)
+	result.Notes = append(result.Notes, deploymentNote, laravelRemovalNote)
 	if opts.NoCommit {
 		result.Notes = append(result.Notes, noCommitNote)
 	}

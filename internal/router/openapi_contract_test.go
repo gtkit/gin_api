@@ -124,8 +124,8 @@ func TestCompareOperations(t *testing.T) {
 		{
 			name:       "stale documentation",
 			registered: operationSet("GET /health"),
-			documented: operationSet("GET /health", "POST /legacy"),
-			want:       []string{"not registered by Gin: POST /legacy"},
+			documented: operationSet("GET /health", "POST /laravel"),
+			want:       []string{"not registered by Gin: POST /laravel"},
 		},
 	}
 

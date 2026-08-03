@@ -356,7 +356,7 @@ func TestRunStandardInstantiation(t *testing.T) {
 	}
 
 	if !hasNoteContaining(result.Notes, "Laravel") {
-		t.Fatal("expected a legacy-removal note")
+		t.Fatal("expected a laravel-removal note")
 	}
 }
 

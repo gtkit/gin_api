@@ -57,6 +57,10 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 			Handler:       handler.Get,
 			AccessPolicy:  authenticated,
 			TimeoutPolicy: timeout,
+			OperationID:   "getCurrentUserProfile",
+			Tags:          []string{"User"},
+			Summary:       "Get the current user profile",
+			Responses:     map[string]string{"500": "Internal error"},
 		},
 		{
 			Method:        http.MethodPut,
@@ -64,6 +68,13 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 			Handler:       handler.Update,
 			AccessPolicy:  authenticated,
 			TimeoutPolicy: timeout,
+			OperationID:   "updateCurrentUserProfile",
+			Tags:          []string{"User"},
+			Summary:       "Update the current user profile",
+			Responses: map[string]string{
+				"422": "Request payload failed validation",
+				"500": "Internal error",
+			},
 		},
 		{
 			Method:        http.MethodPost,
@@ -71,6 +82,13 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 			Handler:       handler.Deactivate,
 			AccessPolicy:  authenticated,
 			TimeoutPolicy: timeout,
+			OperationID:   "deactivateCurrentUser",
+			Tags:          []string{"User"},
+			Summary:       "Deactivate the current user account",
+			Responses: map[string]string{
+				"422": "Request payload failed validation",
+				"500": "Internal error",
+			},
 		},
 	}
 }

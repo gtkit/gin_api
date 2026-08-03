@@ -22,7 +22,7 @@ func TestUserModuleRoutes(t *testing.T) {
 		{name: "update current profile", method: http.MethodPut, path: "/user", wantFound: true},
 		{name: "deactivate current profile", method: http.MethodPost, path: "/user/deactivate", wantFound: true},
 		// 该路由曾经带一个从不使用的路径参数，删除后不得复活。
-		{name: "legacy unused id route removed", method: http.MethodPut, path: "/user/:id", wantFound: false},
+		{name: "laravel unused id route removed", method: http.MethodPut, path: "/user/:id", wantFound: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

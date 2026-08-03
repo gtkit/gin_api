@@ -37,16 +37,16 @@ func Assemble(cfg *config.Config) (*Assembly, error) {
 		return nil, err
 	}
 
-	cutoff, err := parseCutoff(cfg.JWT.LegacyNoKIDAcceptUntil)
+	cutoff, err := parseCutoff(cfg.JWT.UnkeyedTokenAcceptUntil)
 	if err != nil {
 		return nil, err
 	}
 
 	parser, err := NewParser(keys, ParserOptions{
-		Issuer:                 cfg.JWT.Issuer,
-		Audiences:              cfg.JWT.Audiences,
-		ClockSkew:              time.Duration(cfg.JWT.ClockSkewSeconds) * time.Second,
-		LegacyNoKIDAcceptUntil: cutoff,
+		Issuer:                  cfg.JWT.Issuer,
+		Audiences:               cfg.JWT.Audiences,
+		ClockSkew:               time.Duration(cfg.JWT.ClockSkewSeconds) * time.Second,
+		UnkeyedTokenAcceptUntil: cutoff,
 	}, cfg.JWT.CacheMaxEntries)
 	if err != nil {
 		return nil, fmt.Errorf("build jwt parser: %w", err)
@@ -112,7 +112,7 @@ func parseCutoff(raw string) (time.Time, error) {
 	}
 	parsed, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse jwt legacy cutoff %q: %w", raw, err)
+		return time.Time{}, fmt.Errorf("parse jwt acceptance cutoff %q: %w", raw, err)
 	}
 	return parsed, nil
 }

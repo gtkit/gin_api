@@ -2,7 +2,7 @@ package bootstrap
 
 import (
 	"github.com/gtkit/gin-api/internal/platform/config"
-	legacydao "github.com/gtkit/gin-api/internal/platform/data"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 )
 
 // resourceRequirements 由**已启用的能力集合**推导本进程对可选资源的必需性。
@@ -14,8 +14,8 @@ import (
 //
 // 判据只能来自"谁真的要用它"。新增依赖 Redis 的能力时，在下面的表里加一行——
 // 这也是唯一需要改的地方。
-func resourceRequirements(cfg *config.Config) legacydao.Requirements {
-	return legacydao.Requirements{
+func resourceRequirements(cfg *config.Config) data.Requirements {
+	return data.Requirements{
 		Redis: redisRequired(cfg),
 	}
 }

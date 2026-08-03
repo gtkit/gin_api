@@ -127,6 +127,30 @@ type RouteSpec struct {
 	AccessPolicy AccessPolicy
 	// TimeoutPolicy 由超时批次消费。
 	TimeoutPolicy TimeoutPolicy
+	// OperationID 是该操作的**全局唯一**稳定标识。
+	//
+	// 它是 OpenAPI 里客户端生成器用来命名方法的那个值，因此重命名就是一次
+	// 破坏性变更。全局唯一由 compile 强制：重复会让生成的客户端出现同名方法，
+	// 而多数生成器对此的处理是**静默覆盖其中一个**——于是一条真实存在的接口
+	// 在客户端里消失了。
+	OperationID string
+	// Tags 是 OpenAPI 分组标签，输出前稳定排序。
+	Tags []string
+	// Summary 是一句话描述。
+	Summary string
+	// Responses 是该操作**额外**声明的响应状态码。
+	//
+	// 200 与鉴权相关的 401/403/503 由访问策略派生，不必在此重复；
+	// 这里只写业务特有的（如写方法的 422、探针的 503）。
+	//
+	// 响应契约归描述符所有而不是由生成器猜：生成器只能从方法名猜，
+	// 而"这个接口会不会返回 422"是业务事实，猜错的方向是**漏声明**——
+	// 客户端因此不会处理那个分支。
+	Responses map[string]string
+	// Deprecated 标记该操作已弃用。
+	//
+	// 只是标记，不改变行为：真正的下线是删除 RouteSpec，那要走破坏性变更流程。
+	Deprecated bool
 	// RateLimitPolicyID 由限流批次消费；空表示不限流。
 	RateLimitPolicyID string
 }

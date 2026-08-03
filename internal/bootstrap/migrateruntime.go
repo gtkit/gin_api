@@ -9,11 +9,11 @@ import (
 	"github.com/gtkit/ormx"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	legacydao "github.com/gtkit/gin-api/internal/platform/data"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 )
 
 // openDBForMigration 是注入点，便于测试断言迁移路径只建数据库连接、不碰其他基础设施。
-var openDBForMigration = legacydao.OpenDB
+var openDBForMigration = data.OpenDB
 
 // defaultMigrationStartupTimeout 是迁移建立数据库连接的启动预算。
 const defaultMigrationStartupTimeout = 15 * time.Second
@@ -46,7 +46,7 @@ func NewMigrationRuntime(ctx context.Context) (*MigrationRuntime, error) {
 	defer cancel()
 
 	creds := resolveDBCredentials(cfg, Options{UseMigrationCredentials: true})
-	client, err := openDBForMigration(openCtx, cfg.Database, creds, legacydao.NewGormLogger(cfg))
+	client, err := openDBForMigration(openCtx, cfg.Database, creds, data.NewGormLogger(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("open database for migration: %w", err)
 	}

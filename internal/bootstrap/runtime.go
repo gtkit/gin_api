@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	legacyjwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	legacydao "github.com/gtkit/gin-api/internal/platform/data"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 
 	logger "github.com/gtkit/logger/v2"
 )
@@ -19,9 +19,9 @@ import (
 // 而这正是资源泄漏的来源。
 type Runtime struct {
 	config    *config.Config
-	resources *legacydao.Resources
+	resources *data.Resources
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
-	jwt    *legacyjwtauth.Assembly
+	jwt    *jwtauth.Assembly
 	closed atomic.Bool
 }
 
@@ -41,8 +41,8 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, err
 	}
 
-	resources, err := legacydao.NewResources(
-		ctx, cfg, resolveDBCredentials(cfg, opts), resourceRequirements(cfg), legacydao.DefaultBudget(),
+	resources, err := data.NewResources(
+		ctx, cfg, resolveDBCredentials(cfg, opts), resourceRequirements(cfg), data.DefaultBudget(),
 	)
 	if err != nil {
 		closeProcessRuntime()
@@ -75,7 +75,7 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 //
 // 根因用 %w 保留可 errors.Is/As，清理错误只作附加信息——
 // 反过来会让调用方拿不到真正的失败原因。
-func closeRuntimeOnFailure(resources *legacydao.Resources, cause error) error {
+func closeRuntimeOnFailure(resources *data.Resources, cause error) error {
 	closeProcessRuntime()
 	if err := resources.Close(); err != nil {
 		return errors.Join(cause, fmt.Errorf("close resources after failure: %w", err))
@@ -88,9 +88,9 @@ func closeRuntimeOnFailure(resources *legacydao.Resources, cause error) error {
 // optional 资源启动失败只降级、不阻断启动。若不在此明说，
 // "某个能力从进程启动起就没工作过"会长期无人察觉——
 // 而它表现出来的症状（某类请求一直失败）看起来像业务 bug。
-func logResourceStates(resources *legacydao.Resources) {
+func logResourceStates(resources *data.Resources) {
 	state := resources.RedisAvailability()
-	if state == nil || state.State() == legacydao.AvailabilityHealthy {
+	if state == nil || state.State() == data.AvailabilityHealthy {
 		return
 	}
 	logger.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
@@ -106,7 +106,7 @@ func (r *Runtime) Config() *config.Config {
 }
 
 // Resources returns the process-wide infrastructure connections.
-func (r *Runtime) Resources() *legacydao.Resources {
+func (r *Runtime) Resources() *data.Resources {
 	if r == nil {
 		return nil
 	}
@@ -114,7 +114,7 @@ func (r *Runtime) Resources() *legacydao.Resources {
 }
 
 // TokenIssuer 返回轮换签发器。
-func (r *Runtime) TokenIssuer() legacyjwtauth.RotatingTokenIssuer {
+func (r *Runtime) TokenIssuer() jwtauth.RotatingTokenIssuer {
 	if r == nil || r.jwt == nil {
 		return nil
 	}
@@ -122,7 +122,7 @@ func (r *Runtime) TokenIssuer() legacyjwtauth.RotatingTokenIssuer {
 }
 
 // TokenParser 返回轮换验签器。
-func (r *Runtime) TokenParser() legacyjwtauth.TokenParser {
+func (r *Runtime) TokenParser() jwtauth.TokenParser {
 	if r == nil || r.jwt == nil {
 		return nil
 	}

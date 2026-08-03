@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta gittag tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -90,8 +90,14 @@ check-coverage: test-coverage ## Enforce the aggregate statement coverage baseli
 check-architecture: ## 校验分层架构边界
 	@ ./scripts/check-architecture.sh
 
-check-openapi: ## 校验 OpenAPI 文档结构及其与真实 Gin 路由的一致性
+check-openapi: ## 契约一致性（生成物 vs 已提交）+ 双向路由契约 + 破坏性变更门禁
 	go test -count=1 -run '^TestOpenAPIContract$$' ./internal/router
+	@ GOWORK=off go run scripts/gen-openapi.go --check
+	@ bash ./scripts/check-openapi-breaking.sh --self-test
+	@ bash ./scripts/check-openapi-breaking.sh
+
+gen-openapi: ## 从路由描述符重新生成 api/openapi.json
+	GOWORK=off go run scripts/gen-openapi.go
 
 check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模块并验证编译/传感器/goimports（含门禁自检）
 	@ bash ./scripts/check-generator.sh --self-test
