@@ -36,7 +36,28 @@ func ErrorHandler() gin.HandlerFunc {
 			return
 		}
 
-		// Step 5: 响应未写出，走统一响应（resp.Err 内部会记日志），这里不再重复记录。
+		// Step 5: 客户端主动断开**不写任何响应**。
+		//
+		// 连接已经没了，写只会产生一条无意义的错误日志；更糟的是它会把
+		// "客户端走了"记成一次服务端错误，污染错误率指标。
+		if IsClientGone(err) {
+			logger.Debug("client disconnected before the response was written",
+				zap.String("path", requestPath(c)))
+			return
+		}
+
+		// Step 6: 业务 deadline 到点 → 504。
+		//
+		// **只有调用链真的观察了 ctx 并把 DeadlineExceeded 传回来时才会走到这里。**
+		// 忽略 ctx 的 handler 不会产生这个错误，它会一直跑到自己返回——
+		// 那条路径不承诺任何状态码，上界由关停时的强制关闭兜底。
+		if IsTimeoutError(err) {
+			logContextError(c, err)
+			respondGatewayTimeout(c)
+			return
+		}
+
+		// Step 7: 响应未写出，走统一响应（resp.Err 内部会记日志），这里不再重复记录。
 		if appErr, ok := errors.AsType[goerr.Error](err); ok {
 			resp.Err(c, appErr)
 			return

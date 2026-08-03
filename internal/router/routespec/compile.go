@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // allowedMethods 是模块可声明的 HTTP 方法白名单。
@@ -108,6 +109,9 @@ func validateSpec(spec RouteSpec) error {
 	if err := validateTimeoutPolicy(spec.TimeoutPolicy); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateTimeoutMethodConstraint(spec.Method, spec.TimeoutPolicy); err != nil {
+		errs = append(errs, err)
+	}
 	if spec.RateLimitPolicyID != "" && !rateLimitPolicyIDPattern.MatchString(spec.RateLimitPolicyID) {
 		errs = append(errs, fmt.Errorf(
 			"rate limit policy id %q must match %s", spec.RateLimitPolicyID, rateLimitPolicyIDPattern.String()))
@@ -168,6 +172,44 @@ func validateAccessPolicy(p AccessPolicy) error {
 	return nil
 }
 
+// 超时上界。
+//
+// 存在的理由是"用超大 duration 等价关闭保护"这条真实路径：没有上界时，
+// 想绕过保护的人不必删掉策略——写一个 24h 就够了，而代码审查里
+// 一个填了值的字段看起来完全合规。
+//
+// 更长的任务应当改成流式或异步，而不是把请求挂在那里。
+const (
+	// maxRouteDeadline 是业务预算上界。
+	maxRouteDeadline = 5 * time.Minute
+	// maxWriteGrace 是 socket 写宽限上界。它只覆盖"把响应刷给慢客户端"，
+	// 不覆盖业务本身，因此远小于业务预算。
+	maxWriteGrace = 30 * time.Second
+	// maxIdleWrite 是流式写空闲超时上界。
+	maxIdleWrite = 5 * time.Minute
+)
+
+// validateTimeoutMethodConstraint 校验超时模式与 HTTP 方法的组合。
+//
+// ClientVisible 在本阶段只允许 GET/HEAD。原因是它的语义：到点先给客户端写 504，
+// 但 handler goroutine **仍在继续跑**。对写方法而言，客户端已经收到失败、
+// 服务端却把写操作做完了——客户端据此重试就会产生重复副作用。
+//
+// 放开写方法的前提是有显式的幂等策略元数据（批次 6），在那之前一律拒绝。
+func validateTimeoutMethodConstraint(method string, p TimeoutPolicy) error {
+	if p.Mode != TimeoutClientVisible {
+		return nil
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		return nil
+	}
+	return fmt.Errorf(
+		"timeout mode %s is not allowed on %s: it returns 504 to the client while the handler "+
+			"keeps running, so a client retry would duplicate the side effect; "+
+			"use %s until explicit idempotency metadata exists",
+		p.Mode, method, TimeoutCooperative)
+}
+
 func validateTimeoutPolicy(p TimeoutPolicy) error {
 	switch p.Mode {
 	case TimeoutUnspecified:
@@ -179,8 +221,20 @@ func validateTimeoutPolicy(p TimeoutPolicy) error {
 		if p.Deadline <= 0 {
 			errs = append(errs, fmt.Errorf("timeout mode %s requires a positive deadline", p.Mode))
 		}
+		if p.Deadline > maxRouteDeadline {
+			errs = append(errs, fmt.Errorf(
+				"timeout mode %s deadline %s exceeds the %s ceiling: a longer task belongs in a "+
+					"streaming route or an async job, not in a request with the protection turned off",
+				p.Mode, p.Deadline, maxRouteDeadline))
+		}
 		if p.WriteGrace <= 0 {
 			errs = append(errs, fmt.Errorf("timeout mode %s requires a positive write grace", p.Mode))
+		}
+		if p.WriteGrace > maxWriteGrace {
+			errs = append(errs, fmt.Errorf(
+				"timeout mode %s write grace %s exceeds the %s ceiling: the grace only covers "+
+					"flushing a response to a slow client, not the business work itself",
+				p.Mode, p.WriteGrace, maxWriteGrace))
 		}
 		// 流式字段出现在非流式策略上，说明作者搞混了模式，而不是"多写了没关系"。
 		if p.IdleWrite != 0 || p.HeartbeatInterval != 0 {
@@ -192,6 +246,11 @@ func validateTimeoutPolicy(p TimeoutPolicy) error {
 		var errs []error
 		if p.IdleWrite <= 0 {
 			errs = append(errs, errors.New("streaming timeout requires a positive idle write timeout"))
+		}
+		if p.IdleWrite > maxIdleWrite {
+			errs = append(errs, fmt.Errorf(
+				"streaming idle write timeout %s exceeds the %s ceiling: an oversized duration is "+
+					"just the protection switched off under another name", p.IdleWrite, maxIdleWrite))
 		}
 		if p.HeartbeatInterval <= 0 {
 			errs = append(errs, errors.New("streaming timeout requires a positive heartbeat interval"))

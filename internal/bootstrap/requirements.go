@@ -33,9 +33,17 @@ func redisRequired(cfg *config.Config) bool {
 		return false
 	}
 
-	// 能力表（每行一个依赖 Redis 的已启用能力）：
-	//   目前为空。新增时形如：
-	//     if cfg.RateLimit.Backend == "redis" { return true }
-	//     if cfg.Cron.Enabled { return true }
+	// 能力表（每行一个依赖 Redis 的已启用能力）。
+	//
+	// 限流：只有 `store: redis` **且** `failure_mode: fail_closed` 的策略
+	// 才让 Redis 成为 required——那种组合下 Redis 挂掉时该策略只能拒绝请求，
+	// 实例不该被判为 ready。其余组合本来就有降级路径，把 Redis 抬成 required
+	// 会让一次可降级的故障升级成实例被摘流。
+	if redisRequiredForRateLimit(cfg) {
+		return true
+	}
+
+	// 新增其他依赖 Redis 的能力时在此追加，形如：
+	//   if cfg.Cron.Enabled { return true }
 	return false
 }

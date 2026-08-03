@@ -222,6 +222,39 @@ func BindStructErr(c *gin.Context, err error) {
 	Err(c, goerr.New(err, goerr.StatusValidateParams(), message))
 }
 
+// TooManyRequestsCode 是被限流时对客户端暴露的业务错误码。
+const TooManyRequestsCode int32 = 10010429
+
+// TooManyRequestsErr 返回 429。
+//
+// 必须是 429 而不是 403 或 503：客户端与网关对这三者的处置完全不同——
+// 429 是"退避后重试"，403 是"别再试了"，503 是"服务端故障"。
+// 用错的代价是客户端要么放弃一次本该成功的请求，要么立刻重试加剧过载。
+//
+// 调用方负责在此之前写好 Retry-After 头。
+func TooManyRequestsErr(c *gin.Context, message string) {
+	if message == "" {
+		message = "请求过于频繁"
+	}
+	respJSON(c, http.StatusTooManyRequests, NewResponse(TooManyRequestsCode, message, nil))
+}
+
+// GatewayTimeoutCode 是业务预算到点对客户端暴露的业务错误码。
+const GatewayTimeoutCode int32 = 10010504
+
+// GatewayTimeoutErr 返回 504。
+//
+// 显式写 504 而不是走 goerr.StatusTimeout()：后者的 HTTPCode 是 500，
+// 而 500 与 504 对客户端是两件事——500 说"服务端出错了，重试大概率还是错"，
+// 504 说"这次没在预算内完成，重试可能成功"。把超时报成 500 会让客户端
+// 与网关的重试策略都失去依据，也让错误率指标把一次容量问题记成一次故障。
+func GatewayTimeoutErr(c *gin.Context, message string) {
+	if message == "" {
+		message = "请求超时"
+	}
+	respJSON(c, http.StatusGatewayTimeout, NewResponse(GatewayTimeoutCode, message, nil))
+}
+
 // PayloadTooLargeCode 是请求体超限对客户端暴露的业务错误码（沿用历史号段）。
 const PayloadTooLargeCode int32 = 10010019
 

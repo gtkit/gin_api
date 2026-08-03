@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,8 +30,13 @@ const tokenHeaderName = "App-Token"
 // 解析器与缓存做无谓的工作，也会把巨大的字段写进日志。
 const maxTokenBytes = 8 << 10 // 8 KiB
 
+// TokenParser 抽象 token 验证能力。
+//
+// 带 ctx 是有意的：验签链路未来会接黑名单（一次 Redis 查询），
+// 没有 ctx 就无法透传取消与超时——一个挂住的黑名单查询会把
+// 每个请求都拖到超时，而那时再改签名会波及全部调用点。
 type TokenParser interface {
-	ParseToken(string, ...gojwt.ParserOption) (*jwtclaims.Claims, error)
+	ParseToken(ctx context.Context, token string, opts ...gojwt.ParserOption) (*jwtclaims.Claims, error)
 }
 
 // AuthOptions 是认证中间件的依赖。
@@ -72,7 +78,7 @@ func Authenticate(opts AuthOptions) (gin.HandlerFunc, error) {
 			return
 		}
 
-		claims, err := opts.Parser.ParseToken(token)
+		claims, err := opts.Parser.ParseToken(c.Request.Context(), token)
 		if err != nil {
 			abortWith(c, goerr.New(err, goerr.StatusAuth(), "token parse failed"))
 			return

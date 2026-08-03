@@ -153,6 +153,53 @@ if [ -s "$clientip_hits" ]; then
 fi
 rm -f "$clientip_hits"
 
+# 出站 HTTP 调用不得使用共享的全局 client。
+#
+# http.DefaultClient / http.Get / http.Post / http.Head 用的是同一个进程级 client：
+#   - 它的 Timeout 为 0，即**没有任何超时**；一个不响应的下游能永久占住 goroutine；
+#   - 它的 Transport 是全局共享的，一个依赖的连接池耗尽会波及所有其他依赖；
+#   - 没有任何地方能对单个依赖设置连接超时、响应头超时或调用 CloseIdleConnections。
+#
+# 每个出站依赖必须持有自己的 *http.Client 与 Transport，超时与连接池所有权
+# 落在该依赖的 adapter 上。
+#
+# 判据只匹配真实调用（行首到调用之间不出现 //），这样规则的正文与注释
+# 可以自由提及这些 API，规则本身才能归零而不被豁免绕过。
+outbound_hits="$(mktemp)"
+find internal cmd -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE 'http\.(DefaultClient|DefaultTransport)\b|http\.(Get|Post|PostForm|Head)\(' 2>/dev/null |
+  grep -v '^[^:]*:[0-9]*:[[:space:]]*//' >>"$outbound_hits" || true
+if [ -s "$outbound_hits" ]; then
+  echo "FAIL: outbound HTTP must use a per-dependency client with its own timeouts, not the shared global one"
+  cat "$outbound_hits"
+  fail=1
+fi
+rm -f "$outbound_hits"
+
+# 每个包装 ResponseWriter 的类型都必须实现 Unwrap()。
+#
+# http.ResponseController 靠 Unwrap() 递归找到底层连接，才能 SetWriteDeadline。
+# 任何一个透明 wrapper 漏掉它，链就在那里断开——之后所有 socket 写 deadline
+# 变成 ErrNotSupported，而**没有任何报错**：请求照常处理、日志照常记录，
+# 只是超时保护静默失效了。
+#
+# 判据：嵌入 `gin.ResponseWriter` 的结构体所在文件必须出现
+# `Unwrap() http.ResponseWriter`。按文件而不是按类型判定是有意的粗粒度——
+# 精确到类型需要 AST，而这条规则要挡的是"新加一个 wrapper 忘了实现"，
+# 文件级已经足够，且不会误放过（一个文件里加了新 wrapper 却没加 Unwrap 时仍然命中）。
+writer_unwrap_fail=0
+while IFS= read -r -d '' file; do
+  if grep -qE '^[[:space:]]*gin\.ResponseWriter[[:space:]]*$' "$file" &&
+     ! grep -qF 'Unwrap() http.ResponseWriter' "$file"; then
+    echo "FAIL: $file embeds gin.ResponseWriter but has no Unwrap() http.ResponseWriter"
+    echo "      (a broken unwrap chain makes every socket write deadline silently ineffective)"
+    writer_unwrap_fail=1
+  fi
+done < <(find internal -type f -name '*.go' ! -name '*_test.go' -print0)
+if [ "$writer_unwrap_fail" -ne 0 ]; then
+  fail=1
+fi
+
 # 基础设施连接不得有包级后门。
 #
 # 旧实现在 platform/data 里放了一个包级 daoDB，配套 DB()/Mdb()/Rdb()/DBClose() 这组

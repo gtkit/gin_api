@@ -1,6 +1,7 @@
 package jwtauth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ type stubTokenParser struct {
 	calls  int
 }
 
-func (s *stubTokenParser) ParseToken(string, ...jwtv5.ParserOption) (*claims.Claims, error) {
+func (s *stubTokenParser) ParseToken(_ context.Context, tokenString string, _ ...jwtv5.ParserOption) (*claims.Claims, error) {
 	s.calls++
 	return s.parsed, s.err
 }
@@ -94,7 +95,7 @@ func TestFallbackParserParseToken(t *testing.T) {
 				t.Fatalf("NewFallbackParser returned error: %v", err)
 			}
 
-			parsed, err := parser.ParseToken(tt.token(t))
+			parsed, err := parser.ParseToken(context.Background(), tt.token(t))
 			if tt.wantErrIs != nil {
 				if err == nil {
 					t.Fatal("ParseToken expected error, got nil")

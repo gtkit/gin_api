@@ -35,7 +35,7 @@ func (s *stubAuthorizer) Authorize(
 // 解析器与缓存做无谓的工作，空白还会让 " abc" 与 "abc" 在缓存键、审计与
 // 限流键上产生歧义。
 func TestAuthenticateRejectsMalformedToken(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
 
 	tests := []struct {
 		name  string
@@ -51,7 +51,7 @@ func TestAuthenticateRejectsMalformedToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			engine := gin.New()
-			engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
+			engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
 			engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
 			req := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -70,11 +70,11 @@ func TestAuthenticateRejectsMalformedToken(t *testing.T) {
 // 缺 token 可以匿名放行，但**带了非法 token 必须拒绝**——
 // 否则攻击者只要发一个坏 token 就能绕过校验以匿名身份继续。
 func TestOptionalAuthRejectsInvalidToken(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, true))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, true))
 	engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
 	t.Run("missing token passes through", func(t *testing.T) {
@@ -199,7 +199,7 @@ func TestAuthenticateAndAuthorizeRejectMissingDependencies(t *testing.T) {
 	if _, err := Authenticate(AuthOptions{Parser: nil, Verifier: fakeUserVerifier{}}); err == nil {
 		t.Fatal("missing parser must be an assembly error, not a panic")
 	}
-	if _, err := Authenticate(AuthOptions{Parser: newTestIssuer(t), Verifier: nil}); err == nil {
+	if _, err := Authenticate(AuthOptions{Parser: newTestParser(t), Verifier: nil}); err == nil {
 		t.Fatal("missing verifier must be an assembly error, not a panic")
 	}
 	if _, err := Authorize(nil, "x"); err == nil {

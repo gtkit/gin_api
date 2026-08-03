@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	gojwt "github.com/gtkit/gojwt"
-
+	legacyjwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	legacydao "github.com/gtkit/gin-api/internal/platform/data"
 
@@ -19,10 +18,11 @@ import (
 // 字段全部私有：连接句柄一旦能被外部取走并各自持有，"谁负责关闭"就不再有唯一答案，
 // 而这正是资源泄漏的来源。
 type Runtime struct {
-	config      *config.Config
-	resources   *legacydao.Resources
-	tokenIssuer *gojwt.JwtEd25519
-	closed      atomic.Bool
+	config    *config.Config
+	resources *legacydao.Resources
+	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
+	jwt    *legacyjwtauth.Assembly
+	closed atomic.Bool
 }
 
 // NewRuntime builds runtime dependencies that can be reused by commands.
@@ -51,19 +51,23 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 
 	logResourceStates(resources)
 
-	// JWT issuer 只在此处创建一次（旧实现预检创建一份又丢弃、随后再重建一份，属冗余）。
-	tokenIssuer, err := initJWTWithConfig(cfg)
+	// JWT 轮换体系只在此处装配一次。密钥集在进程生命周期内不可变——
+	// 热重载需要原子替换 parser 与其缓存，否则会出现"缓存里的结果由一把
+	// 已经被移除的密钥验出"这种无法解释的状态。轮换通过重启完成。
+	jwtAssembly, err := initJWTWithConfig(cfg)
 	if err != nil {
 		return nil, closeRuntimeOnFailure(resources, fmt.Errorf("init jwt: %w", err))
 	}
-	if tokenIssuer == nil {
-		return nil, closeRuntimeOnFailure(resources, errors.New("jwt issuer is nil"))
+	if jwtAssembly == nil {
+		return nil, closeRuntimeOnFailure(resources, errors.New("jwt assembly is nil"))
 	}
+	logger.Infof("jwt active kid=%s, previous keys=%d",
+		jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
 
 	return &Runtime{
-		config:      cfg,
-		resources:   resources,
-		tokenIssuer: tokenIssuer,
+		config:    cfg,
+		resources: resources,
+		jwt:       jwtAssembly,
 	}, nil
 }
 
@@ -109,13 +113,20 @@ func (r *Runtime) Resources() *legacydao.Resources {
 	return r.resources
 }
 
-// TokenIssuer returns the initialized JWT issuer for explicit injection.
-func (r *Runtime) TokenIssuer() *gojwt.JwtEd25519 {
-	if r == nil {
+// TokenIssuer 返回轮换签发器。
+func (r *Runtime) TokenIssuer() legacyjwtauth.RotatingTokenIssuer {
+	if r == nil || r.jwt == nil {
 		return nil
 	}
+	return r.jwt.Issuer
+}
 
-	return r.tokenIssuer
+// TokenParser 返回轮换验签器。
+func (r *Runtime) TokenParser() legacyjwtauth.TokenParser {
+	if r == nil || r.jwt == nil {
+		return nil
+	}
+	return r.jwt.Parser
 }
 
 // Close releases runtime resources exactly once.

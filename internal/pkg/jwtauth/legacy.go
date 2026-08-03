@@ -1,6 +1,7 @@
 package jwtauth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +62,9 @@ func NewLaravelVerifier(secret, algorithm, role string) (*LaravelVerifier, error
 // ParseToken 按钉死的 HMAC 算法验签并校验 exp/nbf，成功后把 tymon 载荷适配为 gojwt claims：
 // UserID 取自 sub（兼容 JSON 数字与字符串编码），Roles 合成为构造时注入的角色。
 // 签名与 gojwt Tokener 的 ParseToken 对齐，便于与 Ed25519 主验证器组合。
-func (v *LaravelVerifier) ParseToken(tokenString string, opts ...jwtv5.ParserOption) (*claims.Claims, error) {
+func (v *LaravelVerifier) ParseToken(
+	_ context.Context, tokenString string, opts ...jwtv5.ParserOption,
+) (*claims.Claims, error) {
 	parserOpts := append([]jwtv5.ParserOption{
 		jwtv5.WithValidMethods([]string{v.method.Alg()}),
 		jwtv5.WithExpirationRequired(),

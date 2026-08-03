@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 
 type stubTokenParser struct{}
 
-func (stubTokenParser) ParseToken(string, ...jwtv5.ParserOption) (*claims.Claims, error) {
+func (stubTokenParser) ParseToken(_ context.Context, _ string, _ ...jwtv5.ParserOption) (*claims.Claims, error) {
 	return nil, errors.New("stub parse")
 }
 

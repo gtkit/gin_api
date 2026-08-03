@@ -7,7 +7,6 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/gtkit/goerr v1.2.8
-	github.com/gtkit/golimit v1.0.8
 	github.com/gtkit/verify v1.2.4
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/spf13/cobra v1.10.2
@@ -19,6 +18,7 @@ require (
 
 require (
 	github.com/gtkit/gojwt v1.0.5
+	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/json v1.0.0
 	github.com/gtkit/logger/v2 v2.3.0
 	github.com/gtkit/migratex v0.4.0

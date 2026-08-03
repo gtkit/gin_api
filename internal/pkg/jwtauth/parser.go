@@ -1,6 +1,7 @@
 package jwtauth
 
 import (
+	"context"
 	"errors"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
@@ -10,7 +11,7 @@ import (
 // TokenParser 抽象 token 验证能力，与 middleware.TokenParser 形状一致
 // （internal/pkg 不反向 import middleware，故此处自持接口）。
 type TokenParser interface {
-	ParseToken(tokenString string, opts ...jwtv5.ParserOption) (*claims.Claims, error)
+	ParseToken(ctx context.Context, tokenString string, opts ...jwtv5.ParserOption) (*claims.Claims, error)
 }
 
 // FallbackParser 组合主验证器与可选的 Laravel legacy 验证器：
@@ -32,8 +33,10 @@ func NewFallbackParser(primary TokenParser, legacy *LaravelVerifier) (*FallbackP
 
 // ParseToken 先用主验证器解析；主验证失败且 legacy 启用时回退 legacy。
 // 两路都失败时返回 errors.Join 的联合错误，两类客户端的失败原因都保留在日志链上。
-func (p *FallbackParser) ParseToken(tokenString string, opts ...jwtv5.ParserOption) (*claims.Claims, error) {
-	parsed, primaryErr := p.primary.ParseToken(tokenString, opts...)
+func (p *FallbackParser) ParseToken(
+	ctx context.Context, tokenString string, opts ...jwtv5.ParserOption,
+) (*claims.Claims, error) {
+	parsed, primaryErr := p.primary.ParseToken(ctx, tokenString, opts...)
 	if primaryErr == nil {
 		return parsed, nil
 	}
@@ -41,7 +44,7 @@ func (p *FallbackParser) ParseToken(tokenString string, opts ...jwtv5.ParserOpti
 		return nil, primaryErr
 	}
 
-	parsed, legacyErr := p.legacy.ParseToken(tokenString, opts...)
+	parsed, legacyErr := p.legacy.ParseToken(ctx, tokenString, opts...)
 	if legacyErr == nil {
 		return parsed, nil
 	}

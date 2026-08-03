@@ -39,6 +39,9 @@ type App struct {
 	httpServer httpServer
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
+	// rateLimits 持有限流注册表；关停时必须关闭它，否则每条本地策略的
+	// 后台清理 goroutine 会一直活到进程退出。
+	rateLimits rateLimitAssembly
 	// drainWait 是停 producer 之后、关 HTTP 之前的等待时长，
 	// 用于让负载均衡器观察到 /ready 的 503 并把本实例摘出转发目标。
 	drainWait time.Duration
@@ -66,6 +69,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		httpServer: providers.httpServer,
 		workers:    providers.workers,
 		shutdown:   providers.shutdown,
+		rateLimits: providers.rateLimits,
 		drainWait:  drainWaitFrom(runtime.Config()),
 	}, nil
 }
@@ -90,7 +94,12 @@ func drainWaitFrom(cfg *config.Config) time.Duration {
 func (a *App) Run(ctx context.Context) error {
 	defer a.closeResources()
 
-	pprofShutdown := startPprofServer(a.pprofConfig())
+	// pprof 绑定失败即启动失败：一个"配置说开了但实际没监听"的端点
+	// 会让排障的人对着一个不存在的地址反复尝试。
+	pprofEndpoint, err := startPprofServer(a.pprofConfig())
+	if err != nil {
+		return fmt.Errorf("start pprof endpoint: %w", err)
+	}
 
 	// 第一个信号进入优雅关停，第二个信号进入强制路径。
 	// 用 signal.Notify 而不是 signal.NotifyContext：后者只能表达"收到过信号"，
@@ -112,9 +121,11 @@ func (a *App) Run(ctx context.Context) error {
 	// ① 预绑定监听端口并校验 TLS 材料——必须在 worker 启动屏障**之前**。
 	//    端口占用与证书过期都是"要么立刻成功、要么永远不会成功"的条件；
 	//    放到屏障之后失败，required one-shot 的不可逆副作用就已经发生了。
-	bound, err := prebindHTTP(a.httpConfig)
-	if err != nil {
-		return fmt.Errorf("prebind http: %w", err)
+	bound, prebindErr := prebindHTTP(a.httpConfig)
+	if prebindErr != nil {
+		// 启动回滚：pprof 已经开了采样，必须在这里清零。
+		_ = pprofEndpoint.Shutdown(context.WithoutCancel(ctx))
+		return fmt.Errorf("prebind http: %w", prebindErr)
 	}
 	// 屏障失败时关闭已绑定的监听器，不把端口一直占着。
 	prebindClosed := false
@@ -126,6 +137,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	// ② worker 启动屏障。失败即启动失败：HTTP 从不开始服务。
 	if err := a.workers.Start(ctx); err != nil {
+		_ = pprofEndpoint.Shutdown(context.WithoutCancel(ctx))
 		return fmt.Errorf("start workers: %w", err)
 	}
 
@@ -141,7 +153,7 @@ func (a *App) Run(ctx context.Context) error {
 	serverExited := a.awaitShutdown(serverErrCh)
 
 	// ⑤ 分相关停。
-	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofShutdown)
+	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
 }
 
 // watchSignals 把第一个信号翻译成优雅关停请求，第二个翻译成强制关停。
@@ -196,7 +208,7 @@ func (a *App) awaitShutdown(serverErrCh <-chan error) bool {
 // 继续生产新任务，而随后 consumer 被取消，新任务无人消费或半途中断。
 // consumer 若不在 HTTP 之后才 drain，HTTP 关停期间在飞请求写入的任务就会丢。
 func (a *App) gracefulShutdown(
-	ctx context.Context, serverErrCh <-chan error, serverExited bool, pprofShutdown func(context.Context) error,
+	ctx context.Context, serverErrCh <-chan error, serverExited bool, pprofEndpoint *pprofHandle,
 ) error {
 	base := context.WithoutCancel(ctx)
 	var errs []error
@@ -233,10 +245,14 @@ func (a *App) gracefulShutdown(
 	//    这里只覆盖关停超时导致 supervise 未走完的条目，保证"恰好一次"不漏。
 	collect(a.workers.CleanupRemaining(base))
 
-	// 7. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
-	collect(a.shutdownPprof(base, pprofShutdown))
+	// 7. 关限流：每条本地策略都有一个后台清理 goroutine。
+	//    排在 HTTP 之后：在飞请求可能仍要做限流判定。
+	collect(closeRateLimits(a.rateLimits))
 
-	// 8. 资源由 closeResources（defer）按建立逆序关闭。
+	// 8. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
+	collect(a.shutdownPprof(base, pprofEndpoint))
+
+	// 9. 资源由 closeResources（defer）按建立逆序关闭。
 
 	collect(a.shutdown.Cause())
 
@@ -291,14 +307,23 @@ func (a *App) pprofConfig() config.PprofConfig {
 	return config.PprofConfig{}
 }
 
-func (a *App) shutdownPprof(base context.Context, shutdown func(context.Context) error) error {
-	if shutdown == nil {
+// shutdownPprof 关闭 pprof 端点。
+//
+// 它是**可选能力**：关停失败进入聚合错误但不升级为全进程失败。
+// 运行期已异常退出时只记录一次，不把它当成新的关停错误——端点早就没了。
+func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
+	if endpoint == nil {
 		return nil
 	}
+	if endpoint.Exited() {
+		logger.Warn("pprof endpoint had already exited before shutdown; " +
+			"the capability was degraded for part of this process lifetime")
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(base, pprofShutdownTimeout)
 	defer cancel()
 
-	if err := shutdown(shutdownCtx); err != nil {
+	if err := endpoint.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown pprof endpoint: %w", err)
 	}
 	return nil

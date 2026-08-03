@@ -33,21 +33,32 @@ func testJWTConfig(t *testing.T) *config.Config {
 
 	return &config.Config{
 		JWT: config.JWTConfig{
-			PrivateKeyPath: priPath,
-			PublicKeyPath:  pubPath,
+			Active: config.JWTKeyConfig{
+				KID:            "test-kid",
+				PrivateKeyPath: priPath,
+				PublicKeyPath:  pubPath,
+			},
+			Issuer:    "gin-api-test",
+			Audiences: []string{"app"},
 		},
 	}
 }
 
-// newTestIssuer 构造一个使用一次性密钥的 JWT issuer。
-func newTestIssuer(t *testing.T) *gojwt.JwtEd25519 {
+// newTestJWT 装配一次性的轮换密钥体系。
+func newTestJWT(t *testing.T) *jwtauth.Assembly {
 	t.Helper()
 
-	issuer, err := jwtauth.NewWithConfig(testJWTConfig(t))
+	assembly, err := jwtauth.Assemble(testJWTConfig(t))
 	if err != nil {
-		t.Fatalf("NewWithConfig returned error: %v", err)
+		t.Fatalf("Assemble returned error: %v", err)
 	}
-	return issuer
+	return assembly
+}
+
+// newTestParser 返回一次性验签器。
+func newTestParser(t *testing.T) jwtauth.TokenParser {
+	t.Helper()
+	return newTestJWT(t).Parser
 }
 
 // mustAuthenticate 构造认证中间件，装配失败直接让用例失败。

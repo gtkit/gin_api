@@ -22,6 +22,15 @@ func validConfigForDoctor() *config.Config {
 		},
 		Redis: config.RedisConfig{Addr: "127.0.0.1:6379", DBs: []int{0, 1, 2}},
 		Log:   config.LogConfig{Level: "info", Path: "./logs/app_client"},
+		JWT: config.JWTConfig{
+			Active: config.JWTKeyConfig{
+				KID:            "k2026a",
+				PrivateKeyPath: "config/pem/k2026a.private.pem",
+				PublicKeyPath:  "config/pem/k2026a.public.pem",
+			},
+			Issuer:    "gin-api",
+			Audiences: []string{"app"},
+		},
 	}
 }
 

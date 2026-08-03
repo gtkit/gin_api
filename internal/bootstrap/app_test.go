@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	gojwt "github.com/gtkit/gojwt"
 	"github.com/gtkit/tools/mailx"
 	"github.com/gtkit/verify"
 
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
@@ -435,7 +435,7 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 
 	initLogWithConfig = func(*config.Config) {}
 	buildMailClient = func(*config.Config) (*mailx.Client, error) { return nil, nil }
-	initJWTWithConfig = func(*config.Config) (*gojwt.JwtEd25519, error) { return nil, nil }
+	initJWTWithConfig = func(*config.Config) (*jwtauth.Assembly, error) { return nil, nil }
 	initVerify = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}
 

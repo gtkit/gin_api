@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	legacyclaims "github.com/gtkit/gojwt/claims"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 )
@@ -23,16 +22,17 @@ func (f fakeUserVerifier) ValidateUser(context.Context, int64) (bool, error) {
 }
 
 func TestAuthAllowsValidToken(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -49,16 +49,17 @@ func TestAuthAllowsValidToken(t *testing.T) {
 }
 
 func TestAuthRejectsUnknownUser(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: false}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: false}, jwt.Parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -75,17 +76,18 @@ func TestAuthRejectsUnknownUser(t *testing.T) {
 }
 
 func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	// verifier 因基础设施故障返回 error：必须是 503，不能是 401。
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{err: errors.New("db down")}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{err: errors.New("db down")}, jwt.Parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -104,16 +106,17 @@ func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
 // TestAuthRejectsQueryTokenForSSERequest 守卫「query token 仅限 WebSocket 升级」：
 // 声明 Accept: text/event-stream 的普通请求不得凭 query token 通过鉴权。
 func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -135,16 +138,17 @@ func TestAuthRejectsQueryTokenForSSERequest(t *testing.T) {
 // 仓库里没有任何 WebSocket 端点，而 query 会进访问日志、Referer 与浏览器历史。
 // 将来引入 WS 时须单独设计（如一次性票据换取连接），不复活 query token。
 func TestAuthRejectsWebSocketQueryToken(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
 	engine.GET("/ws", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -162,16 +166,17 @@ func TestAuthRejectsWebSocketQueryToken(t *testing.T) {
 }
 
 func TestAuthRejectsQueryTokenForPlainRequest(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, false))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
 	engine.GET("/protected", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -187,11 +192,11 @@ func TestAuthRejectsQueryTokenForPlainRequest(t *testing.T) {
 }
 
 func TestOptionalAuthAllowsMissingToken(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, true))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, true))
 	engine.GET("/public", func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
@@ -206,16 +211,17 @@ func TestOptionalAuthAllowsMissingToken(t *testing.T) {
 }
 
 func TestOptionalAuthSetsUserIDWhenTokenIsPresent(t *testing.T) {
-	issuer := newTestIssuer(t)
+	jwt := newTestJWT(t)
+	issuer := jwt.Issuer
 
-	token, err := issuer.GenerateToken(42, legacyclaims.WithRole("user"))
+	token, err := issuer.Issue(context.Background(), 42, "user")
 	if err != nil {
-		t.Fatalf("GenerateToken returned error: %v", err)
+		t.Fatalf("Issue returned error: %v", err)
 	}
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, issuer, true))
+	engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, true))
 	engine.GET("/public", func(c *gin.Context) {
 		if got := ginc.UserIDFromContext(c); got != 42 {
 			t.Fatalf("user id = %d, want 42", got)

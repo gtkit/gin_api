@@ -11,6 +11,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
+	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
@@ -41,33 +42,100 @@ type accessMiddleware struct {
 	authenticateOptional gin.HandlerFunc
 	// authorizers 是具名授权实现，AccessAuthorized 按 ID 解析。
 	authorizers *sharedauth.AuthorizerRegistry
+	// rateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyID 按 ID 解析。
+	rateLimits *ratelimit.Registry
+	// rateLimitKeys 生成限流键（主体标识经 HMAC）。
+	rateLimitKeys *ratelimit.KeyBuilder
 }
 
-// chainFor 按访问策略构造该路由的 handler 链。
+// chainFor 按路由策略构造该路由的 handler 链。
 //
-// 顺序固定为 认证 → 授权 → 业务 handler。授权必须在认证之后：
-// 它消费已认证的 principal，拿不到身份时一律拒绝而非放行。
+// 顺序固定为 **超时 → IP/全局限流 → 认证 → 授权 → user 限流 → 业务 handler**。
+//
+// 每处位置都有理由：
+//
+//	超时最外层        要覆盖鉴权本身。鉴权链会查库查缓存，那些调用同样会挂住；
+//	                  排在鉴权之后的话，一次数据库僵死会让请求卡在鉴权阶段
+//	                  而不受任何预算约束。
+//	IP/全局限流靠前    它挡的是"还没证明自己是谁"的流量。放在鉴权之后，
+//	                  每个被限流的请求都要先做一次完整的令牌校验——
+//	                  而那正是攻击者想消耗的资源。
+//	user 限流在鉴权后  它需要已认证身份；排在鉴权之前拿不到 userID。
 //
 // 链的构造收敛在这里，而不是让每个模块自己 Use——后者正是
 // "新增路由忘了挂中间件就静默公开"的成因。
 func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
+	chain := make([]gin.HandlerFunc, 0, 6)
+
+	timeoutMW, err := middleware.RouteTimeout(spec.TimeoutPolicy)
+	if err != nil {
+		// 走不到这里：compile 已拒绝非法策略。万一走到，唯一安全的行为是
+		// 拒绝该路由而不是让它以"无超时"运行——那正是本批次要消灭的形态。
+		return []gin.HandlerFunc{denyEverything}
+	}
+	chain = append(chain, timeoutMW)
+
+	// 鉴权**之前**的限流：IP 与全局作用域不需要身份。
+	if mw, ok := m.rateLimitFor(spec, false); ok {
+		chain = append(chain, mw)
+	}
+
 	switch spec.AccessPolicy.Mode {
 	case routespec.AccessAuthenticated:
-		return []gin.HandlerFunc{m.authenticate, spec.Handler}
+		chain = append(chain, m.authenticate)
 	case routespec.AccessOptionalAuthenticated:
-		return []gin.HandlerFunc{m.authenticateOptional, spec.Handler}
+		chain = append(chain, m.authenticateOptional)
 	case routespec.AccessAuthorized:
 		authorizer, _ := m.authorizers.Lookup(spec.AccessPolicy.AuthorizerID)
-		authorize, err := middleware.Authorize(authorizer, spec.AccessPolicy.AuthorizerID)
-		if err != nil {
+		authorize, authErr := middleware.Authorize(authorizer, spec.AccessPolicy.AuthorizerID)
+		if authErr != nil {
 			// 走不到这里：validateAccessSupport 已在 compile 阶段确认过可解析。
 			// 万一走到，唯一安全的行为是拒绝一切，绝不放行。
 			authorize = denyEverything
 		}
-		return []gin.HandlerFunc{m.authenticate, authorize, spec.Handler}
-	default:
-		return []gin.HandlerFunc{spec.Handler}
+		chain = append(chain, m.authenticate, authorize)
+	case routespec.AccessPublic, routespec.AccessUnspecified:
+		// 公开路由不加鉴权段；未指定已在 compile 阶段拒绝。
 	}
+
+	// 鉴权**之后**的限流：user 作用域需要已认证身份。
+	if mw, ok := m.rateLimitFor(spec, true); ok {
+		chain = append(chain, mw)
+	}
+
+	return append(chain, spec.Handler)
+}
+
+// rateLimitFor 返回该路由在指定阶段的限流中间件。
+//
+// afterAuth 决定取哪一段：user 作用域必须在鉴权之后（否则拿不到身份），
+// IP/global 必须在鉴权之前（否则每个被限流的请求都要先付出一次完整的
+// 令牌校验，而那正是攻击者想消耗的资源）。
+func (m accessMiddleware) rateLimitFor(spec routespec.RouteSpec, afterAuth bool) (gin.HandlerFunc, bool) {
+	if spec.RateLimitPolicyID == "" || m.rateLimits == nil || m.rateLimitKeys == nil {
+		return nil, false
+	}
+
+	limiter, ok := m.rateLimits.Lookup(spec.RateLimitPolicyID)
+	if !ok {
+		// 走不到这里：ValidateReferences 已在 compile 之后确认过可解析。
+		// 万一走到，拒绝而不是静默放行——后者等于这条路由完全没有限流。
+		if afterAuth {
+			return denyEverything, true
+		}
+		return nil, false
+	}
+
+	isUserScope := limiter.Policy().Scope == routespec.ScopeUser
+	if isUserScope != afterAuth {
+		return nil, false
+	}
+
+	mw, err := middleware.RateLimit(limiter, m.rateLimitKeys)
+	if err != nil {
+		return denyEverything, true
+	}
+	return mw, true
 }
 
 // denyEverything 是装配异常时的兜底 handler：拒绝而不是放行。
@@ -188,4 +256,35 @@ func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired boo
 // describeCompileError 给编译失败补上足够定位的上下文。
 func describeCompileError(err error) error {
 	return fmt.Errorf("route compilation failed; no route was registered: %w", err)
+}
+
+// validateRateLimitSupport 校验路由引用的限流策略在装配期可解析。
+//
+// 引用一个未登记的策略若不拦住，那条路由会**完全没有限流**——
+// 而 RouteSpec 里明明写了一个 ID，代码审查时看起来一切正常。
+// 这与"声明了鉴权却没提供实现"是同一类错误，处置也相同：启动失败。
+func validateRateLimitSupport(routes []routespec.CompiledRoute, opt RouterOptions) error {
+	var referenced bool
+	for _, route := range routes {
+		if route.Spec.RateLimitPolicyID != "" {
+			referenced = true
+			break
+		}
+	}
+	if !referenced {
+		return nil
+	}
+
+	if opt.RateLimits == nil {
+		return errors.New(
+			"routes declare rate limit policies but no policy registry was provided: " +
+				"those routes would run with no rate limiting at all")
+	}
+	if opt.RateLimitKeys == nil {
+		return errors.New(
+			"routes declare rate limit policies but no key builder was provided: " +
+				"limiter keys must derive subject identifiers through a keyed HMAC")
+	}
+
+	return opt.RateLimits.ValidateReferences(routes)
 }

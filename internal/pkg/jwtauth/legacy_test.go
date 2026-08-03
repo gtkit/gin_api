@@ -1,6 +1,7 @@
 package jwtauth
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -201,7 +202,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			parsed, err := verifier.ParseToken(tt.token(t))
+			parsed, err := verifier.ParseToken(context.Background(), tt.token(t))
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("ParseToken expected error containing %q, got nil", tt.wantErr)

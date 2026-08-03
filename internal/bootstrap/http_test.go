@@ -12,11 +12,10 @@ import (
 func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 	cfg := newHTTPConfig(&config.Config{
 		App: config.AppConfig{
-			Host:                "127.0.0.1",
-			Port:                "8008",
-			EnableHTTPS:         true,
-			ReadTimeoutSeconds:  3,
-			WriteTimeoutSeconds: 4,
+			Host:               "127.0.0.1",
+			Port:               "8008",
+			EnableHTTPS:        true,
+			ReadTimeoutSeconds: 3,
 		},
 		SSL: config.SSLConfig{
 			PEM: "config/pem/jwtpub.pem",
@@ -33,47 +32,45 @@ func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 	if cfg.ReadHeaderTimeout != 3*time.Second {
 		t.Fatalf("ReadHeaderTimeout = %s", cfg.ReadHeaderTimeout)
 	}
-	if cfg.WriteTimeout != 4*time.Second {
-		t.Fatalf("WriteTimeout = %s", cfg.WriteTimeout)
-	}
 }
 
-func TestNewHTTPConfigKeepsLongerConfiguredWriteTimeout(t *testing.T) {
-	cfg := newHTTPConfig(&config.Config{
-		App: config.AppConfig{
-			Host:                "127.0.0.1",
-			Port:                "8008",
-			WriteTimeoutSeconds: 90,
-		},
-		LLM: config.LLMConfig{
-			Providers: []config.LLMProviderConfig{
-				{Name: "deepseek", APIKey: "k"},
+// TestServerWriteTimeoutIsAlwaysZero 钉住"服务器层不施加隐式写上限"。
+//
+// 这条断言与 routespec 的注册期门禁（任何路由缺 TimeoutPolicy 即启动失败）
+// 是一对：单独看它像是关掉了保护，实际是把保护从"所有路由共享一个值"
+// 挪到了"每条路由各自声明"。两者必须同进同退——门禁一旦被放宽，
+// 这里的 0 就变成纯粹的保护缺失。
+//
+// 旧实现按 LLM 配置抬高全局值：流式因此能跑，代价是所有非流式路由
+// 同时失去写超时保护，而这个副作用在配置里完全看不出来。
+func TestServerWriteTimeoutIsAlwaysZero(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{
+			name: "no llm providers",
+			cfg: &config.Config{
+				App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
 			},
-			TimeoutSeconds: 60,
 		},
-	})
-
-	if cfg.WriteTimeout != 90*time.Second {
-		t.Fatalf("WriteTimeout = %s", cfg.WriteTimeout)
+		{
+			name: "llm providers configured",
+			cfg: &config.Config{
+				App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
+				LLM: config.LLMConfig{
+					Providers:      []config.LLMProviderConfig{{Name: "deepseek", APIKey: "k"}},
+					TimeoutSeconds: 600,
+				},
+			},
+		},
 	}
-}
 
-func TestNewHTTPConfigRaisesWriteTimeoutForLLMStreaming(t *testing.T) {
-	cfg := newHTTPConfig(&config.Config{
-		App: config.AppConfig{
-			Host:                "127.0.0.1",
-			Port:                "8008",
-			WriteTimeoutSeconds: 4,
-		},
-		LLM: config.LLMConfig{
-			Providers: []config.LLMProviderConfig{
-				{Name: "deepseek", APIKey: "k"},
-			},
-			TimeoutSeconds: 10,
-		},
-	})
-
-	if cfg.WriteTimeout != 15*time.Second {
-		t.Fatalf("WriteTimeout = %s", cfg.WriteTimeout)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newHTTPConfig(tc.cfg).WriteTimeout; got != 0 {
+				t.Fatalf("WriteTimeout = %s, want 0: the server must not impose an implicit ceiling", got)
+			}
+		})
 	}
 }

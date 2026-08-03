@@ -19,12 +19,26 @@ const (
 	defaultReadHeaderTimeout = 10 * time.Second
 	// defaultReadTimeout 是读取「整个请求（头+体）」的上限，约束慢 body / slowloris。
 	// 独立于 ReadHeaderTimeout；比它宽松，给正常 body 上传留足时间。
-	defaultReadTimeout       = 60 * time.Second
-	defaultWriteTimeout      = 10 * time.Second
-	defaultIdleTimeout       = 120 * time.Second
-	defaultShutdownTimeout   = 10 * time.Second
-	streamWriteTimeoutBuffer = 5 * time.Second
+	defaultReadTimeout     = 60 * time.Second
+	defaultIdleTimeout     = 120 * time.Second
+	defaultShutdownTimeout = 10 * time.Second
 )
+
+// serverWriteTimeout 恒为 0：**服务器层不施加隐式的绝对写上限**。
+//
+// 它不是"关掉保护"，而是把保护从进程级挪到路由级：
+//
+//	http.Server.WriteTimeout 是所有路由共享的一个值，而流式路由需要它足够长、
+//	普通路由需要它足够短——两者不可能同时满足。旧实现的做法是：配了 LLM provider
+//	就把**全局** WriteTimeout 抬到 `LLM timeout + 5s`，于是流式能跑了，
+//	代价是所有非流式路由同时失去写超时保护，而这个副作用在配置里完全看不出来。
+//
+// 定稿是 `WriteTimeout = 0` + 每条路由经 TimeoutPolicy 显式设置连接级写 deadline
+// （ResponseController.SetWriteDeadline 是**覆盖**，不受全局值压制）。
+//
+// **它的安全性完全依赖 routespec 的注册期门禁**：任何路由缺 TimeoutPolicy 即启动失败。
+// 那条门禁一旦被放宽，这里的 0 就是纯粹的保护缺失，两者必须同进同退。
+const serverWriteTimeout = 0
 
 type httpServer interface {
 	// Serve 在**已绑定**的监听器上提供服务。
@@ -62,12 +76,6 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 		readHeaderTimeout = time.Duration(cfg.App.ReadTimeoutSeconds) * time.Second
 	}
 
-	writeTimeout := defaultWriteTimeout
-	if cfg.App.WriteTimeoutSeconds > 0 {
-		writeTimeout = time.Duration(cfg.App.WriteTimeoutSeconds) * time.Second
-	}
-	writeTimeout = effectiveWriteTimeout(cfg, writeTimeout)
-
 	return HTTPConfig{
 		Host:              cfg.App.Host,
 		Port:              cfg.App.Port,
@@ -77,32 +85,10 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 		TLSConfig:         newTLSConfig(),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       defaultReadTimeout,
-		WriteTimeout:      writeTimeout,
+		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       defaultIdleTimeout,
 		ShutdownTimeout:   defaultShutdownTimeout,
 	}
-}
-
-func effectiveWriteTimeout(cfg *config.Config, current time.Duration) time.Duration {
-	if cfg == nil {
-		return current
-	}
-
-	if len(cfg.LLM.Providers) == 0 {
-		return current
-	}
-
-	llmTimeout := defaultWriteTimeout
-	if cfg.LLM.TimeoutSeconds > 0 {
-		llmTimeout = time.Duration(cfg.LLM.TimeoutSeconds) * time.Second
-	}
-
-	minimum := llmTimeout + streamWriteTimeoutBuffer
-	if current < minimum {
-		return minimum
-	}
-
-	return current
 }
 
 func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {

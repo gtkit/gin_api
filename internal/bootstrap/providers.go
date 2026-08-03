@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -31,7 +32,7 @@ import (
 
 var (
 	initLogWithConfig = legacylog.InitWithConfig
-	initJWTWithConfig = legacyjwtauth.NewWithConfig
+	initJWTWithConfig = legacyjwtauth.Assemble
 	initVerify        = verify.New
 	checkJSONRuntime  = json.CheckJSON
 	buildMailClient   = newMailClientFromConfig
@@ -42,6 +43,7 @@ type providerSet struct {
 	httpServer httpServer
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
+	rateLimits rateLimitAssembly
 }
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
@@ -52,6 +54,8 @@ type infra struct {
 	httpConfig HTTPConfig
 	// mailClient SMTP 客户端；email.host 未配置时为 nil，消费方注入前判空。
 	mailClient *mailx.Client
+	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
+	rateLimits rateLimitAssembly
 }
 
 // services 聚合各模块的 application service，供中间件、路由、worker 三个阶段引用。
@@ -94,7 +98,15 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 		return nil, err
 	}
 
-	// 4. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
+	// 4. 限流。必须先于路由装配：registrar 要按 ID 解析策略，
+	//    而策略非法属装配错误，应在任何路由注册之前就失败。
+	rateLimits, err := buildRateLimits(context.Background(), inf.cfg, inf.resources)
+	if err != nil {
+		return nil, fmt.Errorf("build rate limits: %w", err)
+	}
+	inf.rateLimits = rateLimits
+
+	// 5. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
 	workers, err := buildWorkers(svc)
 	if err != nil {
@@ -102,7 +114,7 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 	}
 	coordinator := NewShutdownCoordinator()
 
-	// 5. 路由引擎：组装路由切片并初始化 Gin 引擎。
+	// 6. 路由引擎：组装路由切片并初始化 Gin 引擎。
 	//    路由契约不合法属装配错误，在此透传为启动失败。
 	engine, err := buildEngine(inf, svc, mw, newProcessStatus(coordinator, workers))
 	if err != nil {
@@ -114,6 +126,7 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 		httpServer: newHTTPServer(engine, inf.httpConfig),
 		workers:    workers,
 		shutdown:   coordinator,
+		rateLimits: rateLimits,
 	}, nil
 }
 
@@ -189,7 +202,7 @@ func buildServices(inf infra) (services, error) {
 // buildMiddlewares 构建路由所需的鉴权中间件。
 // legacy Laravel 兼容开启时，token parser 注入回退组合校验（只验不签，过渡期兼容）。
 func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
-	tokenParser, err := newTokenParser(runtime.Config(), runtime.TokenIssuer())
+	tokenParser, err := newTokenParser(runtime.Config(), runtime.TokenParser())
 	if err != nil {
 		return middlewares{}, err
 	}
@@ -282,6 +295,8 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		HealthChecker: newHealthChecker(inf.resources),
 		// readiness 用的 Redis 必需性与资源装配同源，避免两处口径漂移。
 		RedisRequired:          redisRequired(cfg),
+		RateLimits:             inf.rateLimits.registry,
+		RateLimitKeys:          inf.rateLimits.keys,
 		ProcessStatus:          status,
 		AuthMiddleware:         mw.auth,
 		OptionalAuthMiddleware: mw.optionalAuth,

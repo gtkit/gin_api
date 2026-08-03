@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,17 +31,22 @@ type Config struct {
 	CORS     CORSConfig     `mapstructure:"cors"`
 	Pprof    PprofConfig    `mapstructure:"pprof"`
 	Proxy    ProxyConfig    `mapstructure:"proxy"`
+	// RateLimit 是限流的进程级配置（密钥与策略集合）。
+	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }
 
 type AppConfig struct {
-	Domain              string `mapstructure:"domain"`
-	Host                string `mapstructure:"host"`
-	EnableHTTPS         bool   `mapstructure:"ishttps"`
-	Name                string `mapstructure:"name"`
-	Port                string `mapstructure:"port"`
-	ReadTimeoutSeconds  int    `mapstructure:"readtimeout"`
+	Domain             string `mapstructure:"domain"`
+	Host               string `mapstructure:"host"`
+	EnableHTTPS        bool   `mapstructure:"ishttps"`
+	Name               string `mapstructure:"name"`
+	Port               string `mapstructure:"port"`
+	ReadTimeoutSeconds int    `mapstructure:"readtimeout"`
+	// WriteTimeoutSeconds 已废弃：非零即启动失败，见 validateAppConfig 的说明。
+	// 字段保留是为了让旧配置得到**一条可读的迁移错误**，而不是严格解码给出的
+	// "未知键"——后者不会告诉任何人该往哪改。
 	WriteTimeoutSeconds int    `mapstructure:"writertimeout"`
 	Timezone            string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
@@ -330,9 +336,79 @@ type RedisConfig struct {
 	WriteTimeoutMS int `mapstructure:"write_timeout_ms"`
 }
 
+// RateLimitConfig 是限流的进程级配置。
+type RateLimitConfig struct {
+	// KeyHMACSecret 用于派生限流键里的主体标识。
+	//
+	// **必须是专用密钥**，禁止复用 JWT、数据库或任何其他业务密钥：
+	// 复用意味着任何一处泄漏都会同时击穿多个用途，而限流键泄漏与
+	// 令牌签发密钥泄漏在响应流程上完全不同。
+	//
+	// **轮换语义写死为「桶全部重算 = 一次性限额重置」**：换密钥后所有主体
+	// 的键都变了，等于每个人重新拿到一个满桶。不做双密钥灰度——
+	// 那需要同时维护两套键空间，而收益只是避免一次性重置。
+	KeyHMACSecret string `mapstructure:"key_hmac_secret"`
+	// Policies 是策略集合。为空表示不启用限流。
+	Policies []RateLimitPolicyConfig `mapstructure:"policies"`
+}
+
+// RateLimitPolicyConfig 是一条限流策略的配置形态。
+//
+// 与 routespec.RateLimitPolicy 分开：配置层用字符串表达枚举（yaml 友好），
+// 装配层翻译成强类型并做全部校验。让配置结构直接复用强类型枚举会逼着
+// 使用者在 yaml 里写数字，而数字的含义只有读代码才知道。
+type RateLimitPolicyConfig struct {
+	ID          string  `mapstructure:"id"`
+	Rate        float64 `mapstructure:"rate"`
+	Burst       int     `mapstructure:"burst"`
+	Scope       string  `mapstructure:"scope"`
+	Store       string  `mapstructure:"store"`
+	FailureMode string  `mapstructure:"failure_mode"`
+	MaxKeys     int     `mapstructure:"max_keys"`
+}
+
+// JWTKeyConfig 是一把带 kid 的密钥。
+//
+// active 需要私钥与公钥；previous 只需要公钥（它们只用于验签，
+// 保留私钥意味着一把已经退役的密钥仍能签发新令牌——那正是轮换要终结的）。
+type JWTKeyConfig struct {
+	KID            string `mapstructure:"kid"`
+	PrivateKeyPath string `mapstructure:"private_key_path"`
+	PublicKeyPath  string `mapstructure:"public_key_path"`
+}
+
 type JWTConfig struct {
-	// PrivateKeyPath / PublicKeyPath 是 Ed25519 PEM 路径；
-	// 留空时由 jwtauth 兜底为 config/pem/jwtpri.pem 与 config/pem/jwtpub.pem。
+	// Active 是当前签发用的密钥。
+	Active JWTKeyConfig `mapstructure:"active"`
+	// Previous 是仍接受验签的旧公钥，数量上限由 jwtauth 强制。
+	//
+	// 重叠窗口必须覆盖旧令牌的剩余 TTL，否则轮换仍会造成批量失效；
+	// 但也不能无限期保留——每多一把旧公钥，无 kid 存量令牌的验签成本就多一次尝试。
+	Previous []JWTKeyConfig `mapstructure:"previous"`
+	// Issuer 与 Audiences 是**必填**的令牌作用域声明。
+	//
+	// 一个不声明自己是谁、也不声明发给谁的令牌，在多服务共享密钥或密钥
+	// 意外复用时无法区分用途——拿到 A 服务的令牌就能用在 B 服务上。
+	Issuer    string   `mapstructure:"issuer"`
+	Audiences []string `mapstructure:"audiences"`
+	// ClockSkewSeconds 是允许的时钟偏移，上限固定 120 秒。
+	ClockSkewSeconds int `mapstructure:"clock_skew_seconds"`
+	// CacheMaxEntries 是验签结果缓存的容量；0 禁用，负值即配置错误。
+	CacheMaxEntries int `mapstructure:"cache_max_entries"`
+	// LegacyNoKIDAcceptUntil 是无 kid 存量令牌的**绝对** RFC3339 截止时刻。
+	//
+	// 用绝对时刻而不是时长：时长会让每次重启都自动顺延，兼容口因此变成永久的。
+	// 默认空 = 不接受任何无 kid 令牌。
+	LegacyNoKIDAcceptUntil string `mapstructure:"legacy_no_kid_accept_until"`
+	// LaravelLegacyAcceptUntil 是 Laravel 存量令牌的绝对截止时刻。
+	//
+	// 与上一条**分开**：两者是不同的兼容维度（缺 kid vs 不同算法族），
+	// 共用一个开关会让其中一条的删除被另一条阻塞。
+	LaravelLegacyAcceptUntil string `mapstructure:"laravel_legacy_accept_until"`
+	// PrivateKeyPath / PublicKeyPath 是**已废弃**的单密钥路径。
+	//
+	// 保留字段是为了让旧配置得到一条可读的迁移错误，而不是严格解码给出的
+	// "未知键"——后者不会告诉任何人该往哪改。
 	PrivateKeyPath string `mapstructure:"private_key_path"`
 	PublicKeyPath  string `mapstructure:"public_key_path"`
 	// TokenTTLHours 是签发 token 的有效期（小时）；<=0 时兜底为 720（30 天）。
@@ -445,10 +521,16 @@ func (c *Config) Validate() error {
 	if err := validateJWTConfig(c.JWT); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateJWTRotation(c.JWT, c.Env); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateProxyConfig(c.Proxy, c.Env); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateModuleConfigs(c.Modules); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -477,19 +559,56 @@ func validateJWTConfig(jwt JWTConfig) error {
 	return errors.Join(errs...)
 }
 
-// validatePprofConfig 生产环境强制 pprof 只绑回环地址。
-// pprof 暴露堆栈/内存/CPU 等敏感运行时信息，线上必须走 SSH 端口转发，
-// 绝不允许监听 0.0.0.0 或对外地址。
-func validatePprofConfig(env Env, pprof PprofConfig) error {
-	if !env.IsProd() || !pprof.Enabled {
+// validatePprofConfig 强制 pprof 只绑**字面回环 IP**，且不分环境。
+//
+// 三条都有具体理由：
+//
+//  1. **不分环境**。pprof 没有任何鉴权，谁能连上谁就能拿到堆栈、内存快照与
+//     CPU profile——里面有请求参数、密钥片段与完整调用路径。"这是测试环境"
+//     不构成放宽的理由，而按环境区分的规则终究会被复制到生产。
+//  2. **必须是字面 IP，不接受主机名**。`localhost` 依赖 DNS 与 /etc/hosts；
+//     它们被改写时（容器编排、恶意注入）会让端点绑到一个非回环地址上，
+//     而配置文件看起来完全正常。
+//  3. **用 netip.Addr.IsLoopback() 判定**，不是字符串白名单。
+//     127.0.0.2 与 0:0:0:0:0:0:0:1 同样是回环地址，字符串白名单会误拒；
+//     而白名单一旦被人"顺手扩充"，扩进一个非回环地址不会有任何提示。
+//
+// 远程排障走 SSH 端口转发。
+func validatePprofConfig(_ Env, pprof PprofConfig) error {
+	if !pprof.Enabled {
 		return nil
 	}
-	switch strings.TrimSpace(pprof.Host) {
-	case "", "127.0.0.1", "::1", "localhost":
-		return nil
-	default:
-		return fmt.Errorf("pprof.host %q is not allowed in prod: bind loopback (127.0.0.1/::1/localhost) and access via SSH port-forward", pprof.Host)
+
+	var errs []error
+
+	host := strings.TrimSpace(pprof.Host)
+	if host != "" {
+		addr, err := netip.ParseAddr(host)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf(
+				"pprof.host %q must be a literal loopback IP, not a hostname: "+
+					"a hostname resolves through DNS/hosts and can be redirected to a non-loopback "+
+					"address while the config still looks correct", pprof.Host))
+		case !addr.IsLoopback():
+			errs = append(errs, fmt.Errorf(
+				"pprof.host %q is not a loopback address: pprof has no authentication, "+
+					"anyone who can reach it gets stacks, heap snapshots and CPU profiles; "+
+					"access it via an SSH port-forward instead", pprof.Host))
+		}
 	}
+
+	// 采样率是进程全局状态且有真实运行时开销，负值无意义。
+	if pprof.BlockProfileRate < 0 {
+		errs = append(errs, fmt.Errorf(
+			"pprof.block_profile_rate must not be negative, got %d", pprof.BlockProfileRate))
+	}
+	if pprof.MutexProfileFraction < 0 {
+		errs = append(errs, fmt.Errorf(
+			"pprof.mutex_profile_fraction must not be negative, got %d", pprof.MutexProfileFraction))
+	}
+
+	return errors.Join(errs...)
 }
 
 func validateAppConfig(app AppConfig) error {
@@ -509,8 +628,17 @@ func validateAppConfig(app AppConfig) error {
 	if app.ReadTimeoutSeconds < 0 {
 		errs = append(errs, errors.New("application.readtimeout must be >= 0"))
 	}
-	if app.WriteTimeoutSeconds < 0 {
-		errs = append(errs, errors.New("application.writertimeout must be >= 0"))
+	if app.WriteTimeoutSeconds != 0 {
+		// 该键已废弃且**不提供静默兼容**。
+		//
+		// 它曾经设置 http.Server.WriteTimeout —— 一个所有路由共享的绝对写上限。
+		// 现在写超时由每条路由的 TimeoutPolicy 在连接级设置，服务器层恒为 0。
+		// 保留这个键并静默忽略，会让人以为自己配置了保护而实际没有；
+		// 因此这里直接拒绝启动，并在错误里给出迁移方向。
+		errs = append(errs, errors.New(
+			"application.writertimeout is no longer supported: the server-level write timeout is "+
+				"now fixed at 0 and each route sets its own connection-level write deadline via routespec.TimeoutPolicy; "+
+				"remove this key from your config"))
 	}
 	if app.Timezone != "" {
 		if _, err := time.LoadLocation(app.Timezone); err != nil {

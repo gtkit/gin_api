@@ -1,46 +1,9 @@
 package jwtauth
 
-import (
-	"strings"
-	"time"
-
-	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/runtime/resource"
-
-	"github.com/gtkit/gojwt"
-)
-
-const (
-	defaultJWTPrivateKeyPath = "config/pem/jwtpri.pem"
-	defaultJWTPublicKeyPath  = "config/pem/jwtpub.pem"
-	// defaultJWTTTL 与历史硬编码一致（30 天），保证缺省配置时行为不变。
-	defaultJWTTTL = 30 * 24 * time.Hour
-)
-
-// NewWithConfig 创建一个新的 JWT issuer（不改包级全局），由调用方持有其返回值。
+// 本文件曾承载单密钥的 JWT 装配（NewWithConfig）。
 //
-// key 路径与 token TTL 由 JWTConfig 驱动；缺省（cfg 为 nil 或字段留空/<=0）时
-// 回退到历史默认值（config/pem/jwtpri.pem、jwtpub.pem、30 天），故不配置也行为不变。
-func NewWithConfig(cfg *config.Config) (*gojwt.JwtEd25519, error) {
-	privateKeyPath := defaultJWTPrivateKeyPath
-	publicKeyPath := defaultJWTPublicKeyPath
-	ttl := defaultJWTTTL
-
-	if cfg != nil {
-		if p := strings.TrimSpace(cfg.JWT.PrivateKeyPath); p != "" {
-			privateKeyPath = p
-		}
-		if p := strings.TrimSpace(cfg.JWT.PublicKeyPath); p != "" {
-			publicKeyPath = p
-		}
-		if cfg.JWT.TokenTTLHours > 0 {
-			ttl = time.Duration(cfg.JWT.TokenTTLHours) * time.Hour
-		}
-	}
-
-	return gojwt.NewJwtEd25519(
-		resource.ResolvePath(privateKeyPath),
-		resource.ResolvePath(publicKeyPath),
-		gojwt.WithTokenDuration(ttl),
-	)
-}
+// 它已被 Assemble 取代：单密钥体系下换一次公钥就会让全部存量令牌立刻失效，
+// 而默认 TTL 是 30 天——最坏情况是 30 天内签发的全体用户被强制重登。
+//
+// 旧入口整体删除而不是留作兼容：留着它意味着装配层可以"不小心"用回单密钥，
+// 而那条路径不会有任何报错，只会在下一次轮换时以批量失效的形式暴露。

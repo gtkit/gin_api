@@ -6,6 +6,7 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 	middleware "github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 
@@ -49,6 +50,11 @@ type RouterOptions struct {
 	// Authorizers 是具名授权实现的注册表，AccessAuthorized 按 ID 解析。
 	// 注册表在 compile 前冻结，运行期不可变。
 	Authorizers *sharedauth.AuthorizerRegistry
+	// RateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyID 按 ID 解析。
+	// 为 nil 时所有路由不限流——这是母版的默认形态（没有配置任何策略）。
+	RateLimits *ratelimit.Registry
+	// RateLimitKeys 生成限流键。声明了策略却没有它即装配失败。
+	RateLimitKeys *ratelimit.KeyBuilder
 }
 
 // InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
@@ -93,8 +99,13 @@ func InitRouterWithVersionedModules(
 		authenticate:         opt.AuthMiddleware,
 		authenticateOptional: opt.OptionalAuthMiddleware,
 		authorizers:          authorizers,
+		rateLimits:           opt.RateLimits,
+		rateLimitKeys:        opt.RateLimitKeys,
 	}
 	if err := validateAccessSupport(compiled, access); err != nil {
+		return nil, describeCompileError(err)
+	}
+	if err := validateRateLimitSupport(compiled, opt); err != nil {
 		return nil, describeCompileError(err)
 	}
 

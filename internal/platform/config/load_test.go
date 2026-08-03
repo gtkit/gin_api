@@ -22,7 +22,6 @@ application:
   domain: "https://anshuiroom.com"
   ishttps: false
   readtimeout: 2
-  writertimeout: 1
   timezone: "Asia/Shanghai"
 database:
   dbtype: mysql
@@ -77,8 +76,12 @@ redis:
   addr: 127.0.0.1:6379
   dbs: [0,1,2]
 jwt:
-  private_key_path: config/pem/jwtpri.pem
-  public_key_path: config/pem/jwtpub.pem
+  active:
+    kid: k2026a
+    private_key_path: config/pem/k2026a.private.pem
+    public_key_path: config/pem/k2026a.public.pem
+  issuer: gin-api
+  audiences: ["app"]
   token_ttl_hours: 720
 ssl:
   key: keystring
@@ -176,6 +179,20 @@ log:
   path: ./logs/app_client
 `
 
+	// jwtBlock 是通过校验所需的最小 jwt 段。
+	//
+	// 它不放进 base：有两个用例要在 jwt 段内部注入拼写错误的键，
+	// 而 YAML 不允许同一层出现两个 `jwt:`。让这些用例自带完整段落，
+	// 比在 base 里塞一个"可被覆盖"的占位更清楚。
+	jwtBlock := `jwt:
+  active:
+    kid: k2026a
+    private_key_path: config/pem/k2026a.private.pem
+    public_key_path: config/pem/k2026a.public.pem
+  issuer: gin-api
+  audiences: ["app"]
+`
+
 	tests := []struct {
 		name    string
 		extra   string
@@ -188,12 +205,12 @@ log:
 		},
 		{
 			name:    "legacy jwt.secret rejected",
-			extra:   "jwt:\n  secret: legacy\n",
+			extra:   "jwt:\n  active:\n    kid: k\n    private_key_path: a\n    public_key_path: b\n  issuer: i\n  audiences: [\"app\"]\n  secret: legacy\n",
 			wantKey: "secret",
 		},
 		{
 			name:    "typo token_ttl_hour rejected",
-			extra:   "jwt:\n  token_ttl_hour: 24\n",
+			extra:   "jwt:\n  active:\n    kid: k\n    private_key_path: a\n    public_key_path: b\n  issuer: i\n  audiences: [\"app\"]\n  token_ttl_hour: 24\n",
 			wantKey: "token_ttl_hour",
 		},
 		{
@@ -207,7 +224,12 @@ log:
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := loadFromReader(strings.NewReader(base + tt.extra))
+			input := base + tt.extra
+			// 未在 extra 里自带 jwt 段的用例，补上最小合法段。
+			if !strings.Contains(tt.extra, "jwt:") {
+				input = base + jwtBlock + tt.extra
+			}
+			_, err := loadFromReader(strings.NewReader(input))
 			if err == nil {
 				t.Fatalf("loadFromReader expected unknown-key error for %q, got nil", tt.wantKey)
 			}
@@ -218,7 +240,7 @@ log:
 	}
 
 	// 合法的 aliyun 扁平键不受严格模式影响（白名单先读后删）。
-	cfg, err := loadFromReader(strings.NewReader(base + `aliyun:
+	cfg, err := loadFromReader(strings.NewReader(base + jwtBlock + `aliyun:
   sms_access_id: access-id
   sms_access_secret: access-secret
   sms_sign_name: sign-name
@@ -539,6 +561,15 @@ func validConfigForTest() *Config {
 		Log: LogConfig{
 			Level: "info",
 			Path:  "./logs/app_client",
+		},
+		JWT: JWTConfig{
+			Active: JWTKeyConfig{
+				KID:            "k2026a",
+				PrivateKeyPath: "config/pem/k2026a.private.pem",
+				PublicKeyPath:  "config/pem/k2026a.public.pem",
+			},
+			Issuer:    "gin-api",
+			Audiences: []string{"app"},
 		},
 	}
 }

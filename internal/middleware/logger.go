@@ -48,6 +48,18 @@ func (r responseBodyWriter) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// Unwrap 暴露被包装的 ResponseWriter，让 http.ResponseController 能递归找到
+// 底层连接。
+//
+// 没有它，开启响应体日志就会让 SetWriteDeadline 返回 ErrNotSupported——
+// 一个纯观测开关会**静默关掉超时保护**。而这条失效是无声的：
+// 日志照常记录，只是所有 socket deadline 都不再生效。
+//
+// 凡是透明包装 ResponseWriter 的类型都必须实现它，由 writer 能力测试统一断言。
+func (r responseBodyWriter) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // GinLogger 记录 HTTP 访问日志，使用 BufferedWriteSyncer 的 access logger。
 // 按响应状态码分级：4xx→Warn, 5xx→Error, 其余→Info。
 //
