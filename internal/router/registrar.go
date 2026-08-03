@@ -46,11 +46,13 @@ type accessMiddleware struct {
 	rateLimits *ratelimit.Registry
 	// rateLimitKeys 生成限流键（主体标识经 HMAC）。
 	rateLimitKeys *ratelimit.KeyBuilder
+	// maxBodyBytes 是全局请求体上限，路由级策略只能在此之内收紧。
+	maxBodyBytes int64
 }
 
 // chainFor 按路由策略构造该路由的 handler 链。
 //
-// 顺序固定为 **超时 → IP/全局限流 → 认证 → 授权 → user 限流 → 业务 handler**。
+// 顺序固定为 **超时 → IP/全局限流 → 请求体治理 → 认证 → 授权 → user 限流 → 业务 handler**。
 //
 // 每处位置都有理由：
 //
@@ -60,12 +62,14 @@ type accessMiddleware struct {
 //	IP/全局限流靠前    它挡的是"还没证明自己是谁"的流量。放在鉴权之后，
 //	                  每个被限流的请求都要先做一次完整的令牌校验——
 //	                  而那正是攻击者想消耗的资源。
+//	请求体治理在鉴权前 一个超大 body 不该先耗掉认证的开销，未认证请求的 body
+//	                  更应当被约束；类型不符也无需等到 handler 绑定才发现。
 //	user 限流在鉴权后  它需要已认证身份；排在鉴权之前拿不到 userID。
 //
 // 链的构造收敛在这里，而不是让每个模块自己 Use——后者正是
 // "新增路由忘了挂中间件就静默公开"的成因。
 func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
-	chain := make([]gin.HandlerFunc, 0, 6)
+	chain := make([]gin.HandlerFunc, 0, 7)
 
 	timeoutMW, err := middleware.RouteTimeout(spec.TimeoutPolicy)
 	if err != nil {
@@ -79,6 +83,8 @@ func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
 	if mw, ok := m.rateLimitFor(spec, false); ok {
 		chain = append(chain, mw)
 	}
+
+	chain = append(chain, middleware.RequestBody(spec.RequestBodyPolicy, m.maxBodyBytes))
 
 	switch spec.AccessPolicy.Mode {
 	case routespec.AccessAuthenticated:

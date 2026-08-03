@@ -12,10 +12,11 @@ import (
 func idxSpec(method, path string) RouteSpec {
 	return RouteSpec{
 		Method: method, Path: path, Handler: noopHandler,
-		OperationID:   idxOperationID(method, path),
-		AccessPolicy:  AccessPolicy{Mode: AccessPublic},
-		TimeoutPolicy: TimeoutPolicy{Mode: TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},
-		NoRequestBody: true, ResponseShape: ResponseShapeEmpty,
+		OperationID:       idxOperationID(method, path),
+		AccessPolicy:      AccessPolicy{Mode: AccessPublic},
+		TimeoutPolicy:     TimeoutPolicy{Mode: TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},
+		RequestBodyPolicy: RequestBodyPolicy{Mode: BodyModeNone},
+		ResponseShape:     ResponseShapeEmpty,
 	}
 }
 

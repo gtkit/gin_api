@@ -104,33 +104,3 @@ func (w *maxBytesReaderWrapper) Close() error {
 	// 关闭原始读取器
 	return w.original.Close()
 }
-
-// 工具函数：快速创建中间件的便捷方式
-
-// MaxBytesLimit10MB 限制10MB的便捷方法.
-func MaxBytesLimit10MB() gin.HandlerFunc {
-	return MaxBytesLimit(MaxBytesLimitConfig{
-		MaxBytes: 10 << 20, // 10MB
-	})
-}
-
-// MaxBytesLimit1MB 限制1MB的便捷方法.
-func MaxBytesLimit1MB() gin.HandlerFunc {
-	return MaxBytesLimit(MaxBytesLimitConfig{
-		MaxBytes: 1 << 20, // 1MB
-	})
-}
-
-// MaxBytesLimit100MB 限制100MB的便捷方法.
-func MaxBytesLimit100MB() gin.HandlerFunc {
-	return MaxBytesLimit(MaxBytesLimitConfig{
-		MaxBytes: 100 << 20, // 100MB
-	})
-}
-
-// MaxBytesLimit1GB 限制1G的便捷方法.
-func MaxBytesLimit1GB() gin.HandlerFunc {
-	return MaxBytesLimit(MaxBytesLimitConfig{
-		MaxBytes: 1 << 30, // 1GB
-	})
-}

@@ -153,19 +153,17 @@ type RouteSpec struct {
 	Deprecated bool
 	// RateLimitPolicyID 由限流批次消费；空表示不限流。
 	RateLimitPolicyID string
+	// RequestBodyPolicy 声明该路由接受什么样的请求体。写方法的零值非法。
+	RequestBodyPolicy RequestBodyPolicy
 	// RequestBody 是请求体的**样本值**（传零值实例，如 `dto.UserUpdateRequest{}`）。
 	//
 	// 传值而不是 reflect.Type：描述符由业务代码书写，`dto.X{}` 比
 	// `reflect.TypeOf(dto.X{})` 少一层噪音，而生成器无论如何都要反射。
 	//
-	// 写方法必须在它与 NoRequestBody 之间二选一，见 NoRequestBody 的说明。
+	// 它与 RequestBodyPolicy.Mode 必须一致：接受结构化请求体的模式要求它非 nil，
+	// BodyModeNone 要求它为 nil。**运行时治理与契约声明必须同源**——
+	// 两处各写各的，会出现"中间件按 JSON 放行、契约却说没有请求体"这种分叉。
 	RequestBody any
-	// NoRequestBody 显式声明该写方法不接受请求体。
-	//
-	// **不能用 RequestBody == nil 表达**：那样"忘了声明请求体"和"确实没有请求体"
-	// 在代码里长得一模一样，而前者的后果是契约里少掉这个接口最重要的部分——
-	// 客户端生成器会产出一个不接受任何参数的方法。
-	NoRequestBody bool
 	// ResponseShape 声明 200 响应的形状。零值非法，注册期 fail-closed。
 	ResponseShape ResponseShape
 	// ResponseBody 是 200 响应体的样本值，由 ResponseShape 决定如何解读。
@@ -174,6 +172,69 @@ type RouteSpec struct {
 	// 信封形状由 response 包拥有，写进每条描述符就是把同一件事抄 N 遍，
 	// 改信封时必然漏掉几条）；Raw 时它就是整个响应体；Empty 时必须为 nil。
 	ResponseBody any
+}
+
+// BodyMode 是路由接受的请求体形态。
+//
+// 零值非法（写方法）：JSON、multipart 与"不接受请求体"三者的处置完全不同，
+// 漏写会让中间件放行任意 Content-Type——一个只接受 JSON 的接口因此会
+// 收到 multipart，而错误要到 handler 里绑定失败时才浮现。
+type BodyMode uint8
+
+const (
+	// BodyModeUnspecified 是非法零值，写方法在注册期 fail-closed。
+	BodyModeUnspecified BodyMode = iota
+	// BodyModeNone 表示不接受请求体；带 body 的请求会被拒。
+	BodyModeNone
+	// BodyModeJSON 只接受 application/json。
+	BodyModeJSON
+	// BodyModeForm 只接受 application/x-www-form-urlencoded。
+	BodyModeForm
+	// BodyModeMultipart 只接受 multipart/form-data。
+	BodyModeMultipart
+)
+
+func (m BodyMode) String() string {
+	switch m {
+	case BodyModeNone:
+		return "none"
+	case BodyModeJSON:
+		return "json"
+	case BodyModeForm:
+		return "form"
+	case BodyModeMultipart:
+		return "multipart"
+	default:
+		return "unspecified"
+	}
+}
+
+// ContentType 返回该模式要求的媒体类型；BodyModeNone 返回空串。
+func (m BodyMode) ContentType() string {
+	switch m {
+	case BodyModeJSON:
+		return "application/json"
+	case BodyModeForm:
+		return "application/x-www-form-urlencoded"
+	case BodyModeMultipart:
+		return "multipart/form-data"
+	default:
+		return ""
+	}
+}
+
+// RequestBodyPolicy 描述一条路由的请求体治理。
+//
+// 路由级而不是只有全局上限：一个接受头像上传的接口与一个只收几百字节 JSON 的
+// 接口，合理上限相差几个数量级。只有全局上限时，为了让上传能跑，全局值必须
+// 放到最大——于是**每一个**接口都能被灌进那么大的 body。
+type RequestBodyPolicy struct {
+	Mode BodyMode
+	// MaxBytes 是该路由的字节上限；0 表示沿用全局上限。
+	//
+	// 只允许比全局**更严**：路由级放宽会让全局上限形同虚设，而全局上限
+	// 正是那道不需要逐个路由审查就能成立的兜底。注册期校验这一点。
+	MaxBytes int64
 }
 
 // ResponseShape 是 200 响应体的形状。

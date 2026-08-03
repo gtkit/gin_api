@@ -102,6 +102,7 @@ func InitRouterWithVersionedModules(
 		authorizers:          authorizers,
 		rateLimits:           opt.RateLimits,
 		rateLimitKeys:        opt.RateLimitKeys,
+		maxBodyBytes:         opt.MaxBodyBytes,
 	}
 	if err := validateAccessSupport(compiled, access); err != nil {
 		return nil, describeCompileError(err)

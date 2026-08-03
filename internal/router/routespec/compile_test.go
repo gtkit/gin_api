@@ -22,8 +22,9 @@ func specOK() RouteSpec {
 		OperationID: "op12", Path: "/thing", Handler: noopHandler,
 		AccessPolicy: okAccess(), TimeoutPolicy: okTimeout(),
 		// 显式声明 body 契约：这些 fixture 会被改成写方法复用，
-		// 而写方法必须二选一。
-		NoRequestBody: true, ResponseShape: ResponseShapeEmpty,
+		// 而写方法必须显式声明请求体模式。
+		RequestBodyPolicy: RequestBodyPolicy{Mode: BodyModeNone},
+		ResponseShape:     ResponseShapeEmpty,
 	}
 }
 
@@ -381,25 +382,50 @@ func TestCompileRejectsUndeclaredBodyContract(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "post without a request body declaration is rejected",
+			name: "post without a body mode is rejected",
 			mutate: func(s *RouteSpec) {
 				s.Method = http.MethodPost
-				s.NoRequestBody = false
+				s.RequestBodyPolicy = RequestBodyPolicy{}
 			},
 			wantErr: true,
 		},
 		{
-			name: "post declaring both a body and no-body is rejected",
+			name: "a structured mode without a sample value is rejected",
 			mutate: func(s *RouteSpec) {
 				s.Method = http.MethodPost
+				s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeJSON}
+			},
+			wantErr: true,
+		},
+		{
+			name: "mode none carrying a sample value is rejected",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeNone}
 				s.RequestBody = payload{}
-				s.NoRequestBody = true
 			},
 			wantErr: true,
 		},
 		{
-			name:    "get carrying a request body is rejected",
-			mutate:  func(s *RouteSpec) { s.RequestBody = payload{} },
+			name:    "get accepting a body is rejected",
+			mutate:  func(s *RouteSpec) { s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeJSON} },
+			wantErr: true,
+		},
+		{
+			name: "a route level limit above the ceiling is rejected",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeJSON, MaxBytes: maxRouteBodyBytes + 1}
+				s.RequestBody = payload{}
+			},
+			wantErr: true,
+		},
+		{
+			name: "a limit on a bodyless route is rejected",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeNone, MaxBytes: 1024}
+			},
 			wantErr: true,
 		},
 		{
@@ -422,8 +448,8 @@ func TestCompileRejectsUndeclaredBodyContract(t *testing.T) {
 			name: "a fully declared write route is accepted",
 			mutate: func(s *RouteSpec) {
 				s.Method = http.MethodPost
+				s.RequestBodyPolicy = RequestBodyPolicy{Mode: BodyModeJSON, MaxBytes: 4096}
 				s.RequestBody = payload{}
-				s.NoRequestBody = false
 				s.ResponseShape = ResponseShapeEnveloped
 				s.ResponseBody = payload{}
 			},

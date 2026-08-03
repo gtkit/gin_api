@@ -157,20 +157,7 @@ var methodsWithRequestBody = []string{http.MethodPost, http.MethodPut, http.Meth
 func validateBodyDeclaration(spec RouteSpec) error {
 	var errs []error
 
-	if slices.Contains(methodsWithRequestBody, spec.Method) {
-		switch {
-		case spec.RequestBody != nil && spec.NoRequestBody:
-			errs = append(errs, errors.New(
-				"RequestBody and NoRequestBody are both set: pick one"))
-		case spec.RequestBody == nil && !spec.NoRequestBody:
-			errs = append(errs, fmt.Errorf(
-				"%s must declare RequestBody (a sample value such as dto.Xxx{}) or set NoRequestBody",
-				spec.Method))
-		}
-	} else if spec.RequestBody != nil {
-		errs = append(errs, fmt.Errorf(
-			"%s must not carry a request body", spec.Method))
-	}
+	errs = append(errs, validateRequestBodyPolicy(spec)...)
 
 	switch spec.ResponseShape {
 	case ResponseShapeEnveloped, ResponseShapeRaw:
@@ -192,6 +179,58 @@ func validateBodyDeclaration(spec RouteSpec) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// maxRouteBodyBytes 是路由级上限的绝对天花板。
+//
+// 需要一个天花板：路由级上限的意义是**收紧**，而一个写错的巨大值会静默
+// 变成"这条路由没有上限"，且它比全局配置更难被注意到。
+const maxRouteBodyBytes = 1 << 30 // 1 GiB
+
+// validateRequestBodyPolicy 校验请求体契约。
+//
+// 读方法的零值合法且视为"不接受请求体"：GET/HEAD/DELETE 的请求体语义在 HTTP
+// 规范里未定义，本仓不通过它们传递请求体，因此那里不存在"漏写导致危险默认"。
+// 写方法则不同——JSON、multipart 与"没有请求体"的处置完全不同，零值必须被拒。
+func validateRequestBodyPolicy(spec RouteSpec) []error {
+	var errs []error
+	policy := spec.RequestBodyPolicy
+	writeMethod := slices.Contains(methodsWithRequestBody, spec.Method)
+
+	switch {
+	case writeMethod && policy.Mode == BodyModeUnspecified:
+		errs = append(errs, fmt.Errorf(
+			"%s must declare RequestBodyPolicy.Mode (none, json, form or multipart)", spec.Method))
+	case !writeMethod && policy.Mode != BodyModeUnspecified && policy.Mode != BodyModeNone:
+		errs = append(errs, fmt.Errorf(
+			"%s must not accept a request body, got mode %s", spec.Method, policy.Mode))
+	}
+
+	if policy.MaxBytes < 0 || policy.MaxBytes > maxRouteBodyBytes {
+		errs = append(errs, fmt.Errorf(
+			"RequestBodyPolicy.MaxBytes %d is out of range (0 means inherit the global limit, max %d)",
+			policy.MaxBytes, maxRouteBodyBytes))
+	}
+	if policy.Mode == BodyModeNone && policy.MaxBytes > 0 {
+		errs = append(errs, errors.New(
+			"RequestBodyPolicy.MaxBytes is meaningless when the route accepts no body"))
+	}
+
+	// 契约声明与运行时治理必须同源：两处各写各的会出现"中间件按 JSON 放行、
+	// 契约却说没有请求体"这种分叉，而分叉只在客户端接入时才暴露。
+	structured := policy.Mode == BodyModeJSON || policy.Mode == BodyModeForm ||
+		policy.Mode == BodyModeMultipart
+	switch {
+	case structured && spec.RequestBody == nil:
+		errs = append(errs, fmt.Errorf(
+			"RequestBodyPolicy.Mode %s requires RequestBody (a sample value such as dto.Xxx{})",
+			policy.Mode))
+	case !structured && spec.RequestBody != nil:
+		errs = append(errs, fmt.Errorf(
+			"RequestBody must be nil when the mode is %s", policy.Mode))
+	}
+
+	return errs
 }
 
 // validatePath 校验模块声明的相对路径。

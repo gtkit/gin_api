@@ -78,7 +78,8 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 				"422": "Request payload failed validation",
 				"500": "Internal error",
 			},
-			RequestBody: dto.UserUpdateRequest{},
+			RequestBodyPolicy: routespec.RequestBodyPolicy{Mode: routespec.BodyModeJSON},
+			RequestBody:       dto.UserUpdateRequest{},
 			// 更新成功后不回传资料，handler 是 `resp.Ok(c, nil)`。
 			ResponseShape: routespec.ResponseShapeEmpty,
 		},
@@ -95,7 +96,8 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 				"422": "Request payload failed validation",
 				"500": "Internal error",
 			},
-			RequestBody: dto.UserDeactivateRequest{},
+			RequestBodyPolicy: routespec.RequestBodyPolicy{Mode: routespec.BodyModeJSON},
+			RequestBody:       dto.UserDeactivateRequest{},
 			// 停用成功后没有业务数据可返回，线上是 `{code,msg,data:null}`。
 			ResponseShape: routespec.ResponseShapeEmpty,
 		},

@@ -161,7 +161,8 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 认证与授权分离 | `internal/middleware` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403 |
 | 限流契约 | `internal/ratelimit` + `internal/router/routespec` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
 | JWT 密钥轮换 | `internal/pkg/jwtauth` | 令牌带 kid；未知 kid 直接拒绝（无回退遍历）；退役公钥仍可验签 |
-| 请求体上限 / 413 契约 | `internal/middleware/maxbody.go` | 声明长度与 chunked 两条路径都覆盖 |
+| 请求体契约 | `internal/router/routespec` + `internal/middleware/requestbody.go` | 写方法必须声明 body 形态（none/json/form/multipart），零值即拒绝；不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
+| 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等无 RouteSpec 路径；声明长度与 chunked 两条路径都覆盖 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
 | 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |

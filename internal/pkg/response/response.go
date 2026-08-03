@@ -270,6 +270,32 @@ func PayloadTooLargeErr(c *gin.Context, message string, maxBytes int64) {
 	}))
 }
 
+// UnsupportedMediaTypeCode 是 Content-Type 不被接受时的业务错误码。
+const UnsupportedMediaTypeCode int32 = 10010415
+
+// UnsupportedMediaTypeErr 返回 415。
+//
+// 与 400 分开：400 说"你发的内容有问题"，415 说"你发的**格式**这个接口根本不收"。
+// 混成 400 会让客户端去逐字段排查一份格式就不对的请求体，而真正的修法是换
+// Content-Type。
+func UnsupportedMediaTypeErr(c *gin.Context, message string) {
+	if message == "" {
+		message = "不支持的请求内容类型"
+	}
+	respJSON(c, http.StatusUnsupportedMediaType, NewResponse(UnsupportedMediaTypeCode, message, nil))
+}
+
+// BadRequestCode 是请求不符合接口契约时的业务错误码。
+const BadRequestCode int32 = 10010400
+
+// BadRequestErr 返回 400。
+func BadRequestErr(c *gin.Context, message string) {
+	if message == "" {
+		message = "请求不合法"
+	}
+	respJSON(c, http.StatusBadRequest, NewResponse(BadRequestCode, message, nil))
+}
+
 // payloadTooLargeFromBind 识别绑定错误链上的请求体超限（http.MaxBytesReader
 // 超限时从 Read 返回 *http.MaxBytesError，gin 各类 binding 原样或包装上抛），
 // 命中即按 413 统一处理。这是 chunked 请求（无声明长度）唯一可靠的判定点。
