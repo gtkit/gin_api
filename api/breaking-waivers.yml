@@ -3,15 +3,63 @@
 # 每条豁免必须**逐项声明**——不提供全局关闭开关：一个能被整体关掉的门禁
 # 在第一次挡路时就会被关掉，之后再也不会被打开。
 #
-# 字段全部必填：
+# 字段全部必填，缺一即门禁失败：
 #   id         唯一编号
 #   operation  "METHOD /path"，必须与门禁输出里的 operation 完全一致
-#   rule       规则类别（endpoint_removed / operation_id_changed /
-#              security_tightened / response_status_removed）
+#   rule       门禁输出的规则类别
 #   owner      负责人
 #   reason     为什么这次破坏是有意的
 #   expires    到期日期（YYYY-MM-DD）。过期即门禁失败——
 #              一条永不过期的豁免与删掉这条规则没有区别。
-#
-# 当前为空：没有已知的有意破坏性变更。
-waivers: []
+waivers:
+  - id: W-0001
+    operation: PUT /api/v1/user
+    rule: request_field_max_length_lowered
+    owner: xiaozhaofu
+    reason: >-
+      契约补全，不是行为收紧。v0.1.0 的契约是手写的，漏掉了 nick_name 的长度上限；
+      而运行时的校验声明 binding:"omitempty,max=50" 自 v0.1.0 起从未变化——
+      服务端一直拒绝超过 50 字符的昵称。现在契约由描述符生成，这条约束第一次
+      被如实写进文档。门禁无法区分"契约补全"与"行为收紧"（两者在文档层面
+      一模一样），fail-closed 报出来是正确的，由这条豁免说明真实情况。
+      下一个发布 tag 之后基线更新，这条差异自然消失。
+    expires: 2026-11-30
+
+  - id: W-0002
+    operation: GET /api/v1/user
+    rule: response_field_minimum_lowered
+    owner: xiaozhaofu
+    reason: >-
+      v0.1.0 的手写契约承诺 data.gender 落在 [0, 2]，但代码里没有任何东西保证它：
+      UserProfileResponse.Gender 是裸的 int8，响应路径不做校验，业务层也不限制取值。
+      那是一条只在文档里成立、运行时不兑现的承诺——比不承诺更糟，因为客户端会
+      据此写死枚举分支。生成的契约不再做无法兑现的承诺。若将来要恢复这个保证，
+      正确做法是让代码真正保证它（枚举类型 + 写入校验），而不是把数字写回文档。
+    expires: 2026-11-30
+
+  - id: W-0003
+    operation: GET /api/v1/user
+    rule: response_field_maximum_raised
+    owner: xiaozhaofu
+    reason: >-
+      与 W-0002 同一处：data.gender 的上界同样是 v0.1.0 手写契约的过度承诺。
+    expires: 2026-11-30
+
+  - id: W-0004
+    operation: PUT /api/v1/user
+    rule: response_field_type_widened
+    owner: xiaozhaofu
+    reason: >-
+      修正契约与实现不符。v0.1.0 把"无业务数据"声明成 {"type":"array","maxItems":0}，
+      而 handler 是 resp.Ok(c, nil)，线上实际序列化出 "data": null——空数组从未
+      出现在任何一次真实响应里。生成的契约如实声明为 null。这不是行为变化，
+      是文档第一次与线上一致。
+    expires: 2026-11-30
+
+  - id: W-0005
+    operation: POST /api/v1/user/deactivate
+    rule: response_field_type_widened
+    owner: xiaozhaofu
+    reason: >-
+      与 W-0004 同一处成因：v0.1.0 把"无业务数据"写成空数组，线上实际是 null。
+    expires: 2026-11-30

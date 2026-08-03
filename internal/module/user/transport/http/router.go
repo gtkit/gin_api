@@ -5,6 +5,7 @@ import (
 	"time"
 
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
+	"github.com/gtkit/gin-api/internal/module/user/dto"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
@@ -61,6 +62,8 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 			Tags:          []string{"User"},
 			Summary:       "Get the current user profile",
 			Responses:     map[string]string{"500": "Internal error"},
+			ResponseShape: routespec.ResponseShapeEnveloped,
+			ResponseBody:  dto.UserProfileResponse{},
 		},
 		{
 			Method:        http.MethodPut,
@@ -75,6 +78,9 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 				"422": "Request payload failed validation",
 				"500": "Internal error",
 			},
+			RequestBody: dto.UserUpdateRequest{},
+			// 更新成功后不回传资料，handler 是 `resp.Ok(c, nil)`。
+			ResponseShape: routespec.ResponseShapeEmpty,
 		},
 		{
 			Method:        http.MethodPost,
@@ -89,6 +95,9 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 				"422": "Request payload failed validation",
 				"500": "Internal error",
 			},
+			RequestBody: dto.UserDeactivateRequest{},
+			// 停用成功后没有业务数据可返回，线上是 `{code,msg,data:null}`。
+			ResponseShape: routespec.ResponseShapeEmpty,
 		},
 	}
 }

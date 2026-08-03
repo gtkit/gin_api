@@ -1372,6 +1372,7 @@ import (
 	"time"
 
 	{{.AppAlias}} "{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
+	"{{.ProjectModulePath}}/internal/module/{{.PackageName}}/dto"
 	"{{.ProjectModulePath}}/internal/router/routespec"
 )
 
@@ -1397,8 +1398,9 @@ func (m *{{.StructName}}Module) Name() string { return "module.{{.PackageName}}"
 // 模块只声明"这条路由是什么、要什么策略"，不自行注册、不挂中间件、不拼版本前缀——
 // handler chain 与前缀由中央 registrar 统一构造。
 //
-// 策略字段没有默认值：AccessPolicy / TimeoutPolicy 的零值会在启动期被拒绝。
-// 这是刻意的——"漏写访问策略"若默认为公开，一个本该鉴权的接口就会静默暴露。
+// 策略字段没有默认值：AccessPolicy / TimeoutPolicy / ResponseShape 的零值会在
+// 启动期被拒绝。这是刻意的——"漏写访问策略"若默认为公开，一个本该鉴权的接口
+// 就会静默暴露；"漏写响应形状"则会让 OpenAPI 契约缺掉这个接口返回什么。
 // 生成的路由默认是 AccessPublic，请按实际需要改成 AccessAuthenticated 等。
 func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 	handler := NewHandler(m.service)
@@ -1419,6 +1421,8 @@ func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 			Handler:       handler.List,
 			AccessPolicy:  access,
 			TimeoutPolicy: timeout,
+			ResponseShape: routespec.ResponseShapeEnveloped,
+			ResponseBody:  dto.{{.StructName}}ListResponse{},
 		},
 		{
 			Method:        http.MethodGet,
@@ -1429,6 +1433,8 @@ func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
 			Handler:       handler.Get,
 			AccessPolicy:  access,
 			TimeoutPolicy: timeout,
+			ResponseShape: routespec.ResponseShapeEnveloped,
+			ResponseBody:  dto.{{.StructName}}Response{},
 		},
 	}
 }

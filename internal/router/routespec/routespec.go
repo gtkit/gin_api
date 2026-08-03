@@ -153,4 +153,60 @@ type RouteSpec struct {
 	Deprecated bool
 	// RateLimitPolicyID 由限流批次消费；空表示不限流。
 	RateLimitPolicyID string
+	// RequestBody 是请求体的**样本值**（传零值实例，如 `dto.UserUpdateRequest{}`）。
+	//
+	// 传值而不是 reflect.Type：描述符由业务代码书写，`dto.X{}` 比
+	// `reflect.TypeOf(dto.X{})` 少一层噪音，而生成器无论如何都要反射。
+	//
+	// 写方法必须在它与 NoRequestBody 之间二选一，见 NoRequestBody 的说明。
+	RequestBody any
+	// NoRequestBody 显式声明该写方法不接受请求体。
+	//
+	// **不能用 RequestBody == nil 表达**：那样"忘了声明请求体"和"确实没有请求体"
+	// 在代码里长得一模一样，而前者的后果是契约里少掉这个接口最重要的部分——
+	// 客户端生成器会产出一个不接受任何参数的方法。
+	NoRequestBody bool
+	// ResponseShape 声明 200 响应的形状。零值非法，注册期 fail-closed。
+	ResponseShape ResponseShape
+	// ResponseBody 是 200 响应体的样本值，由 ResponseShape 决定如何解读。
+	//
+	// Enveloped 时它是信封里 data 的类型（只声明 data，不声明信封：
+	// 信封形状由 response 包拥有，写进每条描述符就是把同一件事抄 N 遍，
+	// 改信封时必然漏掉几条）；Raw 时它就是整个响应体；Empty 时必须为 nil。
+	ResponseBody any
+}
+
+// ResponseShape 是 200 响应体的形状。
+//
+// 需要三态而不是"有/无"两态：本仓同时存在两类响应——业务接口走
+// `response.ResResult` 统一信封，而 K8s 探针返回裸 JSON（它的形状是编排器
+// 的契约，不能改成信封）。把探针也当成信封会让契约**说谎**，
+// 而照着它生成的探针客户端会去读一个不存在的 code 字段。
+type ResponseShape uint8
+
+const (
+	// ResponseShapeUnspecified 是非法零值，注册期 fail-closed。
+	//
+	// 沉默不能当作"没有响应体"：漏声明与确实没有在代码里长得一模一样，
+	// 而漏声明的后果是客户端生成器产出一个不返回数据的方法。
+	ResponseShapeUnspecified ResponseShape = iota
+	// ResponseShapeEnveloped 表示响应走统一信封，ResponseBody 是其中的 data。
+	ResponseShapeEnveloped
+	// ResponseShapeRaw 表示 ResponseBody 就是整个响应体，不加信封。
+	ResponseShapeRaw
+	// ResponseShapeEmpty 表示走信封但没有业务数据，线上是 `{code,msg,data:null}`。
+	ResponseShapeEmpty
+)
+
+func (s ResponseShape) String() string {
+	switch s {
+	case ResponseShapeEnveloped:
+		return "enveloped"
+	case ResponseShapeRaw:
+		return "raw"
+	case ResponseShapeEmpty:
+		return "empty"
+	default:
+		return "unspecified"
+	}
 }

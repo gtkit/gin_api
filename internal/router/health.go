@@ -78,11 +78,33 @@ type dependency struct {
 	ping     func(context.Context) error
 }
 
+// LivenessResponse 是存活探针的响应体。
+//
+// 用具名类型而不是 gin.H：探针的响应形状是编排器的契约，也是 OpenAPI 契约的
+// 一部分。用 map 的话，契约只能靠人另写一份，而那份迟早与实现分叉。
+// 现在契约与实现共用同一个类型，改字段两边一起变。
+type LivenessResponse struct {
+	Status string `json:"status"`
+}
+
+// ReadinessResponse 是就绪探针的响应体。
+type ReadinessResponse struct {
+	Status string `json:"status"`
+	// Checks 是各依赖的状态，键为依赖名。
+	Checks map[string]string `json:"checks,omitempty"`
+	// Phase 仅在关停期出现。
+	Phase string `json:"phase,omitempty"`
+	// Failed 是导致不可用的进程能力。
+	Failed []string `json:"failed,omitempty"`
+	// Degraded 是已降级但不影响接流量的能力。
+	Degraded []string `json:"degraded,omitempty"`
+}
+
 func healthHandler(c *gin.Context) {
 	// liveness 在 draining 期间**继续返回 200**，直到进程真正退出。
 	// 否则编排器会在优雅关停中途判定进程已死并 kill 它，在飞请求被直接截断——
 	// 优雅关停的全部工作因此白做。
-	c.JSON(http.StatusOK, gin.H{"status": statusOK})
+	c.JSON(http.StatusOK, LivenessResponse{Status: statusOK})
 }
 
 // readyHandler 按四态模型回答就绪性。
@@ -99,15 +121,15 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		// 避免错误装配的实例仍被纳入流量。
 		if checker == nil {
 			logger.Warn("readiness checker not configured; reporting not ready")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": statusUnavailable})
+			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{Status: statusUnavailable})
 			return
 		}
 
 		// draining 优先短路：此时结论已经确定，再去 ping 依赖只是徒增关停期的负载。
 		if status != nil && status.Draining() {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status": statusUnavailable,
-				"phase":  "draining",
+			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{
+				Status: statusUnavailable,
+				Phase:  "draining",
 			})
 			return
 		}
@@ -120,30 +142,30 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		results, anyRequiredFailed, anyOptionalFailed := runDependencyChecks(
 			c.Request.Context(), deps, limiter)
 
-		body := gin.H{"checks": results}
+		body := ReadinessResponse{Checks: results}
 
 		if status != nil {
 			if failed := status.FailedRequirements(); len(failed) > 0 {
 				anyRequiredFailed = true
-				body["failed"] = failed
+				body.Failed = failed
 			}
 			if degraded := status.DegradedCapabilities(); len(degraded) > 0 {
 				anyOptionalFailed = true
-				body["degraded"] = degraded
+				body.Degraded = degraded
 			}
 		}
 
 		switch {
 		case anyRequiredFailed:
-			body["status"] = statusUnavailable
+			body.Status = statusUnavailable
 			c.JSON(http.StatusServiceUnavailable, body)
 		case anyOptionalFailed:
 			// 200 而不是 503：可选能力故障不该让整个实例被摘流，
 			// 但必须在 body 里说清楚，否则"部分能力已失效"完全不可见。
-			body["status"] = statusDegraded
+			body.Status = statusDegraded
 			c.JSON(http.StatusOK, body)
 		default:
-			body["status"] = statusOK
+			body.Status = statusOK
 			c.JSON(http.StatusOK, body)
 		}
 	}

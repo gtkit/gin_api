@@ -15,6 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	"github.com/gtkit/gin-api/internal/openapi"
+	"github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/router"
 )
 
@@ -68,11 +69,16 @@ func render() ([]byte, error) {
 		return nil, err
 	}
 
-	doc := openapi.Generate(routes, openapi.Options{
+	doc, err := openapi.Generate(routes, openapi.Options{
 		Title:       appmeta.CommandName,
 		Version:     "1.0.0",
 		Description: "Public HTTP contract generated from the route descriptors.",
+		// 信封样本取自 response 包本身，因此改了信封字段契约会跟着变。
+		Envelope: resp.ResResult{},
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	var buf bytes.Buffer
 	if err := openapi.Write(&buf, doc); err != nil {

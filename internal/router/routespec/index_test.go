@@ -15,6 +15,7 @@ func idxSpec(method, path string) RouteSpec {
 		OperationID:   idxOperationID(method, path),
 		AccessPolicy:  AccessPolicy{Mode: AccessPublic},
 		TimeoutPolicy: TimeoutPolicy{Mode: TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},
+		NoRequestBody: true, ResponseShape: ResponseShapeEmpty,
 	}
 }
 

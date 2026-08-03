@@ -245,6 +245,9 @@ func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired boo
 			OperationID:   "getHealth",
 			Tags:          []string{"Health"},
 			Summary:       "Liveness probe",
+			// 探针不走统一信封：它的形状是编排器的契约。
+			ResponseShape: routespec.ResponseShapeRaw,
+			ResponseBody:  LivenessResponse{},
 		},
 		{
 			Method:        http.MethodGet,
@@ -256,6 +259,8 @@ func systemRoutes(checker HealthChecker, status ProcessStatus, redisRequired boo
 			Tags:          []string{"Health"},
 			Summary:       "Readiness probe",
 			Responses:     map[string]string{"503": "Not ready to receive traffic"},
+			ResponseShape: routespec.ResponseShapeRaw,
+			ResponseBody:  ReadinessResponse{},
 		},
 	}
 }

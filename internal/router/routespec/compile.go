@@ -136,6 +136,60 @@ func validateSpec(spec RouteSpec) error {
 		errs = append(errs, fmt.Errorf(
 			"rate limit policy id %q must match %s", spec.RateLimitPolicyID, rateLimitPolicyIDPattern.String()))
 	}
+	if err := validateBodyDeclaration(spec); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
+
+// methodsWithRequestBody 是必须声明请求体的方法。
+//
+// DELETE 不在其中：它的请求体语义在 HTTP 规范里未定义，代理与中间件对它的
+// 处理并不一致，因此本仓不通过 DELETE 传递请求体。
+var methodsWithRequestBody = []string{http.MethodPost, http.MethodPut, http.MethodPatch}
+
+// validateBodyDeclaration 要求请求体与响应体**显式**声明。
+//
+// 沉默不能当作"没有"：漏声明与确实没有在代码里长得一模一样，而漏声明的
+// 后果是契约里缺掉这个接口最重要的部分——客户端生成器会产出一个不接受
+// 参数、或不返回数据的方法，而调用它的人要到联调时才发现。
+func validateBodyDeclaration(spec RouteSpec) error {
+	var errs []error
+
+	if slices.Contains(methodsWithRequestBody, spec.Method) {
+		switch {
+		case spec.RequestBody != nil && spec.NoRequestBody:
+			errs = append(errs, errors.New(
+				"RequestBody and NoRequestBody are both set: pick one"))
+		case spec.RequestBody == nil && !spec.NoRequestBody:
+			errs = append(errs, fmt.Errorf(
+				"%s must declare RequestBody (a sample value such as dto.Xxx{}) or set NoRequestBody",
+				spec.Method))
+		}
+	} else if spec.RequestBody != nil {
+		errs = append(errs, fmt.Errorf(
+			"%s must not carry a request body", spec.Method))
+	}
+
+	switch spec.ResponseShape {
+	case ResponseShapeEnveloped, ResponseShapeRaw:
+		if spec.ResponseBody == nil {
+			errs = append(errs, fmt.Errorf(
+				"ResponseShape %s requires ResponseBody (a sample value such as dto.Xxx{})",
+				spec.ResponseShape))
+		}
+	case ResponseShapeEmpty:
+		if spec.ResponseBody != nil {
+			errs = append(errs, errors.New(
+				"ResponseShape empty must not carry a ResponseBody"))
+		}
+	case ResponseShapeUnspecified:
+		errs = append(errs, errors.New(
+			"ResponseShape must be declared (enveloped, raw or empty)"))
+	default:
+		errs = append(errs, fmt.Errorf("unknown ResponseShape %d", spec.ResponseShape))
+	}
 
 	return errors.Join(errs...)
 }

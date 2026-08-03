@@ -21,6 +21,9 @@ func specOK() RouteSpec {
 		Method:      http.MethodGet,
 		OperationID: "op12", Path: "/thing", Handler: noopHandler,
 		AccessPolicy: okAccess(), TimeoutPolicy: okTimeout(),
+		// 显式声明 body 契约：这些 fixture 会被改成写方法复用，
+		// 而写方法必须二选一。
+		NoRequestBody: true, ResponseShape: ResponseShapeEmpty,
 	}
 }
 
@@ -350,6 +353,100 @@ func TestCompileValidatesRateLimitPolicyID(t *testing.T) {
 			s.RateLimitPolicyID = tt.id
 			if err := compileOne(s); (err != nil) != tt.wantErr {
 				t.Fatalf("rate limit policy id %q err = %v, wantErr = %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCompileRejectsUndeclaredBodyContract 是 body 契约的负向证明。
+//
+// 沉默不能当作"没有"：漏声明与确实没有在代码里长得一模一样，而漏声明的
+// 后果是 OpenAPI 契约缺掉这个接口最重要的部分——客户端生成器会产出一个
+// 不接受参数、或不返回数据的方法，调用它的人要到联调时才发现。
+func TestCompileRejectsUndeclaredBodyContract(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		Name string `json:"name"`
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*RouteSpec)
+		wantErr bool
+	}{
+		{
+			name:    "get without a response shape is rejected",
+			mutate:  func(s *RouteSpec) { s.ResponseShape = ResponseShapeUnspecified },
+			wantErr: true,
+		},
+		{
+			name: "post without a request body declaration is rejected",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.NoRequestBody = false
+			},
+			wantErr: true,
+		},
+		{
+			name: "post declaring both a body and no-body is rejected",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.RequestBody = payload{}
+				s.NoRequestBody = true
+			},
+			wantErr: true,
+		},
+		{
+			name:    "get carrying a request body is rejected",
+			mutate:  func(s *RouteSpec) { s.RequestBody = payload{} },
+			wantErr: true,
+		},
+		{
+			name: "enveloped without a response body is rejected",
+			mutate: func(s *RouteSpec) {
+				s.ResponseShape = ResponseShapeEnveloped
+				s.ResponseBody = nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty carrying a response body is rejected",
+			mutate: func(s *RouteSpec) {
+				s.ResponseShape = ResponseShapeEmpty
+				s.ResponseBody = payload{}
+			},
+			wantErr: true,
+		},
+		{
+			name: "a fully declared write route is accepted",
+			mutate: func(s *RouteSpec) {
+				s.Method = http.MethodPost
+				s.RequestBody = payload{}
+				s.NoRequestBody = false
+				s.ResponseShape = ResponseShapeEnveloped
+				s.ResponseBody = payload{}
+			},
+		},
+		{
+			name: "a raw response route is accepted",
+			mutate: func(s *RouteSpec) {
+				s.ResponseShape = ResponseShapeRaw
+				s.ResponseBody = payload{}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := specOK()
+			tt.mutate(&spec)
+
+			err := compileOne(spec)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
 		})
 	}

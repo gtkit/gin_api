@@ -27,11 +27,14 @@ func (contractModule) Routes() []routespec.RouteSpec {
 
 	return []routespec.RouteSpec{
 		{Method: http.MethodGet,
-			OperationID: "op1", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+			OperationID: "op1", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout,
+			ResponseShape: routespec.ResponseShapeEmpty},
 		{Method: http.MethodPost,
-			OperationID: "op2", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+			OperationID: "op2", Path: "/thing", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout,
+			NoRequestBody: true, ResponseShape: routespec.ResponseShapeEmpty},
 		{Method: http.MethodGet,
-			OperationID: "op3", Path: "/thing/:id", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout},
+			OperationID: "op3", Path: "/thing/:id", Handler: h, AccessPolicy: public, TimeoutPolicy: timeout,
+			ResponseShape: routespec.ResponseShapeEmpty},
 	}
 }
 
@@ -170,6 +173,7 @@ func (authRequiringModule) Routes() []routespec.RouteSpec {
 		Handler:       func(c *gin.Context) { c.Status(http.StatusOK) },
 		AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
 		TimeoutPolicy: routespec.TimeoutPolicy{Mode: routespec.TimeoutCooperative, Deadline: time.Second, WriteGrace: time.Second},
+		ResponseShape: routespec.ResponseShapeEmpty,
 	}}
 }
 

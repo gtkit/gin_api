@@ -28,13 +28,34 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful response"
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfileResponseResResult"
+                }
+              }
+            }
           },
           "401": {
-            "description": "Missing or invalid credentials"
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal error"
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           }
         }
       },
@@ -44,6 +65,16 @@
           "User"
         ],
         "summary": "Update the current user profile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/dto.UserUpdateRequest"
+              }
+            }
+          }
+        },
         "security": [
           {
             "AppToken": []
@@ -51,16 +82,44 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful response"
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "401": {
-            "description": "Missing or invalid credentials"
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "422": {
-            "description": "Request payload failed validation"
+            "description": "Request payload failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal error"
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           }
         }
       }
@@ -72,6 +131,16 @@
           "User"
         ],
         "summary": "Deactivate the current user account",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/dto.UserDeactivateRequest"
+              }
+            }
+          }
+        },
         "security": [
           {
             "AppToken": []
@@ -79,16 +148,44 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful response"
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "401": {
-            "description": "Missing or invalid credentials"
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "422": {
-            "description": "Request payload failed validation"
+            "description": "Request payload failed validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal error"
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyResResult"
+                }
+              }
+            }
           }
         }
       }
@@ -102,7 +199,14 @@
         "summary": "Liveness probe",
         "responses": {
           "200": {
-            "description": "Successful response"
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/router.LivenessResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -116,16 +220,197 @@
         "summary": "Readiness probe",
         "responses": {
           "200": {
-            "description": "Successful response"
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/router.ReadinessResponse"
+                }
+              }
+            }
           },
           "503": {
-            "description": "Not ready to receive traffic"
+            "description": "Not ready to receive traffic",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/router.ReadinessResponse"
+                }
+              }
+            }
           }
         }
       }
     }
   },
   "components": {
+    "schemas": {
+      "EmptyResResult": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "data": {
+            "type": "null"
+          },
+          "msg": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "msg",
+          "data"
+        ]
+      },
+      "UserProfileResponseResResult": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "data": {
+            "$ref": "#/components/schemas/dto.UserProfileResponse"
+          },
+          "msg": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "msg",
+          "data"
+        ]
+      },
+      "dto.UserDeactivateRequest": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "channel"
+        ]
+      },
+      "dto.UserProfileResponse": {
+        "type": "object",
+        "properties": {
+          "avatar": {
+            "type": "string"
+          },
+          "gender": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nickname": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "vip_level": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "vip_status": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "required": [
+          "avatar",
+          "gender",
+          "id",
+          "nickname",
+          "phone",
+          "status",
+          "vip_level",
+          "vip_status"
+        ]
+      },
+      "dto.UserUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "avatar": {
+            "type": "string",
+            "format": "uri"
+          },
+          "gender": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "nick_name": {
+            "type": "string",
+            "maxLength": 50
+          }
+        }
+      },
+      "router.LivenessResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "router.ReadinessResponse": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "degraded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "phase": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    },
     "securitySchemes": {
       "AppToken": {
         "type": "apiKey",

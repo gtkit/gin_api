@@ -17,6 +17,7 @@ func route(method, path string, mutate func(*routespec.RouteSpec)) routespec.Com
 		AccessPolicy: routespec.AccessPolicy{
 			Mode: routespec.AccessPublic,
 		},
+		ResponseShape: routespec.ResponseShapeEmpty,
 	}
 	if mutate != nil {
 		mutate(&spec)
@@ -104,7 +105,7 @@ func TestSecurityIsDerivedFromAccessPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			doc := Generate([]routespec.CompiledRoute{
+			doc := mustGenerate(t, []routespec.CompiledRoute{
 				route(http.MethodGet, "/x", func(s *routespec.RouteSpec) { s.AccessPolicy = tc.policy }),
 			}, Options{Title: "t", Version: "1"})
 
@@ -143,7 +144,7 @@ func TestSecurityIsDerivedFromAccessPolicy(t *testing.T) {
 func TestAppTokenSchemeShape(t *testing.T) {
 	t.Parallel()
 
-	doc := Generate(nil, Options{Title: "t", Version: "1"})
+	doc := mustGenerate(t, nil, Options{Title: "t", Version: "1"})
 	scheme, ok := doc.Components.SecuritySchemes[AppTokenScheme]
 	if !ok {
 		t.Fatalf("security scheme %q is missing", AppTokenScheme)
@@ -159,7 +160,7 @@ func TestAppTokenSchemeShape(t *testing.T) {
 func TestPathParametersAreExtracted(t *testing.T) {
 	t.Parallel()
 
-	doc := Generate([]routespec.CompiledRoute{
+	doc := mustGenerate(t, []routespec.CompiledRoute{
 		route(http.MethodGet, "/thing/:id", nil),
 	}, Options{Title: "t", Version: "1"})
 
@@ -182,7 +183,7 @@ func TestPathParametersAreExtracted(t *testing.T) {
 func TestDescriptorResponsesOverrideDerived(t *testing.T) {
 	t.Parallel()
 
-	doc := Generate([]routespec.CompiledRoute{
+	doc := mustGenerate(t, []routespec.CompiledRoute{
 		route(http.MethodPost, "/x", func(s *routespec.RouteSpec) {
 			s.AccessPolicy = routespec.AccessPolicy{Mode: routespec.AccessAuthenticated}
 			s.Responses = map[string]string{"422": "validation failed", "500": "internal"}
@@ -203,7 +204,7 @@ func TestDescriptorResponsesOverrideDerived(t *testing.T) {
 func mustRender(t *testing.T, routes []routespec.CompiledRoute) string {
 	t.Helper()
 
-	doc := Generate(routes, Options{Title: "svc", Version: "1.0.0"})
+	doc := mustGenerate(t, routes, Options{Title: "svc", Version: "1.0.0"})
 	var sb strings.Builder
 	if err := Write(&sb, doc); err != nil {
 		t.Fatalf("Write: %v", err)

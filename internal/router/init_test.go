@@ -36,7 +36,8 @@ func (m *testModule) Routes() []routespec.RouteSpec {
 		Handler:     func(c *gin.Context) { c.Status(http.StatusNoContent) },
 		// 测试模块同样必须显式声明策略——零值会被 compile 拒绝，
 		// 这正是描述符要保证的性质。
-		AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessPublic},
+		AccessPolicy:  routespec.AccessPolicy{Mode: routespec.AccessPublic},
+		ResponseShape: routespec.ResponseShapeEmpty,
 		TimeoutPolicy: routespec.TimeoutPolicy{
 			Mode:       routespec.TimeoutCooperative,
 			Deadline:   time.Second,

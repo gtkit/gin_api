@@ -150,7 +150,10 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
-| 路由契约 | `internal/router/routespec` | 访问/超时策略零值即拒绝；双向契约测试防旁路路由 |
+| 路由契约 | `internal/router/routespec` | 访问/超时策略与响应形状零值即拒绝；双向契约测试防旁路路由 |
+| OpenAPI 契约生成 | `internal/openapi` + `make gen-openapi` | 从 RouteSpec 生成含 body schema 的 `api/openapi.json`；无法表达的类型（`any`、未自述形状的自定义 `MarshalJSON`）**拒绝生成而非产出空 schema** |
+| 契约破坏性门禁 | `scripts/check-openapi-breaking.sh` | 与上一个稳定 SemVer tag 比对；按数据流向判定（请求侧收窄 / 响应侧放宽）；覆盖 endpoint / 参数 / security / 状态码 / 媒体类型 / body 字段与约束；22 条规则各有负向与反向自检 |
+| 破坏性变更豁免 | `api/breaking-waivers.yml` | 逐项声明，无全局开关；字段不全或过期即门禁失败；操作与规则须同时命中 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层 `WriteTimeout=0` |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |

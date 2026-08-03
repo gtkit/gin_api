@@ -76,6 +76,7 @@ func TestRouteRateLimitRejectsBeyondBurst(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: policy.ID,
 		}}}},
 	}, RouterOptions{
@@ -139,6 +140,7 @@ func TestRouteRateLimitSeparatesSubjects(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: policy.ID,
 		}}}},
 	}, RouterOptions{
@@ -183,6 +185,7 @@ func TestUnknownRateLimitPolicyFailsAssembly(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: "never.registered",
 		}}}},
 	}, RouterOptions{
@@ -208,6 +211,7 @@ func TestRateLimitPolicyWithoutRegistryFailsAssembly(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: "test.ip",
 		}}}},
 	}, RouterOptions{})
@@ -239,6 +243,7 @@ func TestUserScopedPolicyOnPublicRouteFailsAssembly(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: policy.ID,
 		}}}},
 	}, RouterOptions{
@@ -272,6 +277,7 @@ func TestUserScopedRateLimitRunsAfterAuthentication(t *testing.T) {
 			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
 			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
 			TimeoutPolicy:     cooperativeTimeoutPolicy(),
+			ResponseShape:     routespec.ResponseShapeEmpty,
 			RateLimitPolicyID: policy.ID,
 		}}}},
 	}, RouterOptions{

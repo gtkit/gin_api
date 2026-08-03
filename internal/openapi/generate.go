@@ -8,6 +8,7 @@ package openapi
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -63,6 +64,7 @@ type Operation struct {
 	Summary     string                `json:"summary,omitempty"`
 	Deprecated  bool                  `json:"deprecated,omitempty"`
 	Parameters  []Parameter           `json:"parameters,omitempty"`
+	RequestBody *RequestBody          `json:"requestBody,omitempty"`
 	Security    []map[string][]string `json:"security,omitempty"`
 	Responses   map[string]Response   `json:"responses"`
 	// XAuthorizer 是受控的 vendor extension。
@@ -83,11 +85,13 @@ type Parameter struct {
 
 // Response 是一个响应。
 type Response struct {
-	Description string `json:"description"`
+	Description string               `json:"description"`
+	Content     map[string]MediaType `json:"content,omitempty"`
 }
 
-// Components 承载安全方案。
+// Components 承载安全方案与具名 schema。
 type Components struct {
+	Schemas         map[string]*Schema        `json:"schemas,omitempty"`
 	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes"`
 }
 
@@ -106,16 +110,41 @@ type Options struct {
 	Title       string
 	Version     string
 	Description string
+	// Envelope 是统一响应信封的样本值（如 `response.ResResult{}`）。
+	//
+	// 由调用方传入而不是在本包写死：信封归 response 包所有，抄一份到这里
+	// 就成了第二套来源，改信封时文档不会跟着变。
+	//
+	// 它必须**恰有一个** interface 字段——那就是业务数据槽。
+	Envelope any
+}
+
+// info 取出文档元信息。
+//
+// Options 比 Info 多了生成侧才需要的字段，因此不能直接转换。
+func (o Options) info() Info {
+	return Info{Title: o.Title, Version: o.Version, Description: o.Description}
 }
 
 // Generate 从编译后的路由生成文档。
 //
 // 输出**完全确定性**：路径、方法、标签、参数全部稳定排序，且不含任何
 // 随生成时刻变化的内容。否则一致性门禁会因为无关差异而失败。
-func Generate(routes []routespec.CompiledRoute, opts Options) Document {
+//
+// 任何一条路由的 body 无法产出有意义的 schema 时**整体失败**，不产出
+// 一份"大部分正确"的契约：局部错误的契约比没有契约更危险，因为它看起来
+// 是完整的，而客户端会照着错误的那部分去实现。
+func Generate(routes []routespec.CompiledRoute, opts Options) (Document, error) {
+	registry := NewSchemaRegistry()
+
+	envelope, err := newEnvelopeBuilder(registry, opts.Envelope)
+	if err != nil {
+		return Document{}, err
+	}
+
 	doc := Document{
 		OpenAPI: SchemaVersion,
-		Info:    Info(opts),
+		Info:    opts.info(),
 		Paths:   map[string]PathItem{},
 		Components: Components{
 			SecuritySchemes: map[string]SecurityScheme{
@@ -125,6 +154,7 @@ func Generate(routes []routespec.CompiledRoute, opts Options) Document {
 	}
 
 	tagSet := map[string]struct{}{}
+	var errs []error
 
 	for _, route := range routes {
 		path := toOpenAPIPath(route.FullPath)
@@ -133,11 +163,21 @@ func Generate(routes []routespec.CompiledRoute, opts Options) Document {
 			item = PathItem{}
 			doc.Paths[path] = item
 		}
-		item[strings.ToLower(route.Spec.Method)] = toOperation(route)
+
+		op, err := toOperation(route, registry, envelope)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s %s: %w", route.Spec.Method, route.FullPath, err))
+			continue
+		}
+		item[strings.ToLower(route.Spec.Method)] = op
 
 		for _, tag := range route.Spec.Tags {
 			tagSet[tag] = struct{}{}
 		}
+	}
+
+	if len(errs) > 0 {
+		return Document{}, errors.Join(errs...)
 	}
 
 	tags := make([]Tag, 0, len(tagSet))
@@ -147,27 +187,112 @@ func Generate(routes []routespec.CompiledRoute, opts Options) Document {
 	slices.SortFunc(tags, func(a, b Tag) int { return cmp.Compare(a.Name, b.Name) })
 	doc.Tags = tags
 
-	return doc
+	schemas, err := registry.Components()
+	if err != nil {
+		return Document{}, err
+	}
+	doc.Components.Schemas = schemas
+
+	return doc, nil
 }
 
 // toOperation 把一条路由翻译成 OpenAPI 操作。
-func toOperation(route routespec.CompiledRoute) Operation {
+func toOperation(
+	route routespec.CompiledRoute, registry *SchemaRegistry, envelope *envelopeBuilder,
+) (Operation, error) {
+	spec := route.Spec
+
 	op := Operation{
-		OperationID: route.Spec.OperationID,
-		Tags:        slices.Clone(route.Spec.Tags),
-		Summary:     route.Spec.Summary,
-		Deprecated:  route.Spec.Deprecated,
+		OperationID: spec.OperationID,
+		Tags:        slices.Clone(spec.Tags),
+		Summary:     spec.Summary,
+		Deprecated:  spec.Deprecated,
 		Parameters:  pathParameters(route.FullPath),
-		Responses:   mergeResponses(defaultResponses(route.Spec.AccessPolicy), route.Spec.Responses),
+		Responses:   mergeResponses(defaultResponses(spec.AccessPolicy), spec.Responses),
 	}
 	slices.Sort(op.Tags)
 
-	op.Security = securityFor(route.Spec.AccessPolicy)
-	if route.Spec.AccessPolicy.Mode == routespec.AccessAuthorized {
-		op.XAuthorizer = route.Spec.AccessPolicy.AuthorizerID
+	op.Security = securityFor(spec.AccessPolicy)
+	if spec.AccessPolicy.Mode == routespec.AccessAuthorized {
+		op.XAuthorizer = spec.AccessPolicy.AuthorizerID
 	}
 
-	return op
+	if spec.RequestBody != nil {
+		schema, err := registry.Of(spec.RequestBody, RoleRequest)
+		if err != nil {
+			return Operation{}, fmt.Errorf("request body: %w", err)
+		}
+		op.RequestBody = &RequestBody{
+			Required: true,
+			Content:  map[string]MediaType{jsonMediaType: {Schema: schema}},
+		}
+	}
+
+	if err := attachResponseBodies(&op, spec, registry, envelope); err != nil {
+		return Operation{}, fmt.Errorf("response body: %w", err)
+	}
+
+	return op, nil
+}
+
+// attachResponseBodies 给**每个**声明的状态码补上响应体。
+//
+// 不只给 200：错误响应同样有 body（统一信封里带业务错误码），只给成功码
+// 声明 content 会让契约说"出错时没有响应体"，于是客户端在错误分支里
+// 根本不去解析——而错误码正是它最需要读的东西。
+func attachResponseBodies(
+	op *Operation, spec routespec.RouteSpec, registry *SchemaRegistry, envelope *envelopeBuilder,
+) error {
+	success, err := responseSchema(spec, registry, envelope)
+	if err != nil {
+		return err
+	}
+
+	// 裸响应的错误分支也走同一个类型（探针无论 200 还是 503 都返回同一形状）；
+	// 走信封的路由，错误分支是不带业务数据的信封。
+	failure := success
+	if spec.ResponseShape != routespec.ResponseShapeRaw {
+		failure = envelope.wrap(registry, nil, "")
+	}
+
+	for status := range op.Responses {
+		body := failure
+		if strings.HasPrefix(status, "2") {
+			body = success
+		}
+		response := op.Responses[status]
+		response.Content = map[string]MediaType{jsonMediaType: {Schema: body}}
+		op.Responses[status] = response
+	}
+	return nil
+}
+
+// responseSchema 按声明的形状产出 200 响应体的 schema。
+//
+// Empty 仍然产出信封而不是空 body：线上返回的是 `{code,msg,data:null}`，
+// 声明成空 body 会让客户端跳过解析，连业务错误码都读不到。
+func responseSchema(
+	spec routespec.RouteSpec, registry *SchemaRegistry, envelope *envelopeBuilder,
+) (*Schema, error) {
+	switch spec.ResponseShape {
+	case routespec.ResponseShapeEmpty:
+		return envelope.wrap(registry, nil, ""), nil
+
+	case routespec.ResponseShapeEnveloped:
+		data, err := registry.Of(spec.ResponseBody, RoleResponse)
+		if err != nil {
+			return nil, err
+		}
+		return envelope.wrap(registry, data, bodySchemaName(spec.ResponseBody)), nil
+
+	case routespec.ResponseShapeRaw:
+		// 不加信封：探针的响应形状是编排器的契约，包进信封会让契约说谎。
+		return registry.Of(spec.ResponseBody, RoleResponse)
+
+	default:
+		// 未声明已在 compile 阶段拒绝；万一走到，宁可整体失败也不产出一份猜出来的契约。
+		return nil, fmt.Errorf("response shape %s cannot be rendered", spec.ResponseShape)
+	}
 }
 
 // securityFor 从访问策略**派生** security，不维护第二个字段。
@@ -191,10 +316,7 @@ func securityFor(policy routespec.AccessPolicy) []map[string][]string {
 
 // defaultResponses 给出该访问模式下必然存在的响应码。
 //
-// 只声明由框架保证的那些：业务响应体的 schema 需要一套完整的类型映射
-// 方案（validation tag、指针语义、自定义 Marshal、递归结构等），
-// 那是独立的一步，不在这里凭空产出无约束的 `{}`——那样的 schema
-// 看起来有契约，实际什么也没约束。
+// 只派生由框架保证的那些；业务特有的响应码归描述符声明。
 func defaultResponses(policy routespec.AccessPolicy) map[string]Response {
 	responses := map[string]Response{
 		"200": {Description: "Successful response"},
