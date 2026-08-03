@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-loopback-tests check-release-wiring check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-loopback-tests check-image-digests check-release-wiring check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -143,6 +143,10 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
+check-image-digests: ## 所有镜像引用必须钉不可变摘要
+	@ bash ./scripts/check-image-digests.sh --self-test
+	@ bash ./scripts/check-image-digests.sh
+
 check-loopback-tests: ## 绑端口的测试必须自行声明依赖（防受限环境静默失效）
 	@ GOWORK=off go run scripts/check-loopback-tests.go --self-test
 	@ GOWORK=off go run scripts/check-loopback-tests.go internal cmd
@@ -188,7 +192,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-package-vars check-loopback-tests check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-package-vars check-loopback-tests check-image-digests check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

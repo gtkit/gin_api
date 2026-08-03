@@ -8,6 +8,20 @@
 # govulncheck 不在此处：它由 go.mod 的 tool 指令锁定精确版本，
 # 经 `go tool govulncheck` 调用，不依赖 PATH 上的随机版本。
 
+# 基础镜像与开发依赖镜像的固定摘要。
+#
+# 与扫描器同一条理由，但**后果更重**：基础镜像进的是交付物本身，扫描器只是工具。
+# 摘要取自多平台 OCI index，不是单平台 image digest——后者会让镜像只能在
+# 一种架构上构建。同时保留可读 tag：只写摘要时没人能一眼看出这是哪个版本，
+# 两者并存时 Docker 以摘要为准，tag 退化为注释。
+#
+# 升级流程：`docker buildx imagetools inspect <tag>` 取顶层 Digest，改这里，
+# 再跑 `make check-image-digests`。绝不手抄或推测摘要。
+GOLANG_IMAGE = golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
+ALPINE_IMAGE = alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+MYSQL_IMAGE  = mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+REDIS_IMAGE  = redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+
 GITLEAKS_IMAGE = zricethezav/gitleaks@sha256:71d3ee5990f2176f763b438298453fc37e87b119122045e176ca9d44ff00b08b
 TRIVY_IMAGE    = aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f
 

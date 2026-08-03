@@ -232,7 +232,7 @@ func TestRetryAfterSecondsCeilsWithFloor(t *testing.T) {
 func TestKeyBuilderComposition(t *testing.T) {
 	t.Parallel()
 
-	const secret = "0123456789abcdef0123456789abcdef"
+	const secret = "rate-limit-test-secret-not-a-real-credential"
 	builder, err := NewKeyBuilder(secret, "svc")
 	if err != nil {
 		t.Fatalf("NewKeyBuilder: %v", err)

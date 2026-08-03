@@ -61,6 +61,17 @@ func main() {
 			fatalf("gitleaks 全历史产物无法解析（扫描器错误不可豁免）：%v", herr)
 		}
 		secrets = append(secrets, hist...)
+
+		// 镜像漏洞必须参与判定。
+		//
+		// 产出了 trivy-image.json 却不消费它，等于花时间扫了一遍然后把结果扔掉——
+		// 门禁照样打印 OK，而基础镜像里的漏洞一条都没被看见。那比不扫更糟：
+		// 不扫至少不会让人以为镜像已经被检查过。
+		imageVulns, ierr := readTrivyImage(filepath.Join(*cacheDir, "trivy-image.json"))
+		if ierr != nil {
+			fatalf("trivy 镜像产物无法解析（扫描器错误不可豁免）：%v", ierr)
+		}
+		vulns = append(vulns, imageVulns...)
 	}
 
 	waivers, err := readWaivers(*waiversPath)
@@ -244,6 +255,65 @@ func readWaivers(path string) (map[string]waiver, error) {
 // 只统计**真正影响本项目调用链**的 finding：govulncheck 会同时报告
 // "依赖里存在该漏洞但你的代码没有调用到"的情形，把后者也算作阻断
 // 会产生大量无法处理的噪声，最终逼人整体关掉门禁。
+// blockingSeverities 是必须当场处理的镜像漏洞等级。
+//
+// 只挡 CRITICAL / HIGH：把每一级都设成阻断，结果是豁免表迅速膨胀成一份
+// 没人再认真看的清单，而真正紧急的那几条会淹没在里面。低等级与
+// UNKNOWN（多为"该包已不再维护"这类提示）记入产物与 SBOM 供审阅，
+// 但不阻断发布——它们没有"现在必须做什么"的动作。
+var blockingSeverities = map[string]bool{"CRITICAL": true, "HIGH": true}
+
+// readTrivyImage 读出交付镜像里需要处理的漏洞。
+//
+// component 用 "包名@版本"：同一个 CVE 在不同包上是不同的处置对象，
+// 只按 CVE 号豁免会让一条豁免顺带放过另一个包上的同名漏洞。
+func readTrivyImage(path string) ([]finding, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // source 模式不产出镜像扫描结果。
+		}
+		return nil, err
+	}
+
+	var report struct {
+		Results []struct {
+			Target          string `json:"Target"`
+			Vulnerabilities []struct {
+				VulnerabilityID  string `json:"VulnerabilityID"`
+				PkgName          string `json:"PkgName"`
+				InstalledVersion string `json:"InstalledVersion"`
+				FixedVersion     string `json:"FixedVersion"`
+				Severity         string `json:"Severity"`
+				Title            string `json:"Title"`
+			} `json:"Vulnerabilities"`
+		} `json:"Results"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		return nil, fmt.Errorf("解析 trivy 镜像输出：%w", err)
+	}
+
+	var out []finding
+	for _, result := range report.Results {
+		for _, v := range result.Vulnerabilities {
+			if !blockingSeverities[strings.ToUpper(v.Severity)] {
+				continue
+			}
+			detail := fmt.Sprintf("%s %s（%s）", v.Severity, v.Title, result.Target)
+			if v.FixedVersion != "" {
+				detail += fmt.Sprintf("，已有修复版本 %s", v.FixedVersion)
+			}
+			out = append(out, finding{
+				Scanner:   "trivy",
+				ID:        v.VulnerabilityID,
+				Component: v.PkgName + "@" + v.InstalledVersion,
+				Detail:    detail,
+			})
+		}
+	}
+	return out, nil
+}
+
 func readGovulncheck(path string) ([]finding, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

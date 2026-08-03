@@ -3,7 +3,7 @@
 #
 # 两个入口，刻意分层：
 #   security-source   日常/提交前：当前发布候选快照的漏洞与密钥扫描
-#   security-release   打 tag 之前：追加全历史密钥扫描、镜像构建与镜像漏洞扫描、SBOM
+#   security-release   打 tag 之前：追加全历史密钥扫描、镜像构建与镜像漏洞扫描、SBOM、manifest
 #
 # **不塞进 `make check`**：`make check` 的契约是"架构传感器 + lint + vet + race/coverage"，
 # 且要求受限环境可复现。安全扫描依赖网络（漏洞库）与 Docker（扫描器镜像），
@@ -22,6 +22,14 @@ MODE="${1:-source}"
 # 扫描器版本与 digest 的单一来源。
 GITLEAKS_IMAGE="$(sed -n -E 's/^GITLEAKS_IMAGE[[:space:]]*=[[:space:]]*(.+)$/\1/p' security/toolchain.mk)"
 TRIVY_IMAGE="$(sed -n -E 's/^TRIVY_IMAGE[[:space:]]*=[[:space:]]*(.+)$/\1/p' security/toolchain.mk)"
+
+# APP_NAME 取自应用身份的唯一来源，与 `make image` 用同一个值——
+# 两处各写各的会让门禁扫的镜像和实际交付的镜像不是同一个。
+APP_NAME="$(sed -n -E 's/^APP_NAME[[:space:]]*=[[:space:]]*(.+)$/\1/p' project.mk)"
+[ -n "$APP_NAME" ] || fail "project.mk 缺少 APP_NAME"
+
+# IMAGE_DIGEST 由 build_release_image 填充，manifest 据此绑定被扫镜像。
+IMAGE_DIGEST=""
 
 fail() { echo "[security-gate] FAIL: $*" >&2; exit 1; }
 info() { echo "[security-gate] $*"; }
@@ -123,6 +131,102 @@ run_gitleaks_history() {
 }
 
 # ---------------------------------------------------------------------------
+# 交付镜像：构建 → 摘要 → 漏洞扫描 → SBOM
+# ---------------------------------------------------------------------------
+# 只扫源码依赖时，基础镜像带入的系统包漏洞完全不可见——而那些包与应用代码
+# 一同交付、一同运行。此前 TRIVY_IMAGE 被读取、被校验"必须钉 digest"，
+# 然后**从不使用**，于是 `security-release OK` 是一句关于镜像的空话。
+
+# image_ref 是本次发布候选镜像的本地标签。
+image_ref() {
+  printf '%s:%s' "$APP_NAME" "$(git rev-parse --short HEAD)"
+}
+
+build_release_image() {
+  local ref
+  ref="$(image_ref)"
+  info "构建交付镜像 ${ref}"
+  docker build \
+    --build-arg APP_NAME="$APP_NAME" \
+    --build-arg GOPROXY="$(go env GOPROXY)" \
+    -t "$ref" "$ROOT_DIR" >/dev/null ||
+    fail "交付镜像构建失败（构建错误不可豁免）"
+
+  # 本地 image ID 而不是 registry digest：镜像尚未推送，registry digest 此刻
+  # 并不存在。用 ID 同样能唯一标识"这次扫的是哪个镜像"，且不需要先推送——
+  # 先推后扫会让未经扫描的镜像出现在 registry 上。
+  IMAGE_DIGEST="$(docker image inspect "$ref" --format '{{.Id}}')" ||
+    fail "无法取得交付镜像摘要"
+  info "交付镜像摘要 ${IMAGE_DIGEST}"
+}
+
+# scan_image 用 Trivy 扫描导出的镜像归档。
+#
+# **不挂载 docker socket**：把宿主 socket 交给扫描器容器等于给它宿主的完全
+# 控制权，而扫描器只需要读一个镜像。供应链门禁本身成为供应链风险不可接受。
+scan_image() {
+  local ref archive out sbom
+  ref="$(image_ref)"
+  archive="${workdir}/image.tar"
+  out="${CACHE_DIR}/trivy-image.json"
+  sbom="${CACHE_DIR}/sbom.cdx.json"
+  rm -f "$out" "$sbom"
+
+  info "导出镜像归档供扫描"
+  docker save "$ref" -o "$archive" || fail "镜像导出失败（扫描器错误不可豁免）"
+
+  info "trivy 镜像漏洞扫描"
+  docker run --rm -v "${workdir}:/scan:ro" -v "${ROOT_DIR}/${CACHE_DIR}:/out" \
+    "$TRIVY_IMAGE" image --input /scan/image.tar \
+    --format json --output /out/trivy-image.json --exit-code 0 --quiet ||
+    fail "trivy 镜像扫描执行失败（扫描器错误不可豁免）"
+  info "镜像扫描结果 → $out"
+
+  info "生成 CycloneDX SBOM"
+  docker run --rm -v "${workdir}:/scan:ro" -v "${ROOT_DIR}/${CACHE_DIR}:/out" \
+    "$TRIVY_IMAGE" image --input /scan/image.tar \
+    --format cyclonedx --output /out/sbom.cdx.json --quiet ||
+    fail "SBOM 生成失败（扫描器错误不可豁免）"
+  info "SBOM → $sbom"
+}
+
+# write_manifest 把本次门禁的全部产物绑定到 commit 与镜像摘要。
+#
+# 没有它，一堆 JSON 文件无法证明属于同一次发布——而发布事故的复盘恰恰要回答
+# "这次扫的是哪个镜像、跑了哪些工具"。
+#
+# 写入必须**原子**：中途失败留下的半份 manifest 会被当成有效记录。
+write_manifest() {
+  local out="${CACHE_DIR}/manifest.json" tmp="${CACHE_DIR}/.manifest.json.tmp"
+  local artifacts="" name path first=1
+
+  for name in govulncheck.json gitleaks.json gitleaks-history.json trivy-image.json sbom.cdx.json; do
+    path="${CACHE_DIR}/${name}"
+    [ -f "$path" ] || continue
+    [ "$first" -eq 1 ] || artifacts="${artifacts},"
+    first=0
+    artifacts="${artifacts}
+    {\"name\": \"${name}\", \"sha256\": \"$(shasum -a 256 "$path" | awk '{print $1}')\"}"
+  done
+
+  cat > "$tmp" <<JSON
+{
+  "mode": "${MODE}",
+  "commit": "$(git rev-parse HEAD)",
+  "image_digest": "${IMAGE_DIGEST:-}",
+  "scanners": {
+    "gitleaks": "${GITLEAKS_IMAGE}",
+    "trivy": "${TRIVY_IMAGE}"
+  },
+  "artifacts": [${artifacts}
+  ]
+}
+JSON
+  mv -f "$tmp" "$out"
+  info "manifest → $out"
+}
+
+# ---------------------------------------------------------------------------
 # 统一判定
 # ---------------------------------------------------------------------------
 evaluate() {
@@ -140,6 +244,7 @@ case "$MODE" in
     run_govulncheck
     run_gitleaks_snapshot
     evaluate
+    write_manifest
     info "security-source OK"
     ;;
   release)
@@ -147,7 +252,10 @@ case "$MODE" in
     run_govulncheck
     run_gitleaks_snapshot
     run_gitleaks_history
+    build_release_image
+    scan_image
     evaluate
+    write_manifest
     info "security-release OK"
     ;;
   *)

@@ -20,7 +20,7 @@ services:
   mysql:
     # 与 make migrate-verify 使用同一版本：门禁与本地环境必须一致，
     # 否则"本地能跑通的迁移在门禁里失败"会变成经常性的困惑。
-    image: mysql:8.0
+    image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
     container_name: gin-api-dev-mysql
     command:
       - --character-set-server=utf8mb4
@@ -43,7 +43,7 @@ services:
       start_period: 20s
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     container_name: gin-api-dev-redis
     command: ["redis-server", "--requirepass", "${DEV_REDIS_PASSWORD:?set DEV_REDIS_PASSWORD in .env}"]
     ports:

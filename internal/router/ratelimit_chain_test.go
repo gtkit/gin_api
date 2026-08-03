@@ -15,7 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const testKeySecret = "0123456789abcdef0123456789abcdef"
+// 刻意用可读的低熵字符串而不是十六进制占位串：后者会被密钥扫描器判为
+// 疑似泄漏，而那种假阳性只能靠登记表压制——登记表需要长期维护与续期，
+// 消除成因比登记症状便宜得多。长度仍满足 KeyBuilder 的下限要求。
+const testKeySecret = "rate-limit-test-secret-not-a-real-credential"
 
 // rateLimitModule 是一个只提供若干条 RouteSpec 的测试模块。
 type rateLimitModule struct{ routes []routespec.RouteSpec }

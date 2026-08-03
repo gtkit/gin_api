@@ -16,7 +16,11 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # 固定版本：它同时兼作"最低支持版本"的实证——门禁跑通即证明该版本可用。
-MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0}"
+#
+# 从 security/toolchain.mk 读取而不是在这里硬编码：镜像摘要有**唯一声明处**，
+# 否则升级时必然漏掉其中一处，而漏掉的那处会静默用回旧镜像。
+MYSQL_IMAGE="${MYSQL_IMAGE:-$(sed -n -E 's/^MYSQL_IMAGE[[:space:]]*=[[:space:]]*(.+)$/\1/p' security/toolchain.mk)}"
+[ -n "$MYSQL_IMAGE" ] || { echo "security/toolchain.mk 缺少 MYSQL_IMAGE" >&2; exit 1; }
 CONTAINER="${MIGRATE_VERIFY_CONTAINER:-gin-api-migrate-verify}"
 DB_NAME="${MIGRATE_VERIFY_DB:-migrate_verify}"
 DB_USER="${MIGRATE_VERIFY_USER:-root}"
