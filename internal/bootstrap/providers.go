@@ -111,7 +111,7 @@ func newProviders(ctx context.Context, runtime *Runtime) (*providerSet, error) {
 
 	// 5. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
-	workers, err := buildWorkers(svc)
+	workers, err := buildWorkers(inf, svc)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
 	}
@@ -297,11 +297,25 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-func buildWorkers(_ services) (*WorkerManager, error) {
-	return NewWorkerManager(
-		DefaultWorkerBudget(),
-		// scaffold:module-workers
-	)
+func buildWorkers(inf infra, _ services) (*WorkerManager, error) {
+	var workers []Worker
+
+	// 注销档案清理：未配置保留期时不注册。
+	//
+	// 这张表存的是个人信息（原手机号、邮箱、昵称、来源 IP），保留期必须由使用方
+	// 按所在司法辖区确定——各行业与各地对最长保留期、删除权响应时限的要求并不
+	// 一致，脚手架替使用者选一个数字只会让它在某些辖区是错的，而且是静默错的。
+	cleanup, err := newDeactivationCleanupWorker(inf.mysqlDB, inf.cfg.Modules.User)
+	if err != nil {
+		return nil, err
+	}
+	if cleanup != nil {
+		workers = append(workers, cleanup)
+	}
+
+	// scaffold:module-workers
+
+	return NewWorkerManager(DefaultWorkerBudget(), workers...)
 }
 
 // newTokenParser 按配置装配注入 Auth 中间件的 token parser：
@@ -352,6 +366,12 @@ func initProcessRuntime(cfg *config.Config) error {
 
 	// 非生产允许 0.0.0.0/0 以便本地调试转发头，但不能让它无声地被带到预发环境。
 	// 生产环境该配置由 config.Validate 直接拒绝，走不到这里。
+	// 填了却没接线的扩展位：不阻断启动，但必须说出来。
+	// 一个填了却静默无效的配置，比没有这个配置更容易让人误判能力边界。
+	for _, w := range cfg.UnwiredExtensionWarnings() {
+		logger.Warn(w)
+	}
+
 	for _, w := range cfg.Proxy.Warnings(cfg.Env) {
 		logger.Warn(w)
 	}

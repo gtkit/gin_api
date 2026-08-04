@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gtkit/gin-api/pkg/ratelimit"
+
 	"github.com/gtkit/gin-api/internal/models"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
@@ -211,6 +213,11 @@ func registeredRouteOperations(tb testing.TB) map[string]struct{} {
 	}, router.RouterOptions{
 		// 声明了 AccessAuthenticated 的路由必须有鉴权实现，否则 registrar 拒绝启动。
 		AuthMiddleware: func(c *gin.Context) { c.Next() },
+		// 业务路由声明了默认限流策略，因此必须提供注册表。
+		// registrar 在缺注册表时拒绝启动——那正是要的：否则那些路由会静默地
+		// 完全没有限流，而 RouteSpec 里明明写着策略 ID。
+		RateLimits:    contractRateLimitRegistry(tb),
+		RateLimitKeys: contractKeyBuilder(tb),
 	})
 	if err != nil {
 		tb.Fatalf("build engine: %v", err)
@@ -290,4 +297,44 @@ func newContractUserService(tb testing.TB) *userapp.Service {
 		tb.Fatalf("build contract user service: %v", err)
 	}
 	return svc
+}
+
+// contractRateLimitRegistry 登记业务路由引用的默认策略。
+//
+// 参数与生产模板一致即可——本测试只关心路由能否装配，不验证限流行为本身。
+func contractRateLimitRegistry(tb testing.TB) *ratelimit.Registry {
+	tb.Helper()
+
+	registry := ratelimit.NewRegistry()
+	for _, p := range []ratelimit.Policy{
+		{
+			ID: "default.ip", Rate: 5, Burst: 20,
+			Scope: ratelimit.ScopeIP, Store: ratelimit.StoreLocal,
+			FailureMode: ratelimit.FailureClosed, MaxKeys: 100000,
+		},
+		{
+			ID: "default.user", Rate: 10, Burst: 50,
+			Scope: ratelimit.ScopeUser, Store: ratelimit.StoreLocal,
+			FailureMode: ratelimit.FailureClosed, MaxKeys: 100000,
+		},
+	} {
+		limiter, err := ratelimit.NewLocalBackend(p)
+		if err != nil {
+			tb.Fatalf("NewLocalBackend(%s): %v", p.ID, err)
+		}
+		if err := registry.Register(limiter); err != nil {
+			tb.Fatalf("Register(%s): %v", p.ID, err)
+		}
+	}
+	return registry
+}
+
+func contractKeyBuilder(tb testing.TB) *ratelimit.KeyBuilder {
+	tb.Helper()
+
+	builder, err := ratelimit.NewKeyBuilder("contract-test-secret-not-a-real-credential", "contract")
+	if err != nil {
+		tb.Fatalf("NewKeyBuilder: %v", err)
+	}
+	return builder
 }

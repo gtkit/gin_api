@@ -149,6 +149,15 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
+check-ai-traces: ## 发布候选集合不得含 AI 工具痕迹（扫已跟踪 + 未跟踪未忽略）
+	@ bash ./scripts/check-ai-traces.sh --self-test
+	@ bash ./scripts/check-ai-traces.sh
+
+check-tidy: ## 依赖清单必须整洁
+	## 手工跑过的检查必须进门禁：只在记得的时候跑，等于它不存在。
+	## 实测代价——删掉 mailx 代码后 go.mod 里的依赖没清，而 make check 全绿。
+	@ GOWORK=off go mod tidy -diff
+
 check-security-eval: ## 安全判定逻辑自检（它是唯一决定发布能否通过的逻辑）
 	@ GOWORK=off go run ./scripts/security-eval.go --self-test
 
@@ -200,7 +209,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-ai-traces check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

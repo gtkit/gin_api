@@ -44,6 +44,15 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 		Deadline:   userDeadline,
 		WriteGrace: userWriteGrace,
 	}
+	// 默认限流：来源 + 身份两层。
+	//
+	// **两层都要**：只限身份时，一个来源可以用大量账号并发打满；只限来源时，
+	// 就失去了按账号的精确限额。策略本身在 config 的 ratelimit.policies 里定义，
+	// 这里只引用 ID——同一条限额往往被多条路由共享，内联参数会产生多份副本。
+	//
+	// 引用一个未登记的 ID 会在装配期失败，不会静默变成"这条路由没限流"。
+	defaultLimits := []string{"default.ip", "default.user"}
+
 	// 三条路由都要求已认证身份。
 	//
 	// 此前这是靠 group.Use(authMiddleware) 表达的——一旦有人新增路由时忘了挂进
@@ -53,27 +62,29 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 
 	return []routespec.RouteSpec{
 		{
-			Method:        http.MethodGet,
-			Path:          "/user",
-			Handler:       handler.Get,
-			AccessPolicy:  authenticated,
-			TimeoutPolicy: timeout,
-			OperationID:   "getCurrentUserProfile",
-			Tags:          []string{"User"},
-			Summary:       "Get the current user profile",
-			Responses:     map[string]string{"500": "Internal error"},
-			ResponseShape: routespec.ResponseShapeEnveloped,
-			ResponseBody:  dto.UserProfileResponse{},
+			Method:             http.MethodGet,
+			Path:               "/user",
+			Handler:            handler.Get,
+			AccessPolicy:       authenticated,
+			TimeoutPolicy:      timeout,
+			RateLimitPolicyIDs: defaultLimits,
+			OperationID:        "getCurrentUserProfile",
+			Tags:               []string{"User"},
+			Summary:            "Get the current user profile",
+			Responses:          map[string]string{"500": "Internal error"},
+			ResponseShape:      routespec.ResponseShapeEnveloped,
+			ResponseBody:       dto.UserProfileResponse{},
 		},
 		{
-			Method:        http.MethodPut,
-			Path:          "/user",
-			Handler:       handler.Update,
-			AccessPolicy:  authenticated,
-			TimeoutPolicy: timeout,
-			OperationID:   "updateCurrentUserProfile",
-			Tags:          []string{"User"},
-			Summary:       "Update the current user profile",
+			Method:             http.MethodPut,
+			Path:               "/user",
+			Handler:            handler.Update,
+			AccessPolicy:       authenticated,
+			TimeoutPolicy:      timeout,
+			RateLimitPolicyIDs: defaultLimits,
+			OperationID:        "updateCurrentUserProfile",
+			Tags:               []string{"User"},
+			Summary:            "Update the current user profile",
 			Responses: map[string]string{
 				"422": "Request payload failed validation",
 				"500": "Internal error",
@@ -84,14 +95,15 @@ func (m *UserModule) Routes() []routespec.RouteSpec {
 			ResponseShape: routespec.ResponseShapeEmpty,
 		},
 		{
-			Method:        http.MethodPost,
-			Path:          "/user/deactivate",
-			Handler:       handler.Deactivate,
-			AccessPolicy:  authenticated,
-			TimeoutPolicy: timeout,
-			OperationID:   "deactivateCurrentUser",
-			Tags:          []string{"User"},
-			Summary:       "Deactivate the current user account",
+			Method:             http.MethodPost,
+			Path:               "/user/deactivate",
+			Handler:            handler.Deactivate,
+			AccessPolicy:       authenticated,
+			TimeoutPolicy:      timeout,
+			RateLimitPolicyIDs: defaultLimits,
+			OperationID:        "deactivateCurrentUser",
+			Tags:               []string{"User"},
+			Summary:            "Deactivate the current user account",
 			Responses: map[string]string{
 				"422": "Request payload failed validation",
 				"500": "Internal error",

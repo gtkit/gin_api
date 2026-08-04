@@ -26,7 +26,6 @@ require (
 	github.com/gtkit/ormx v1.5.0
 	github.com/gtkit/redisx v1.3.0
 	github.com/gtkit/stringx v1.1.6
-	github.com/gtkit/tools/mailx v0.0.0-20260729111902-9a272d97abc6
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
@@ -60,7 +59,6 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
-	github.com/wneessen/go-mail v0.8.1 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/vuln v1.6.0 // indirect

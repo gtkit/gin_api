@@ -17,20 +17,28 @@ type Config struct {
 	Env      Env            `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
 	Database DatabaseConfig `mapstructure:"database"`
-	Email    EmailConfig    `mapstructure:"email"`
-	SMS      SMSConfig      `mapstructure:"sms"`
-	Pay      PayConfig      `mapstructure:"pay"`
-	LLM      LLMConfig      `mapstructure:"llm"`
-	Log      LogConfig      `mapstructure:"log"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	JWT      JWTConfig      `mapstructure:"jwt"`
-	SSL      SSLConfig      `mapstructure:"ssl"`
-	News     NewsConfig     `mapstructure:"news"`
-	Aliyun   AliyunConfig   `mapstructure:"aliyun"`
-	Baidu    BaiduConfig    `mapstructure:"baidu"`
-	CORS     CORSConfig     `mapstructure:"cors"`
-	Pprof    PprofConfig    `mapstructure:"pprof"`
-	Proxy    ProxyConfig    `mapstructure:"proxy"`
+	// Email / SMS / Pay / Aliyun / Baidu 是**预留的扩展位**，母版不带运行时实现。
+	//
+	// 保留它们是刻意的：这些是绝大多数业务迟早要接的能力，先把配置形状定下来，
+	// 使用者接线时不必再改一次配置契约（而那次改动会波及所有已派生项目）。
+	//
+	// 但必须说清楚：**填了这些配置不会产生任何行为**，直到接上对应的客户端。
+	// 启动期会对"填了却没接线"的段落发出提示——一个填了却静默失效的配置，
+	// 比没有这个配置更容易让人误判能力边界。接线方式见 SCAFFOLD.md 的注册位清单。
+	Email  EmailConfig  `mapstructure:"email"`
+	SMS    SMSConfig    `mapstructure:"sms"`
+	Pay    PayConfig    `mapstructure:"pay"`
+	LLM    LLMConfig    `mapstructure:"llm"`
+	Log    LogConfig    `mapstructure:"log"`
+	Redis  RedisConfig  `mapstructure:"redis"`
+	JWT    JWTConfig    `mapstructure:"jwt"`
+	SSL    SSLConfig    `mapstructure:"ssl"`
+	News   NewsConfig   `mapstructure:"news"`
+	Aliyun AliyunConfig `mapstructure:"aliyun"`
+	Baidu  BaiduConfig  `mapstructure:"baidu"`
+	CORS   CORSConfig   `mapstructure:"cors"`
+	Pprof  PprofConfig  `mapstructure:"pprof"`
+	Proxy  ProxyConfig  `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。

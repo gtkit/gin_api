@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -49,8 +50,14 @@ type RedisBackend struct {
 	// observer 接收运行期事件；未注入时是空实现。
 	observer Observer
 	client   scriptRunner
-	sha      string
-	health   *HealthState
+	// sha 是脚本缓存标识，**必须原子读写**。
+	//
+	// 它在每个请求上被读（EvalSha），并在 NOSCRIPT 时被重载写入——而 NOSCRIPT
+	// 会在主从切换、故障恢复与 SCRIPT FLUSH 之后同时发生在多个并发请求上。
+	// 用普通字段时 `go test -race` 明确报 read/write 与 write/write 竞争；
+	// Go 内存模型下那是未定义行为，实际可能读到撕裂的 string header。
+	sha    atomic.Pointer[string]
+	health *HealthState
 	// keyPrefix 隔离不同服务的限流键。
 	keyPrefix string
 	// now 可注入，测试用它确定性地驱动时钟场景。
@@ -79,12 +86,12 @@ func NewRedisBackend(
 
 	b := &RedisBackend{
 		client:    client,
-		sha:       sha,
 		health:    NewHealthState(DefaultHealthPolicy(), resolved.observer),
 		keyPrefix: resolved.keyPrefix,
 		observer:  resolved.observer,
 		now:       time.Now,
 	}
+	b.sha.Store(&sha)
 
 	if err := b.probe(ctx); err != nil {
 		return nil, fmt.Errorf("verify rate limit capability: %w", err)
@@ -161,7 +168,7 @@ func (b *RedisBackend) evaluate(
 		bucketTTL(policy).Milliseconds(),
 	}
 
-	raw, err := b.client.EvalSha(ctx, b.sha, []string{key}, args...).Result()
+	raw, err := b.client.EvalSha(ctx, *b.sha.Load(), []string{key}, args...).Result()
 	if err != nil && isNoScript(err) {
 		// 主从切换或 SCRIPT FLUSH 之后脚本缓存会丢。**重载并重试一次**。
 		// 缺这一条，一次故障切换会让整片限流持续报错，而根因只是缓存没了。
@@ -169,7 +176,9 @@ func (b *RedisBackend) evaluate(
 		if loadErr != nil {
 			return Decision{}, fmt.Errorf("reload rate limit script after NOSCRIPT: %w", loadErr)
 		}
-		b.sha = sha
+		// 并发重载时多个 goroutine 会各自 Store 一次。这没有问题——
+		// 它们加载的是同一段脚本，因此得到的 sha 必然相同；重复存入等价。
+		b.sha.Store(&sha)
 		raw, err = b.client.EvalSha(ctx, sha, []string{key}, args...).Result()
 	}
 	if err != nil {
@@ -244,13 +253,31 @@ func toInt64(v any) (int64, error) {
 	}
 }
 
+// maxBucketTTL 是键存活时长的上限。
+//
+// 桶再大也不该让键活过一天：更长的 TTL 只是让一个早已无人访问的主体
+// 继续占内存，而它的配额早就补满了。
+const maxBucketTTL = 24 * time.Hour
+
 // bucketTTL 返回键的存活时长：补满一桶所需时间 + 余量。
+//
+// **必须夹在上限内**。此前直接 `time.Duration(秒数) * time.Second` 会溢出：
+// 实测 Rate=0.000001、Burst=10000 通过了策略校验，却算出
+// -2346317h46m53s——负 TTL 传给 Redis 会让键立即过期或被拒绝，限流静默失效。
+//
+// 策略校验只查了 Lua 的精确整数范围，而这是**另一个**溢出边界
+// （time.Duration 是纳秒计的 int64）。两个边界必须各查各的。
 func bucketTTL(policy Policy) time.Duration {
 	if policy.Rate <= 0 {
 		return ttlSlack
 	}
-	refill := time.Duration(math.Ceil(float64(policy.Burst)/policy.Rate)) * time.Second
-	return refill + ttlSlack
+
+	seconds := math.Ceil(float64(policy.Burst) / policy.Rate)
+	// 先在 float64 域比较再转换：转换后再比较就已经溢出了。
+	if seconds >= maxBucketTTL.Seconds() {
+		return maxBucketTTL
+	}
+	return time.Duration(seconds)*time.Second + ttlSlack
 }
 
 // FallbackBackend 把 Redis backend 与本地影子桶组合成 local_fallback 模式。

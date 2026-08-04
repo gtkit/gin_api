@@ -29,6 +29,9 @@ var deploymentPlaceholders = []struct{ from, to string }{
 	{`private_key_path: ""           # 【文件挂载】0600`, `private_key_path: "config/pem/t.private.pem"`},
 	{`public_key_path: ""            # 【文件挂载】`, `public_key_path: "config/pem/t.public.pem"`},
 	{`issuer: ""`, `issuer: "gin-api-test"`},
+	// 模板带默认限流策略，因此这个密钥成了必填。留空是对的——它必须是每个
+	// 部署自己的专用密钥，模板预填一个会被原样带上生产。
+	{`key_hmac_secret: ""`, `key_hmac_secret: "rate-limit-hmac-secret-32-bytes-min"`},
 	{`audiences: []`, `audiences: ["gin-api-client"]`},
 }
 
