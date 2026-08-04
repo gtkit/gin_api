@@ -19,13 +19,11 @@ type rateLimitAssembly struct {
 	keys     *ratelimit.KeyBuilder
 }
 
-// buildRateLimits 把配置翻译成限流注册表。
+// buildRateLimits 把配置里的策略翻译成执行层注册表。
 //
-// 策略集合为空时返回零值：母版默认不配置任何策略，此时路由也不会引用
-// 任何策略 ID，registrar 的引用校验因而不会触发。
-//
-// 任何一条策略非法即启动失败：限流配置错误的表现是"限额不是你以为的那个值"，
-// 而那在生产上只有被打穿或被误杀时才会发现。
+// 策略集合为空时返回空注册表。**这不等于"关闭限流"**：业务路由硬引用策略 ID，
+// 引用无法解析会在装配期失败——脚手架无从判断部署入口有没有网关，
+// 而"配置写了 ID 却不生效"比启动失败坏得多。
 func buildRateLimits(
 	ctx context.Context, cfg *config.Config, resources *data.Resources,
 ) (rateLimitAssembly, error) {

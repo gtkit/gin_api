@@ -2,16 +2,8 @@ package bootstrap
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	userworker "github.com/gtkit/gin-api/internal/module/user/worker"
-	"github.com/gtkit/gin-api/internal/platform/config"
-	userdeactivation "github.com/gtkit/gin-api/internal/repository/user_deactivation"
-
-	logger "github.com/gtkit/logger/v2"
-
-	"gorm.io/gorm"
 )
 
 // deactivationCleanupWorker 把纯业务的清理逻辑适配到进程编排契约。
@@ -24,27 +16,18 @@ type deactivationCleanupWorker struct {
 	cleanup *userworker.DeactivationCleanup
 }
 
-// newDeactivationCleanupWorker 装配注销档案清理任务。
+// newDeactivationCleanupWorker 把 runtime 装配好的清理任务包成编排契约。
 //
-// **未配置保留期时返回 (nil, nil)**：禁用应当表现为根本不注册这个 worker，
-// 而不是注册一个什么都不做的——后者会在关停顺序与就绪信息里留下一个名字，
-// 让人以为清理正在进行。
-func newDeactivationCleanupWorker(
-	db *gorm.DB, cfg config.UserModuleConfig,
-) (Worker, error) {
-	if !cfg.RetentionEnabled() {
-		return nil, nil
+// 仓储与业务对象的装配在 runtime/module/user——编排层不该知道 user 模块
+// 用了哪个仓储。这里只补齐 Kind / Lifecycle / Required 这类**编排语义**，
+// 它们的类型属于本包，在模块层实现会让依赖方向倒转。
+//
+// cleanup 为 nil（未配置保留期）时返回 nil，调用方据此不注册。
+func newDeactivationCleanupWorker(cleanup *userworker.DeactivationCleanup) Worker {
+	if cleanup == nil {
+		return nil
 	}
-
-	retention := time.Duration(cfg.DeactivationRetentionDays) * 24 * time.Hour
-	cleanup, err := userworker.NewDeactivationCleanup(
-		userdeactivation.New(db), cleanupAuditor{},
-		retention, cfg.EffectiveCleanupInterval(), cfg.EffectiveCleanupBatch(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("assemble deactivation cleanup: %w", err)
-	}
-	return &deactivationCleanupWorker{cleanup: cleanup}, nil
+	return &deactivationCleanupWorker{cleanup: cleanup}
 }
 
 func (w *deactivationCleanupWorker) Name() string { return "user.deactivation-cleanup" }
@@ -72,8 +55,3 @@ func (w *deactivationCleanupWorker) Run(ctx context.Context) error {
 
 // Cleanup 无资源可释放，幂等。
 func (w *deactivationCleanupWorker) Cleanup(context.Context) error { return nil }
-
-// cleanupAuditor 把清理结果接到进程日志栈。
-type cleanupAuditor struct{}
-
-func (cleanupAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }

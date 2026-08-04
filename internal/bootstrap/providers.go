@@ -305,12 +305,12 @@ func buildWorkers(inf infra, _ services) (*WorkerManager, error) {
 	// 这张表存的是个人信息（原手机号、邮箱、昵称、来源 IP），保留期必须由使用方
 	// 按所在司法辖区确定——各行业与各地对最长保留期、删除权响应时限的要求并不
 	// 一致，脚手架替使用者选一个数字只会让它在某些辖区是错的，而且是静默错的。
-	cleanup, err := newDeactivationCleanupWorker(inf.mysqlDB, inf.cfg.Modules.User)
+	cleanup, err := userruntime.NewDeactivationCleanup(inf.mysqlDB, inf.cfg.Modules.User)
 	if err != nil {
 		return nil, err
 	}
-	if cleanup != nil {
-		workers = append(workers, cleanup)
+	if w := newDeactivationCleanupWorker(cleanup); w != nil {
+		workers = append(workers, w)
 	}
 
 	// scaffold:module-workers
@@ -369,6 +369,11 @@ func initProcessRuntime(cfg *config.Config) error {
 	// 填了却没接线的扩展位：不阻断启动，但必须说出来。
 	// 一个填了却静默无效的配置，比没有这个配置更容易让人误判能力边界。
 	for _, w := range cfg.UnwiredExtensionWarnings() {
+		logger.Warn(w)
+	}
+
+	// 个人信息无保留期：配置注释承诺过会提示一次，此前只是承诺。
+	for _, w := range cfg.RetentionWarnings() {
 		logger.Warn(w)
 	}
 

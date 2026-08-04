@@ -106,7 +106,8 @@ func (b *RedisBackend) probe(ctx context.Context) error {
 	if _, err := rand.Read(suffix); err != nil {
 		return fmt.Errorf("generate probe key: %w", err)
 	}
-	key := b.keyPrefix + ":probe:" + hex.EncodeToString(suffix)
+	// 不在此处拼前缀：evaluate 会统一加。两处各拼一次会得到双重前缀。
+	key := "probe:" + hex.EncodeToString(suffix)
 
 	probePolicy := Policy{
 		ID: "probe", Rate: 1, Burst: 1,
@@ -160,6 +161,14 @@ func (b *RedisBackend) check(
 func (b *RedisBackend) evaluate(
 	ctx context.Context, policy Policy, key string,
 ) (Decision, error) {
+	// **前缀在这里统一拼接**，因为这是所有路径唯一的收口点。
+	//
+	// 曾经由各调用方自己拼：探针拼了，真实判定没拼——于是 WithKeyPrefix 对
+	// 生产流量完全无效，而它的文档明确承诺隔离。多个服务共用同一后端时，
+	// 同名策略共享同一个桶，各自的限额都不是配置里写的那个值。
+	// 收口到一处之后，新增调用路径不会再漏。
+	key = b.qualifiedKey(key)
+
 	args := []any{
 		policy.FixedPointRate(),
 		policy.FixedPointBurst(),
@@ -274,10 +283,28 @@ func bucketTTL(policy Policy) time.Duration {
 
 	seconds := math.Ceil(float64(policy.Burst) / policy.Rate)
 	// 先在 float64 域比较再转换：转换后再比较就已经溢出了。
+	//
+	// **含余量之后再夹上限**，不能反过来：先夹再加余量会让结果比上限多出一个
+	// 余量（实测 Rate=1、Burst=86399 得到 24h0m59s，而声称的上限是 24h）。
+	// 一个自己就违反声称值的上限，无法作为容量估算的依据。
 	if seconds >= maxBucketTTL.Seconds() {
 		return maxBucketTTL
 	}
-	return time.Duration(seconds)*time.Second + ttlSlack
+	if ttl := time.Duration(seconds)*time.Second + ttlSlack; ttl < maxBucketTTL {
+		return ttl
+	}
+	return maxBucketTTL
+}
+
+// qualifiedKey 给键加上服务前缀。
+//
+// 未配置前缀时原样返回：多数部署只有一个服务用这个 Redis，强制加前缀
+// 只会让键变长而不带来隔离价值。
+func (b *RedisBackend) qualifiedKey(key string) string {
+	if b.keyPrefix == "" {
+		return key
+	}
+	return b.keyPrefix + ":" + key
 }
 
 // FallbackBackend 把 Redis backend 与本地影子桶组合成 local_fallback 模式。

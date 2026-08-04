@@ -63,11 +63,26 @@ func (c UserModuleConfig) Validate() []error {
 				"such a value is effectively permanent retention, which is rarely intended",
 			c.DeactivationRetentionDays, maxRetentionDays))
 	}
+	// 下界：毫秒级间隔会让清理任务持续扫库，而它本身并不紧急。
+	const minCleanupInterval = time.Minute
 	if c.DeactivationCleanupInterval < 0 {
 		errs = append(errs, errors.New("module.user.deactivation_cleanup_interval must be >= 0"))
+	} else if c.DeactivationCleanupInterval > 0 && c.DeactivationCleanupInterval < minCleanupInterval {
+		errs = append(errs, fmt.Errorf(
+			"module.user.deactivation_cleanup_interval %s is below the %s minimum: "+
+				"a tighter loop keeps scanning the table without making the task any more timely",
+			c.DeactivationCleanupInterval, minCleanupInterval))
 	}
+
+	// 上界：单批过大会形成长事务并撑大 binlog，而分批的意义就是避免它。
+	const maxCleanupBatch = 10000
 	if c.DeactivationCleanupBatch < 0 {
 		errs = append(errs, errors.New("module.user.deactivation_cleanup_batch must be >= 0"))
+	} else if c.DeactivationCleanupBatch > maxCleanupBatch {
+		errs = append(errs, fmt.Errorf(
+			"module.user.deactivation_cleanup_batch %d exceeds %d: a batch that large holds locks "+
+				"long enough to defeat the point of batching",
+			c.DeactivationCleanupBatch, maxCleanupBatch))
 	}
 
 	return errs

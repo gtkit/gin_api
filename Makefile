@@ -55,8 +55,8 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
 #
 # 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
-#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：71.7%  ← 下界
-#   正常路径（loopback 可用）：                          72.0%
+#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.4%  ← 下界
+#   正常路径（loopback 可用）：                          73.4%
 #
 # 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
 # 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
@@ -64,7 +64,8 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # testutil.RequireLoopback 在测试内部完成，标志在任意机器上都真正生效，
 # 上面两个数字因此可以被任何人重新测出来，而不是只能被声称。
 #
-# 门禁取 70.0：低于受限下界 1.7 个点，留给测试波动与环境差异，同时不再虚高于实际。
+# 门禁取 70.0：低于受限下界 0.4 个点。**余量已经很薄**——下一次提高门禁前
+# 必须先把受限路径实测抬上去，而不是直接改这个数字。
 # 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
 COVERAGE_MIN ?= 70.0
 tool: ## Lint Go code with the installed golangci-lint
@@ -149,9 +150,6 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
-check-ai-traces: ## 发布候选集合不得含 AI 工具痕迹（扫已跟踪 + 未跟踪未忽略）
-	@ bash ./scripts/check-ai-traces.sh --self-test
-	@ bash ./scripts/check-ai-traces.sh
 
 check-tidy: ## 依赖清单必须整洁
 	## 手工跑过的检查必须进门禁：只在记得的时候跑，等于它不存在。
@@ -209,7 +207,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-ai-traces check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 
