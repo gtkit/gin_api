@@ -79,7 +79,7 @@ type middlewares struct {
 
 // newProviders 按「基础设施 → service → 中间件 → 路由引擎 → worker」五个阶段编排装配，
 // 每个阶段收敛到一个单一职责的私有函数，本函数只做顺序拼接与错误透传。
-func newProviders(runtime *Runtime) (*providerSet, error) {
+func newProviders(ctx context.Context, runtime *Runtime) (*providerSet, error) {
 	// 1. 基础设施：数据库连接、配置文件、HTTP 配置、日志、消息队列、缓存、文件存储等。
 	inf, err := resolveInfra(runtime)
 	if err != nil {
@@ -93,14 +93,19 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 	}
 
 	// 3. 中间件：鉴权、日志、限流、缓存等。
-	mw, err := buildMiddlewares(svc, runtime)
+	// 豁免理由：contextcheck 跟进的是 Authenticate **返回的闭包**——那段代码在
+	// 每个请求上执行、用请求自身的 ctx，与装配期无关。装配这一步本身不做 I/O。
+	//
+	// 与限流那步的区别很实在：buildRateLimits 会 ScriptLoad 并跑探针，是真正的
+	// 装配期 I/O，因此它拿的是启动 ctx。这里塞一个用不到的 ctx 才是对 API 的谎报。
+	mw, err := buildMiddlewares(svc, runtime) //nolint:contextcheck // 见上：被指认的是请求期闭包
 	if err != nil {
 		return nil, err
 	}
 
 	// 4. 限流。必须先于路由装配：registrar 要按 ID 解析策略，
 	//    而策略非法属装配错误，应在任何路由注册之前就失败。
-	rateLimits, err := buildRateLimits(context.Background(), inf.cfg, inf.resources)
+	rateLimits, err := buildRateLimits(ctx, inf.cfg, inf.resources)
 	if err != nil {
 		return nil, fmt.Errorf("build rate limits: %w", err)
 	}
@@ -116,7 +121,10 @@ func newProviders(runtime *Runtime) (*providerSet, error) {
 
 	// 6. 路由引擎：组装路由切片并初始化 Gin 引擎。
 	//    路由契约不合法属装配错误，在此透传为启动失败。
-	engine, err := buildEngine(inf, svc, mw, newProcessStatus(coordinator, workers))
+	// 豁免理由同上：被指认的是 readyHandler **返回的闭包**，探针在每个请求上
+	// 用自己的 ctx 执行；路由装配本身只做注册，不发起任何 I/O。
+	engine, err := buildEngine(inf, svc, mw, //nolint:contextcheck // 见上：被指认的是请求期闭包
+		newProcessStatus(coordinator, workers))
 	if err != nil {
 		return nil, err
 	}

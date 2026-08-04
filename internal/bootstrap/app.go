@@ -53,11 +53,13 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		return nil, err
 	}
 
-	// 豁免理由：contextcheck 顺着 buildMiddlewares → Authenticate 一路跟进了
-	// Authenticate **返回的闭包**，那段代码在每个请求上执行、用的是请求自身的 ctx，
-	// 与装配期无关。装配阶段本身不做任何 I/O（连接已由 NewRuntime 在 ctx 预算内建立完毕），
-	// 给它塞一个用不到的 ctx 参数是对 API 的谎报。
-	providers, err := newProviders(runtime) //nolint:contextcheck // 见上：被指认的链路是请求期闭包
+	// 装配期确实会做 I/O：限流的 Redis backend 要 ScriptLoad 并跑一次探针。
+	// 因此启动 ctx 必须传进去——启动被信号打断时，那次 Redis 往返应当随之取消，
+	// 而不是把启动流程拖到它自己的超时为止。
+	//
+	// （此处曾用 context.Background() 并注释成"装配阶段不做任何 I/O"。
+	//   那句话对 buildMiddlewares 成立，对限流不成立。）
+	providers, err := newProviders(ctx, runtime)
 	if err != nil {
 		runtime.Close()
 		return nil, err

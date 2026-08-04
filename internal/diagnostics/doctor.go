@@ -231,12 +231,30 @@ func countJoined(err error) int {
 //
 // 只看文件元数据，绝不读取内容——doctor 的输出会被粘贴到各种地方，
 // 而私钥一旦出现在任何一份日志里就等于泄漏。
+// checkJWTKeys 校验**当前生效的**密钥文件。
+//
+// 曾经读的是 cfg.JWT.PrivateKeyPath / PublicKeyPath——那是密钥轮换落地前的
+// 单密钥字段，如今已废弃且恒为空。空路径被循环直接跳过，于是这项检查在
+// 密钥完全缺失时照样报 pass：它检查的是一个不再被使用的字段。
+//
+// **那比不检查更糟**：doctor 的用途正是回答"这份配置能不能起来"，
+// 而它给出的是一个虚假的肯定。
 func checkJWTKeys(cfg *config.Config) CheckResult {
-	paths := []string{cfg.JWT.PrivateKeyPath, cfg.JWT.PublicKeyPath}
+	paths := []string{cfg.JWT.Active.PrivateKeyPath, cfg.JWT.Active.PublicKeyPath}
+	// 退役公钥仍参与验签，缺失会让持有旧令牌的用户在轮换后集体失效。
+	for _, previous := range cfg.JWT.Previous {
+		paths = append(paths, previous.PublicKeyPath)
+	}
 
 	var missing, insecure int
 	for _, p := range paths {
+		// 空路径算缺失，**不能跳过**。
+		//
+		// 跳过正是上一版失效的方式：废弃字段恒为空，于是每条路径都被跳过，
+		// 计数为零，报告 pass。空的活跃密钥路径意味着服务签不出令牌，
+		// 那是缺失，不是"无需检查"。
 		if p == "" {
+			missing++
 			continue
 		}
 		info, err := os.Stat(resource.ResolvePath(p))

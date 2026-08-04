@@ -19,6 +19,16 @@
 # 再跑 `make check-image-digests`。绝不手抄或推测摘要。
 GOLANG_IMAGE = golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
 ALPINE_IMAGE = alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+# 受限验证的测试运行器。
+#
+# 刻意用**自带 git 的完整镜像**而不是交付用的 alpine：受限环境靠 seccomp 拒绝
+# bind(2)，而 DNS 客户端需要 bind 一个 UDP socket 才能收响应——于是容器内
+# 无法联网装包。git 是 projectinit 测试的真实依赖，缺它会让那些测试以
+# "git 不存在"失败，把真正的端口信号淹没在噪音里。
+#
+# 与交付镜像不一致是可以接受的：它只是测试运行器，不进任何交付物。
+RESTRICTED_RUNNER_IMAGE = golang:1.26@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+
 MYSQL_IMAGE  = mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
 REDIS_IMAGE  = redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
 

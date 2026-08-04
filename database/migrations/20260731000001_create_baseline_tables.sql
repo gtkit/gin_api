@@ -70,6 +70,16 @@ CREATE TABLE `user_profiles` (
   CONSTRAINT `fk_users_profile` FOREIGN KEY (`user_id`) REFERENCES `users`(`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- user_deactivations 保存注销前的个人信息快照（手机号、邮箱、昵称、来源 IP），
+-- 明文存储，用于注销后的申诉、风控回溯与合规举证。
+--
+-- **保留期限与清理策略必须由使用方按所在司法辖区确定后再上线**：
+-- 各地对个人信息的最长保留期、删除权响应时限、以及"注销后仍需留存多久"的
+-- 行业要求并不一致，脚手架替你选一个数字只会让它在某些辖区是错的。
+--
+-- 需要落定的三件事：保留多久、到期由谁清理、谁能读这张表。
+-- 前两者可用定时任务按 created_at 清理；第三者靠库账号权限，而不是应用层判断——
+-- 应用层的读取限制绕不过直连数据库的人。
 CREATE TABLE `user_deactivations` (
   `id` bigint AUTO_INCREMENT COMMENT '主键编码',
   `user_id` bigint NOT NULL COMMENT '被注销的用户ID',

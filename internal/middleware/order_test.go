@@ -56,7 +56,7 @@ func TestInitMiddlewareOrderIsExact(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, []string{"https://example.com"}, AccessLogOptions{}, 1024); err != nil {
+	if err := InitMiddleware(engine, []string{"https://example.com"}, AccessLogOptions{}, 1024, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestInitMiddlewareWithoutCORS(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 1024); err != nil {
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 1024, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestSecurityHeadersPresentOnEveryResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 8); err != nil {
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 8, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 	engine.GET("/ok", func(c *gin.Context) { c.String(http.StatusOK, "ok") })

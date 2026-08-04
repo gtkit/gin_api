@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,6 +36,26 @@ func validConfigForDoctor() *config.Config {
 	}
 }
 
+// configWithRealKeysForDoctor 返回一份密钥文件真实存在的配置。
+//
+// jwt_keys 会 stat 活跃密钥。fixture 指向不存在的路径时，任何断言"doctor 整体
+// 通过"的用例都会因为一项与被测行为无关的真实失败而失败——而密钥文件不进 git，
+// 干净 clone 上必然没有它们。
+func configWithRealKeysForDoctor(t *testing.T) *config.Config {
+	t.Helper()
+
+	dir := t.TempDir()
+	cfg := validConfigForDoctor()
+	cfg.JWT.Active.PrivateKeyPath = filepath.Join(dir, "active.private.pem")
+	cfg.JWT.Active.PublicKeyPath = filepath.Join(dir, "active.public.pem")
+	for _, p := range []string{cfg.JWT.Active.PrivateKeyPath, cfg.JWT.Active.PublicKeyPath} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	return cfg
+}
+
 // noProbes 明确表示本次不接线 deep 探测。
 func noProbes(context.Context) (diagnostics.Probes, func(), error) {
 	return diagnostics.Probes{}, func() {}, nil
@@ -50,7 +72,7 @@ func TestDoctorCommand(t *testing.T) {
 	}{
 		{
 			name: "valid config",
-			load: func() (*config.Config, error) { return validConfigForDoctor(), nil },
+			load: func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil },
 			wantOutput: []string{
 				"config: ok",
 				"env: dev",
@@ -107,7 +129,7 @@ func TestDoctorCommand(t *testing.T) {
 func TestDoctorJSONOutput(t *testing.T) {
 	t.Parallel()
 
-	cmd := newDoctorCmdWithDeps(func() (*config.Config, error) { return validConfigForDoctor(), nil }, noProbes)
+	cmd := newDoctorCmdWithDeps(func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil }, noProbes)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -162,7 +184,7 @@ func TestDoctorDeepExitCodes(t *testing.T) {
 			t.Parallel()
 
 			cmd := newDoctorCmdWithDeps(
-				func() (*config.Config, error) { return validConfigForDoctor(), nil },
+				func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil },
 				func(context.Context) (diagnostics.Probes, func(), error) {
 					return tc.probes, func() {}, nil
 				})
@@ -193,7 +215,7 @@ func TestDoctorDeepProbeBuildFailureIsReported(t *testing.T) {
 	t.Parallel()
 
 	cmd := newDoctorCmdWithDeps(
-		func() (*config.Config, error) { return validConfigForDoctor(), nil },
+		func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil },
 		func(context.Context) (diagnostics.Probes, func(), error) {
 			return diagnostics.Probes{}, func() {}, errors.New("cannot open resources")
 		})

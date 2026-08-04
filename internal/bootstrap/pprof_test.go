@@ -149,6 +149,7 @@ func TestPprofServesAndShutsDownCleanly(t *testing.T) {
 //
 // 只关 server 不清零的话，一个已经不存在的端点会让进程持续付出采样开销。
 func TestPprofShutdownClearsProfileRates(t *testing.T) {
+	testutil.RequireLoopback(t)
 	resetProfileRates(t)
 
 	h, err := startPprofServer(config.PprofConfig{
@@ -179,6 +180,7 @@ func TestPprofShutdownClearsProfileRates(t *testing.T) {
 //
 // 关停触发源不止一个（正常关停、启动回滚），它们可能都调用 Shutdown。
 func TestPprofShutdownIsIdempotent(t *testing.T) {
+	testutil.RequireLoopback(t)
 	resetProfileRates(t)
 
 	h, err := startPprofServer(config.PprofConfig{Enabled: true, Host: "127.0.0.1", Port: "0"})

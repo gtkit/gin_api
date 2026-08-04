@@ -112,10 +112,12 @@ func InitRouterWithVersionedModules(
 	}
 
 	// —— 自此才开始触碰生产 engine ——
-	engine := gin.New()
-
-	// 设置 Gin mode, 根据运行环境
+	//
+	// SetMode 必须在 gin.New() **之前**：New 会按当时的 mode 决定调试输出行为，
+	// 之后再改等于让 engine 以一份和声明不符的模式被创建。
 	gin.SetMode(ginModeFromEnv(envName))
+
+	engine := gin.New()
 
 	// 可信代理边界必须无条件设置，不能依赖 Gin 默认值。
 	//
@@ -136,7 +138,9 @@ func InitRouterWithVersionedModules(
 	if err := middleware.InitMiddleware(engine, opt.AllowedOrigins, middleware.AccessLogOptions{
 		LogRequestBody:  opt.LogRequestBody,
 		LogResponseBody: opt.LogResponseBody,
-	}, opt.MaxBodyBytes); err != nil {
+		// 预检需要知道目标路径上到底允许哪些方法：没有它，OPTIONS 会对不存在的
+		// 路径回 204，而随后的实际请求拿到 404——客户端排查的方向因此是错的。
+	}, opt.MaxBodyBytes, index.AllowHeaderValue); err != nil {
 		return nil, fmt.Errorf("init global middleware: %w", err)
 	}
 

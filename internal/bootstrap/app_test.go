@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/testutil"
+
 	"github.com/gtkit/tools/mailx"
 	"github.com/gtkit/verify"
 
@@ -130,6 +132,7 @@ func newTestApp(t *testing.T, server httpServer, workers ...Worker) *App {
 // 两个方向都要断言。只测其一时，一个"全部 worker 都在 HTTP 之前停"或
 // "全部都在之后停"的实现都能蒙混过关——而那正是本批次要消灭的单一 Worker 抽象。
 func TestAppRunPhasedShutdownOrder(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 
 	var producerBeforeHTTP, consumerAfterHTTP atomic.Bool
@@ -202,6 +205,7 @@ func TestAppRunPhasedShutdownOrder(t *testing.T) {
 
 // TestAppRunWithoutWorkers 覆盖母版默认形态：worker 集合为空时启停不阻塞、不报错。
 func TestAppRunWithoutWorkers(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 	app := newTestApp(t, server)
 
@@ -227,6 +231,7 @@ func TestAppRunWithoutWorkers(t *testing.T) {
 // TestAppRunFailsFastOnRequiredWorkerError 锁定 required worker 异常的传播：
 // 异常触发全进程优雅关停，Run 以带 worker 名与根因的错误退出，不做静默重启。
 func TestAppRunFailsFastOnRequiredWorkerError(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 	app := newTestApp(t, server, &funcWorker{
 		name: "failing-worker", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: true,
@@ -256,6 +261,7 @@ func TestAppRunFailsFastOnRequiredWorkerError(t *testing.T) {
 //
 // 反过来（optional 异常也拖垮进程）会让"可选"这个声明失去全部意义。
 func TestAppRunOptionalWorkerFailureDoesNotStopProcess(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 	failed := make(chan struct{})
 	app := newTestApp(t, server, &funcWorker{
@@ -295,6 +301,7 @@ func TestAppRunOptionalWorkerFailureDoesNotStopProcess(t *testing.T) {
 // 第二个信号取消剩余等待、直接 Close，并以非零（非 nil）错误退出——
 // 进程是被迫结束的，不能表现成一次正常关停。
 func TestAppRunForcedShutdownReturnsNonZero(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 	app := newTestApp(t, server)
 
@@ -320,6 +327,7 @@ func TestAppRunForcedShutdownReturnsNonZero(t *testing.T) {
 // 放到 HTTP 之后就失去了全部意义——启动期数据修复的整个前提是
 // "对外服务之前先把它做完"。
 func TestAppRunRequiredOneShotBlocksHTTP(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 	release := make(chan struct{})
 	var listenedBeforeOneShot atomic.Bool
@@ -373,6 +381,7 @@ func TestAppRunRequiredOneShotBlocksHTTP(t *testing.T) {
 // TestAppRunRequiredPrepareFailureNeverStartsHTTP 验证 Prepare 失败即启动失败，
 // 且 HTTP 从不监听、已 Prepare 的 worker 被逆序清理。
 func TestAppRunRequiredPrepareFailureNeverStartsHTTP(t *testing.T) {
+	testutil.RequireLoopback(t)
 	server := newTestHTTPServer()
 
 	ok := &funcWorker{

@@ -32,7 +32,12 @@ func (r *Repository) Update(ctx context.Context, userID int64, fields map[string
 	if len(fields) == 0 {
 		return nil
 	}
-	return r.mdbCtx(ctx).Model(&models.User{}).Where("id = ?", userID).Updates(fields).Error
+	if err := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ?", userID).Updates(fields).Error; err != nil {
+		// 带上操作与主键：裸 GORM 错误只说"Error 1062: Duplicate entry"，
+		// 而一次请求里可能有多处写入，光看错误无从判断是哪一处。
+		return fmt.Errorf("update user %d: %w", userID, err)
+	}
+	return nil
 }
 
 // ExistsByID 判断指定主键的可用（status=1）用户是否存在。

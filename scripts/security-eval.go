@@ -158,12 +158,22 @@ func waiverKey(scanner, id, component string) string {
 	return strings.ToLower(scanner + "|" + id + "|" + component)
 }
 
+// expired 判断到期日是否已过。
+//
+// **到期日当天仍然有效**，次日零点（UTC）起才算过期。
+//
+// 曾经写成 `now.After(t)`：t 是当天零点，于是 `expires: 2026-08-04` 在
+// 2026-08-04 00:00:01 就失效了——而写下这个日期的人显然认为那一整天都还算数。
+// 差一天听起来无关紧要，直到某次发布卡在门禁上，而豁免"明明还没到期"。
+//
+// 用 UTC 而不是本地时区：同一条豁免在不同时区的机器上必须给出同一个结论，
+// 否则 CI 通过而本地失败（或反过来）会变成一桩查不清的悬案。
 func expired(date string, now time.Time) bool {
 	t, err := time.Parse("2006-01-02", strings.TrimSpace(date))
 	if err != nil {
 		return true // 无法解析的到期日按已过期处理，逼迫修正。
 	}
-	return now.After(t)
+	return !now.UTC().Before(t.AddDate(0, 0, 1))
 }
 
 // readWaivers 读取登记表。
@@ -515,6 +525,20 @@ func runSelfTest() {
 	expect("a past date is expired", expired("2026-08-02", now), true)
 	expect("today is not expired", expired("2026-08-03", now), false)
 	expect("a future date is not expired", expired("2099-01-01", now), false)
+
+	// 边界：到期日当天**整天**都有效，次日零点才失效。
+	// 只测零点时刻会漏掉这一条——而差一天正是最容易被忽略、
+	// 也最容易在发布当天造成意外的偏差。
+	lateSameDay := time.Date(2026, 8, 3, 23, 59, 59, 0, time.UTC)
+	expect("the expiry date stays valid all day", expired("2026-08-03", lateSameDay), false)
+	nextMidnight := time.Date(2026, 8, 4, 0, 0, 0, 0, time.UTC)
+	expect("expiry takes effect at the next midnight", expired("2026-08-03", nextMidnight), true)
+
+	// 非 UTC 时区的同一时刻必须得到同一结论。
+	shanghai := time.FixedZone("CST", 8*3600)
+	sameInstant := nextMidnight.In(shanghai)
+	expect("the verdict does not depend on the machine timezone",
+		expired("2026-08-03", sameInstant), true)
 
 	// --- 陈旧条目 ---
 	entries := map[string]waiver{"k1": {ID: "GO-1"}, "k2": {ID: "GO-2"}}

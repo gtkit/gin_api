@@ -35,6 +35,7 @@ import (
 // 必须让启动失败的条件，而 panic 会绕过已建立资源的清理。
 func InitMiddleware(
 	r *gin.Engine, allowedOrigins []string, accessLog AccessLogOptions, maxBodyBytes int64,
+	allowedMethods AllowedMethodsFunc,
 ) error {
 	generator, err := NewRequestIDGenerator()
 	if err != nil {
@@ -51,7 +52,7 @@ func InitMiddleware(
 	r.Use(SecurityHeaders())
 	r.Use(ErrorHandler())
 	if len(allowedOrigins) > 0 {
-		r.Use(Cors(allowedOrigins))
+		r.Use(Cors(allowedOrigins, allowedMethods))
 	}
 	r.Use(MaxBytesLimit(MaxBytesLimitConfig{MaxBytes: maxBodyBytes}))
 

@@ -4,6 +4,7 @@ package userdeactivation
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
@@ -24,7 +25,11 @@ func New(db *gorm.DB) *Repository {
 // 事务由上层通过 dbtx.Manager.Do 开启并经 ctx 传递，本方法走 mdbCtx 自动参与同一事务，
 // 与"改写 users 字段"原子提交。
 func (r *Repository) Create(ctx context.Context, record *models.UserDeactivation) error {
-	return r.mdbCtx(ctx).Create(record).Error
+	if err := r.mdbCtx(ctx).Create(record).Error; err != nil {
+		// 带上操作与主键：注销是多步事务，裸错误无法指出是哪一步失败的。
+		return fmt.Errorf("create deactivation record for user %d: %w", record.UserID, err)
+	}
+	return nil
 }
 
 // GetLatestByUserID 返回指定用户最新一条注销记录。

@@ -11,7 +11,7 @@ import (
 func newCorsTestEngine(allowedOrigins []string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Cors(allowedOrigins))
+	engine.Use(Cors(allowedOrigins, nil))
 	engine.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})

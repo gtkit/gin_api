@@ -69,6 +69,7 @@ func writeSelfSignedCert(t *testing.T, notBefore, notAfter time.Time) (certPath,
 // 这正是它存在的意义：端口占用必须在 worker 启动屏障**之前**暴露，
 // 否则 required one-shot 的不可逆副作用（数据修复、发通知）会先于失败发生。
 func TestPrebindBindsPortBeforeServing(t *testing.T) {
+	testutil.RequireLoopback(t)
 	t.Parallel()
 
 	bound, err := prebindHTTP(HTTPConfig{Host: "127.0.0.1", Port: "0"})
@@ -112,6 +113,7 @@ func TestPrebindReportsPortConflict(t *testing.T) {
 //   - 临近过期        → 正常启动（证书**现在仍然有效**，拒绝启动等于
 //     用一次确定的停机换一个尚未发生的问题）。
 func TestPrebindTLSValidation(t *testing.T) {
+	testutil.RequireLoopback(t)
 	t.Parallel()
 
 	now := time.Now()

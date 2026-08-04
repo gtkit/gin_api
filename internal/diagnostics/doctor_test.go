@@ -14,6 +14,28 @@ import (
 )
 
 // validConfig 返回一份能通过严格校验的最小配置。
+// configWithRealKeys 返回一份密钥文件真实存在的配置。
+//
+// jwt_keys 会 stat 活跃密钥；fixture 指向不存在的路径时，任何断言"整体通过"
+// 的测试都会因为一项真实失败而失败——而那项失败与被测行为无关。
+func configWithRealKeys(t *testing.T) *config.Config {
+	t.Helper()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "active.private.pem")
+	pub := filepath.Join(dir, "active.public.pem")
+	for _, p := range []string{priv, pub} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	cfg := validConfig()
+	cfg.JWT.Active.PrivateKeyPath = priv
+	cfg.JWT.Active.PublicKeyPath = pub
+	return cfg
+}
+
 func validConfig() *config.Config {
 	return &config.Config{
 		Env: config.EnvDev,
@@ -54,7 +76,7 @@ func TestRunWithoutDeepSkipsIO(t *testing.T) {
 	t.Parallel()
 
 	var probed bool
-	report := Run(context.Background(), validConfig(), Options{
+	report := Run(context.Background(), configWithRealKeys(t), Options{
 		Deep: false,
 		Probes: Probes{
 			PingDB:    func(context.Context) error { probed = true; return nil },
@@ -116,7 +138,7 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 
 	t.Run("database down fails", func(t *testing.T) {
 		t.Parallel()
-		report := Run(context.Background(), validConfig(), Options{
+		report := Run(context.Background(), configWithRealKeys(t), Options{
 			Deep:   true,
 			Probes: Probes{PingDB: down, PingRedis: func(context.Context) error { return nil }},
 		})
@@ -130,7 +152,7 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 
 	t.Run("redis down degrades", func(t *testing.T) {
 		t.Parallel()
-		report := Run(context.Background(), validConfig(), Options{
+		report := Run(context.Background(), configWithRealKeys(t), Options{
 			Deep:   true,
 			Probes: Probes{PingDB: func(context.Context) error { return nil }, PingRedis: down},
 		})
@@ -146,7 +168,7 @@ func TestProbeErrorsAreNotEchoed(t *testing.T) {
 	t.Parallel()
 
 	const secret = "dial tcp root:hunter2@10.0.0.5:3306: connection refused"
-	report := Run(context.Background(), validConfig(), Options{
+	report := Run(context.Background(), configWithRealKeys(t), Options{
 		Deep: true,
 		Probes: Probes{
 			PingDB:    func(context.Context) error { return errors.New(secret) },
@@ -173,7 +195,7 @@ func TestPerCheckTimeoutIsIndependent(t *testing.T) {
 	block := func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
 
 	start := time.Now()
-	report := Run(context.Background(), validConfig(), Options{
+	report := Run(context.Background(), configWithRealKeys(t), Options{
 		Deep:    true,
 		Timeout: 100 * time.Millisecond,
 		Probes:  Probes{PingDB: block, PingRedis: block},
@@ -195,7 +217,7 @@ func TestPerCheckTimeoutIsIndependent(t *testing.T) {
 func TestReportIsStableAndMachineReadable(t *testing.T) {
 	t.Parallel()
 
-	report := Run(context.Background(), validConfig(), Options{})
+	report := Run(context.Background(), configWithRealKeys(t), Options{})
 
 	var buf strings.Builder
 	if err := WriteJSON(&buf, report); err != nil {
@@ -282,8 +304,8 @@ func TestJWTKeyPermissions(t *testing.T) {
 	}
 
 	cfg := validConfig()
-	cfg.JWT.PrivateKeyPath = priv
-	cfg.JWT.PublicKeyPath = pub
+	cfg.JWT.Active.PrivateKeyPath = priv
+	cfg.JWT.Active.PublicKeyPath = pub
 
 	if got := checkJWTKeys(cfg); got.Status != StatusPass {
 		t.Fatalf("status = %q (%s), want pass for 0600 keys", got.Status, got.Detail)
@@ -305,6 +327,61 @@ func TestJWTKeyPermissions(t *testing.T) {
 	}
 	if got := checkJWTKeys(cfg); got.ErrorCode != CodeMissing {
 		t.Fatalf("error code = %q, want %q for a missing key file", got.ErrorCode, CodeMissing)
+	}
+}
+
+// TestJWTKeyCheckReadsTheActiveKeyNotTheRetiredFields 是防回归断言。
+//
+// 这项检查曾经读 cfg.JWT.PrivateKeyPath / PublicKeyPath——密钥轮换落地前的
+// 单密钥字段。它们如今恒为空，空路径被循环跳过，于是**密钥完全缺失时
+// 仍然报 pass**。而当时的测试同样在设置那两个废弃字段，因此一路全绿。
+//
+// 断言的形态刻意是"只填废弃字段"：如果哪天实现又退回去读它们，这里会变绿，
+// 从而暴露回归。
+func TestJWTKeyCheckReadsTheActiveKeyNotTheRetiredFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	retired := filepath.Join(dir, "retired.pem")
+	if err := os.WriteFile(retired, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := validConfig()
+	cfg.JWT.PrivateKeyPath = retired
+	cfg.JWT.PublicKeyPath = retired
+	cfg.JWT.Active = config.JWTKeyConfig{}
+
+	got := checkJWTKeys(cfg)
+	if got.Status != StatusFail || got.ErrorCode != CodeMissing {
+		t.Fatalf("status=%q code=%q: an unconfigured active key must fail even when "+
+			"the retired single-key fields point at real files", got.Status, got.ErrorCode)
+	}
+}
+
+// TestJWTKeyCheckCoversRetiredPublicKeys 验证退役公钥也被检查。
+//
+// 它们仍参与验签：缺失会让持有旧令牌的用户在轮换后集体失效，
+// 而那正是重叠窗口要避免的事。
+func TestJWTKeyCheckCoversRetiredPublicKeys(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	priv := filepath.Join(dir, "active.priv")
+	pub := filepath.Join(dir, "active.pub")
+	for _, p := range []string{priv, pub} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	cfg := validConfig()
+	cfg.JWT.Active = config.JWTKeyConfig{PrivateKeyPath: priv, PublicKeyPath: pub}
+	cfg.JWT.Previous = []config.JWTKeyConfig{{PublicKeyPath: filepath.Join(dir, "gone.pub")}}
+
+	if got := checkJWTKeys(cfg); got.ErrorCode != CodeMissing {
+		t.Fatalf("error code = %q, want %q for a missing retired public key",
+			got.ErrorCode, CodeMissing)
 	}
 }
 
