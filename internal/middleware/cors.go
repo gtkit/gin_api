@@ -80,7 +80,15 @@ func Cors(allowedOrigins []string, allowedMethods AllowedMethodsFunc) gin.Handle
 		}
 
 		c.Header("Access-Control-Allow-Headers", allowHeadersValue)
-		c.Header("Access-Control-Allow-Methods", "POST,GET,OPTIONS,DELETE,PUT")
+		// 允许方法取自**路由索引**，与预检校验同一来源。
+		//
+		// 写死一份清单会与实际注册的路由分叉，而分叉的两个方向都坏：
+		// 清单少写（此前缺 PATCH 与 HEAD）会让浏览器拒绝一个服务端支持的方法；
+		// 多写则让浏览器放行一个会 405 的请求。
+		//
+		// 拿不到索引时退回一个保守常量：那只出现在没有索引的装配场景（本包单测），
+		// 生产装配必然传入。
+		c.Header("Access-Control-Allow-Methods", allowedMethodsHeader(c, allowedMethods))
 		c.Header("Access-Control-Expose-Headers",
 			"Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,"+
 				"Content-Type,New-Token,New-Expires-At")
@@ -133,6 +141,23 @@ func handlePreflight(c *gin.Context, allowedMethods AllowedMethodsFunc) {
 	}
 
 	c.AbortWithStatus(http.StatusNoContent)
+}
+
+// fallbackAllowedMethods 是拿不到路由索引时的保守取值。
+//
+// 只在没有索引的装配场景出现（本包单测）；生产装配必然传入索引。
+const fallbackAllowedMethods = "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS"
+
+// allowedMethodsHeader 返回该路径实际支持的方法。
+func allowedMethodsHeader(c *gin.Context, allowedMethods AllowedMethodsFunc) string {
+	if allowedMethods == nil {
+		return fallbackAllowedMethods
+	}
+	if allow := allowedMethods(c.Request.URL.Path); allow != "" {
+		return allow
+	}
+	// 路径未注册：预检会在下一步返回 404，这里的取值不影响结论。
+	return fallbackAllowedMethods
 }
 
 // methodAllowed 判断请求的方法是否在 Allow 头里。

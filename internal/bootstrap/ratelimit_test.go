@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/router/routespec"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 func policyConfig(mutate func(*config.RateLimitPolicyConfig)) config.RateLimitPolicyConfig {
@@ -30,31 +30,31 @@ func TestToRateLimitPolicyTranslatesEnums(t *testing.T) {
 	cases := []struct {
 		name      string
 		mutate    func(*config.RateLimitPolicyConfig)
-		wantScope routespec.RateLimitScope
-		wantStore routespec.RateLimitStore
-		wantMode  routespec.RateLimitFailureMode
+		wantScope ratelimit.Scope
+		wantStore ratelimit.Store
+		wantMode  ratelimit.FailureMode
 	}{
 		{
 			name:      "ip local fail_closed",
 			mutate:    nil,
-			wantScope: routespec.ScopeIP, wantStore: routespec.StoreLocal,
-			wantMode: routespec.FailureClosed,
+			wantScope: ratelimit.ScopeIP, wantStore: ratelimit.StoreLocal,
+			wantMode: ratelimit.FailureClosed,
 		},
 		{
 			name: "user redis fail_open",
 			mutate: func(p *config.RateLimitPolicyConfig) {
 				p.Scope, p.Store, p.FailureMode = "user", "redis", "fail_open"
 			},
-			wantScope: routespec.ScopeUser, wantStore: routespec.StoreRedis,
-			wantMode: routespec.FailureOpen,
+			wantScope: ratelimit.ScopeUser, wantStore: ratelimit.StoreRedis,
+			wantMode: ratelimit.FailureOpen,
 		},
 		{
 			name: "global redis local_fallback",
 			mutate: func(p *config.RateLimitPolicyConfig) {
 				p.Scope, p.Store, p.FailureMode = "global", "redis", "local_fallback"
 			},
-			wantScope: routespec.ScopeGlobal, wantStore: routespec.StoreRedis,
-			wantMode: routespec.FailureLocalFallback,
+			wantScope: ratelimit.ScopeGlobal, wantStore: ratelimit.StoreRedis,
+			wantMode: ratelimit.FailureLocalFallback,
 		},
 	}
 

@@ -13,8 +13,6 @@ import (
 var (
 	// ErrUserNotFound 表示用户不存在或已被软删除。
 	ErrUserNotFound = errors.New("user not found")
-	// ErrAlreadyDeactivated 表示用户已是注销态，幂等返回。
-	ErrAlreadyDeactivated = errors.New("user already deactivated")
 )
 
 // deactivatedNickname 注销后对客展示的占位昵称（业务文案，由 application 决定）。
@@ -66,7 +64,7 @@ type DeactivateInput struct {
 //
 // 事务边界在此编排（经 TxManager.Do），事务内步骤：
 //  1. LockByID 以 SELECT ... FOR UPDATE 锁定用户行，规避并发重复注销；
-//  2. 检查未被注销（status != Deleted），否则幂等返回 ErrAlreadyDeactivated；
+//  2. 锁行时已排除软删记录，因此拿到的必然是未注销用户；
 //  3. 写 user_deactivations 记录（保留 phone/email/nickname 原值，供审计/申诉）；
 //  4. AnonymizeForDeactivation 脱敏改写 + 软删 users 行（脱敏后的 phone/昵称由本层决定）；
 //  5. SoftDeleteProfile 软删 user_profiles 关联行。
@@ -91,10 +89,6 @@ func (s *Service) Deactivate(ctx context.Context, in DeactivateInput) error {
 		if !found {
 			return ErrUserNotFound
 		}
-		if user.Status == models.UserStatusDeleted {
-			return ErrAlreadyDeactivated
-		}
-
 		record := &models.UserDeactivation{
 			UserID:           user.ID,
 			OriginalPhone:    user.Phone,

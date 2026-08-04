@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
 )
@@ -21,7 +22,8 @@ application:
   name: %s
   domain: "https://anshuiroom.com"
   ishttps: false
-  readtimeout: 2
+  read_header_timeout: 2
+  read_timeout: 30
   timezone: "Asia/Shanghai"
 database:
   dbtype: mysql
@@ -260,12 +262,12 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 	cfg := &Config{
 		Env: "dev",
 		App: AppConfig{
-			Name:                appmeta.CommandName,
-			Host:                "localhost",
-			Port:                "not-a-port",
-			ReadTimeoutSeconds:  -1,
-			WriteTimeoutSeconds: -1,
-			Timezone:            "Mars/Nowhere",
+			Name:                     appmeta.CommandName,
+			Host:                     "localhost",
+			Port:                     "not-a-port",
+			ReadHeaderTimeoutSeconds: -1,
+			WriteTimeoutSeconds:      -1,
+			Timezone:                 "Mars/Nowhere",
 		},
 		Database: DatabaseConfig{
 			DBType: "",
@@ -520,6 +522,11 @@ func TestValidateLaravelJWTConfig(t *testing.T) {
 
 			cfg := validConfigForTest()
 			cfg.JWT.Laravel = tt.laravel
+			// 启用回退必须给出终点，否则会先被那条规则挡下，
+			// 本用例想验证的字段就永远测不到。
+			if tt.laravel.Enabled && cfg.JWT.LaravelAcceptUntil == "" {
+				cfg.JWT.LaravelAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+			}
 
 			err := cfg.Validate()
 			if tt.wantErrText == "" {

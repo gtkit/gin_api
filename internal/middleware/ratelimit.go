@@ -7,8 +7,7 @@ import (
 
 	ginc "github.com/gtkit/gin-api/internal/pkg/ginc"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
-	"github.com/gtkit/gin-api/internal/ratelimit"
-	"github.com/gtkit/gin-api/internal/router/routespec"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gin-gonic/gin"
 	logger "github.com/gtkit/logger/v2"
@@ -81,15 +80,15 @@ func RateLimit(limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder) (gin.Handl
 //
 // IP 只经唯一 accessor 取得（架构传感器强制）：两处各自裸调 ClientIP() 时，
 // 任何一处加了归一化都会让"日志里的 IP"与"被限流的 IP"指向不同主体。
-func rateLimitSubject(c *gin.Context, policy routespec.RateLimitPolicy) (ratelimit.Subject, error) {
+func rateLimitSubject(c *gin.Context, policy ratelimit.Policy) (ratelimit.Subject, error) {
 	switch policy.Scope {
-	case routespec.ScopeGlobal:
+	case ratelimit.ScopeGlobal:
 		return ratelimit.Subject{Scope: policy.Scope}, nil
 
-	case routespec.ScopeIP:
+	case ratelimit.ScopeIP:
 		return ratelimit.Subject{Scope: policy.Scope, Value: ginc.ClientIP(c)}, nil
 
-	case routespec.ScopeUser:
+	case ratelimit.ScopeUser:
 		// 未认证时返回 0。**不能把 0 当成一个合法主体**：那会让所有匿名请求
 		// 共用同一个桶，一个用户就能把它打满，而这条路由看起来"限流是生效的"。
 		userID := ginc.UserIDFromContext(c)
@@ -108,8 +107,23 @@ func rateLimitSubject(c *gin.Context, policy routespec.RateLimitPolicy) (ratelim
 //
 // 放行时也写：客户端据此提前退避比撞上 429 再退避更有价值，
 // 而只在被拒时写的话，客户端只能靠试错来发现限额。
+// writeRateLimitHeaders 写剩余配额，**只在比已有值更紧时覆盖**。
+//
+// 一条路由可以挂多条策略，而响应头只有一份。多条策略分布在处理链的不同位置——
+// 鉴权前的策略执行时，鉴权后那条还没跑，因此无法先聚合再决定写哪个。
+//
+// "只在更紧时覆盖"让结果**不依赖执行顺序**：每条各自尝试收紧，最终留下的
+// 必然是最紧的那条，也就不需要请求级的聚合器。
+//
+// 报出较宽松的那条会误导客户端：它据此认为还有余量，继续发送并被另一条策略
+// 拒绝，退避逻辑因此失效。
 func writeRateLimitHeaders(c *gin.Context, decision ratelimit.Decision) {
 	h := c.Writer.Header()
+	if existing := h.Get(headerRateRemaining); existing != "" {
+		if previous, err := strconv.Atoi(existing); err == nil && previous <= decision.Remaining {
+			return
+		}
+	}
 	h.Set(headerRateLimit, strconv.Itoa(decision.Limit))
 	h.Set(headerRateRemaining, strconv.Itoa(decision.Remaining))
 }

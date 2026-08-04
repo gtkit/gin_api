@@ -151,8 +151,19 @@ type RouteSpec struct {
 	//
 	// 只是标记，不改变行为：真正的下线是删除 RouteSpec，那要走破坏性变更流程。
 	Deprecated bool
-	// RateLimitPolicyID 由限流批次消费；空表示不限流。
-	RateLimitPolicyID string
+	// RateLimitPolicyIDs 是该路由生效的限流策略，空表示不限流。
+	//
+	// 用一组而不是单条：同时限制"这个来源不能太快"与"这个身份不能太快"是
+	// 最常见的组合——只限身份时，一个来源可以用大量账号并发打满；只限来源时，
+	// 就失去了按身份的精确限额。分档限流（短窗口 + 长窗口各一条）同理。
+	//
+	// **执行阶段由各自的 Scope 决定**，不在这里显式分组：user 作用域需要已认证
+	// 身份因而排在认证之后，其余排在认证之前。让作者手工分组会多出一处
+	// 可能与 Scope 矛盾的信息。
+	//
+	// 同一策略不得出现两次：重复不会让限流更严，只会让同一个桶在一次请求里
+	// 被扣两次，于是实际配额变成配置值的一半——而配置上完全看不出来。
+	RateLimitPolicyIDs []string
 	// RequestBodyPolicy 声明该路由接受什么样的请求体。写方法的零值非法。
 	RequestBodyPolicy RequestBodyPolicy
 	// RequestBody 是请求体的**样本值**（传零值实例，如 `dto.UserUpdateRequest{}`）。

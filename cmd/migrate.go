@@ -19,9 +19,12 @@ func init() {
 
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
 //
+// ctx 由调用方（cobra 命令）传入而不是用背景上下文：中断信号因此能覆盖数据库
+// 初始化——否则 Ctrl+C 之后进程还会停在建连上，直到它自己的超时到点。
+//
 // UseMigrationCredentials：迁移是唯一需要 DDL 权限的路径，配置了迁移专用账号时用它，
 // 未配置则回退运行凭据并告警（不失败，避免破坏尚未配置迁移凭据的存量部署）。
-func buildMigrationCommands() (*migrate.Commands, func(), error) {
+func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func(), error) {
 	// module path 必须先解析：解析失败时不该先把数据库连上再报错。
 	modulePath, err := resolveModulePath()
 	if err != nil {
@@ -31,7 +34,7 @@ func buildMigrationCommands() (*migrate.Commands, func(), error) {
 	// 最小装配：只要配置 + 日志 + 数据库。
 	// 此前走完整 NewRuntime，而 Redis 连不上会直接 panic——于是"Redis 挂了 ⇒ 数据库迁移也跑不了"，
 	// 两个无关依赖被绑死，而迁移恰恰是故障恢复时最需要能执行的操作。
-	rt, err := bootstrap.NewMigrationRuntime(context.Background())
+	rt, err := bootstrap.NewMigrationRuntime(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -74,7 +77,7 @@ func runMigratexSubtree(cmd *cobra.Command, args []string, pick func(*migrate.Co
 		return cmd.Help()
 	}
 
-	cmds, closeRuntime, err := buildMigrationCommands()
+	cmds, closeRuntime, err := buildMigrationCommands(cmd.Context())
 	if err != nil {
 		return commandError("bootstrap runtime", err)
 	}

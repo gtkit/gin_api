@@ -1,4 +1,15 @@
-package routespec
+// Package ratelimit 实现分布式与进程内限流。
+//
+// 算法是**定点整数令牌桶**，不是固定窗口：固定窗口在两个窗口交界处会放过
+// 接近两倍的流量，而修补它通常要退回 ZSet 滑动窗口——那让每个键的内存随
+// 请求数增长。令牌桶每个键只有两个字段，且天然表达"平时限速、允许突发"。
+//
+// Redis 侧全部经一段 Lua 原子执行。原子性不是可选项：读取、补充、扣减若
+// 分成多个命令，并发下会互相覆盖，而覆盖的方向是超发配额。
+//
+// 本包不写日志、不认识 HTTP，也不依赖任何仓库内部包——那是它能被外部项目
+// 引用的前提。运行期事件经 WithObserver 交给调用方。
+package ratelimit
 
 import (
 	"errors"
@@ -7,16 +18,16 @@ import (
 	"regexp"
 )
 
-// RateLimitScope 决定限流键里"主体"那一段取自哪里。
+// Scope 决定限流键里"主体"那一段取自哪里。
 //
 // 零值非法：与访问/超时策略同一原则。一个没声明 scope 的策略无法确定
 // 它到底在限谁，而最可能的默认（全局）恰好是危害最大的那个——
 // 一个用户的行为会影响所有人。
-type RateLimitScope uint8
+type Scope uint8
 
 const (
 	// ScopeUnspecified 是非法零值。
-	ScopeUnspecified RateLimitScope = iota
+	ScopeUnspecified Scope = iota
 	// ScopeIP 按客户端 IP 限流。IP 只能经唯一 accessor 取得（见架构传感器）。
 	ScopeIP
 	// ScopeUser 按已认证用户限流。**必须挂在鉴权之后的路由上**，
@@ -26,7 +37,7 @@ const (
 	ScopeGlobal
 )
 
-func (s RateLimitScope) String() string {
+func (s Scope) String() string {
 	switch s {
 	case ScopeIP:
 		return "ip"
@@ -39,12 +50,12 @@ func (s RateLimitScope) String() string {
 	}
 }
 
-// RateLimitStore 是计数状态的存放位置。
-type RateLimitStore uint8
+// Store 是计数状态的存放位置。
+type Store uint8
 
 const (
 	// StoreUnspecified 是非法零值。
-	StoreUnspecified RateLimitStore = iota
+	StoreUnspecified Store = iota
 	// StoreLocal 是进程内令牌桶。
 	//
 	// **多副本下有效限额 = 配置值 × 副本数**。它适合"高位防护上限"，
@@ -54,7 +65,7 @@ const (
 	StoreRedis
 )
 
-func (s RateLimitStore) String() string {
+func (s Store) String() string {
 	switch s {
 	case StoreLocal:
 		return "local"
@@ -65,15 +76,15 @@ func (s RateLimitStore) String() string {
 	}
 }
 
-// RateLimitFailureMode 决定后端不可用时怎么办。
+// FailureMode 决定后端不可用时怎么办。
 //
 // 这是一个**业务决策**，不能有默认值：登录接口失败时必须拒绝（否则限流形同虚设），
 // 而普通查询失败时拒绝会把一次 Redis 抖动放大成一次业务不可用。
-type RateLimitFailureMode uint8
+type FailureMode uint8
 
 const (
 	// FailureUnspecified 是非法零值。
-	FailureUnspecified RateLimitFailureMode = iota
+	FailureUnspecified FailureMode = iota
 	// FailureOpen 后端不可用时放行。
 	FailureOpen
 	// FailureClosed 后端不可用时拒绝。
@@ -85,7 +96,7 @@ const (
 	FailureLocalFallback
 )
 
-func (m RateLimitFailureMode) String() string {
+func (m FailureMode) String() string {
 	switch m {
 	case FailureOpen:
 		return "fail_open"
@@ -116,12 +127,12 @@ const microTokensPerToken = 1_000_000
 // 不会有任何报错。因此所有会进 Lua 的数值都必须在启动期校验不越界。
 const maxExactInteger = int64(1)<<53 - 1
 
-// RateLimitPolicy 是一条限流策略的完整契约。
+// Policy 是一条限流策略的完整契约。
 //
 // 策略在装配期注册进 registry，路由经 RouteSpec.RateLimitPolicyID 引用。
 // 不让路由内联策略参数：同一条限额往往被多条路由共享，内联会产生
 // 多份可能不一致的副本，而改动时极易漏掉其中之一。
-type RateLimitPolicy struct {
+type Policy struct {
 	// ID 是稳定的低基数标识，进限流键与 metrics label。
 	ID string
 	// Rate 是每秒补充速率，必须 > 0。允许小数（如 0.5 = 每 2 秒 1 个）。
@@ -129,11 +140,11 @@ type RateLimitPolicy struct {
 	// Burst 是桶容量，必须 > 0。
 	Burst int
 	// Scope 决定键里主体那一段的来源。
-	Scope RateLimitScope
+	Scope Scope
 	// Store 决定计数状态存放位置。
-	Store RateLimitStore
+	Store Store
 	// FailureMode 决定后端不可用时的行为。
-	FailureMode RateLimitFailureMode
+	FailureMode FailureMode
 	// MaxKeys 是该策略的键基数硬上限，必须 > 0。
 	//
 	// 达上限时**拒绝新建**，绝不淘汰仍活跃的桶：LRU 淘汰意味着攻击者
@@ -146,7 +157,7 @@ type RateLimitPolicy struct {
 //
 // 全部在**启动期**执行：限流配置错误的表现是"限额不是你以为的那个值"，
 // 而那在生产上只有被打穿或被误杀时才会发现。
-func (p RateLimitPolicy) Validate() error {
+func (p Policy) Validate() error {
 	var errs []error
 
 	if !rateLimitIDPattern.MatchString(p.ID) {
@@ -194,7 +205,7 @@ func (p RateLimitPolicy) Validate() error {
 //
 // 越界之后整数运算开始丢精度，而表现是限流**悄悄失准**——没有任何报错。
 // 因此必须在启动期拒绝，而不是等运行时算出一个错误的剩余配额。
-func (p RateLimitPolicy) validateFixedPointRange() []error {
+func (p Policy) validateFixedPointRange() []error {
 	if p.Rate <= 0 || p.Burst <= 0 {
 		return nil // 已由上面的规则报错，这里不再重复
 	}
@@ -219,11 +230,11 @@ func (p RateLimitPolicy) validateFixedPointRange() []error {
 }
 
 // FixedPointRate 返回每秒补充的 microtokens（四舍五入）。
-func (p RateLimitPolicy) FixedPointRate() int64 {
+func (p Policy) FixedPointRate() int64 {
 	return int64(math.Round(p.Rate * microTokensPerToken))
 }
 
 // FixedPointBurst 返回桶容量对应的 microtokens。
-func (p RateLimitPolicy) FixedPointBurst() int64 {
+func (p Policy) FixedPointBurst() int64 {
 	return int64(p.Burst) * microTokensPerToken
 }

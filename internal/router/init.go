@@ -7,9 +7,9 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 	middleware "github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gin-gonic/gin"
 )

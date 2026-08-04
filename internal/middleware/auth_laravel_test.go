@@ -39,7 +39,7 @@ func TestAuthAcceptsLaravelToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}
-	parser, err := jwtauth.NewFallbackParser(primary, laravelVerifier)
+	parser, err := jwtauth.NewFallbackParser(primary, laravelVerifier, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("NewFallbackParser returned error: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestAuthAcceptsLaravelToken(t *testing.T) {
 func TestAuthRejectsLaravelTokenWhenFallbackDisabled(t *testing.T) {
 	primary := newTestParser(t)
 
-	parser, err := jwtauth.NewFallbackParser(primary, nil)
+	parser, err := jwtauth.NewFallbackParser(primary, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("NewFallbackParser returned error: %v", err)
 	}

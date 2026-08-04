@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"sync"
-
-	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
 // Limiter 是一条策略的执行体。
@@ -16,7 +14,7 @@ type Limiter interface {
 	// 为 OutcomeBackendUnavailable，调用方按 FailureMode 处理。
 	Check(ctx context.Context, key string) (Decision, error)
 	// Policy 返回该 limiter 的策略。
-	Policy() routespec.RateLimitPolicy
+	Policy() Policy
 	// Close 释放资源。
 	Close()
 }
@@ -100,49 +98,6 @@ func (r *Registry) Close() error {
 		l.Close()
 	}
 	return nil
-}
-
-// ValidateReferences 校验路由引用的策略 ID 都已登记，且 scope 与访问策略相容。
-//
-// 在 compile 之后、接触生产 engine 之前执行。引用一个不存在的策略 ID
-// 若不拦住，那条路由就会**完全没有限流**——而配置里明明写了一个 ID，
-// 看起来一切正常。
-func (r *Registry) ValidateReferences(routes []routespec.CompiledRoute) error {
-	var errs []error
-
-	for _, route := range routes {
-		id := route.Spec.RateLimitPolicyID
-		if id == "" {
-			continue
-		}
-
-		limiter, ok := r.Lookup(id)
-		if !ok {
-			errs = append(errs, fmt.Errorf(
-				"route %s %s references rate limit policy %q, which is not registered: "+
-					"the route would run with no rate limiting at all",
-				route.Spec.Method, route.FullPath, id))
-			continue
-		}
-
-		// ScopeUser 需要已认证身份。挂在公开路由上时拿不到 userID，
-		// 整条路由会退化成一个所有匿名请求共享的桶——一个用户就能打满它。
-		if limiter.Policy().Scope == routespec.ScopeUser && !requiresAuthentication(route.Spec.AccessPolicy) {
-			errs = append(errs, fmt.Errorf(
-				"route %s %s uses user-scoped rate limit policy %q but does not require authentication: "+
-					"without an identity every anonymous request would share one bucket",
-				route.Spec.Method, route.FullPath, id))
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// requiresAuthentication 报告访问策略是否保证 handler 能拿到已认证身份。
-//
-// OptionalAuthenticated 不算：它允许匿名请求通过，因此不保证有身份。
-func requiresAuthentication(p routespec.AccessPolicy) bool {
-	return p.Mode == routespec.AccessAuthenticated || p.Mode == routespec.AccessAuthorized
 }
 
 // 编译期确认三种执行体都满足 Limiter 契约。

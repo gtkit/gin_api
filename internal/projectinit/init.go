@@ -435,9 +435,19 @@ func runCheckAppmeta(root string) error {
 	return runMake(root, "check-appmeta")
 }
 
+// isolatedEnv 是派生项目验证子命令的环境。
+//
+// **显式关闭 workspace**：父目录若存在 go.work（或其中的本地 replace），
+// 派生项目的第一次验证跑的就不是它自己的依赖图——通过了也说明不了什么，
+// 而失败时人会去查派生项目的代码，实际问题在上层目录。
+func isolatedEnv() []string {
+	return append(os.Environ(), "GOWORK=off")
+}
+
 func runMake(root, target string) error {
 	cmd := exec.Command("make", target)
 	cmd.Dir = root
+	cmd.Env = isolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("make %s: %w: %s", target, err, strings.TrimSpace(string(out)))
 	}
@@ -447,11 +457,13 @@ func runMake(root, target string) error {
 // goBuildAndCheck 收尾自检：先 go build，再 make check。
 func goBuildAndCheck(root string) error {
 	build := exec.Command("go", "build", "./...")
+	build.Env = isolatedEnv()
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		return fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	check := exec.Command("make", "check")
+	check.Env = isolatedEnv()
 	check.Dir = root
 	if out, err := check.CombinedOutput(); err != nil {
 		return fmt.Errorf("make check: %w: %s", err, strings.TrimSpace(string(out)))

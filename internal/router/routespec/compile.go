@@ -31,6 +31,9 @@ var allowedMethods = []string{
 var authorizerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
 
 // rateLimitPolicyIDPattern 与 authorizer ID 同源：同样进 key 与 metrics label。
+//
+// 本包只校验描述符里的**引用**长什么样。策略本身的定义、取值枚举与自洽校验
+// 在 pkg/ratelimit——协议描述包不认识令牌桶，也不该认识。
 var rateLimitPolicyIDPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
 
 // CompiledRoute 是通过全部校验、可安全交给 engine 的一条路由。
@@ -132,10 +135,7 @@ func validateSpec(spec RouteSpec) error {
 			"operation id %q must match %s: it names the generated client method, so it has to be "+
 				"a stable identifier", spec.OperationID, operationIDPattern.String()))
 	}
-	if spec.RateLimitPolicyID != "" && !rateLimitPolicyIDPattern.MatchString(spec.RateLimitPolicyID) {
-		errs = append(errs, fmt.Errorf(
-			"rate limit policy id %q must match %s", spec.RateLimitPolicyID, rateLimitPolicyIDPattern.String()))
-	}
+	errs = append(errs, validateRateLimitPolicyIDs(spec.RateLimitPolicyIDs)...)
 	if err := validateBodyDeclaration(spec); err != nil {
 		errs = append(errs, err)
 	}
@@ -230,6 +230,47 @@ func validateRequestBodyPolicy(spec RouteSpec) []error {
 			"RequestBody must be nil when the mode is %s", policy.Mode))
 	}
 
+	return errs
+}
+
+// maxRateLimitPoliciesPerRoute 是单条路由可引用的策略数上限。
+//
+// 每条策略都是一次后端往返。挂十几条会让该路由的延迟随策略数线性增长，
+// 而这种劣化只在高负载下显现——那时再回头数策略条数已经很晚了。
+// 四条足以表达"来源 + 身份"各配一档短窗口与一档长窗口。
+const maxRateLimitPoliciesPerRoute = 4
+
+// validateRateLimitPolicyIDs 校验策略引用。
+func validateRateLimitPolicyIDs(ids []string) []error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	var errs []error
+	if len(ids) > maxRateLimitPoliciesPerRoute {
+		errs = append(errs, fmt.Errorf(
+			"a route may reference at most %d rate limit policies, got %d: each one costs a backend "+
+				"round trip, so the route latency grows with the count",
+			maxRateLimitPoliciesPerRoute, len(ids)))
+	}
+
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !rateLimitPolicyIDPattern.MatchString(id) {
+			errs = append(errs, fmt.Errorf(
+				"rate limit policy id %q must match %s", id, rateLimitPolicyIDPattern.String()))
+			continue
+		}
+		if seen[id] {
+			// 重复不会让限流更严：同一个桶在一次请求里被扣两次，实际配额
+			// 因此是配置值的一半，而配置上完全看不出来。
+			errs = append(errs, fmt.Errorf(
+				"rate limit policy %q is referenced twice by the same route: the bucket would be "+
+					"charged twice per request, halving the effective quota", id))
+			continue
+		}
+		seen[id] = true
+	}
 	return errs
 }
 

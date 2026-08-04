@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gtkit/gin-api/internal/router/routespec"
-
 	golimit "github.com/gtkit/golimit/v2"
 )
 
@@ -15,7 +13,7 @@ import (
 // 的调用量），不适合精确业务限额——"每账号每分钟 5 次登录"在 3 个副本上
 // 实际是 15 次，而那正是攻击者需要的那点余量。
 type LocalBackend struct {
-	policy  routespec.RateLimitPolicy
+	policy  Policy
 	limiter *golimit.Limiter
 }
 
@@ -23,7 +21,7 @@ type LocalBackend struct {
 //
 // 每条策略一个实例，不共享：共享会让两条限额不同的策略互相消耗对方的 token，
 // 而这种串扰在压测里表现为"限额比配置的更严"，极难定位。
-func NewLocalBackend(policy routespec.RateLimitPolicy) (*LocalBackend, error) {
+func NewLocalBackend(policy Policy) (*LocalBackend, error) {
 	if err := policy.Validate(); err != nil {
 		return nil, fmt.Errorf("build local rate limit backend: %w", err)
 	}
@@ -76,7 +74,7 @@ func (b *LocalBackend) Close() {
 }
 
 // Policy 返回该 backend 的策略。
-func (b *LocalBackend) Policy() routespec.RateLimitPolicy { return b.policy }
+func (b *LocalBackend) Policy() Policy { return b.policy }
 
 // clampRemaining 把剩余令牌数向下取整并夹到非负。
 //

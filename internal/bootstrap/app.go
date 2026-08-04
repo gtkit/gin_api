@@ -45,6 +45,8 @@ type App struct {
 	// drainWait 是停 producer 之后、关 HTTP 之前的等待时长，
 	// 用于让负载均衡器观察到 /ready 的 503 并把本实例摘出转发目标。
 	drainWait time.Duration
+	// status 供 readiness 读取进程自身状态；pprof 启动后登记进去。
+	status *processStatus
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
@@ -73,6 +75,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		shutdown:   providers.shutdown,
 		rateLimits: providers.rateLimits,
 		drainWait:  drainWaitFrom(runtime.Config()),
+		status:     providers.status,
 	}, nil
 }
 
@@ -102,6 +105,9 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("start pprof endpoint: %w", err)
 	}
+	// 登记给 readiness：pprof 运行期异常退出时，实例仍可接流量，
+	// 但就绪信息里要说清楚"这台机器上没有 pprof 了"。
+	a.status.attachPprof(pprofEndpoint)
 
 	// 第一个信号进入优雅关停，第二个信号进入强制路径。
 	// 用 signal.Notify 而不是 signal.NotifyContext：后者只能表达"收到过信号"，

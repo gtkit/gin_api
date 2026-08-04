@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/router/routespec"
-
 	"github.com/redis/go-redis/v9"
 )
 
@@ -90,11 +88,11 @@ func (f *fakeRedis) counts() (load, eval, del int) {
 	return f.loadCalls, f.evalCalls, f.delCalls
 }
 
-func redisTestPolicy() routespec.RateLimitPolicy {
-	return routespec.RateLimitPolicy{
+func redisTestPolicy() Policy {
+	return Policy{
 		ID: "redis.policy", Rate: 10, Burst: 5,
-		Scope: routespec.ScopeIP, Store: routespec.StoreRedis,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ScopeIP, Store: StoreRedis,
+		FailureMode: FailureClosed, MaxKeys: 100,
 	}
 }
 
@@ -107,7 +105,7 @@ func TestRedisBackendProbesCapabilityNotJustConnectivity(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{}
-	backend, err := NewRedisBackend(context.Background(), fake, "svc")
+	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 	if err != nil {
 		t.Fatalf("NewRedisBackend: %v", err)
 	}
@@ -133,7 +131,7 @@ func TestRedisBackendFailsWhenScriptCannotLoad(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{loadErr: errors.New("NOPERM this user has no permissions to run 'script'")}
-	if _, err := NewRedisBackend(context.Background(), fake, "svc"); err == nil {
+	if _, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc")); err == nil {
 		t.Fatal("NewRedisBackend succeeded although the script could not be loaded")
 	}
 }
@@ -146,7 +144,7 @@ func TestRedisBackendReportsUncleanProbe(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{delErr: errors.New("NOPERM del")}
-	_, err := NewRedisBackend(context.Background(), fake, "svc")
+	_, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 	if err == nil {
 		t.Fatal("NewRedisBackend succeeded although the probe key could not be removed")
 	}
@@ -163,7 +161,7 @@ func TestRedisBackendRetriesOnNoScript(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{}
-	backend, err := NewRedisBackend(context.Background(), fake, "svc")
+	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 	if err != nil {
 		t.Fatalf("NewRedisBackend: %v", err)
 	}
@@ -207,7 +205,7 @@ func TestRedisBackendClockSkewIsAFaultNotAClamp(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{}
-	backend, err := NewRedisBackend(context.Background(), fake, "svc")
+	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 	if err != nil {
 		t.Fatalf("NewRedisBackend: %v", err)
 	}
@@ -251,11 +249,11 @@ func TestRedisLimiterFailureModes(t *testing.T) {
 
 	cases := []struct {
 		name        string
-		mode        routespec.RateLimitFailureMode
+		mode        FailureMode
 		wantAllowed bool
 	}{
-		{name: "fail_open allows", mode: routespec.FailureOpen, wantAllowed: true},
-		{name: "fail_closed rejects", mode: routespec.FailureClosed, wantAllowed: false},
+		{name: "fail_open allows", mode: FailureOpen, wantAllowed: true},
+		{name: "fail_closed rejects", mode: FailureClosed, wantAllowed: false},
 	}
 
 	for _, tc := range cases {
@@ -263,7 +261,7 @@ func TestRedisLimiterFailureModes(t *testing.T) {
 			t.Parallel()
 
 			fake := &fakeRedis{}
-			backend, err := NewRedisBackend(context.Background(), fake, "svc")
+			backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 			if err != nil {
 				t.Fatalf("NewRedisBackend: %v", err)
 			}
@@ -306,7 +304,7 @@ func TestFallbackBackendSwitchesToShadowBucket(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{}
-	backend, err := NewRedisBackend(context.Background(), fake, "svc")
+	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
 	if err != nil {
 		t.Fatalf("NewRedisBackend: %v", err)
 	}
@@ -316,7 +314,7 @@ func TestFallbackBackendSwitchesToShadowBucket(t *testing.T) {
 	fake.mu.Unlock()
 
 	policy := redisTestPolicy()
-	policy.FailureMode = routespec.FailureLocalFallback
+	policy.FailureMode = FailureLocalFallback
 	fallback, err := NewFallbackBackend(backend, policy)
 	if err != nil {
 		t.Fatalf("NewFallbackBackend: %v", err)

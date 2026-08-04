@@ -13,7 +13,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/testutil"
 
-	"github.com/gtkit/tools/mailx"
 	"github.com/gtkit/verify"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
@@ -429,21 +428,18 @@ func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
 func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 	originalLocal := time.Local
 	originalInitLog := initLogWithConfig
-	originalBuildMail := buildMailClient
 	originalInitJWT := initJWTWithConfig
 	originalVerify := initVerify
 	originalJSONCheck := checkJSONRuntime
 	defer func() {
 		time.Local = originalLocal
 		initLogWithConfig = originalInitLog
-		buildMailClient = originalBuildMail
 		initJWTWithConfig = originalInitJWT
 		initVerify = originalVerify
 		checkJSONRuntime = originalJSONCheck
 	}()
 
 	initLogWithConfig = func(*config.Config) {}
-	buildMailClient = func(*config.Config) (*mailx.Client, error) { return nil, nil }
 	initJWTWithConfig = func(*config.Config) (*jwtauth.Assembly, error) { return nil, nil }
 	initVerify = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}

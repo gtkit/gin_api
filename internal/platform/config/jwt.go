@@ -104,6 +104,14 @@ func validateJWTRotation(jwt JWTConfig, env Env) error {
 func validateJWTCutoffs(jwt JWTConfig, _ Env) []error {
 	var errs []error
 
+	// 开启 Laravel 回退却不给终点，等于把过渡口做成永久的。
+	// 在启动期拒绝，而不是让它静默地一直生效。
+	if jwt.Laravel.Enabled && strings.TrimSpace(jwt.LaravelAcceptUntil) == "" {
+		errs = append(errs, errors.New(
+			"jwt.laravel.enabled requires jwt.laravel_accept_until: a compatibility window "+
+				"without an end date never ends, and nothing will remind you to close it"))
+	}
+
 	for _, c := range []struct {
 		key   string
 		value string

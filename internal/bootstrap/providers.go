@@ -24,7 +24,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/json"
-	"github.com/gtkit/tools/mailx"
 	"github.com/gtkit/verify"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -35,7 +34,6 @@ var (
 	initJWTWithConfig = jwtauth.Assemble
 	initVerify        = verify.New
 	checkJSONRuntime  = json.CheckJSON
-	buildMailClient   = newMailClientFromConfig
 )
 
 type providerSet struct {
@@ -44,6 +42,8 @@ type providerSet struct {
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
 	rateLimits rateLimitAssembly
+	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
+	status *processStatus
 }
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
@@ -52,8 +52,6 @@ type infra struct {
 	cfg        *config.Config
 	mysqlDB    *gorm.DB
 	httpConfig HTTPConfig
-	// mailClient SMTP 客户端；email.host 未配置时为 nil，消费方注入前判空。
-	mailClient *mailx.Client
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
 }
@@ -123,8 +121,8 @@ func newProviders(ctx context.Context, runtime *Runtime) (*providerSet, error) {
 	//    路由契约不合法属装配错误，在此透传为启动失败。
 	// 豁免理由同上：被指认的是 readyHandler **返回的闭包**，探针在每个请求上
 	// 用自己的 ctx 执行；路由装配本身只做注册，不发起任何 I/O。
-	engine, err := buildEngine(inf, svc, mw, //nolint:contextcheck // 见上：被指认的是请求期闭包
-		newProcessStatus(coordinator, workers))
+	status := newProcessStatus(coordinator, workers)
+	engine, err := buildEngine(inf, svc, mw, status) //nolint:contextcheck // 见上：被指认的是请求期闭包
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +133,7 @@ func newProviders(ctx context.Context, runtime *Runtime) (*providerSet, error) {
 		workers:    workers,
 		shutdown:   coordinator,
 		rateLimits: rateLimits,
+		status:     status,
 	}, nil
 }
 
@@ -150,44 +149,13 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	}
 
 	cfg := runtime.Config()
-	mailClient, err := buildMailClient(cfg)
-	if err != nil {
-		return infra{}, fmt.Errorf("init mail client: %w", err)
-	}
 
 	return infra{
 		resources:  resources,
 		cfg:        cfg,
 		mysqlDB:    mysqlDB,
 		httpConfig: newHTTPConfig(cfg),
-		mailClient: mailClient,
 	}, nil
-}
-
-// newMailClientFromConfig 把 email 配置翻译成 mailx 客户端。
-// email.host 为空视为未启用邮件能力，返回 (nil, nil) 不阻塞启动；
-// 配置存在但非法（如 from 地址格式错误）fail-fast。
-// 465 端口自动走隐式 SSL（SMTPS），其余端口走 mailx 默认的强制 TLS（STARTTLS）。
-func newMailClientFromConfig(cfg *config.Config) (*mailx.Client, error) {
-	if cfg == nil || strings.TrimSpace(cfg.Email.Host) == "" {
-		return nil, nil
-	}
-
-	opts := make([]mailx.Option, 0, 4)
-	if cfg.Email.Port > 0 {
-		opts = append(opts, mailx.WithPort(cfg.Email.Port))
-	}
-	if cfg.Email.Port == 465 {
-		opts = append(opts, mailx.WithImplicitSSL())
-	}
-	if cfg.Email.User != "" {
-		opts = append(opts, mailx.WithCredentials(cfg.Email.User, cfg.Email.Pass))
-	}
-	if cfg.Email.Alias != "" {
-		opts = append(opts, mailx.WithFromName(cfg.Email.Alias))
-	}
-
-	return mailx.New(cfg.Email.Host, cfg.Email.User, opts...)
 }
 
 // buildServices 把基础设施翻译成各模块的 application service，传递最小依赖。
@@ -350,7 +318,19 @@ func newTokenParser(cfg *config.Config, issuer jwtauth.TokenParser) (middleware.
 		return nil, fmt.Errorf("init laravel verifier: %w", err)
 	}
 
-	return jwtauth.NewFallbackParser(issuer, laravelVerifier)
+	// 截止时刻必须真正注入运行期。
+	//
+	// 此前它只在配置层被校验格式，从未被读取——于是只要 enabled 不关，
+	// Laravel 令牌永久有效，而配置里那个日期给了运维一个虚假的下线承诺。
+	// 格式已由 config.Validate 保证，这里再解析一次是为了把它变成 time.Time。
+	acceptUntil, err := time.Parse(time.RFC3339, strings.TrimSpace(cfg.JWT.LaravelAcceptUntil))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"jwt.laravel.enabled requires jwt.laravel_accept_until as an RFC3339 instant: "+
+				"a compatibility window without an end date never ends: %w", err)
+	}
+
+	return jwtauth.NewFallbackParser(issuer, laravelVerifier, acceptUntil)
 }
 
 // initProcessRuntime 初始化**进程级、无连接**的运行时设施：时区、日志、校验器、JSON 实现。

@@ -340,7 +340,11 @@ func TestCompileValidatesRateLimitPolicyID(t *testing.T) {
 		id      string
 		wantErr bool
 	}{
-		{name: "empty means no limit"},
+		{
+			// 旧语义里空字符串同时表示"不限流"与"空 ID"，二义。
+			// 现在"不限流"由空切片表达，空字符串就只剩"引用了一个非法 ID"一种含义。
+			name: "an empty id is a malformed reference", id: "", wantErr: true,
+		},
 		{name: "valid", id: "ip.default"},
 		{name: "valid with dash", id: "user-scope.login"},
 		{name: "uppercase rejected", id: "IP.Default", wantErr: true},
@@ -351,9 +355,72 @@ func TestCompileValidatesRateLimitPolicyID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := specOK()
-			s.RateLimitPolicyID = tt.id
+			s.RateLimitPolicyIDs = []string{tt.id}
 			if err := compileOne(s); (err != nil) != tt.wantErr {
 				t.Fatalf("rate limit policy id %q err = %v, wantErr = %v", tt.id, err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("no policies at all is allowed", func(t *testing.T) {
+		t.Parallel()
+		if err := compileOne(specOK()); err != nil {
+			t.Fatalf("a route without rate limiting must compile: %v", err)
+		}
+	})
+}
+
+// TestCompileValidatesRateLimitPolicySet 钉住多策略引用的约束。
+//
+// 这些约束的共同点是**配置上看不出问题**：重复引用看起来像"限得更严"，
+// 而实际是同一个桶被扣两次、配额减半；策略挂太多看起来只是配置长一点，
+// 而实际是每条一次后端往返、延迟随条数线性增长。
+func TestCompileValidatesRateLimitPolicySet(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ids     []string
+		wantErr string
+	}{
+		{name: "two distinct policies are allowed", ids: []string{"ip.default", "user.login"}},
+		{
+			name: "the same policy twice is rejected",
+			ids:  []string{"ip.default", "ip.default"},
+			// 重复不会让限流更严，只会让实际配额变成配置值的一半。
+			wantErr: "referenced twice",
+		},
+		{
+			name:    "exceeding the per-route cap is rejected",
+			ids:     []string{"a.one", "b.two", "c.three", "d.four", "e.five"},
+			wantErr: "at most",
+		},
+		{
+			name:    "a malformed id among valid ones is still caught",
+			ids:     []string{"ip.default", "Bad.ID"},
+			wantErr: "must match",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := specOK()
+			s.RateLimitPolicyIDs = tt.ids
+
+			err := compileOne(s)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("compile: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("compile succeeded, want an error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want it to mention %q", err, tt.wantErr)
 			}
 		})
 	}

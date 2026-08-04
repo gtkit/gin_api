@@ -97,7 +97,7 @@ go run . module staff --field nickname:string --field status:uint8
 3. `golangci-lint run ./...`。
 4. `go vet ./...`。
 5. race 测试并生成聚合 coverage profile。
-6. 校验全仓覆盖率不低于当前门禁 62.0%（以 `Makefile` 的 `COVERAGE_MIN` 为准）。
+6. 校验全仓覆盖率不低于当前门禁（**以 `Makefile` 的 `COVERAGE_MIN` 为准**，本文不重复该数字——写死会与实际门禁分叉，而分叉时读者无从判断哪个是真的）。
 
 `make check-ci` 在 `make check` 基础上额外执行脚手架防腐冒烟 `check-generator`：把发布候选工作树
 （已跟踪文件 + 新增未跟踪且非 ignored 文件，排除 ignored）导出到临时目录跑生成器，验证产物编译 /

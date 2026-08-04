@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,10 +79,23 @@ func TestMaxBytesLimitReturns413ForChunkedBodyViaBind(t *testing.T) {
 	}
 }
 
+// TestMaxBytesLimitReturns413WhenRequestBodyLoggingEnabled 验证开启请求体日志时
+// 字节上限依然生效。
+//
+// handler **必须真的读 body**：日志中间件不再主动预读，而是在 handler 读取时
+// 旁路抄走前缀。这正是要的语义——不读 body 的 handler 不该因为日志被拒。
+//
+// 旧版本测的是"日志预读撞限"，而那次预读发生在字节上限接管之前，读的是
+// 未受约束的流；换句话说，它测的是一条本身就有缺陷的路径。
 func TestMaxBytesLimitReturns413WhenRequestBodyLoggingEnabled(t *testing.T) {
 	handlerCalled := false
 	engine := newMaxBytesTestEngine(4, AccessLogOptions{LogRequestBody: true}, func(c *gin.Context) {
 		handlerCalled = true
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			// 与生产 handler 同一口径：绑定路径识别 MaxBytesError 并映射 413。
+			resp.BindStructErr(c, err)
+			return
+		}
 		c.Status(http.StatusOK)
 	})
 
@@ -93,8 +107,8 @@ func TestMaxBytesLimitReturns413WhenRequestBodyLoggingEnabled(t *testing.T) {
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
 	}
-	if handlerCalled {
-		t.Fatal("handler executed, want skipped after body read failure")
+	if !handlerCalled {
+		t.Fatal("handler was skipped: the limit must surface when the handler reads, not before")
 	}
 }
 

@@ -11,9 +11,9 @@ import (
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
-	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 // registerCompiledRoutes 是全仓**唯一**允许向 engine 注册路由的地方。
@@ -42,7 +42,7 @@ type accessMiddleware struct {
 	authenticateOptional gin.HandlerFunc
 	// authorizers 是具名授权实现，AccessAuthorized 按 ID 解析。
 	authorizers *sharedauth.AuthorizerRegistry
-	// rateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyID 按 ID 解析。
+	// rateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyIDs 按 ID 解析。
 	rateLimits *ratelimit.Registry
 	// rateLimitKeys 生成限流键（主体标识经 HMAC）。
 	rateLimitKeys *ratelimit.KeyBuilder
@@ -80,9 +80,7 @@ func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
 	chain = append(chain, timeoutMW)
 
 	// 鉴权**之前**的限流：IP 与全局作用域不需要身份。
-	if mw, ok := m.rateLimitFor(spec, false); ok {
-		chain = append(chain, mw)
-	}
+	chain = append(chain, m.rateLimitsFor(spec, false)...)
 
 	chain = append(chain, middleware.RequestBody(spec.RequestBodyPolicy, m.maxBodyBytes))
 
@@ -105,43 +103,50 @@ func (m accessMiddleware) chainFor(spec routespec.RouteSpec) []gin.HandlerFunc {
 	}
 
 	// 鉴权**之后**的限流：user 作用域需要已认证身份。
-	if mw, ok := m.rateLimitFor(spec, true); ok {
-		chain = append(chain, mw)
-	}
+	chain = append(chain, m.rateLimitsFor(spec, true)...)
 
 	return append(chain, spec.Handler)
 }
 
-// rateLimitFor 返回该路由在指定阶段的限流中间件。
+// rateLimitsFor 返回该路由在指定阶段的全部限流中间件，保持声明顺序。
 //
 // afterAuth 决定取哪一段：user 作用域必须在鉴权之后（否则拿不到身份），
 // IP/global 必须在鉴权之前（否则每个被限流的请求都要先付出一次完整的
 // 令牌校验，而那正是攻击者想消耗的资源）。
-func (m accessMiddleware) rateLimitFor(spec routespec.RouteSpec, afterAuth bool) (gin.HandlerFunc, bool) {
-	if spec.RateLimitPolicyID == "" || m.rateLimits == nil || m.rateLimitKeys == nil {
-		return nil, false
+//
+// 阶段由每条策略自己的 Scope 决定，而不是由作者在描述符里分组——
+// 手工分组会多出一处可能与 Scope 矛盾的信息，而矛盾时以哪边为准没有好答案。
+func (m accessMiddleware) rateLimitsFor(spec routespec.RouteSpec, afterAuth bool) []gin.HandlerFunc {
+	if len(spec.RateLimitPolicyIDs) == 0 || m.rateLimits == nil || m.rateLimitKeys == nil {
+		return nil
 	}
 
-	limiter, ok := m.rateLimits.Lookup(spec.RateLimitPolicyID)
-	if !ok {
-		// 走不到这里：ValidateReferences 已在 compile 之后确认过可解析。
-		// 万一走到，拒绝而不是静默放行——后者等于这条路由完全没有限流。
-		if afterAuth {
-			return denyEverything, true
+	var chain []gin.HandlerFunc
+	for _, id := range spec.RateLimitPolicyIDs {
+		limiter, ok := m.rateLimits.Lookup(id)
+		if !ok {
+			// 走不到这里：validateRateLimitReferences 已在 compile 之后确认可解析。
+			// 万一走到，拒绝而不是静默放行——后者等于这条策略完全没生效。
+			//
+			// 只在鉴权后那一段兜底：鉴权前返回 denyEverything 会让公开路由
+			// 整体不可用，而问题本身只是一条策略解析不到。
+			if afterAuth {
+				return []gin.HandlerFunc{denyEverything}
+			}
+			continue
 		}
-		return nil, false
-	}
 
-	isUserScope := limiter.Policy().Scope == routespec.ScopeUser
-	if isUserScope != afterAuth {
-		return nil, false
-	}
+		if (limiter.Policy().Scope == ratelimit.ScopeUser) != afterAuth {
+			continue
+		}
 
-	mw, err := middleware.RateLimit(limiter, m.rateLimitKeys)
-	if err != nil {
-		return denyEverything, true
+		mw, err := middleware.RateLimit(limiter, m.rateLimitKeys)
+		if err != nil {
+			return []gin.HandlerFunc{denyEverything}
+		}
+		chain = append(chain, mw)
 	}
-	return mw, true
+	return chain
 }
 
 // denyEverything 是装配异常时的兜底 handler：拒绝而不是放行。
@@ -284,7 +289,7 @@ func describeCompileError(err error) error {
 func validateRateLimitSupport(routes []routespec.CompiledRoute, opt RouterOptions) error {
 	var referenced bool
 	for _, route := range routes {
-		if route.Spec.RateLimitPolicyID != "" {
+		if len(route.Spec.RateLimitPolicyIDs) > 0 {
 			referenced = true
 			break
 		}
@@ -304,5 +309,5 @@ func validateRateLimitSupport(routes []routespec.CompiledRoute, opt RouterOption
 				"limiter keys must derive subject identifiers through a keyed HMAC")
 	}
 
-	return opt.RateLimits.ValidateReferences(routes)
+	return validateRateLimitReferences(opt.RateLimits, routes)
 }

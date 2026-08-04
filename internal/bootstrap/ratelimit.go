@@ -7,8 +7,8 @@ import (
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/gin-api/internal/ratelimit"
-	"github.com/gtkit/gin-api/internal/router/routespec"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"go.uber.org/zap"
 
 	logger "github.com/gtkit/logger/v2"
 )
@@ -71,12 +71,12 @@ func buildRateLimits(
 // buildLimiter 按 Store 与 FailureMode 构造执行体。
 func buildLimiter(
 	ctx context.Context,
-	policy routespec.RateLimitPolicy,
+	policy ratelimit.Policy,
 	resources *data.Resources,
 	redisBackend **ratelimit.RedisBackend,
 	keyPrefix string,
 ) (ratelimit.Limiter, error) {
-	if policy.Store == routespec.StoreLocal {
+	if policy.Store == ratelimit.StoreLocal {
 		return ratelimit.NewLocalBackend(policy)
 	}
 
@@ -87,78 +87,80 @@ func buildLimiter(
 				"rate limit policy %q uses the redis store but no redis client is available: "+
 					"either configure redis or switch the policy to the local store", policy.ID)
 		}
-		backend, err := ratelimit.NewRedisBackend(ctx, client, keyPrefix)
+		backend, err := ratelimit.NewRedisBackend(ctx, client,
+			ratelimit.WithKeyPrefix(keyPrefix),
+			ratelimit.WithObserver(rateLimitObserver{}))
 		if err != nil {
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
 		}
 		*redisBackend = backend
 	}
 
-	if policy.FailureMode == routespec.FailureLocalFallback {
+	if policy.FailureMode == ratelimit.FailureLocalFallback {
 		return ratelimit.NewFallbackBackend(*redisBackend, policy)
 	}
 	return ratelimit.NewRedisLimiter(*redisBackend, policy)
 }
 
 // toRateLimitPolicy 把配置形态翻译成强类型策略。
-func toRateLimitPolicy(raw config.RateLimitPolicyConfig) (routespec.RateLimitPolicy, error) {
+func toRateLimitPolicy(raw config.RateLimitPolicyConfig) (ratelimit.Policy, error) {
 	scope, err := parseScope(raw.Scope)
 	if err != nil {
-		return routespec.RateLimitPolicy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
+		return ratelimit.Policy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
 	}
 	store, err := parseStore(raw.Store)
 	if err != nil {
-		return routespec.RateLimitPolicy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
+		return ratelimit.Policy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
 	}
 	mode, err := parseFailureMode(raw.FailureMode)
 	if err != nil {
-		return routespec.RateLimitPolicy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
+		return ratelimit.Policy{}, fmt.Errorf("rate limit policy %q: %w", raw.ID, err)
 	}
 
-	policy := routespec.RateLimitPolicy{
+	policy := ratelimit.Policy{
 		ID: raw.ID, Rate: raw.Rate, Burst: raw.Burst,
 		Scope: scope, Store: store, FailureMode: mode, MaxKeys: raw.MaxKeys,
 	}
 	if err := policy.Validate(); err != nil {
-		return routespec.RateLimitPolicy{}, err
+		return ratelimit.Policy{}, err
 	}
 	return policy, nil
 }
 
-func parseScope(raw string) (routespec.RateLimitScope, error) {
+func parseScope(raw string) (ratelimit.Scope, error) {
 	switch raw {
 	case "ip":
-		return routespec.ScopeIP, nil
+		return ratelimit.ScopeIP, nil
 	case "user":
-		return routespec.ScopeUser, nil
+		return ratelimit.ScopeUser, nil
 	case "global":
-		return routespec.ScopeGlobal, nil
+		return ratelimit.ScopeGlobal, nil
 	default:
-		return routespec.ScopeUnspecified, fmt.Errorf("unknown scope %q", raw)
+		return ratelimit.ScopeUnspecified, fmt.Errorf("unknown scope %q", raw)
 	}
 }
 
-func parseStore(raw string) (routespec.RateLimitStore, error) {
+func parseStore(raw string) (ratelimit.Store, error) {
 	switch raw {
 	case "local":
-		return routespec.StoreLocal, nil
+		return ratelimit.StoreLocal, nil
 	case "redis":
-		return routespec.StoreRedis, nil
+		return ratelimit.StoreRedis, nil
 	default:
-		return routespec.StoreUnspecified, fmt.Errorf("unknown store %q", raw)
+		return ratelimit.StoreUnspecified, fmt.Errorf("unknown store %q", raw)
 	}
 }
 
-func parseFailureMode(raw string) (routespec.RateLimitFailureMode, error) {
+func parseFailureMode(raw string) (ratelimit.FailureMode, error) {
 	switch raw {
 	case "fail_open":
-		return routespec.FailureOpen, nil
+		return ratelimit.FailureOpen, nil
 	case "fail_closed":
-		return routespec.FailureClosed, nil
+		return ratelimit.FailureClosed, nil
 	case "local_fallback":
-		return routespec.FailureLocalFallback, nil
+		return ratelimit.FailureLocalFallback, nil
 	default:
-		return routespec.FailureUnspecified, fmt.Errorf("unknown failure mode %q", raw)
+		return ratelimit.FailureUnspecified, fmt.Errorf("unknown failure mode %q", raw)
 	}
 }
 
@@ -190,4 +192,27 @@ func closeRateLimits(a rateLimitAssembly) error {
 		return errors.Join(errors.New("close rate limit registry"), err)
 	}
 	return nil
+}
+
+// rateLimitObserver 把限流包的运行期事件接到项目日志栈。
+//
+// 限流包自己不写日志——它是对外发布的包，不该知道本项目用哪个日志库。
+// 事件在这里落地，因此将来换日志栈只影响这一个类型。
+type rateLimitObserver struct{}
+
+// BackendPhaseChanged 记录后端健康相位迁移。
+//
+// 低基数事件，每次都记：它是排查"限流为什么突然放宽或收紧"的第一手线索。
+func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
+	logger.Warn("rate limit backend phase changed",
+		zap.String("from", from.String()), zap.String("to", to.String()))
+}
+
+// FellBackToLocal 在首次降级到本地影子桶时记录一次。
+//
+// 只记一次：故障期间每个请求都打一条会把日志刷满，而信息量只有第一条。
+func (rateLimitObserver) FellBackToLocal(policyID string) {
+	logger.Warn("rate limit fell back to the local shadow bucket; "+
+		"the model is the same but the state is not carried over, so up to one burst may pass through",
+		zap.String("policy", policyID))
 }

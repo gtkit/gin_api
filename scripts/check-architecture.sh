@@ -70,6 +70,25 @@ check_no_match \
   "${MOD}/internal/module/" \
   internal/pkg
 
+# pkg/ 是对外发布的可复用包，绝不能依赖仓库内部包。
+#
+# 这不是风格约束而是硬性限制：pkg 一旦被外部项目引用，而它自身 import 了
+# 本仓 internal/，外部项目的编译会因 Go 的 internal 可见性规则直接失败。
+# 违反这条的包只是**看起来**可复用——在本仓内怎么跑都正常，
+# 只有真正被外部引用时才暴露，而那时已经发布出去了。
+check_no_match \
+  "pkg imports internal (breaks external consumers)" \
+  "${MOD}/internal/" \
+  pkg
+
+# pkg/ 不绑定业务日志栈：事件应经回调交给调用方。
+#
+# 包内直接写日志会把使用者绑定到某个具体日志库，而换一个库只是换个绑定对象。
+check_no_match \
+  "pkg imports a logging stack (emit events to the caller instead)" \
+  'github\.com/gtkit/logger|go\.uber\.org/zap|log/slog' \
+  pkg
+
 check_no_match \
   "worker imports gorm / repository" \
   "${MOD}/internal/repository/|gorm\.io/gorm" \

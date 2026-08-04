@@ -12,10 +12,11 @@ import (
 func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 	cfg := newHTTPConfig(&config.Config{
 		App: config.AppConfig{
-			Host:               "127.0.0.1",
-			Port:               "8008",
-			EnableHTTPS:        true,
-			ReadTimeoutSeconds: 3,
+			Host:                     "127.0.0.1",
+			Port:                     "8008",
+			EnableHTTPS:              true,
+			ReadHeaderTimeoutSeconds: 3,
+			ReadTimeoutFullSeconds:   45,
 		},
 		SSL: config.SSLConfig{
 			PEM: "config/pem/jwtpub.pem",

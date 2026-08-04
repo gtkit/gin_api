@@ -7,15 +7,13 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
-func testPolicy(mutate func(*routespec.RateLimitPolicy)) routespec.RateLimitPolicy {
-	p := routespec.RateLimitPolicy{
+func testPolicy(mutate func(*Policy)) Policy {
+	p := Policy{
 		ID: "test.policy", Rate: 10, Burst: 5,
-		Scope: routespec.ScopeIP, Store: routespec.StoreLocal,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ScopeIP, Store: StoreLocal,
+		FailureMode: FailureClosed, MaxKeys: 100,
 	}
 	if mutate != nil {
 		mutate(&p)
@@ -32,73 +30,73 @@ func TestPolicyValidation(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		mutate   func(*routespec.RateLimitPolicy)
+		mutate   func(*Policy)
 		wantErr  bool
 		wantHint string
 	}{
 		{name: "valid policy", mutate: nil},
 		{
 			name:   "fractional rate is valid",
-			mutate: func(p *routespec.RateLimitPolicy) { p.Rate = 0.5 },
+			mutate: func(p *Policy) { p.Rate = 0.5 },
 		},
 		{
 			name:    "id charset enforced",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.ID = "Bad ID/with slash" },
+			mutate:  func(p *Policy) { p.ID = "Bad ID/with slash" },
 			wantErr: true, wantHint: "policy id",
 		},
 		{
 			name:    "empty id rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.ID = "" },
+			mutate:  func(p *Policy) { p.ID = "" },
 			wantErr: true, wantHint: "policy id",
 		},
 		{
 			name:    "zero rate rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Rate = 0 },
+			mutate:  func(p *Policy) { p.Rate = 0 },
 			wantErr: true, wantHint: "positive finite rate",
 		},
 		{
 			name:    "zero burst rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Burst = 0 },
+			mutate:  func(p *Policy) { p.Burst = 0 },
 			wantErr: true, wantHint: "positive burst",
 		},
 		{
 			name:    "zero max keys rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.MaxKeys = 0 },
+			mutate:  func(p *Policy) { p.MaxKeys = 0 },
 			wantErr: true, wantHint: "max keys",
 		},
 		{
 			name:    "unspecified scope rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Scope = routespec.ScopeUnspecified },
+			mutate:  func(p *Policy) { p.Scope = ScopeUnspecified },
 			wantErr: true, wantHint: "must declare a scope",
 		},
 		{
 			name:    "unspecified store rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Store = routespec.StoreUnspecified },
+			mutate:  func(p *Policy) { p.Store = StoreUnspecified },
 			wantErr: true, wantHint: "must declare a store",
 		},
 		{
 			name:    "unspecified failure mode rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.FailureMode = routespec.FailureUnspecified },
+			mutate:  func(p *Policy) { p.FailureMode = FailureUnspecified },
 			wantErr: true, wantHint: "must declare a failure mode",
 		},
 		{
 			// local store 降级到 local 没有意义——降级目标就是它自己。
 			name: "local store with local fallback rejected",
-			mutate: func(p *routespec.RateLimitPolicy) {
-				p.Store = routespec.StoreLocal
-				p.FailureMode = routespec.FailureLocalFallback
+			mutate: func(p *Policy) {
+				p.Store = StoreLocal
+				p.FailureMode = FailureLocalFallback
 			},
 			wantErr: true, wantHint: "nothing to fall back from",
 		},
 		{
 			// 越过精确整数范围之后限流会**悄悄失准**，没有任何报错。
 			name:    "burst overflowing the exact integer range rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Burst = 1 << 40 },
+			mutate:  func(p *Policy) { p.Burst = 1 << 40 },
 			wantErr: true, wantHint: "exact-integer range",
 		},
 		{
 			name:    "rate below the smallest representable value rejected",
-			mutate:  func(p *routespec.RateLimitPolicy) { p.Rate = 1e-9 },
+			mutate:  func(p *Policy) { p.Rate = 1e-9 },
 			wantErr: true, wantHint: "smallest representable rate",
 		},
 	}
@@ -129,7 +127,7 @@ func TestLocalBackendEnforcesBurstAndRate(t *testing.T) {
 	t.Parallel()
 
 	// Rate 极低，保证测试期间几乎不补充：断言的是 Burst 边界本身。
-	backend, err := NewLocalBackend(testPolicy(func(p *routespec.RateLimitPolicy) {
+	backend, err := NewLocalBackend(testPolicy(func(p *Policy) {
 		p.Rate, p.Burst = 0.01, 3
 	}))
 	if err != nil {
@@ -168,7 +166,7 @@ func TestLocalBackendEnforcesBurstAndRate(t *testing.T) {
 func TestLocalBackendRejectsNewKeysAtBound(t *testing.T) {
 	t.Parallel()
 
-	backend, err := NewLocalBackend(testPolicy(func(p *routespec.RateLimitPolicy) {
+	backend, err := NewLocalBackend(testPolicy(func(p *Policy) {
 		p.MaxKeys = 2
 	}))
 	if err != nil {
@@ -239,7 +237,7 @@ func TestKeyBuilderComposition(t *testing.T) {
 	}
 
 	policy := testPolicy(nil)
-	ipSubject := Subject{Scope: routespec.ScopeIP, Value: "203.0.113.7"}
+	ipSubject := Subject{Scope: ScopeIP, Value: "203.0.113.7"}
 
 	key := builder.Build(policy, "GET", "/api/v1/users/:id", ipSubject)
 
@@ -261,7 +259,7 @@ func TestKeyBuilderComposition(t *testing.T) {
 		t.Fatal("two different route patterns produced the same key")
 	}
 	// 不同策略必须有独立的桶。
-	other := testPolicy(func(p *routespec.RateLimitPolicy) { p.ID = "other.policy" })
+	other := testPolicy(func(p *Policy) { p.ID = "other.policy" })
 	if key == builder.Build(other, "GET", "/api/v1/users/:id", ipSubject) {
 		t.Fatal("two different policies produced the same key")
 	}
@@ -297,7 +295,7 @@ func TestKeyBuilderUsesFixedFallbackRouteKeys(t *testing.T) {
 	}
 
 	policy := testPolicy(nil)
-	subject := Subject{Scope: routespec.ScopeIP, Value: "203.0.113.7"}
+	subject := Subject{Scope: ScopeIP, Value: "203.0.113.7"}
 
 	// FullPath() 在未命中路由时为空。
 	key := builder.Build(policy, "GET", "", subject)
@@ -318,7 +316,7 @@ func TestKeyBuilderUsesFixedFallbackRouteKeys(t *testing.T) {
 func newTestHealth(t *testing.T, policy HealthPolicy) (*HealthState, *fakeClock) {
 	t.Helper()
 	clock := &fakeClock{now: time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)}
-	s := NewHealthState(policy)
+	s := NewHealthState(policy, nil)
 	s.now = clock.Now
 	return s, clock
 }
@@ -497,7 +495,7 @@ func TestRegistryRejectsDuplicatesAndFreezes(t *testing.T) {
 	}
 
 	reg.Freeze()
-	third, err := NewLocalBackend(testPolicy(func(p *routespec.RateLimitPolicy) { p.ID = "third.policy" }))
+	third, err := NewLocalBackend(testPolicy(func(p *Policy) { p.ID = "third.policy" }))
 	if err != nil {
 		t.Fatalf("NewLocalBackend: %v", err)
 	}
@@ -508,112 +506,10 @@ func TestRegistryRejectsDuplicatesAndFreezes(t *testing.T) {
 	_ = reg.Close()
 }
 
-// TestRegistryValidateReferences 钉住两类装配错误。
-//
-// 引用未登记的策略若不拦住，那条路由会**完全没有限流**——而配置里
-// 明明写了一个 ID，看起来一切正常。user scope 挂在公开路由上同理：
-// 拿不到身份，整条路由退化成一个所有匿名请求共享的桶。
-func TestRegistryValidateReferences(t *testing.T) {
-	t.Parallel()
-
-	reg := NewRegistry()
-	userPolicy := testPolicy(func(p *routespec.RateLimitPolicy) {
-		p.ID = "user.policy"
-		p.Scope = routespec.ScopeUser
-	})
-	limiter, err := NewLocalBackend(userPolicy)
-	if err != nil {
-		t.Fatalf("NewLocalBackend: %v", err)
-	}
-	if err := reg.Register(limiter); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	cases := []struct {
-		name     string
-		route    routespec.CompiledRoute
-		wantErr  bool
-		wantHint string
-	}{
-		{
-			name: "no policy reference is fine",
-			route: routespec.CompiledRoute{
-				FullPath: "/api/v1/open",
-				Spec:     routespec.RouteSpec{Method: "GET"},
-			},
-		},
-		{
-			name: "unknown policy rejected",
-			route: routespec.CompiledRoute{
-				FullPath: "/api/v1/thing",
-				Spec: routespec.RouteSpec{
-					Method: "GET", RateLimitPolicyID: "missing.policy",
-					AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
-				},
-			},
-			wantErr: true, wantHint: "not registered",
-		},
-		{
-			name: "user scope on a public route rejected",
-			route: routespec.CompiledRoute{
-				FullPath: "/api/v1/public",
-				Spec: routespec.RouteSpec{
-					Method: "GET", RateLimitPolicyID: "user.policy",
-					AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessPublic},
-				},
-			},
-			wantErr: true, wantHint: "does not require authentication",
-		},
-		{
-			name: "user scope on an authenticated route accepted",
-			route: routespec.CompiledRoute{
-				FullPath: "/api/v1/me",
-				Spec: routespec.RouteSpec{
-					Method: "GET", RateLimitPolicyID: "user.policy",
-					AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
-				},
-			},
-		},
-		{
-			// OptionalAuthenticated 允许匿名通过，因此不保证有身份。
-			name: "user scope on an optional-auth route rejected",
-			route: routespec.CompiledRoute{
-				FullPath: "/api/v1/maybe",
-				Spec: routespec.RouteSpec{
-					Method: "GET", RateLimitPolicyID: "user.policy",
-					AccessPolicy: routespec.AccessPolicy{Mode: routespec.AccessOptionalAuthenticated},
-				},
-			},
-			wantErr: true, wantHint: "does not require authentication",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := reg.ValidateReferences([]routespec.CompiledRoute{tc.route})
-			if !tc.wantErr {
-				if err != nil {
-					t.Fatalf("ValidateReferences() = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatal("ValidateReferences() = nil, want error")
-			}
-			if !strings.Contains(err.Error(), tc.wantHint) {
-				t.Fatalf("error %q does not mention %q", err, tc.wantHint)
-			}
-		})
-	}
-}
-
-// TestFixedPointConversion 验证定点换算与 Lua 精确整数边界。
 func TestFixedPointConversion(t *testing.T) {
 	t.Parallel()
 
-	p := testPolicy(func(p *routespec.RateLimitPolicy) { p.Rate, p.Burst = 2.5, 10 })
+	p := testPolicy(func(p *Policy) { p.Rate, p.Burst = 2.5, 10 })
 
 	if got := p.FixedPointRate(); got != 2_500_000 {
 		t.Fatalf("FixedPointRate() = %d, want 2500000", got)

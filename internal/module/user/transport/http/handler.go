@@ -1,8 +1,6 @@
 package http
 
 import (
-	"errors"
-
 	"github.com/gtkit/gin-api/internal/module/user/application"
 	"github.com/gtkit/gin-api/internal/module/user/dto"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
@@ -75,7 +73,13 @@ func (h *Handler) Update(c *gin.Context) {
 // Deactivate 注销账号（方案 A：脱敏改写 + 写注销记录）。
 // 不可逆，客户端调用前需自行做二次确认。
 //
-// 幂等：用户已是注销态时返回 200 + msg="账号已注销"，便于客户端重试不报错。
+// **注销后账号立即不可用**：状态改写后，认证阶段的用户校验就不再通过，
+// 因此后续请求（包括客户端因丢包发起的重试）会在进入本 handler 之前被拒。
+//
+// 此处曾声称"重复注销返回 200"。那个承诺在真实链路上无法兑现——第二次请求
+// 到不了这里；即便到了，仓储只锁未软删的行，也拿不到已注销用户。
+// 要提供跨请求幂等，正确的做法是 Idempotency-Key 或按操作记录查重，
+// 而不是放宽全局认证让已注销账号继续通过——那会让注销失去意义。
 func (h *Handler) Deactivate(c *gin.Context) {
 	var req dto.UserDeactivateRequest
 	if err := c.ShouldBind(&req); err != nil {
@@ -95,8 +99,7 @@ func (h *Handler) Deactivate(c *gin.Context) {
 		Channel:    req.Channel,
 		OperatorIP: ginc.ClientIP(c),
 	})
-	// 幂等：重复注销视为成功，避免客户端因丢包重试报错。
-	if err == nil || errors.Is(err, application.ErrAlreadyDeactivated) {
+	if err == nil {
 		resp.Ok(c, nil)
 		return
 	}

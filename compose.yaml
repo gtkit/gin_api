@@ -21,7 +21,6 @@ services:
     # 与 make migrate-verify 使用同一版本：门禁与本地环境必须一致，
     # 否则"本地能跑通的迁移在门禁里失败"会变成经常性的困惑。
     image: mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
-    container_name: gin-api-dev-mysql
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -44,7 +43,6 @@ services:
 
   redis:
     image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
-    container_name: gin-api-dev-redis
     command: ["redis-server", "--requirepass", "${DEV_REDIS_PASSWORD:?set DEV_REDIS_PASSWORD in .env}"]
     ports:
       - "127.0.0.1:${DEV_REDIS_PORT:-6379}:6379"
@@ -62,7 +60,9 @@ services:
 volumes:
   # 具名卷而非匿名卷：dev-down 之后数据仍在，重新 up 不必重建库。
   # 想真正清空必须走带二次确认的 dev-reset。
+  # **不写死卷名**：Compose 会按项目名加前缀，从而让每个派生项目各有一份数据。
+  #
+  # 写死的后果里，冲突还算好的——更糟的是两个项目**共享同一个卷**：
+  # 那不会报错，只会让一个项目读到另一个项目的库。
   mysql-data:
-    name: gin-api-dev-mysql-data
   redis-data:
-    name: gin-api-dev-redis-data

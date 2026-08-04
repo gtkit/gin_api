@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
-	"github.com/gtkit/gin-api/internal/ratelimit"
 	"github.com/gtkit/gin-api/internal/router/routespec"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,7 +32,7 @@ func cooperativeTimeoutPolicy() routespec.TimeoutPolicy {
 	}
 }
 
-func newRateLimitRegistry(t *testing.T, policies ...routespec.RateLimitPolicy) *ratelimit.Registry {
+func newRateLimitRegistry(t *testing.T, policies ...ratelimit.Policy) *ratelimit.Registry {
 	t.Helper()
 
 	reg := ratelimit.NewRegistry()
@@ -66,21 +66,21 @@ func newKeyBuilder(t *testing.T) *ratelimit.KeyBuilder {
 func TestRouteRateLimitRejectsBeyondBurst(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	policy := routespec.RateLimitPolicy{
+	policy := ratelimit.Policy{
 		ID: "test.ip", Rate: 0.01, Burst: 2,
-		Scope: routespec.ScopeIP, Store: routespec.StoreLocal,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ratelimit.ScopeIP, Store: ratelimit.StoreLocal,
+		FailureMode: ratelimit.FailureClosed, MaxKeys: 100,
 	}
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op6", Path: "/limited",
-			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: policy.ID,
+			Handler:            func(c *gin.Context) { c.String(http.StatusOK, "ok") },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessPublic},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{policy.ID},
 		}}}},
 	}, RouterOptions{
 		RateLimits:    newRateLimitRegistry(t, policy),
@@ -130,21 +130,21 @@ func TestRouteRateLimitRejectsBeyondBurst(t *testing.T) {
 func TestRouteRateLimitSeparatesSubjects(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	policy := routespec.RateLimitPolicy{
+	policy := ratelimit.Policy{
 		ID: "test.per-ip", Rate: 0.01, Burst: 1,
-		Scope: routespec.ScopeIP, Store: routespec.StoreLocal,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ratelimit.ScopeIP, Store: ratelimit.StoreLocal,
+		FailureMode: ratelimit.FailureClosed, MaxKeys: 100,
 	}
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op7", Path: "/limited",
-			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: policy.ID,
+			Handler:            func(c *gin.Context) { c.String(http.StatusOK, "ok") },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessPublic},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{policy.ID},
 		}}}},
 	}, RouterOptions{
 		RateLimits:    newRateLimitRegistry(t, policy),
@@ -185,11 +185,11 @@ func TestUnknownRateLimitPolicyFailsAssembly(t *testing.T) {
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op8", Path: "/limited",
-			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: "never.registered",
+			Handler:            func(c *gin.Context) { c.Status(http.StatusOK) },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessPublic},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{"never.registered"},
 		}}}},
 	}, RouterOptions{
 		RateLimits:    newRateLimitRegistry(t),
@@ -211,11 +211,11 @@ func TestRateLimitPolicyWithoutRegistryFailsAssembly(t *testing.T) {
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op9", Path: "/limited",
-			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: "test.ip",
+			Handler:            func(c *gin.Context) { c.Status(http.StatusOK) },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessPublic},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{"test.ip"},
 		}}}},
 	}, RouterOptions{})
 	if err == nil {
@@ -233,21 +233,21 @@ func TestRateLimitPolicyWithoutRegistryFailsAssembly(t *testing.T) {
 func TestUserScopedPolicyOnPublicRouteFailsAssembly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	policy := routespec.RateLimitPolicy{
+	policy := ratelimit.Policy{
 		ID: "test.user", Rate: 1, Burst: 1,
-		Scope: routespec.ScopeUser, Store: routespec.StoreLocal,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ratelimit.ScopeUser, Store: ratelimit.StoreLocal,
+		FailureMode: ratelimit.FailureClosed, MaxKeys: 100,
 	}
 
 	_, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op10", Path: "/public",
-			Handler:           func(c *gin.Context) { c.Status(http.StatusOK) },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessPublic},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: policy.ID,
+			Handler:            func(c *gin.Context) { c.Status(http.StatusOK) },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessPublic},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{policy.ID},
 		}}}},
 	}, RouterOptions{
 		RateLimits:    newRateLimitRegistry(t, policy),
@@ -267,21 +267,21 @@ func TestUserScopedPolicyOnPublicRouteFailsAssembly(t *testing.T) {
 func TestUserScopedRateLimitRunsAfterAuthentication(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	policy := routespec.RateLimitPolicy{
+	policy := ratelimit.Policy{
 		ID: "test.user-scope", Rate: 0.01, Burst: 1,
-		Scope: routespec.ScopeUser, Store: routespec.StoreLocal,
-		FailureMode: routespec.FailureClosed, MaxKeys: 100,
+		Scope: ratelimit.ScopeUser, Store: ratelimit.StoreLocal,
+		FailureMode: ratelimit.FailureClosed, MaxKeys: 100,
 	}
 
 	engine, err := InitRouterWithVersionedModules("test", VersionedModules{
 		V1: []Module{rateLimitModule{routes: []routespec.RouteSpec{{
 			Method:      http.MethodGet,
 			OperationID: "op11", Path: "/me",
-			Handler:           func(c *gin.Context) { c.String(http.StatusOK, "ok") },
-			AccessPolicy:      routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
-			TimeoutPolicy:     cooperativeTimeoutPolicy(),
-			ResponseShape:     routespec.ResponseShapeEmpty,
-			RateLimitPolicyID: policy.ID,
+			Handler:            func(c *gin.Context) { c.String(http.StatusOK, "ok") },
+			AccessPolicy:       routespec.AccessPolicy{Mode: routespec.AccessAuthenticated},
+			TimeoutPolicy:      cooperativeTimeoutPolicy(),
+			ResponseShape:      routespec.ResponseShapeEmpty,
+			RateLimitPolicyIDs: []string{policy.ID},
 		}}}},
 	}, RouterOptions{
 		// 认证中间件写入固定用户，模拟鉴权成功。

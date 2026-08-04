@@ -71,9 +71,15 @@ type HTTPConfig struct {
 }
 
 func newHTTPConfig(cfg *config.Config) HTTPConfig {
+	// 两项分别取值。合并成一个键时，只有读头受配置控制，而读 body 用固定默认值——
+	// 于是配置里的数字与实际暴露面差了一个数量级，且从配置上完全看不出来。
 	readHeaderTimeout := defaultReadHeaderTimeout
-	if cfg.App.ReadTimeoutSeconds > 0 {
-		readHeaderTimeout = time.Duration(cfg.App.ReadTimeoutSeconds) * time.Second
+	if cfg.App.ReadHeaderTimeoutSeconds > 0 {
+		readHeaderTimeout = time.Duration(cfg.App.ReadHeaderTimeoutSeconds) * time.Second
+	}
+	readTimeout := defaultReadTimeout
+	if cfg.App.ReadTimeoutFullSeconds > 0 {
+		readTimeout = time.Duration(cfg.App.ReadTimeoutFullSeconds) * time.Second
 	}
 
 	return HTTPConfig{
@@ -84,7 +90,7 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 		KeyFile:           resource.ResolvePath(cfg.SSL.Key),
 		TLSConfig:         newTLSConfig(),
 		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       defaultReadTimeout,
+		ReadTimeout:       readTimeout,
 		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       defaultIdleTimeout,
 		ShutdownTimeout:   defaultShutdownTimeout,
@@ -93,10 +99,17 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 
 func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 	return &http.Server{
-		Addr:              net.JoinHostPort(cfg.Host, cfg.Port),
-		Handler:           engine,
-		TLSConfig:         cfg.TLSConfig,
-		TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+		Addr:      net.JoinHostPort(cfg.Host, cfg.Port),
+		Handler:   engine,
+		TLSConfig: cfg.TLSConfig,
+		// **不设 TLSNextProto**：留空让标准库按默认启用 HTTP/2 协商。
+		//
+		// 此前这里被设成空 map，显式关闭了协商，且没有记录任何理由。
+		// 历史上确有 WriteTimeout 与 HTTP/2 交互不良的情形，但本服务器层
+		// WriteTimeout 恒为 0（每条路由自己设连接级写 deadline），那个理由不成立。
+		//
+		// 禁用协商的影响是全局且不可见的：所有客户端退回到较旧的协议版本，
+		// 而没人会收到任何提示。要重新禁用，必须在此写明具体理由。
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,

@@ -12,15 +12,6 @@ config/pem/*.pem
 # Go workspace：单模块仓库不需要，仅本机开发用（含本地 replace 目录），不提交。
 go.work
 go.work.sum
-*.md
-!/README.md
-!cmd/README.md
-!cmd/MODULE_GENERATOR.md
-!config/README.md
-!api/README.md
-!database/README.md
-!/SCAFFOLD.md
-!scripts/README.md
 *.log
 *.gz
 examples

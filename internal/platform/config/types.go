@@ -38,12 +38,25 @@ type Config struct {
 }
 
 type AppConfig struct {
-	Domain             string `mapstructure:"domain"`
-	Host               string `mapstructure:"host"`
-	EnableHTTPS        bool   `mapstructure:"ishttps"`
-	Name               string `mapstructure:"name"`
-	Port               string `mapstructure:"port"`
-	ReadTimeoutSeconds int    `mapstructure:"readtimeout"`
+	Domain      string `mapstructure:"domain"`
+	Host        string `mapstructure:"host"`
+	EnableHTTPS bool   `mapstructure:"ishttps"`
+	Name        string `mapstructure:"name"`
+	Port        string `mapstructure:"port"`
+	// ReadTimeoutSeconds 是**已废弃**的合并键。
+	//
+	// 保留字段只为让旧配置得到一条可读的迁移错误，而不是严格解码给出的
+	// "未知键"——后者不会告诉任何人该往哪改。
+	//
+	// 它此前被赋给 ReadHeaderTimeout，于是 `readtimeout: 2` 让人以为整个请求
+	// 的读取上限是 2 秒，而读 body 仍可占用固定的 60 秒。
+	ReadTimeoutSeconds int `mapstructure:"readtimeout"`
+	// ReadHeaderTimeoutSeconds 是读取请求头的上限；<=0 时用内置默认值。
+	ReadHeaderTimeoutSeconds int `mapstructure:"read_header_timeout"`
+	// ReadTimeoutFullSeconds 是读取**整个请求（头 + 体）**的上限；<=0 时用内置默认值。
+	//
+	// 与上一项分开：只限读头挡不住慢 body，而那正是 slowloris 的形态。
+	ReadTimeoutFullSeconds int `mapstructure:"read_timeout"`
 	// WriteTimeoutSeconds 已废弃：非零即启动失败，见 validateAppConfig 的说明。
 	// 字段保留是为了让旧配置得到**一条可读的迁移错误**，而不是严格解码给出的
 	// "未知键"——后者不会告诉任何人该往哪改。
@@ -354,7 +367,7 @@ type RateLimitConfig struct {
 
 // RateLimitPolicyConfig 是一条限流策略的配置形态。
 //
-// 与 routespec.RateLimitPolicy 分开：配置层用字符串表达枚举（yaml 友好），
+// 与 ratelimit.Policy 分开：配置层用字符串表达枚举（yaml 友好），
 // 装配层翻译成强类型并做全部校验。让配置结构直接复用强类型枚举会逼着
 // 使用者在 yaml 里写数字，而数字的含义只有读代码才知道。
 type RateLimitPolicyConfig struct {
@@ -625,8 +638,18 @@ func validateAppConfig(app AppConfig) error {
 	} else if _, err := strconv.Atoi(app.Port); err != nil {
 		errs = append(errs, fmt.Errorf("application.port must be numeric: %w", err))
 	}
-	if app.ReadTimeoutSeconds < 0 {
-		errs = append(errs, errors.New("application.readtimeout must be >= 0"))
+	if app.ReadTimeoutSeconds != 0 {
+		errs = append(errs, errors.New(
+			"application.readtimeout is no longer supported: it only bounded reading the request "+
+				"headers while the body still had a fixed 60s budget, so the configured value "+
+				"understated the exposure. Split it into application.read_header_timeout and "+
+				"application.read_timeout"))
+	}
+	if app.ReadHeaderTimeoutSeconds < 0 {
+		errs = append(errs, errors.New("application.read_header_timeout must be >= 0"))
+	}
+	if app.ReadTimeoutFullSeconds < 0 {
+		errs = append(errs, errors.New("application.read_timeout must be >= 0"))
 	}
 	if app.WriteTimeoutSeconds != 0 {
 		// 该键已废弃且**不提供静默兼容**。

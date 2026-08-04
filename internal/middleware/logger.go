@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
-	resp "github.com/gtkit/gin-api/internal/pkg/response"
 )
 
 // maxBodyLogSize 记录 request/response body 的最大字节数，
@@ -93,35 +91,27 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 			w = &responseBodyWriter{body: &bytes.Buffer{}, ResponseWriter: c.Writer}
 			c.Writer = w
 		}
-		// 读取失败时跳过 handler：响应已由下面的错误分支写出、body 已部分消费，
-		// 把截断数据交给下游只会产生二次错误；访问日志仍照常落盘。
-		skipHandler := false
-		if logReqBody && c.Request.Body != nil {
-			// 只预读日志需要的前缀（有界），剩余字节无损拼回交给 handler——
-			// 中间件为日志持有的内存与 body 总量解耦（原实现全量预读，上界高达 MaxBodyBytes）。
-			// 前缀仍经 MaxBytesReader 读出，超限/读取错误依旧在 handler 前暴露。
-			var readErr error
-			requestBody, readErr = io.ReadAll(io.LimitReader(c.Request.Body, bodyLogCaptureLimit))
-			if readErr == nil {
-				c.Request.Body = &prefixedBody{
-					Reader: io.MultiReader(bytes.NewReader(requestBody), c.Request.Body),
-					closer: c.Request.Body,
-				}
-				requestBodyType = c.ContentType()
-			} else {
-				// 超限（MaxBytesReader 返回 *http.MaxBytesError）→ 413；
-				// 其他读取失败按绑定失败口径 → 422。不再静默吞错误。
-				if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](readErr); ok {
-					resp.PayloadTooLargeErr(c, "", maxBytesErr.Limit)
-				} else {
-					resp.BindStructErr(c, readErr)
-				}
-				skipHandler = true
-			}
+		// **旁路捕获，不主动预读**。
+		//
+		// 主动预读发生在 c.Next() 之前——而字节上限中间件在链的更内层，那时
+		// 还没接管 body。于是预读读到的是**未受上限约束**的流，此前那段代码里
+		// 判定 MaxBytesError 的分支在这条路径上根本不可达。
+		//
+		// 改为包装：handler 真正读 body 时顺带抄走前若干字节。好处有三——
+		// handler 不读 body 时（例如 GET）零开销；读取发生在内层上限接管之后，
+		// 上限真正生效；错误处置回归它本来的位置（上限中间件与绑定逻辑），
+		// 日志中间件不再替它们报错。
+		var tee *teeBody
+		if logReqBody && c.Request.Body != nil && c.Request.Body != http.NoBody {
+			tee = &teeBody{ReadCloser: c.Request.Body, limit: bodyLogCaptureLimit}
+			c.Request.Body = tee
+			requestBodyType = c.ContentType()
 		}
 
-		if !skipHandler {
-			c.Next()
+		c.Next()
+
+		if tee != nil {
+			requestBody = tee.captured
 		}
 
 		status := c.Writer.Status()
@@ -160,14 +150,29 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 	}
 }
 
-// prefixedBody 把已预读的前缀与未消费的原始 body 拼回一个 ReadCloser，
-// Close 透传给原始 body（maxbody 的 wrapper Close 幂等）。
-type prefixedBody struct {
-	io.Reader
-	closer io.Closer
+// teeBody 在 handler 读取请求体时旁路抄走前若干字节。
+//
+// 只抄前缀而不是全量：日志要回答的是"这次请求大概发了什么"，而全量会让中间件
+// 持有的内存与请求体大小挂钩——一个刚好在上限内的大请求就能撑爆日志缓冲。
+//
+// Close 由内嵌的 ReadCloser 透传（上限中间件的 wrapper Close 幂等）。
+type teeBody struct {
+	io.ReadCloser
+	captured []byte
+	limit    int
 }
 
-func (p *prefixedBody) Close() error { return p.closer.Close() }
+func (t *teeBody) Read(p []byte) (int, error) {
+	n, err := t.ReadCloser.Read(p)
+	if n > 0 && len(t.captured) < t.limit {
+		room := t.limit - len(t.captured)
+		if n < room {
+			room = n
+		}
+		t.captured = append(t.captured, p[:room]...)
+	}
+	return n, err
+}
 
 // truncate 截断字符串到 maxLen 字节，超出部分标记 ...(truncated)。
 func truncate(s string, maxLen int) string {

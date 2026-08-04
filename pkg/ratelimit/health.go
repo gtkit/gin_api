@@ -4,9 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
 )
 
 // HealthPhase 是限流后端的健康相位。
@@ -67,8 +64,9 @@ func DefaultHealthPolicy() HealthPolicy {
 //
 // 并发安全。
 type HealthState struct {
-	policy HealthPolicy
-	now    func() time.Time
+	policy   HealthPolicy
+	now      func() time.Time
+	observer Observer
 
 	mu        sync.Mutex
 	phase     HealthPhase
@@ -81,8 +79,13 @@ type HealthState struct {
 }
 
 // NewHealthState 创建一个初始为 Healthy 的状态机。
-func NewHealthState(policy HealthPolicy) *HealthState {
-	return &HealthState{policy: policy, now: time.Now, phase: PhaseHealthy}
+//
+// observer 为 nil 时相位迁移不产生任何输出。
+func NewHealthState(policy HealthPolicy, observer Observer) *HealthState {
+	if observer == nil {
+		observer = nopObserver{}
+	}
+	return &HealthState{policy: policy, now: time.Now, phase: PhaseHealthy, observer: observer}
 }
 
 // Phase 返回当前相位。
@@ -211,16 +214,9 @@ func (s *HealthState) transitionLocked(next HealthPhase) {
 	}
 	previous := s.phase
 	s.phase = next
-	// 相位迁移是低基数事件，可以每次都记；它是故障排查的第一手线索。
-	logger.Warn("rate limit backend phase changed",
-		zap.String("from", previous.String()), zap.String("to", next.String()))
-}
-
-// fallbackWarn 在首次切到本地影子桶时提示一次。
-//
-// 只提示一次：故障期间每个请求都打一条会把日志刷满，而信息量只有第一条。
-func fallbackWarn(policyID string) {
-	logger.Warn("rate limit fell back to the local shadow bucket; "+
-		"the model is the same but the state is not carried over, so up to one burst may pass through",
-		zap.String("policy", policyID))
+	// 相位迁移是低基数事件，可以每次都发；它是故障排查的第一手线索。
+	//
+	// 持锁同步发出：观察者若在这里阻塞，会挡住所有限流判定。这是刻意的取舍——
+	// 异步发送要引入队列，而队列满时要么丢事件要么仍然阻塞，复杂度换不来改善。
+	s.observer.BackendPhaseChanged(previous, next)
 }

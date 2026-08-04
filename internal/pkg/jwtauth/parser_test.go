@@ -25,7 +25,7 @@ func (s *stubTokenParser) ParseToken(_ context.Context, tokenString string, _ ..
 func TestNewFallbackParserRequiresPrimary(t *testing.T) {
 	t.Parallel()
 
-	if _, err := NewFallbackParser(nil, nil); err == nil {
+	if _, err := NewFallbackParser(nil, nil, time.Time{}); err == nil {
 		t.Fatal("NewFallbackParser expected error for nil primary, got nil")
 	}
 }
@@ -90,7 +90,12 @@ func TestFallbackParserParseToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			parser, err := NewFallbackParser(tt.primary, tt.laravel)
+			// 启用回退时才需要截止时刻；不启用时零值是合法的。
+			cutoff := time.Time{}
+			if tt.laravel != nil {
+				cutoff = time.Now().Add(time.Hour)
+			}
+			parser, err := NewFallbackParser(tt.primary, tt.laravel, cutoff)
 			if err != nil {
 				t.Fatalf("NewFallbackParser returned error: %v", err)
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/gtkit/gojwt/claims"
@@ -56,6 +57,11 @@ func TestNewTokenParser(t *testing.T) {
 
 			cfg := &config.Config{}
 			cfg.JWT.Laravel = tt.laravel
+			// 启用回退必须给出终点。用例本身要验证的是别的字段，
+			// 缺终点会先被那条规则挡下，于是想测的分支根本走不到。
+			if tt.laravel.Enabled {
+				cfg.JWT.LaravelAcceptUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
+			}
 
 			parser, err := newTokenParser(cfg, issuer)
 			if tt.wantErr {
@@ -75,5 +81,26 @@ func TestNewTokenParser(t *testing.T) {
 				t.Fatalf("parser = %v, want the bare issuer passed through", parser)
 			}
 		})
+	}
+}
+
+// TestNewTokenParserRequiresLaravelCutoff 钉住启用回退必须给出终点。
+//
+// 截止时刻此前只在配置层被校验格式，装配层完全不读——于是只要开关不关，
+// Laravel 令牌永久有效，而配置里那个日期给了运维一个**虚假的**下线承诺。
+//
+// 现在缺终点会在装配期失败，而不是静默地一直生效。
+func TestNewTokenParserRequiresLaravelCutoff(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	cfg.JWT.Laravel = config.LaravelJWTConfig{
+		Enabled: true, Secret: "laravel-secret", Algorithm: "hs256",
+	}
+	// 刻意不设 LaravelAcceptUntil。
+
+	if _, err := newTokenParser(cfg, stubTokenParser{}); err == nil {
+		t.Fatal("enabling the laravel fallback without a cutoff was accepted: " +
+			"a compatibility window without an end date never ends")
 	}
 }

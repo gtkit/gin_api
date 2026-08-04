@@ -28,7 +28,6 @@ func TestMigrationRuntimeDoesNotWireUnrelatedInfra(t *testing.T) {
 		{"initJWTWithConfig", "令牌签发器与迁移无关"},
 		{"initProcessRuntime", "完整装配会连带初始化全部进程级设施"},
 		{"NewRuntime", "完整 Runtime 正是此前阻断迁移的原因"},
-		{"buildMailClient", "邮件客户端与迁移无关"},
 		{"initFileWithConfig", "文件能力与迁移无关"},
 		{"initNewsWithConfig", "通知能力与迁移无关"},
 	}

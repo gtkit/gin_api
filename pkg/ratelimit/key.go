@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
 // minSecretLength 是 key HMAC 密钥的最小字节数。
@@ -55,7 +53,7 @@ func NewKeyBuilder(secret string, prefix string) (*KeyBuilder, error) {
 
 // Subject 是限流的主体标识（IP、userID，或全局作用域下为空）。
 type Subject struct {
-	Scope routespec.RateLimitScope
+	Scope Scope
 	Value string
 }
 
@@ -70,7 +68,7 @@ type Subject struct {
 //     用原始路径会让每个 ID 各占一个桶，限流形同虚设且键空间无界；
 //   - **scope + 主体**：真正要限的对象。
 func (b *KeyBuilder) Build(
-	policy routespec.RateLimitPolicy, method, routePattern string, subject Subject,
+	policy Policy, method, routePattern string, subject Subject,
 ) string {
 	pattern := routePattern
 	if pattern == "" {
@@ -88,7 +86,7 @@ func (b *KeyBuilder) Build(
 	sb.WriteByte(':')
 	sb.WriteString(subject.Scope.String())
 
-	if subject.Scope != routespec.ScopeGlobal {
+	if subject.Scope != ScopeGlobal {
 		sb.WriteByte(':')
 		sb.WriteString(b.hash(subject.Value))
 	}

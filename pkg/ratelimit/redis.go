@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/router/routespec"
-
 	"github.com/redis/go-redis/v9"
 )
 
@@ -48,9 +46,11 @@ type scriptRunner interface {
 // 共享是有意的：按策略各建一套状态机会让同一次 Redis 故障触发 N 份独立探测，
 // 对一个已经出问题的依赖形成探测风暴。FailureMode 仍由各策略分别决定。
 type RedisBackend struct {
-	client scriptRunner
-	sha    string
-	health *HealthState
+	// observer 接收运行期事件；未注入时是空实现。
+	observer Observer
+	client   scriptRunner
+	sha      string
+	health   *HealthState
 	// keyPrefix 隔离不同服务的限流键。
 	keyPrefix string
 	// now 可注入，测试用它确定性地驱动时钟场景。
@@ -65,11 +65,12 @@ type RedisBackend struct {
 //
 // 探测在启动 ctx 内完成，用带服务前缀的随机 probe key 执行一次真实调用后删除。
 func NewRedisBackend(
-	ctx context.Context, client scriptRunner, keyPrefix string,
+	ctx context.Context, client scriptRunner, opts ...Option,
 ) (*RedisBackend, error) {
 	if client == nil {
 		return nil, errors.New("redis rate limit backend requires a client")
 	}
+	resolved := newOptions(opts)
 
 	sha, err := client.ScriptLoad(ctx, tokenBucketScript).Result()
 	if err != nil {
@@ -79,8 +80,9 @@ func NewRedisBackend(
 	b := &RedisBackend{
 		client:    client,
 		sha:       sha,
-		health:    NewHealthState(DefaultHealthPolicy()),
-		keyPrefix: keyPrefix,
+		health:    NewHealthState(DefaultHealthPolicy(), resolved.observer),
+		keyPrefix: resolved.keyPrefix,
+		observer:  resolved.observer,
 		now:       time.Now,
 	}
 
@@ -99,10 +101,10 @@ func (b *RedisBackend) probe(ctx context.Context) error {
 	}
 	key := b.keyPrefix + ":probe:" + hex.EncodeToString(suffix)
 
-	probePolicy := routespec.RateLimitPolicy{
+	probePolicy := Policy{
 		ID: "probe", Rate: 1, Burst: 1,
-		Scope: routespec.ScopeGlobal, Store: routespec.StoreRedis,
-		FailureMode: routespec.FailureClosed, MaxKeys: 1,
+		Scope: ScopeGlobal, Store: StoreRedis,
+		FailureMode: FailureClosed, MaxKeys: 1,
 	}
 
 	if _, err := b.evaluate(ctx, probePolicy, key); err != nil {
@@ -126,7 +128,7 @@ func (b *RedisBackend) Health() *HealthState { return b.health }
 // 处于 Degraded 时**不再打 Redis**：故障期间继续每请求发起调用，
 // 只会给一个已经出问题的依赖持续加压，并让每个请求都白等一次超时。
 func (b *RedisBackend) check(
-	ctx context.Context, policy routespec.RateLimitPolicy, key string,
+	ctx context.Context, policy Policy, key string,
 ) (Decision, error) {
 	if !b.health.AllowRequest(ctx) {
 		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, nil
@@ -149,7 +151,7 @@ func (b *RedisBackend) check(
 
 // evaluate 执行一次脚本调用，处理 NOSCRIPT 重载。
 func (b *RedisBackend) evaluate(
-	ctx context.Context, policy routespec.RateLimitPolicy, key string,
+	ctx context.Context, policy Policy, key string,
 ) (Decision, error) {
 	args := []any{
 		policy.FixedPointRate(),
@@ -186,7 +188,7 @@ func isNoScript(err error) bool {
 }
 
 // parseScriptResult 把 Lua 返回值翻译成 Decision。
-func parseScriptResult(raw any, policy routespec.RateLimitPolicy) (Decision, error) {
+func parseScriptResult(raw any, policy Policy) (Decision, error) {
 	values, ok := raw.([]any)
 	if !ok || len(values) != 3 {
 		return Decision{}, fmt.Errorf("unexpected rate limit script result shape: %T", raw)
@@ -242,11 +244,8 @@ func toInt64(v any) (int64, error) {
 	}
 }
 
-// microTokensPerToken 与 routespec 的定点基数保持一致。
-const microTokensPerToken = 1_000_000
-
 // bucketTTL 返回键的存活时长：补满一桶所需时间 + 余量。
-func bucketTTL(policy routespec.RateLimitPolicy) time.Duration {
+func bucketTTL(policy Policy) time.Duration {
 	if policy.Rate <= 0 {
 		return ttlSlack
 	}
@@ -262,14 +261,14 @@ func bucketTTL(policy routespec.RateLimitPolicy) time.Duration {
 type FallbackBackend struct {
 	redis  *RedisBackend
 	shadow *LocalBackend
-	policy routespec.RateLimitPolicy
+	policy Policy
 
 	// warnOnce 保证"已降级"只提示一次，避免故障期刷屏。
 	warnOnce sync.Once
 }
 
 // NewFallbackBackend 组合 Redis 与同参数的本地影子桶。
-func NewFallbackBackend(redisBackend *RedisBackend, policy routespec.RateLimitPolicy) (*FallbackBackend, error) {
+func NewFallbackBackend(redisBackend *RedisBackend, policy Policy) (*FallbackBackend, error) {
 	if redisBackend == nil {
 		return nil, errors.New("fallback backend requires a redis backend")
 	}
@@ -281,7 +280,7 @@ func NewFallbackBackend(redisBackend *RedisBackend, policy routespec.RateLimitPo
 }
 
 // Policy 返回该 backend 的策略。
-func (b *FallbackBackend) Policy() routespec.RateLimitPolicy { return b.policy }
+func (b *FallbackBackend) Policy() Policy { return b.policy }
 
 // Check 优先走 Redis，不可用时切到本地影子桶。
 func (b *FallbackBackend) Check(ctx context.Context, key string) (Decision, error) {
@@ -291,7 +290,7 @@ func (b *FallbackBackend) Check(ctx context.Context, key string) (Decision, erro
 	}
 
 	b.warnOnce.Do(func() {
-		fallbackWarn(b.policy.ID)
+		b.redis.observer.FellBackToLocal(b.policy.ID)
 	})
 
 	local, _ := b.shadow.Check(ctx, key)
@@ -313,11 +312,11 @@ func (b *FallbackBackend) Close() {
 // 触发 N 份探测），而 FailureMode 与限额参数必须各自独立。
 type RedisLimiter struct {
 	backend *RedisBackend
-	policy  routespec.RateLimitPolicy
+	policy  Policy
 }
 
 // NewRedisLimiter 绑定策略。
-func NewRedisLimiter(backend *RedisBackend, policy routespec.RateLimitPolicy) (*RedisLimiter, error) {
+func NewRedisLimiter(backend *RedisBackend, policy Policy) (*RedisLimiter, error) {
 	if backend == nil {
 		return nil, errors.New("redis limiter requires a backend")
 	}
@@ -328,7 +327,7 @@ func NewRedisLimiter(backend *RedisBackend, policy routespec.RateLimitPolicy) (*
 }
 
 // Policy 返回该 limiter 的策略。
-func (l *RedisLimiter) Policy() routespec.RateLimitPolicy { return l.policy }
+func (l *RedisLimiter) Policy() Policy { return l.policy }
 
 // Check 判定一次请求；后端故障时按 FailureMode 给出最终判定。
 func (l *RedisLimiter) Check(ctx context.Context, key string) (Decision, error) {

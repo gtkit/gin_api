@@ -3,8 +3,6 @@ package ratelimit
 import (
 	"math"
 	"time"
-
-	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
 // Outcome 是一次限流判定的结果。
@@ -76,7 +74,7 @@ func (d Decision) RetryAfterSeconds() int {
 //
 // local_fallback 不在这里处理：它需要一个真实的本地桶，由持有该桶的
 // backend 自行完成切换。
-func resolveFailure(policy routespec.RateLimitPolicy, limit int) Decision {
+func resolveFailure(policy Policy, limit int) Decision {
 	switch policy.FailureMode {
 	case FailureOpenMode:
 		return Decision{Outcome: OutcomeAllowed, Limit: limit, Remaining: limit, Degraded: true}
@@ -100,9 +98,9 @@ func resolveFailure(policy routespec.RateLimitPolicy, limit int) Decision {
 
 // 便于在本包内引用的别名，避免每处都写完整包路径。
 const (
-	FailureOpenMode     = routespec.FailureOpen
-	FailureClosedMode   = routespec.FailureClosed
-	FailureFallbackMode = routespec.FailureLocalFallback
+	FailureOpenMode     = FailureOpen
+	FailureClosedMode   = FailureClosed
+	FailureFallbackMode = FailureLocalFallback
 )
 
 // backendUnavailableRetryAfter 是 fail_closed 降级时给客户端的重试建议。

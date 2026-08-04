@@ -67,21 +67,30 @@ func TestDeactivateUserNotFound(t *testing.T) {
 	}
 }
 
-func TestDeactivateAlreadyDeactivated(t *testing.T) {
+// TestDeactivateTreatsAlreadyDeactivatedAsNotFound 钉住已注销用户在锁行阶段就取不到。
+//
+// 曾经有一条测试用 fake 构造出"锁到了行、且状态为已注销"，并断言返回一个
+// 专门的"已注销"错误。**那个状态在真实仓储下不可能出现**——LockByID 只锁
+// 未软删的行，已注销用户永远返回 found=false。
+//
+// fake 让不可能的状态变得可构造，于是那条分支看起来被验证过，实际是死代码；
+// 而它支撑的"重复注销返回 200"承诺同样无法兑现——第二次请求在认证阶段就被
+// 拒了，根本到不了这里。
+//
+// 现在如实断言：对本层而言，"已注销"与"不存在"是同一种情况。
+func TestDeactivateTreatsAlreadyDeactivatedAsNotFound(t *testing.T) {
 	t.Parallel()
 
-	repo := &fakeUserRepo{
-		lockFound: true,
-		lockUser:  &models.User{Status: models.UserStatusDeleted},
-	}
+	// lockFound=false 正是真实仓储对已注销用户的返回。
+	repo := &fakeUserRepo{lockFound: false}
 	service := mustService(t, Deps{Repo: repo, Recorder: &fakeDeactRecorder{}, Tx: &fakeTxManager{}})
 
 	err := service.Deactivate(context.Background(), DeactivateInput{UserID: 42, Channel: "app"})
-	if !errors.Is(err, ErrAlreadyDeactivated) {
-		t.Fatalf("err = %v, want ErrAlreadyDeactivated", err)
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
 	if repo.anonCalls != 0 || repo.softDelCalls != 0 {
-		t.Fatal("幂等短路后不应执行脱敏/软删")
+		t.Fatal("取不到用户时不应执行脱敏或软删")
 	}
 }
 
