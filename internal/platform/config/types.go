@@ -25,13 +25,15 @@ type Config struct {
 	// 但必须说清楚：**填了这些配置不会产生任何行为**，直到接上对应的客户端。
 	// 启动期会对"填了却没接线"的段落发出提示——一个填了却静默失效的配置，
 	// 比没有这个配置更容易让人误判能力边界。接线方式见 SCAFFOLD.md 的注册位清单。
-	Email  EmailConfig  `mapstructure:"email"`
-	SMS    SMSConfig    `mapstructure:"sms"`
-	Pay    PayConfig    `mapstructure:"pay"`
-	LLM    LLMConfig    `mapstructure:"llm"`
-	Log    LogConfig    `mapstructure:"log"`
-	Redis  RedisConfig  `mapstructure:"redis"`
-	JWT    JWTConfig    `mapstructure:"jwt"`
+	Email EmailConfig `mapstructure:"email"`
+	SMS   SMSConfig   `mapstructure:"sms"`
+	Pay   PayConfig   `mapstructure:"pay"`
+	LLM   LLMConfig   `mapstructure:"llm"`
+	Log   LogConfig   `mapstructure:"log"`
+	Redis RedisConfig `mapstructure:"redis"`
+	JWT   JWTConfig   `mapstructure:"jwt"`
+	// Auth 是认证模式与本地认证参数。模式零值非法，见 AuthConfig.Mode。
+	Auth   AuthConfig   `mapstructure:"auth"`
 	SSL    SSLConfig    `mapstructure:"ssl"`
 	News   NewsConfig   `mapstructure:"news"`
 	Aliyun AliyunConfig `mapstructure:"aliyun"`
@@ -433,6 +435,9 @@ type JWTConfig struct {
 	PrivateKeyPath string `mapstructure:"private_key_path"`
 	PublicKeyPath  string `mapstructure:"public_key_path"`
 	// TokenTTLHours 是签发 token 的有效期（小时）；<=0 时兜底为 720（30 天）。
+	//
+	// 这是访问令牌寿命的**唯一来源**：认证模块的 expires_in 与撤销记录的
+	// 存活时间都从它推导，不另设一个可能与之漂移的副本。
 	TokenTTLHours int `mapstructure:"token_ttl_hours"`
 	// Laravel 是旧 Laravel（tymon/jwt-auth）存量 token 的过渡期兼容开关：
 	// 只验不签，Laravel 下线且存量 token 全部过期后整块删除。
@@ -537,6 +542,9 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	if err := validatePprofConfig(c.Env, c.Pprof); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateAuthConfig(c.Auth, c.Redis, c.JWT.EffectiveTokenTTL()); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateJWTConfig(c.JWT); err != nil {

@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,20 +45,36 @@ func (f *fakePurger) callCount() int {
 }
 
 type recordingAuditor struct {
-	mu      sync.Mutex
-	entries []string
+	mu       sync.Mutex
+	entries  []string
+	failures []string
 }
 
 func (r *recordingAuditor) Auditf(format string, args ...any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries = append(r.entries, format)
+	r.entries = append(r.entries, fmt.Sprintf(format, args...))
 }
 
-func (r *recordingAuditor) count() int {
+func (r *recordingAuditor) Failf(format string, args ...any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.entries)
+	r.failures = append(r.failures, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingAuditor) failureCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.failures)
+}
+
+func (r *recordingAuditor) lastFailure() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.failures) == 0 {
+		return ""
+	}
+	return r.failures[len(r.failures)-1]
 }
 
 // TestNewDeactivationCleanupRejectsDisabledShape 钉住"禁用"不能表现为一个空转的 worker。
@@ -158,12 +176,60 @@ func TestCleanupFailureIsAuditedNotFatal(t *testing.T) {
 
 	cleanup.purge(context.Background())
 
-	if auditor.count() == 0 {
-		t.Fatal("a failed purge left no trace: the records stay forever and nobody knows")
+	if auditor.failureCount() == 0 {
+		t.Fatal("a failed purge left no failure-level trace: the records stay forever and nobody knows")
 	}
 	// 失败后立即停止本轮，不无限重试。
 	if got := repo.callCount(); got != 1 {
 		t.Fatalf("delete calls = %d, want 1 (stop this round and retry next tick)", got)
+	}
+
+	// 连续失败必须累计，且失败日志携带计数与最后成功时间——
+	// "失败了一次"和"已经连续失败很多轮"是完全不同的运维事件。
+	cleanup.purge(context.Background())
+	last := auditor.lastFailure()
+	if !strings.Contains(last, "consecutive failures: 2") {
+		t.Fatalf("second failure log = %q, want it to carry the consecutive count", last)
+	}
+	if !strings.Contains(last, "last success: never") {
+		t.Fatalf("failure log = %q, want it to say the task never succeeded", last)
+	}
+}
+
+// TestCleanupSuccessResetsFailureStreak 验证一次成功清零连续失败计数。
+//
+// 不清零的话，一次历史故障会让之后每条失败日志的计数虚高，
+// 告警阈值因此失真。
+func TestCleanupSuccessResetsFailureStreak(t *testing.T) {
+	t.Parallel()
+
+	auditor := &recordingAuditor{}
+	repo := &fakePurger{err: errors.New("db down")}
+	cleanup, err := NewDeactivationCleanup(repo, auditor, time.Hour, time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewDeactivationCleanup: %v", err)
+	}
+	cleanup.now = func() time.Time { return time.Unix(1754000000, 0) }
+
+	cleanup.purge(context.Background()) // 失败 1 次
+
+	repo.mu.Lock()
+	repo.err = nil
+	repo.remaining = 1
+	repo.mu.Unlock()
+	cleanup.purge(context.Background()) // 成功，清零
+
+	repo.mu.Lock()
+	repo.err = errors.New("db down again")
+	repo.mu.Unlock()
+	cleanup.purge(context.Background()) // 再失败：计数应从 1 重新开始
+
+	last := auditor.lastFailure()
+	if !strings.Contains(last, "consecutive failures: 1") {
+		t.Fatalf("failure log after a success = %q, want the streak reset to 1", last)
+	}
+	if strings.Contains(last, "last success: never") {
+		t.Fatalf("failure log = %q, want it to carry the real last-success time", last)
 	}
 }
 

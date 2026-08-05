@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
+	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	"github.com/gtkit/gin-api/internal/openapi"
 	"github.com/gtkit/gin-api/internal/pkg/response"
@@ -60,8 +61,16 @@ func render() ([]byte, error) {
 	// 模块集合与 bootstrap 的 buildEngine 保持一致。
 	// service 传 nil：契约只取描述符（方法/路径/策略/operationId），
 	// 不执行任何 handler。
+	//
+	// **认证模块无条件包含**，尽管运行时它只在 auth.mode 为 local 时注册：
+	// 契约描述的是这个代码库提供的 API 表面，而生成器读不到部署配置。
+	// 存在条件写在每条 auth 路由的 summary 里，契约的消费者据此知道
+	// 这些端点在外部身份模式的部署上不存在。
 	modules := router.VersionedModules{
-		V1: []router.Module{userhttp.NewModule(nil)},
+		V1: []router.Module{
+			userhttp.NewModule(nil),
+			authhttp.NewModule(nil),
+		},
 	}
 
 	routes, err := router.CompiledRoutesFor(modules)

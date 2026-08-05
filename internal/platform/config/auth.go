@@ -1,0 +1,173 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// AuthMode 是认证模式。
+//
+// 用字符串而不是 bool：`local: false` 无法表达"外部身份"与"还没想好"的区别，
+// 而这两者需要完全不同的启动行为。
+type AuthMode string
+
+const (
+	// AuthModeLocal 由本服务保管用户凭据，注册/登录/刷新/登出端点全部注册。
+	AuthModeLocal AuthMode = "local"
+	// AuthModeExternal 身份由外部 IdP 提供，本服务只验签与授权。
+	//
+	// 母版不预置任何具体 IdP 的对接：Keycloak、Auth0、自研网关在 claims 形状、
+	// 用户同步时机与撤销通知方式上差异极大，预置任何一家都会让另外几家的使用者
+	// 先删掉再重写——比没有更费事。接线点见 SCAFFOLD.md。
+	AuthModeExternal AuthMode = "external"
+)
+
+// AuthConfig 是认证配置。
+type AuthConfig struct {
+	// Mode 是认证模式，**零值非法**。
+	//
+	// 不给默认值是刻意的。默认到 local，打算接外部 IdP 的部署会平白多出一组
+	// 无人看管的凭据端点；默认到 external，使用者会以为认证已就绪，
+	// 而实际上没有任何签发入口——两种默认都会静默地给出错误的系统。
+	Mode AuthMode `mapstructure:"mode"`
+
+	// BcryptCost 是密码哈希代价，留空按 defaultBcryptCost。
+	//
+	// 选 bcrypt 而非 argon2id：argon2id 要同时调 memory/time/parallelism 三个
+	// 参数，而它们的正确取值取决于部署机器的内存与核数——母版无从知道。
+	// 母版给的默认值要么在小机器上打满内存，要么在大机器上形同虚设，
+	// 且两种情况都不会报错。bcrypt 只有一个参数，语义单一，调错的空间小。
+	BcryptCost int `mapstructure:"bcrypt_cost"`
+
+	// RefreshTTL 是刷新令牌寿命，留空按 defaultRefreshTTL。
+	//
+	// **访问令牌的寿命不在这里**：它由 jwt.token_ttl_hours 决定，因为签发
+	// 令牌的是 JWT 装配。在这里再放一个 access_ttl 会产生两个来源——
+	// 客户端拿到的 expires_in 与令牌里真实的 exp 一旦对不上，客户端会在
+	// 令牌已经失效之后才去刷新，或者反过来提前把好用的令牌丢掉。
+	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
+}
+
+const (
+	// defaultBcryptCost 取 12。
+	//
+	// bcrypt 的代价按 2^cost 增长。10 在现代硬件上约几十毫秒，12 约在
+	// 200~300 毫秒量级——对登录接口是可接受的延迟，对离线爆破则是 4 倍的成本。
+	defaultBcryptCost = 12
+	// minBcryptCost 是允许的下限。
+	//
+	// bcrypt 包自身允许低至 4，那个下限是为测试留的，用在生产上等于没有哈希。
+	minBcryptCost = 10
+	// maxBcryptCost 是 bcrypt 包的硬上限。
+	//
+	// 校验它而不是让 bcrypt 在第一次注册时才报错：配置错误应当在启动期暴露，
+	// 而不是等到第一个用户注册。
+	maxBcryptCost = 31
+
+	defaultRefreshTTL = 30 * 24 * time.Hour
+)
+
+// LocalEnabled 报告是否启用本地认证。
+func (c AuthConfig) LocalEnabled() bool { return c.Mode == AuthModeLocal }
+
+// EffectiveBcryptCost 返回生效的哈希代价。
+func (c AuthConfig) EffectiveBcryptCost() int {
+	if c.BcryptCost > 0 {
+		return c.BcryptCost
+	}
+	return defaultBcryptCost
+}
+
+// EffectiveRefreshTTL 返回生效的刷新令牌寿命。
+func (c AuthConfig) EffectiveRefreshTTL() time.Duration {
+	if c.RefreshTTL > 0 {
+		return c.RefreshTTL
+	}
+	return defaultRefreshTTL
+}
+
+// validateAuthConfig 校验认证配置，并检查本地认证的前置条件。
+//
+// 需要 redis 参数：本地认证的撤销能力依赖它，而"缺撤销能力"必须在启动期
+// 就拦下——见下方 fail-closed 的理由。
+func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration) error {
+	var errs []error
+
+	switch c.Mode {
+	case AuthModeLocal, AuthModeExternal:
+	case "":
+		errs = append(errs, errors.New(
+			"auth.mode is required: set it to \"local\" (this service stores user credentials "+
+				"and serves the register/login/refresh/logout endpoints) or \"external\" "+
+				"(identity comes from an external provider; no auth endpoint is registered)"))
+	default:
+		errs = append(errs, fmt.Errorf(
+			"auth.mode %q is invalid: must be exactly one of local|external", c.Mode))
+	}
+
+	if c.BcryptCost != 0 {
+		if c.BcryptCost < minBcryptCost {
+			errs = append(errs, fmt.Errorf(
+				"auth.bcrypt_cost %d is too low: use at least %d (below that the hash is fast "+
+					"enough to brute-force offline, which defeats the point of hashing)",
+				c.BcryptCost, minBcryptCost))
+		}
+		if c.BcryptCost > maxBcryptCost {
+			errs = append(errs, fmt.Errorf(
+				"auth.bcrypt_cost %d exceeds the maximum of %d", c.BcryptCost, maxBcryptCost))
+		}
+	}
+
+	if c.RefreshTTL < 0 {
+		errs = append(errs, errors.New("auth.refresh_ttl must not be negative"))
+	}
+	// 刷新令牌比访问令牌还短就没有存在意义：它的整个作用是在访问令牌过期后
+	// 换取新的，寿命更短意味着它先死，用户被迫重新登录——那等于没有刷新机制。
+	//
+	// 只在本地认证模式下检查：外部身份模式不签发这两种令牌，那里的
+	// jwt.token_ttl_hours 描述的是本服务**接受**的外部令牌，与刷新无关。
+	if c.Mode == AuthModeLocal && accessTTL > 0 && c.EffectiveRefreshTTL() <= accessTTL {
+		errs = append(errs, fmt.Errorf(
+			"auth.refresh_ttl (%s) must be longer than the access token lifetime "+
+				"(jwt.token_ttl_hours = %s): a refresh token that expires first can never be used",
+			c.EffectiveRefreshTTL(), accessTTL))
+	}
+
+	// 本地认证要求可用的撤销存储，缺失时 fail-closed。
+	//
+	// 没有它，登出与刷新令牌撤销都无法实现。而"能登录但登不出"比完全没有认证
+	// 更危险：系统看起来是完整的，使用者不会再去补这一块，直到需要回收某个
+	// 泄漏的令牌时才发现无从下手。
+	//
+	// 错误里给两条出路而不是一条：使用者的真实意图可能是任何一种，
+	// 只说"请配置 redis"会让打算接外部 IdP 的人以为自己必须装一个 Redis。
+	if c.Mode == AuthModeLocal && redis.Addr == "" {
+		errs = append(errs, errors.New(
+			"auth.mode is \"local\" but redis.addr is empty: local auth needs a revocation "+
+				"store for logout and refresh-token rotation, and an auth system that can "+
+				"issue tokens but never revoke them is worse than none — it looks complete. "+
+				"Either configure redis, or set auth.mode to \"external\" and plug in your "+
+				"identity provider (see SCAFFOLD.md)"))
+	}
+
+	return errors.Join(errs...)
+}
+
+// defaultTokenTTLHours 是 jwt.token_ttl_hours 留空时的兜底值。
+//
+// 与 jwtauth 装配里的兜底保持一致。两处各写一份是当前的实际情况：
+// 那边不能 import 本包（配置结构由本包定义）。数值一旦分叉，客户端拿到的
+// expires_in 就会与令牌真实的 exp 对不上，因此这里明确指出对应关系。
+const defaultTokenTTLHours = 720
+
+// EffectiveTokenTTL 返回访问令牌的生效寿命。
+//
+// 它是访问令牌寿命的唯一来源：认证模块的 expires_in 与撤销记录的存活时间
+// 都从它推导。
+func (c JWTConfig) EffectiveTokenTTL() time.Duration {
+	if c.TokenTTLHours > 0 {
+		return time.Duration(c.TokenTTLHours) * time.Hour
+	}
+	return defaultTokenTTLHours * time.Hour
+}

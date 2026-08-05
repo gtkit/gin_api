@@ -55,8 +55,8 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
 #
 # 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
-#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.4%  ← 下界
-#   正常路径（loopback 可用）：                          73.4%
+#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.2%  ← 下界
+#   正常路径（loopback 可用）：                          73.0%
 #
 # 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
 # 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
@@ -64,8 +64,12 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # testutil.RequireLoopback 在测试内部完成，标志在任意机器上都真正生效，
 # 上面两个数字因此可以被任何人重新测出来，而不是只能被声称。
 #
-# 门禁取 70.0：低于受限下界 0.4 个点。**余量已经很薄**——下一次提高门禁前
-# 必须先把受限路径实测抬上去，而不是直接改这个数字。
+# 门禁取 70.0：低于受限下界 **0.2 个点**。余量比上一轮更薄了——
+# 认证与指标两批新增了不少只在完整环境才跑得起来的测试（miniredis 要绑回环端口），
+# 它们在受限路径上被跳过，因此新增代码抬高了分母却没抬高受限分子。
+#
+# 下一次动这个数字之前必须先做的事：给受限路径补覆盖（用不碰网络的替身，
+# 见 internal/pkg/tokenstore/logic_test.go 的做法），而不是直接改门禁。
 # 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
 COVERAGE_MIN ?= 70.0
 tool: ## Lint Go code with the installed golangci-lint

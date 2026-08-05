@@ -47,3 +47,7 @@ func NewDeactivationCleanup(
 type cleanupAuditor struct{}
 
 func (cleanupAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }
+
+// Failf 走 Warn：清理失败意味着该被清除的个人信息在超期留存，
+// 日志告警规则按级别匹配，不该被迫去解析 Info 消息的文本。
+func (cleanupAuditor) Failf(format string, args ...any) { logger.Warnf(format, args...) }

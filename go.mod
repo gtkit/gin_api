@@ -11,12 +11,13 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto v0.54.0
 	gorm.io/driver/mysql v1.6.0 // indirect
 	gorm.io/gorm v1.31.2
 )
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/json v1.0.0
@@ -31,6 +32,9 @@ require (
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d
+	go.opentelemetry.io/otel v1.45.0
+	go.opentelemetry.io/otel/metric v1.45.0
+	go.opentelemetry.io/otel/sdk/metric v1.45.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/tools v0.48.0
 )
@@ -51,6 +55,9 @@ require (
 )
 
 require (
+	github.com/go-logr/logr v1.4.4 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gtkit/json/v2 v2.0.7 // indirect
 	github.com/gtkit/logrotate v1.1.3 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
@@ -59,6 +66,10 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
+	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/vuln v1.6.0 // indirect
@@ -73,7 +84,7 @@ require (
 	github.com/gin-contrib/sse v1.1.1 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-sql-driver/mysql v1.10.0 // indirect
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

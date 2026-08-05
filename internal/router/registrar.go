@@ -10,6 +10,7 @@ import (
 	"github.com/gtkit/goerr"
 
 	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -46,6 +47,8 @@ type accessMiddleware struct {
 	rateLimits *ratelimit.Registry
 	// rateLimitKeys 生成限流键（主体标识经 HMAC）。
 	rateLimitKeys *ratelimit.KeyBuilder
+	// metrics 记录限流判定；为 nil 时不记录。
+	metrics *metrics.Recorder
 	// maxBodyBytes 是全局请求体上限，路由级策略只能在此之内收紧。
 	maxBodyBytes int64
 }
@@ -140,7 +143,7 @@ func (m accessMiddleware) rateLimitsFor(spec routespec.RouteSpec, afterAuth bool
 			continue
 		}
 
-		mw, err := middleware.RateLimit(limiter, m.rateLimitKeys)
+		mw, err := middleware.RateLimit(limiter, m.rateLimitKeys, m.metrics)
 		if err != nil {
 			return []gin.HandlerFunc{denyEverything}
 		}

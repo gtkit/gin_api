@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	ginc "github.com/gtkit/gin-api/internal/pkg/ginc"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
@@ -33,7 +34,15 @@ const (
 //
 // 中间件只做三件事：组键、调用执行体、翻译成响应。限额算法、后端选择与
 // 降级语义全在 ratelimit 包内——中间件不认识 Redis，也不认识令牌桶。
-func RateLimit(limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder) (gin.HandlerFunc, error) {
+//
+// **指标记在这里而不是 ratelimit 包内**：那个包是可独立发布的（pkg/），
+// 不该依赖本仓的 internal 包，也不该替使用者选一套遥测栈。判定结果在这里
+// 已经拿到，记一次的成本就是一次计数器递增。
+//
+// recorder 为 nil 时不记录。
+func RateLimit(
+	limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder, recorder *metrics.Recorder,
+) (gin.HandlerFunc, error) {
 	if limiter == nil {
 		return nil, errors.New("rate limit middleware requires a limiter")
 	}
@@ -50,6 +59,7 @@ func RateLimit(limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder) (gin.Handl
 			// 唯一安全的行为是拒绝——放行等于这条路由完全没有限流。
 			logger.Error("rate limit subject unavailable; rejecting",
 				zap.String("policy", policy.ID), zap.Error(err))
+			recorder.RecordRateLimitDecision(c.Request.Context(), policy.ID, metrics.RateLimitFailure)
 			rejectRateLimited(c, ratelimit.Decision{Limit: policy.Burst})
 			return
 		}
@@ -65,6 +75,11 @@ func RateLimit(limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder) (gin.Handl
 				zap.String("outcome", decision.Outcome.String()),
 				zap.Error(checkErr))
 		}
+
+		// **每次判定都记**，不只记拒绝：没有分母就算不出拒绝率，
+		// 而"拒绝了多少次"单独看是没有意义的——流量翻倍时它也会翻倍。
+		recorder.RecordRateLimitDecision(c.Request.Context(), policy.ID,
+			rateLimitOutcome(decision.Outcome))
 
 		writeRateLimitHeaders(c, decision)
 
@@ -137,4 +152,25 @@ func rejectRateLimited(c *gin.Context, decision ratelimit.Decision) {
 	c.Writer.Header().Set(headerRetryAfter, strconv.Itoa(decision.RetryAfterSeconds()))
 	resp.TooManyRequestsErr(c, "请求过于频繁，请稍后再试")
 	c.Abort()
+}
+
+// rateLimitOutcome 把限流包的判定翻译成指标取值。
+//
+// 两套枚举而不是共用一套：ratelimit 是可独立发布的包，让它认识本仓的指标
+// 类型就是一条反向依赖。翻译函数是这条边界的实际成本，且它很短。
+func rateLimitOutcome(outcome ratelimit.Outcome) metrics.RateLimitOutcome {
+	switch outcome {
+	case ratelimit.OutcomeAllowed:
+		return metrics.RateLimitAllowed
+	case ratelimit.OutcomeRateLimited:
+		return metrics.RateLimitThrottled
+	case ratelimit.OutcomeKeyBudgetExhausted:
+		return metrics.RateLimitKeyLimit
+	case ratelimit.OutcomeBackendUnavailable:
+		return metrics.RateLimitFailure
+	default:
+		// 上游新增了取值而这里没跟上。归到 failure 而不是 allowed：
+		// 把未知情况记成"放行"会让一类新的拒绝在监控上完全消失。
+		return metrics.RateLimitFailure
+	}
 }

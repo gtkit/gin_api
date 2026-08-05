@@ -169,6 +169,72 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 注销信息留存 | `user_deactivations` 表 | 明文保存注销前手机号/邮箱/昵称/IP 供申诉与风控；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见该表的迁移注释 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
 
+### 认证：两种模式二选一（`auth.mode`，无默认值）
+
+启动时必须显式选择，忘记选会直接启动失败。两种默认都会静默给出一个错误的系统：
+默认 `local` 会给接外部身份的部署凭空加一组凭据端点；默认 `external` 会让人以为
+认证已就绪，而实际上没有任何签发入口。
+
+**`local` —— 本服务保管凭据**（母版的默认实现）
+
+开箱提供 `POST /api/v1/auth/{register,login,refresh,logout}`：
+
+| 能力 | 实现要点 |
+|------|---------|
+| 密码 | bcrypt，cost 可配（默认 12，下限 10）。账号不存在时**同样执行一次哈希比对**，否则响应时间会泄漏手机号是否已注册 |
+| 访问令牌 | 复用既有 JWT 签发与密钥轮换。寿命由 `jwt.token_ttl_hours` 决定（唯一来源） |
+| 刷新令牌 | 独立的随机串，不是 JWT——JWT 不可撤销，而刷新的核心需求正是可撤销。服务端存哈希，一次性使用并每次轮换 |
+| 重用检测 | 已消费的刷新令牌再次出现 → **撤销整个令牌族**。仅拒绝这一次的话，攻击者仍持有链条上的其它令牌 |
+| 登出 | 访问令牌 jti 进撤销表，存活时间等于令牌剩余寿命，因此撤销表不会无限增长 |
+| 防爆破 | 复用限流：`auth.credential` 策略（按来源，比业务默认严得多） |
+
+**要求可用的 Redis**：登出与刷新轮换都依赖它做撤销，缺了直接启动失败。
+"能登录、登不出"比没有认证更危险——它看起来是完整的，没人会再去补。
+
+**`external` —— 身份来自外部**
+
+不注册任何认证端点，本服务只验签与授权。接线点：
+
+1. `internal/pkg/jwtauth` 的 parser 换成你的 IdP 验签实现（或配置为接受其 JWKS）；
+2. `sharedauth.UserVerifier` 改为查询你的用户同步表；
+3. 撤销由 IdP 负责，`middleware.AuthOptions.Revocation` 留 nil。
+
+母版**不预置任何具体 IdP 的对接**：Keycloak、Auth0、自研网关在 claims 形状、
+用户同步时机与撤销通知方式上差异极大，预置任何一家都会让另外几家的使用者
+先删掉再重写。
+
+切到该模式后可整体删除：`internal/module/auth/`、`internal/runtime/module/auth/`、
+`internal/repository/authcredential/`、`internal/pkg/{credential,tokenstore}/`、
+配置里的 `auth.bcrypt_cost` / `auth.refresh_ttl` 与两条 `auth.*` 限流策略。
+
+### 接指标导出
+
+母版只依赖 OTel 的 **API 包**，不带 SDK、不带 exporter：Prometheus 拉取、
+OTLP 推送、云厂商专有协议的选择取决于你既有的监控栈，预置任何一个都会让
+用另一套的人先拆再接。
+
+接线是在进程启动前设置全局 provider，**记录点一处都不用改**：
+
+```go
+// main.go，在 bootstrap 之前
+exporter, err := prometheus.New()          // 或 otlpmetricgrpc.New(...)
+if err != nil { return err }
+provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
+otel.SetMeterProvider(provider)
+defer provider.Shutdown(context.Background())
+```
+
+需要额外引入 `go.opentelemetry.io/otel/sdk/metric` 与所选 exporter。
+
+**标签基数是硬约束**，加埋点时必须守住：路由标签用路由模板（`FullPath()`），
+未匹配路由归到固定常量；禁止把原始 URL、用户 ID、IP、令牌、订单号写进标签。
+序列数是标签取值的笛卡尔积——把请求方可控的值写进去，一次目录爆破就能把
+监控后端压垮，而故障出现在监控侧：最需要它的时候正好不可用。
+
+状态类指标（连接池用量、worker 最后成功时间）走**异步回调**，采集时读当前值。
+主动上报要在"打得太密"与"错过变化"之间选，而一个每天跑一次的任务，
+主动上报意味着它的指标一天只有一个数据点。
+
 ### 【注册位 — 需要接线才生效】
 
 | 能力 | 如何启用 |
@@ -178,16 +244,19 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | `role.admin` 授权 | **当前是恒拒绝占位**（无权威角色源），所有请求 403。接入角色表/IAM 后替换该 adapter，RouteSpec 无需改动 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
-| pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败 |
+| 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
+| 指标（OTel） | 默认 **no-op**：不接导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。接线见下方「接指标导出」 |
+| pprof + API 文档 | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败。同一端点的 `/docs` 提供契约查看器（编译期嵌入 openapi.json，自包含无外网依赖）；文档入口刻意不进业务路由与 OpenAPI 契约——dev 工具不该出现在对外契约里 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在 `RouteSpec.RateLimitPolicyID` 引用策略 ID |
 
 ### 【示例 — 可按需删除】
 
 | 内容 | 说明 |
 |------|------|
-| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者 |
+| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者。**注意其用户模型带具体业务形状**（VIP、渠道、邀请码、设备信息等字段来自存量业务）：派生项目应按自身领域重塑 users 表与 dto，而不是默认继承这些字段 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
+| 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |
 
 ### 本地开发依赖（可选）
 

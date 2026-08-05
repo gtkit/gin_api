@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	gojwt "github.com/golang-jwt/jwt/v5"
@@ -39,10 +40,24 @@ type TokenParser interface {
 	ParseToken(ctx context.Context, token string, opts ...gojwt.ParserOption) (*jwtclaims.Claims, error)
 }
 
+// RevocationChecker 报告访问令牌是否已被撤销。
+//
+// 它填上了 TokenParser 那个 ctx 参数当初预留的位置：撤销检查是一次 Redis
+// 查询，需要透传取消与超时——一个挂住的查询会把每个请求都拖到超时。
+type RevocationChecker interface {
+	IsRevoked(ctx context.Context, tokenID string) (bool, error)
+}
+
 // AuthOptions 是认证中间件的依赖。
 type AuthOptions struct {
 	Verifier sharedauth.UserVerifier
 	Parser   TokenParser
+	// Revocation 检查令牌是否已被撤销；为 nil 时不做检查。
+	//
+	// 允许为 nil 是给**外部身份模式**留的：那种部署里令牌由外部签发，
+	// 撤销也归外部，本服务没有撤销表可查。本地认证模式必须注入——
+	// 缺了它登出不会产生任何效果，而配置校验已经在启动期拦下这种组合。
+	Revocation RevocationChecker
 	// AllowMissingToken 对应"可选认证"：缺失 token 时放行；
 	// 但**一旦提供了 token，非法就必须拒绝**——否则攻击者只要发一个坏 token
 	// 就能绕过校验以匿名身份继续。
@@ -100,8 +115,34 @@ func Authenticate(opts AuthOptions) (gin.HandlerFunc, error) {
 			return
 		}
 
+		// 撤销检查放在最后：它是三项检查里唯一需要网络往返的，
+		// 排在签名与用户有效性之后，非法请求不会白白消耗一次 Redis 查询。
+		if opts.Revocation != nil {
+			revoked, err := opts.Revocation.IsRevoked(c.Request.Context(), claims.TokenID)
+			if err != nil {
+				// **故障必须拒绝，不能放行**。
+				//
+				// 把查询失败当作"未撤销"，会让一次 Redis 抖动变成"所有已登出的
+				// 令牌重新生效"——恰恰在最需要它生效的时候失效。回 503 而不是
+				// 401：这是依赖不可用，不是凭据无效，客户端据此重试才是对的。
+				abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(),
+					"token revocation check unavailable"))
+				return
+			}
+			if revoked {
+				abortWith(c, goerr.New(nil, goerr.StatusAuth(), "token has been revoked"))
+				return
+			}
+		}
+
 		ginc.SetUserID(c, claims.UserID)
 		ginc.SetPrincipal(c, sharedauth.Principal{UserID: claims.UserID, Roles: claims.Roles})
+		// 记录令牌标识供登出撤销使用。ExpiresAt 决定撤销记录该活多久——
+		// 缺了它就只能给撤销记录一个猜出来的存活时间。
+		ginc.SetTokenIdentity(c, ginc.TokenIdentity{
+			TokenID:   claims.TokenID,
+			ExpiresAt: claimsExpiry(claims),
+		})
 		c.Next()
 	}, nil
 }
@@ -181,4 +222,16 @@ func tokenFromHeader(c *gin.Context) (string, error) {
 		return "", fmt.Errorf("%s header contains whitespace", tokenHeaderName)
 	}
 	return raw, nil
+}
+
+// claimsExpiry 取令牌的过期时刻。
+//
+// 缺失时返回零值：调用方（登出）据此判断这个令牌无法被撤销。
+// 编一个"当前时间 + 默认 TTL"更糟——那会写出一条与真实寿命对不上的撤销记录，
+// 短了则令牌提前复活，长了则撤销表白白占着空间。
+func claimsExpiry(claims *jwtclaims.Claims) time.Time {
+	if claims == nil || claims.ExpiresAt == nil {
+		return time.Time{}
+	}
+	return claims.ExpiresAt.Time
 }

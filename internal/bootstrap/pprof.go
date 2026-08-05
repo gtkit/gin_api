@@ -141,6 +141,10 @@ func newPprofMux() *http.ServeMux {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile) // CPU profile
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace) // 执行跟踪
+
+	// API 文档查看器与 pprof 共用这个调试端点：两者需要的安全边界完全一致
+	// （默认关闭、只绑回环、非回环绑定被配置校验拒绝），见 registerDevDocs。
+	registerDevDocs(mux)
 	return mux
 }
 

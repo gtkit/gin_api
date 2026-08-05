@@ -4,6 +4,8 @@
 package ginc
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -45,4 +47,42 @@ func PrincipalFromContext(c *gin.Context) (sharedauth.Principal, bool) {
 	}
 	p, ok := v.(sharedauth.Principal)
 	return p, ok
+}
+
+// tokenIdentityKey 是本次请求所用令牌的标识在 gin context 中的键。
+type tokenIdentityKey struct{}
+
+// TokenIdentity 是本次请求所用访问令牌的可撤销标识。
+//
+// **与 Principal 分开**是刻意的：Principal 回答"你是谁"，供授权判定消费；
+// 这里回答"你这次用的是哪个令牌、它什么时候过期"，只有登出与撤销需要。
+// 混进 Principal 会让授权实现能看到令牌 ID——而授权不该关心凭据的身份，
+// 那是两个会各自演进的关注点。
+type TokenIdentity struct {
+	// TokenID 是令牌的 jti，撤销以它为准。
+	TokenID string
+	// ExpiresAt 是令牌的过期时刻，决定撤销记录该活多久。
+	ExpiresAt time.Time
+}
+
+// SetTokenIdentity 记录本次请求所用的令牌标识（由鉴权中间件调用）。
+func SetTokenIdentity(c *gin.Context, id TokenIdentity) {
+	c.Set(tokenIdentityKey{}, id)
+}
+
+// TokenIdentityFromContext 取出本次请求的令牌标识。
+//
+// ok=false 表示本次请求没有经过认证，或令牌不含可撤销的标识。
+// 调用方**不能**把它当成"无需撤销"——登出在这种情况下应当报错，
+// 否则用户会以为自己已经登出。
+func TokenIdentityFromContext(c *gin.Context) (TokenIdentity, bool) {
+	if c == nil {
+		return TokenIdentity{}, false
+	}
+	v, exists := c.Get(tokenIdentityKey{})
+	if !exists {
+		return TokenIdentity{}, false
+	}
+	id, ok := v.(TokenIdentity)
+	return id, ok
 }

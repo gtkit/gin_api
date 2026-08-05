@@ -89,6 +89,13 @@ func buildOpenOptions(dbCfg config.DatabaseConfig, creds config.DBCredentials) [
 		ormx.WithPrepareStmt(true),
 		ormx.WithSkipDefaultTransaction(true),
 
+		// 把驱动错误翻译成 GORM 的统一错误类型（gorm.ErrDuplicatedKey 等）。
+		//
+		// 没有它，仓储只能靠匹配驱动的错误码文本来区分"唯一键冲突"与"数据库
+		// 出错"，而那个文本随驱动与数据库版本变化。这条判断决定的是回 409
+		// 还是回 500——判错会把一次正常的重复提交报成服务端故障。
+		ormx.WithTranslateError(true),
+
 		// 跳过 GORM 自己的版本探测（那次往返不受 ctx 约束），改由本函数显式校验。
 		ormx.WithSkipInitializeWithVersion(true),
 		ormx.WithServerVersion(dbCfg.EffectiveMinVersion()),

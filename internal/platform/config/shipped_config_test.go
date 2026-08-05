@@ -33,6 +33,8 @@ var deploymentPlaceholders = []struct{ from, to string }{
 	// 部署自己的专用密钥，模板预填一个会被原样带上生产。
 	{`key_hmac_secret: ""`, `key_hmac_secret: "rate-limit-hmac-secret-32-bytes-min"`},
 	{`audiences: []`, `audiences: ["gin-api-client"]`},
+	// 认证模式没有默认值：模板替使用者选一个，等于替他决定凭据存在哪里。
+	{`mode: ""`, `mode: "external"`},
 }
 
 // TestShippedExampleStaysInSyncWithTheCode 钉住分发的配置模板不与代码漂移。
@@ -100,7 +102,7 @@ func TestShippedExampleShipsNoUsableCredentials(t *testing.T) {
 	}
 
 	// 错误必须点名待填项，否则使用者不知道该补什么。
-	for _, want := range []string{"jwt.active.kid", "jwt.issuer", "jwt.audiences"} {
+	for _, want := range []string{"jwt.active.kid", "jwt.issuer", "jwt.audiences", "auth.mode"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the startup error does not tell the operator to fill %q", want)
 		}

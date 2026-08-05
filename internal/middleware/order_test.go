@@ -18,6 +18,8 @@ import (
 //   - RequestID 不够靠前 → 它之前产生的日志与错误响应都没有关联 ID；
 //   - AccessLogger 排在 CORS/MaxBytes 之后 → 403/413 的响应没有访问记录，
 //     而那正是最需要留痕的两类；
+//   - Metrics 排在拒绝类中间件之后 → 被限流/体积限制挡掉的请求根本不进指标，
+//     而"挡掉了多少"恰恰是最需要指标回答的一类问题；
 //   - SecurityHeaders 排在任何写 body 的中间件之后 → header 设置**静默失效**
 //     （body 一开始写响应头就已发出），线上看不到任何报错；
 //   - MaxBytesLimit 不在最后 → body 日志的读取不受同一上限约束。
@@ -27,6 +29,7 @@ var wantMiddlewareOrder = []string{
 	"GinRecovery",
 	"RequestID",
 	"GinLogger",
+	"Metrics",
 	"SecurityHeaders",
 	"ErrorHandler",
 	"Cors",
@@ -56,7 +59,7 @@ func TestInitMiddlewareOrderIsExact(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, []string{"https://example.com"}, AccessLogOptions{}, 1024, nil); err != nil {
+	if err := InitMiddleware(engine, []string{"https://example.com"}, AccessLogOptions{}, 1024, nil, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 
@@ -77,7 +80,7 @@ func TestInitMiddlewareWithoutCORS(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 1024, nil); err != nil {
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 1024, nil, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 
@@ -106,7 +109,7 @@ func TestSecurityHeadersPresentOnEveryResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
-	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 8, nil); err != nil {
+	if err := InitMiddleware(engine, nil, AccessLogOptions{}, 8, nil, nil); err != nil {
 		t.Fatalf("InitMiddleware: %v", err)
 	}
 	engine.GET("/ok", func(c *gin.Context) { c.String(http.StatusOK, "ok") })

@@ -26,6 +26,14 @@ go run . project init --name your-project             # 执行
 
 2. 填写 MySQL、Redis、JWT 等本机配置。
 
+   其中 `auth.mode` **没有默认值，必须显式选择**：
+
+   - `local` —— 本服务保管用户凭据，开箱提供注册/登录/刷新/登出端点
+     （需要可用的 Redis：登出与刷新轮换依赖它做撤销）；
+   - `external` —— 身份来自外部 IdP，不注册任何认证端点。
+
+   两种模式的能力与接线方式见 `SCAFFOLD.md`。
+
 3. 启动服务：
 
    ```bash
@@ -176,4 +184,6 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 
 - 配置说明：`config/README.md`
 - pprof 默认关闭；启用后使用独立回环地址端点。
-- 模块生成器生成可审阅的 `.up.sql` / `.down.sql` 草稿，仅供 DBA 审阅后手工执行（项目不含迁移 runtime）。
+- 模块生成器生成可审阅的 `.up.sql` / `.down.sql` 草稿。执行走内置的 `migrate` CLI
+  （`make migrate-up` / `migrate-status`，连库验证见 `make migrate-verify`），
+  上线前须经 DBA 审阅。

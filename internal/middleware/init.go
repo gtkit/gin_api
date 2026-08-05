@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 )
 
 // InitMiddleware 按**固定顺序**装配全局中间件。
@@ -17,6 +19,10 @@ import (
 //	                  排在其余全部之前是因为 panic 日志同样需要 ID。
 //	AccessLogger      要覆盖到后续中间件产生的响应（413/403/404/405 都必须有一条访问记录），
 //	                  因此必须排在它们之前。
+//	Metrics           与 AccessLogger 同层、紧随其后：它要统计的同样是**全部**请求，
+//	                  包括被后续中间件直接拒掉的（413/403）与未匹配路由的（404/405）。
+//	                  排在它们之后的话，"被限流挡掉多少"这类问题在指标上根本看不到，
+//	                  而那恰恰是最需要指标回答的一类问题。
 //	SecurityHeaders   必须在任何可能写响应体的中间件之前：body 一开始写，
 //	                  响应头就已发出，之后设置 header 不生效且**不会报错**。
 //	ErrorHandler      统一把 c.Errors 转成响应格式。
@@ -35,7 +41,7 @@ import (
 // 必须让启动失败的条件，而 panic 会绕过已建立资源的清理。
 func InitMiddleware(
 	r *gin.Engine, allowedOrigins []string, accessLog AccessLogOptions, maxBodyBytes int64,
-	allowedMethods AllowedMethodsFunc,
+	allowedMethods AllowedMethodsFunc, recorder *metrics.Recorder,
 ) error {
 	generator, err := NewRequestIDGenerator()
 	if err != nil {
@@ -49,6 +55,7 @@ func InitMiddleware(
 	r.Use(GinRecovery(true))
 	r.Use(requestID)
 	r.Use(GinLogger(accessLog))
+	r.Use(Metrics(recorder))
 	r.Use(SecurityHeaders())
 	r.Use(ErrorHandler())
 	if len(allowedOrigins) > 0 {

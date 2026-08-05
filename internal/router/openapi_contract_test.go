@@ -14,6 +14,7 @@ import (
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gtkit/gin-api/internal/models"
+	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	"github.com/gtkit/gin-api/internal/router"
@@ -208,8 +209,11 @@ func registeredRouteOperations(tb testing.TB) map[string]struct{} {
 	tb.Helper()
 
 	userModule := userhttp.NewModule(newContractUserService(tb))
+	// 认证模块与生成器保持一致：契约里有这四条路由，真实 engine 就必须能注册
+	// 出同样的四条。service 传 nil——本测试只走描述符，不执行 handler。
+	authModule := authhttp.NewModule(nil)
 	engine, err := router.InitRouterWithVersionedModules("test", router.VersionedModules{
-		V1: []router.Module{userModule},
+		V1: []router.Module{userModule, authModule},
 	}, router.RouterOptions{
 		// 声明了 AccessAuthenticated 的路由必须有鉴权实现，否则 registrar 拒绝启动。
 		AuthMiddleware: func(c *gin.Context) { c.Next() },
@@ -315,6 +319,16 @@ func contractRateLimitRegistry(tb testing.TB) *ratelimit.Registry {
 		{
 			ID: "default.user", Rate: 10, Burst: 50,
 			Scope: ratelimit.ScopeUser, Store: ratelimit.StoreLocal,
+			FailureMode: ratelimit.FailureClosed, MaxKeys: 100000,
+		},
+		{
+			ID: "auth.credential", Rate: 0.2, Burst: 10,
+			Scope: ratelimit.ScopeIP, Store: ratelimit.StoreLocal,
+			FailureMode: ratelimit.FailureClosed, MaxKeys: 100000,
+		},
+		{
+			ID: "auth.token", Rate: 1, Burst: 20,
+			Scope: ratelimit.ScopeIP, Store: ratelimit.StoreLocal,
 			FailureMode: ratelimit.FailureClosed, MaxKeys: 100000,
 		},
 	} {

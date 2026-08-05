@@ -16,6 +16,8 @@ func TestLoadFromReader(t *testing.T) {
 
 	cfg, err := loadFromReader(strings.NewReader(fmt.Sprintf(`
 env: dev
+auth:
+  mode: external
 application:
   host: localhost
   port: "8008"
@@ -163,6 +165,8 @@ func TestLoadFromReaderRejectsUnknownKeys(t *testing.T) {
 	// 最小合法基座；每个用例往里注入一个未知键。
 	base := `
 env: dev
+auth:
+  mode: external
 application:
   name: app_client
   host: localhost
@@ -549,6 +553,9 @@ func TestValidateLaravelJWTConfig(t *testing.T) {
 func validConfigForTest() *Config {
 	return &Config{
 		Env: EnvDev,
+		// 认证模式没有默认值，合法配置必须显式选一个。fixture 取 external：
+		// 它不要求 Redis，因此不会给无关的用例强加一个依赖。
+		Auth: AuthConfig{Mode: AuthModeExternal},
 		App: AppConfig{
 			Name: "app_client",
 			Host: "localhost",

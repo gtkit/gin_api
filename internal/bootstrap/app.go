@@ -42,6 +42,12 @@ type App struct {
 	// rateLimits 持有限流注册表；关停时必须关闭它，否则每条本地策略的
 	// 后台清理 goroutine 会一直活到进程退出。
 	rateLimits rateLimitAssembly
+	// metricsCleanup 注销指标的异步回调。
+	//
+	// 不注销的话，回调会继续持有已停掉的 worker 与已关闭的连接池——
+	// 采集到的是一份永远不再变化的陈旧状态，而运维看到的是"指标还在，
+	// 值不动了"，比没有指标更容易误判。
+	metricsCleanup []func() error
 	// drainWait 是停 producer 之后、关 HTTP 之前的等待时长，
 	// 用于让负载均衡器观察到 /ready 的 503 并把本实例摘出转发目标。
 	drainWait time.Duration
@@ -68,14 +74,15 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	}
 
 	return &App{
-		runtime:    runtime,
-		httpConfig: providers.httpConfig,
-		httpServer: providers.httpServer,
-		workers:    providers.workers,
-		shutdown:   providers.shutdown,
-		rateLimits: providers.rateLimits,
-		drainWait:  drainWaitFrom(runtime.Config()),
-		status:     providers.status,
+		runtime:        runtime,
+		httpConfig:     providers.httpConfig,
+		httpServer:     providers.httpServer,
+		workers:        providers.workers,
+		shutdown:       providers.shutdown,
+		rateLimits:     providers.rateLimits,
+		metricsCleanup: providers.metricsCleanup,
+		drainWait:      drainWaitFrom(runtime.Config()),
+		status:         providers.status,
 	}, nil
 }
 
@@ -257,10 +264,16 @@ func (a *App) gracefulShutdown(
 	//    排在 HTTP 之后：在飞请求可能仍要做限流判定。
 	collect(closeRateLimits(a.rateLimits))
 
-	// 8. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
+	// 8. 注销指标回调。排在 worker 与限流之后：它们停掉之前，采集到的
+	//    仍是有效状态；之后再采就是陈旧值了。
+	for _, unregister := range a.metricsCleanup {
+		collect(unregister())
+	}
+
+	// 9. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
 	collect(a.shutdownPprof(base, pprofEndpoint))
 
-	// 9. 资源由 closeResources（defer）按建立逆序关闭。
+	// 10. 资源由 closeResources（defer）按建立逆序关闭。
 
 	collect(a.shutdown.Cause())
 

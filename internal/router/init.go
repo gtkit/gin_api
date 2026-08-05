@@ -6,6 +6,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/appmeta"
 	middleware "github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/router/routespec"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -51,11 +52,21 @@ type RouterOptions struct {
 	// Authorizers 是具名授权实现的注册表，AccessAuthorized 按 ID 解析。
 	// 注册表在 compile 前冻结，运行期不可变。
 	Authorizers *sharedauth.AuthorizerRegistry
-	// RateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyID 按 ID 解析。
+	// RateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyIDs 按 ID 解析。
+	//
+	// **传 nil 不等于"不限流"**：业务路由硬引用默认策略，引用无法解析会在
+	// 装配期失败。nil 只对完全不声明策略的路由集合成立（如部分单测）。
 	// 为 nil 时所有路由不限流——这是母版的默认形态（没有配置任何策略）。
 	RateLimits *ratelimit.Registry
 	// RateLimitKeys 生成限流键。声明了策略却没有它即装配失败。
 	RateLimitKeys *ratelimit.KeyBuilder
+
+	// Metrics 记录请求量、时延与状态码；为 nil 时不记录。
+	//
+	// 允许为 nil 而不是要求必传：指标默认不接导出，测试与最小装配不该被迫
+	// 构造一份仪表。这与限流不同——那里 nil 意味着"声明的策略静默失效"，
+	// 是必须拦下的装配错误；这里 nil 只意味着"不记录"，没有任何东西被绕过。
+	Metrics *metrics.Recorder
 }
 
 // InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
@@ -102,6 +113,7 @@ func InitRouterWithVersionedModules(
 		authorizers:          authorizers,
 		rateLimits:           opt.RateLimits,
 		rateLimitKeys:        opt.RateLimitKeys,
+		metrics:              opt.Metrics,
 		maxBodyBytes:         opt.MaxBodyBytes,
 	}
 	if err := validateAccessSupport(compiled, access); err != nil {
@@ -140,7 +152,7 @@ func InitRouterWithVersionedModules(
 		LogResponseBody: opt.LogResponseBody,
 		// 预检需要知道目标路径上到底允许哪些方法：没有它，OPTIONS 会对不存在的
 		// 路径回 204，而随后的实际请求拿到 404——客户端排查的方向因此是错的。
-	}, opt.MaxBodyBytes, index.AllowHeaderValue); err != nil {
+	}, opt.MaxBodyBytes, index.AllowHeaderValue, opt.Metrics); err != nil {
 		return nil, fmt.Errorf("init global middleware: %w", err)
 	}
 
