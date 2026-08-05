@@ -9,6 +9,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
@@ -53,24 +54,25 @@ type Options struct {
 //
 // 装配顺序就是 gin 的惯例：先 engine 级 Use，再分组注册。
 func New(envName string, opt Options) (*gin.Engine, error) {
-	if config.Env(envName) == config.EnvProd {
-		gin.SetMode(gin.ReleaseMode)
-	}
+	// SetMode 必须在 gin.New() **之前**：gin.New() 的第一件事就是按当时的 mode
+	// 决定构造期调试输出，构造后再设置对那部分输出无效。
+	gin.SetMode(ginModeFromEnv(envName))
 
 	engine := gin.New()
-
-	// 可信代理必须显式设置。Gin 不设置时的默认是**信任所有代理**，
-	// 那会让任何客户端都能用转发头伪造自己的 IP，而限流与审计都按 IP 走。
-	if err := engine.SetTrustedProxies(opt.TrustedProxies); err != nil {
+	if err := configureEngine(engine, opt); err != nil {
 		return nil, err
-	}
-	if len(opt.RemoteIPHeaders) > 0 {
-		engine.RemoteIPHeaders = opt.RemoteIPHeaders
 	}
 
 	if err := useGlobalMiddleware(engine, opt); err != nil {
 		return nil, err
 	}
+
+	// 未匹配路由与未匹配方法的处置。
+	//
+	// 注册时机不敏感：gin 的 NoRoute/NoMethod 与 Use 都会重建 404/405 处理链，
+	// 两者的先后不影响"全局中间件对未匹配请求同样生效"这一结果。
+	engine.NoRoute(noRoute)
+	engine.NoMethod(noMethod)
 
 	registerSystemRoutes(engine, opt)
 
@@ -80,6 +82,90 @@ func New(envName string, opt Options) (*gin.Engine, error) {
 	}
 
 	return engine, nil
+}
+
+// ginModeFromEnv 把运行环境映射到 gin 运行模式。
+//
+// 只处理生产环境是不够的：dev/test 会落在 gin 默认的 DebugMode，
+// 而 DebugMode 下 gin 自己往 stderr 打路由表与警告，绕过项目的结构化日志。
+func ginModeFromEnv(envName string) string {
+	switch config.Env(strings.ToLower(strings.TrimSpace(envName))) {
+	case config.EnvProd:
+		return gin.ReleaseMode
+	case config.EnvTest:
+		return gin.TestMode
+	case config.EnvDev:
+		return gin.DebugMode
+	default:
+		return gin.DebugMode
+	}
+}
+
+// configureEngine 是 engine 可配置面的**唯一**决策点。
+//
+// 这里逐项列出 gin.Engine 的全部可配置字段——包括决定"保持 gin 默认"的那些。
+// 清单本身就是防遗漏机制：此前只有可信代理与运行模式被想到并写下，其余十余项
+// 从未被提及，于是"漏了哪一项"无法通过阅读这段代码发现，而实际漏掉的四项
+// （405 不可能产生、404 脱离统一信封、隐式尾斜杠重定向、*gin.Context 丢 deadline）
+// 全都有真实后果。新增字段时在此追加一行定性，不要散落到别处。
+//
+// 各项定性（gin v1.12.0，默认值取自 gin.New()）：
+//
+//	RedirectTrailingSlash   true  → false：API 不做隐式重定向。非 GET 方法走 307，
+//	                        客户端会带原请求体重发，一次写操作可能落到并非作者
+//	                        本意的路径上；隐式纠正也让"路径不存在"不再确定。
+//	RedirectFixedPath       false 保持：大小写不敏感的路径修正会与网关/WAF 的
+//	                        路径规则分叉（网关按 /Admin 放行、应用按 /admin 匹配）。
+//	HandleMethodNotAllowed  false → true：否则 405 永不产生，方法不匹配伪装成 404，
+//	                        且与 CORS 预检回 405+Allow 的结论自相矛盾。
+//	ForwardedByClientIP     true  保持：与 SetTrustedProxies 配对生效。
+//	AppEngine               —     不触碰：已废弃字段。
+//	UseRawPath              false 保持：用已解码的 URL.Path 匹配，与既有路由声明一致。
+//	UseEscapedPath          false 保持：同上。
+//	UnescapePathValues      true  保持：路径参数解码后交给 handler，是既有行为。
+//	RemoveExtraSlash        false 保持：同 RedirectFixedPath，归一化会与上游规则分叉。
+//	RemoteIPHeaders         配置驱动：opt 为空时保持 gin 默认。
+//	TrustedPlatform         ""    保持：设置它等于无条件信任某云厂商的 IP 头，
+//	                        本仓走显式可信代理列表。
+//	MaxMultipartMemory      32MB  保持：仓库无 multipart 路由，全局 body 上限已封顶
+//	                        该场景；为尚不存在的上传路由预设一个值没有依据。接入
+//	                        上传时按该路由的实际上限单独定值。
+//	UseH2C                  false 保持：h2c 是明文 HTTP/2，本仓服务 TLS 或置于反代之后。
+//	ContextWithFallback     false → true：*gin.Context 自身满足 context.Context，
+//	                        下游写 service.Do(c, …) 能通过编译，但默认实现会让
+//	                        Deadline/Done/Err/Value 返回零值——路由级超时对这种
+//	                        写法完全失效，且无任何编译期或运行期信号。
+func configureEngine(engine *gin.Engine, opt Options) error {
+	// 可信代理必须显式设置。Gin 不设置时的默认是**信任所有代理**，
+	// 那会让任何客户端都能用转发头伪造自己的 IP，而限流与审计都按 IP 走。
+	if err := engine.SetTrustedProxies(opt.TrustedProxies); err != nil {
+		return err
+	}
+	if len(opt.RemoteIPHeaders) > 0 {
+		engine.RemoteIPHeaders = opt.RemoteIPHeaders
+	}
+
+	engine.RedirectTrailingSlash = false
+	engine.HandleMethodNotAllowed = true
+	engine.ContextWithFallback = true
+
+	return nil
+}
+
+// noRoute 处置未匹配的路由，走统一响应信封。
+//
+// 不按路径形态分流（例如让含点的路径落回框架默认响应）：那会产生两种 404 形态，
+// 而合法的路径参数可以含点，那些请求会拿到与 API 不一致的响应体。
+func noRoute(c *gin.Context) {
+	resp.NotFoundError(c, "unknown route")
+}
+
+// noMethod 处置已注册路径上的未注册方法，走统一响应信封。
+//
+// Allow 头不在此计算：gin 在进入本处理器**之前**已按 RFC 7231 §6.5.5 写好，
+// 这里再算一遍等于维护第二份同源事实。
+func noMethod(c *gin.Context) {
+	resp.NotAllowedMethod(c, "method not allowed")
 }
 
 // useGlobalMiddleware 按**固定顺序**装配全局中间件。

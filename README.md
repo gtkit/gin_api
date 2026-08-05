@@ -84,6 +84,15 @@ cmd
 - `GET /health`：存活检查。
 - `GET /ready`：MySQL、Redis 就绪检查。
 
+### 通用 HTTP 行为
+
+以下语义对全部路由生效，派生项目会继承：
+
+- 未匹配的路径返回 404，未注册的方法返回 405 并携带 `Allow` 头；两者的响应体与业务接口共用同一 JSON 信封。
+- 带尾斜杠的路径不做隐式重定向，按未匹配路由处置。
+- `*gin.Context` 可直接当作 `context.Context` 传给下游，请求的取消与路由超时会一并传播。
+- gin 运行模式由配置的 `env` 决定：`prod` 用 release、`test` 用 test、其余用 debug。
+
 ## 命令
 
 ```bash
