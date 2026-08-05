@@ -48,25 +48,25 @@ func TestResolveAccessChoiceMapsEveryMode(t *testing.T) {
 	}{
 		{
 			name: "public", public: true,
-			wantExpr: "routespec.AccessPolicy{Mode: routespec.AccessPublic}",
+			wantExpr: "",
 		},
 		{
 			name: "authenticated", access: AccessOptionAuthenticated,
-			wantExpr: "routespec.AccessPolicy{Mode: routespec.AccessAuthenticated}",
+			wantExpr: "g.Use(deps.Auth)",
 		},
 		{
 			name: "optional", access: AccessOptionOptional,
-			wantExpr: "routespec.AccessPolicy{Mode: routespec.AccessOptionalAuthenticated}",
+			wantExpr: "g.Use(deps.OptionalAuth)",
 		},
 		{
 			name: "admin", access: AccessOptionAdmin,
-			wantExpr: `routespec.AccessPolicy{Mode: routespec.AccessAuthorized, AuthorizerID: "role.admin"}`,
+			wantExpr: `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
 		},
 		{
 			// custom 的 ID 必须由模块名确定性派生：它同时出现在 RouteSpec、
 			// registry 注册点与 metrics label 上，随机 ID 会让三者对不上。
 			name: "custom", access: AccessOptionCustom,
-			wantExpr: `routespec.AccessPolicy{Mode: routespec.AccessAuthorized, AuthorizerID: "module.demo.custom"}`,
+			wantExpr: `g.Use(deps.Auth, deps.Authorize("module.demo.custom"))`,
 		},
 	}
 	for _, tt := range tests {
@@ -124,10 +124,10 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 		public bool
 		want   string
 	}{
-		{name: "public", public: true, want: "routespec.AccessPublic}"},
-		{name: "authenticated", access: AccessOptionAuthenticated, want: "routespec.AccessAuthenticated}"},
-		{name: "admin", access: AccessOptionAdmin, want: `AuthorizerID: "role.admin"`},
-		{name: "custom", access: AccessOptionCustom, want: `AuthorizerID: "module.admin.custom"`},
+		{name: "public", public: true, want: "g.GET(\"\", handler.List)"},
+		{name: "authenticated", access: AccessOptionAuthenticated, want: "g.Use(deps.Auth)"},
+		{name: "admin", access: AccessOptionAdmin, want: `deps.Authorize("role.admin")`},
+		{name: "custom", access: AccessOptionCustom, want: `deps.Authorize("module.admin.custom")`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

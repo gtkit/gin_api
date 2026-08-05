@@ -2,79 +2,140 @@ package http
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/router/routespec"
+	"github.com/gin-gonic/gin"
 )
 
-func TestUserModuleRoutes(t *testing.T) {
-	t.Parallel()
-
-	routes := NewModule(nil).Routes()
-
-	tests := []struct {
-		name      string
-		method    string
-		path      string
-		wantFound bool
-	}{
-		{name: "get current profile", method: http.MethodGet, path: "/user", wantFound: true},
-		{name: "update current profile", method: http.MethodPut, path: "/user", wantFound: true},
-		{name: "deactivate current profile", method: http.MethodPost, path: "/user/deactivate", wantFound: true},
-		// 该路由曾经带一个从不使用的路径参数，删除后不得复活。
-		{name: "laravel unused id route removed", method: http.MethodPut, path: "/user/:id", wantFound: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			found := false
-			for _, r := range routes {
-				if r.Method == tt.method && r.Path == tt.path {
-					found = true
-					break
-				}
-			}
-			if found != tt.wantFound {
-				t.Fatalf("route %s %s found=%t, want %t", tt.method, tt.path, found, tt.wantFound)
-			}
-		})
-	}
-}
-
-// TestUserModuleRoutesAllRequireAuthentication 是本模块最重要的一条断言。
+// TestRegisterMountsEveryRoute 钉住三条路由都注册上了。
 //
-// 此前鉴权靠 group.Use(authMiddleware) 表达：新增路由时忘了挂进同一个 group，
-// 它就会静默变成公开接口，而代码看上去毫无异常。改成描述符后，
-// 这条测试能逐条锁死每个路由的访问模式。
-func TestUserModuleRoutesAllRequireAuthentication(t *testing.T) {
+// 断言的是 engine 实际注册出来的路由表，不是 Register 里写了几行——
+// 一条写在错误分组里、或者路径拼错的路由，只有从路由表才看得出来。
+func TestRegisterMountsEveryRoute(t *testing.T) {
 	t.Parallel()
+	gin.SetMode(gin.TestMode)
 
-	for _, r := range NewModule(nil).Routes() {
-		if r.AccessPolicy.Mode != routespec.AccessAuthenticated {
-			t.Fatalf("route %s %s has access mode %s, want authenticated",
-				r.Method, r.Path, r.AccessPolicy.Mode)
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{Auth: passthrough()})
+
+	got := map[string]struct{}{}
+	for _, r := range engine.Routes() {
+		got[r.Method+" "+r.Path] = struct{}{}
+	}
+
+	for _, want := range []string{
+		"GET /api/v1/user",
+		"PUT /api/v1/user",
+		"POST /api/v1/user/deactivate",
+	} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("route %q was not registered (got %v)", want, keys(got))
 		}
 	}
 }
 
-// TestUserModuleRoutesDeclarePolicies 守住零值 fail-closed：
-// 描述符的价值在于"漏写就启动失败"，因此模块自己也不能留下未声明的策略。
-func TestUserModuleRoutesDeclarePolicies(t *testing.T) {
+// TestEveryRouteGoesThroughAuth 是访问控制的**唯一**自动化保障。
+//
+// 描述符机制被移除后，"这条路由要不要鉴权"由代码位置决定：写在挂了
+// deps.Auth 的组外面就是公开接口，而编译、vet 与其余测试都不会有任何异常。
+//
+// 这条测试用一个会记账的假认证中间件替换真的那个，然后逐条路由发请求，
+// 确认它们都经过了它。新增路由若漏挂鉴权，这里会失败——这是本次改动之后
+// 唯一还能自动发现该问题的地方，删掉它等于彻底放弃这条保障。
+func TestEveryRouteGoesThroughAuth(t *testing.T) {
 	t.Parallel()
+	gin.SetMode(gin.TestMode)
 
-	routes := NewModule(nil).Routes()
+	var seen []string
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Auth: func(c *gin.Context) {
+			seen = append(seen, c.Request.Method+" "+c.FullPath())
+			// 直接中止：本测试只关心"认证中间件跑到了"，
+			// 不需要让请求真的进 handler（那需要一个 service）。
+			c.AbortWithStatus(http.StatusTeapot)
+		},
+	})
+
+	routes := engine.Routes()
 	if len(routes) == 0 {
-		t.Fatal("module must contribute at least one route")
+		t.Fatal("no route was registered")
 	}
+
 	for _, r := range routes {
-		if r.AccessPolicy.Mode == routespec.AccessUnspecified {
-			t.Fatalf("route %s %s left the access policy unspecified", r.Method, r.Path)
-		}
-		if r.TimeoutPolicy.Mode == routespec.TimeoutUnspecified {
-			t.Fatalf("route %s %s left the timeout policy unspecified", r.Method, r.Path)
-		}
-		if r.Handler == nil {
-			t.Fatalf("route %s %s has a nil handler", r.Method, r.Path)
+		req := httptest.NewRequest(r.Method, r.Path, nil)
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusTeapot {
+			t.Errorf("%s %s did not go through the auth middleware (status %d): "+
+				"it is a public endpoint, and nothing else in the build would tell you",
+				r.Method, r.Path, rec.Code)
 		}
 	}
+
+	if len(seen) != len(routes) {
+		t.Errorf("auth ran for %d of %d routes", len(seen), len(routes))
+	}
+}
+
+// TestRateLimitIsAppliedWhenConfigured 钉住限流中间件确实被挂上。
+func TestRateLimitIsAppliedWhenConfigured(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	var requested []string
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Auth: passthrough(),
+		RateLimit: func(id string) gin.HandlerFunc {
+			requested = append(requested, id)
+			return passthrough()
+		},
+	})
+
+	// 两层限流：来源 + 身份。只挂一层的话，另一维度完全不设限。
+	want := map[string]bool{"default.ip": false, "default.user": false}
+	for _, id := range requested {
+		if _, ok := want[id]; ok {
+			want[id] = true
+		}
+	}
+	for id, applied := range want {
+		if !applied {
+			t.Errorf("rate limit policy %q was never requested", id)
+		}
+	}
+}
+
+// TestMissingRateLimitPolicyIsSkipped 钉住未配置的策略不导致 panic。
+//
+// 限流策略集合由部署配置决定，一个只跑单机的开发环境完全可以不配某条策略。
+// 那时应当跳过，而不是让整个进程起不来。
+func TestMissingRateLimitPolicyIsSkipped(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Auth:      passthrough(),
+		RateLimit: func(string) gin.HandlerFunc { return nil },
+	})
+
+	if len(engine.Routes()) == 0 {
+		t.Fatal("registration produced no routes when no policy is configured")
+	}
+}
+
+func passthrough() gin.HandlerFunc {
+	return func(c *gin.Context) { c.Next() }
+}
+
+func keys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

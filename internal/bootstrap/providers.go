@@ -10,6 +10,7 @@ import (
 	logger "github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/middleware"
+	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
@@ -249,23 +250,13 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 		revocation = svc.auth.Revocation
 	}
 
-	auth, err := middleware.Authenticate(middleware.AuthOptions{
+	authOpts := middleware.AuthOptions{
 		Verifier:   svc.user,
 		Parser:     tokenParser,
 		Revocation: revocation,
-	})
-	if err != nil {
-		return middlewares{}, err
 	}
-	optionalAuth, err := middleware.Authenticate(middleware.AuthOptions{
-		Verifier:          svc.user,
-		Parser:            tokenParser,
-		Revocation:        revocation,
-		AllowMissingToken: true,
-	})
-	if err != nil {
-		return middlewares{}, err
-	}
+	auth := middleware.Auth(authOpts)
+	optionalAuth := middleware.OptionalAuth(authOpts)
 
 	authorizers, err := buildAuthorizers(svc)
 	if err != nil {
@@ -317,24 +308,7 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
 
-	// 组装模块路由切片——新增模块只需在此追加一行。
-	//
-	// 认证模块不在这个切片里：它按 auth.mode 条件注册（见下方 append）。
-	// 外部身份模式下它根本不存在，而不是注册一个永远报错的模块。
-	v1Modules := []router.Module{
-		userhttp.NewModule(svc.user),
-		// scaffold:modules
-	}
-	// 认证模块只在本地认证模式下注册。
-	if svc.auth.Module != nil {
-		v1Modules = append(v1Modules, svc.auth.Module)
-	}
-	// var v2Modules []router.Module
-
-	engine, err := router.InitRouterWithVersionedModules(string(cfg.Env), router.VersionedModules{
-		V1: v1Modules,
-		// V2: v2Modules,
-	}, router.RouterOptions{
+	opt := router.Options{
 		AllowedOrigins:  cfg.CORS.AllowedOrigins,
 		LogRequestBody:  cfg.Log.AccessRequestBody,
 		LogResponseBody: cfg.Log.AccessResponseBody,
@@ -343,22 +317,36 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,
 		Metrics:         inf.recorder,
-		// 系统探针与鉴权都经描述符统一装配，不再旁路注册、不再由模块自己 Use。
-		HealthChecker: newHealthChecker(inf.resources),
+		HealthChecker:   newHealthChecker(inf.resources),
 		// readiness 用的 Redis 必需性与资源装配同源，避免两处口径漂移。
-		RedisRequired:          redisRequired(cfg),
-		RateLimits:             inf.rateLimits.registry,
-		RateLimitKeys:          inf.rateLimits.keys,
-		ProcessStatus:          status,
-		AuthMiddleware:         mw.auth,
-		OptionalAuthMiddleware: mw.optionalAuth,
-		Authorizers:            mw.authorizers,
-	})
-	if err != nil {
-		return nil, err
+		RedisRequired: redisRequired(cfg),
+		RateLimits:    inf.rateLimits.registry,
+		RateLimitKeys: inf.rateLimits.keys,
+		ProcessStatus: status,
+	}
+	rateLimitByID := router.RateLimitByID(opt)
+
+	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
+	// 新增模块只需在这里加一行 Register。
+	opt.RegisterModules = func(v1 *gin.RouterGroup) {
+		userhttp.Register(v1, userhttp.Deps{
+			Service:   svc.user,
+			Auth:      mw.auth,
+			RateLimit: rateLimitByID,
+		})
+		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
+		// 而不是注册一组永远报错的路由。
+		if svc.auth.Service != nil {
+			authhttp.Register(v1, authhttp.Deps{
+				Service:   svc.auth.Service,
+				Auth:      mw.auth,
+				RateLimit: rateLimitByID,
+			})
+		}
+		// scaffold:modules
 	}
 
-	return engine, nil
+	return router.New(string(cfg.Env), opt)
 }
 
 // buildWorkers 组装进程级后台任务。

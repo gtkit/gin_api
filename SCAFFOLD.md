@@ -150,8 +150,6 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
-| 路由契约 | `internal/router/routespec` | 访问/超时策略与响应形状零值即拒绝；双向契约测试防旁路路由 |
-| OpenAPI 契约生成 | `internal/openapi` + `make gen-openapi` | 从 RouteSpec 生成含 body schema 的 `api/openapi.json`；无法表达的类型（`any`、未自述形状的自定义 `MarshalJSON`）**拒绝生成而非产出空 schema** |
 | 契约破坏性门禁 | `scripts/check-openapi-breaking.sh` | 与上一个稳定 SemVer tag 比对；按数据流向判定（请求侧收窄 / 响应侧放宽）；覆盖 endpoint / 参数 / security / 状态码 / 媒体类型 / body 字段与约束；22 条规则各有负向与反向自检 |
 | 破坏性变更豁免 | `api/breaking-waivers.yml` | 逐项声明，无全局开关；字段不全或过期即门禁失败；操作与规则须同时命中 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层 `WriteTimeout=0` |
@@ -159,10 +157,10 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
 | 认证与授权分离 | `internal/middleware` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403 |
-| 限流契约 | `internal/ratelimit` + `internal/router/routespec` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
+| 限流契约 | `pkg/ratelimit` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
 | JWT 密钥轮换 | `internal/pkg/jwtauth` | 令牌带 kid；未知 kid 直接拒绝（无回退遍历）；退役公钥仍可验签 |
-| 请求体契约 | `internal/router/routespec` + `internal/middleware/requestbody.go` | 写方法必须声明 body 形态（none/json/form/multipart），零值即拒绝；不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
-| 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等无 RouteSpec 路径；声明长度与 chunked 两条路径都覆盖 |
+| 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
+| 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
 | 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |
@@ -206,6 +204,46 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 切到该模式后可整体删除：`internal/module/auth/`、`internal/runtime/module/auth/`、
 `internal/repository/authcredential/`、`internal/pkg/{credential,tokenstore}/`、
 配置里的 `auth.bcrypt_cost` / `auth.refresh_ttl` 与两条 `auth.*` 限流策略。
+
+### 新增路由
+
+用 gin 的方式写：
+
+```go
+// internal/module/<name>/transport/http/router.go
+func Register(r *gin.RouterGroup, deps Deps) {
+    handler := NewHandler(deps.Service)
+
+    g := r.Group("/thing")
+    g.Use(middleware.Timeout(5*time.Second, 2*time.Second))
+    useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
+    g.Use(deps.Auth)                    // 需要鉴权就挂上
+
+    g.GET("", handler.List)
+    g.POST("", middleware.JSONBody(0), handler.Create)
+}
+```
+
+然后在 `internal/bootstrap/providers.go` 的 `opt.RegisterModules` 里加一行
+`xxxhttp.Register(v1, ...)`。`make module` 生成的模板已经是这个形状。
+
+**新增路由时必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
+而编译、`go vet` 与全部测试都不会有任何异常——这是选择 gin 惯用写法的代价，
+换来的是任何会 gin 的人不用先学一套只在本仓成立的写法。
+
+可用的路由级中间件：
+
+| 中间件 | 用途 |
+|--------|------|
+| `middleware.Timeout(deadline, writeGrace)` | 协作式超时，handler 必须监听 ctx |
+| `middleware.StreamTimeout(idleWrite)` | 流式响应的空闲写超时（SSE） |
+| `middleware.JSONBody(maxBytes)` | 要求 JSON 并限大小；0 表示沿用全局上限 |
+| `middleware.NoBody()` | 拒绝携带请求体 |
+| `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入 |
+| `deps.Authorize(id)` | 具名授权 |
+
+全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / CORS / 体积上限）
+在 `internal/router/init.go` 里按固定顺序装配，顺序有测试锁定。
 
 ### 后台任务的单实例执行
 
@@ -283,20 +321,21 @@ defer provider.Shutdown(context.Background())
 | 能力 | 如何启用 |
 |------|---------|
 | 后台任务 | 在 `providers.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
-| 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `RouteSpec.AccessPolicy.AuthorizerID` 对齐 |
-| `role.admin` 授权 | **当前是恒拒绝占位**（无权威角色源），所有请求 403。接入角色表/IAM 后替换该 adapter，RouteSpec 无需改动 |
+| 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
+| `role.admin` 授权 | **当前是恒拒绝占位**（无权威角色源），所有请求 403。接入角色表/IAM 后替换该 adapter，路由代码无需改动 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
 | 指标（OTel） | 默认 **no-op**：不接导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。接线见下方「接指标导出」 |
 | pprof + API 文档 | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败。同一端点的 `/docs` 提供契约查看器（编译期嵌入 openapi.json，自包含无外网依赖）；文档入口刻意不进业务路由与 OpenAPI 契约——dev 工具不该出现在对外契约里 |
-| 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在 `RouteSpec.RateLimitPolicyID` 引用策略 ID |
+| 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `useRateLimit(g, deps.RateLimit, "策略ID")` 引用它 |
 
 ### 【示例 — 可按需删除】
 
 | 内容 | 说明 |
 |------|------|
-| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者。**注意其用户模型带具体业务形状**（VIP、渠道、邀请码、设备信息等字段来自存量业务）：派生项目应按自身领域重塑 users 表与 dto，而不是默认继承这些字段 |
+| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者 |
+| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `entitlement.vip` authorizer 与 `VIPVerifier`（`internal/bootstrap/providers.go`）；③ dto 里对应的响应字段；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
 | 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。**它是单实例任务**（见下方「后台任务的单实例执行」），因此启用时 Redis 是硬依赖。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |

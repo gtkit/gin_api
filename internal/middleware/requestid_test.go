@@ -26,10 +26,7 @@ func newRequestIDEngine(t *testing.T) (*gin.Engine, *[]string) {
 	if err != nil {
 		t.Fatalf("NewRequestIDGenerator: %v", err)
 	}
-	mw, err := RequestID(gen)
-	if err != nil {
-		t.Fatalf("RequestID: %v", err)
-	}
+	mw := RequestID(gen)
 
 	var (
 		mu   sync.Mutex
@@ -109,10 +106,7 @@ func TestRequestIDReachesGoContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequestIDGenerator: %v", err)
 	}
-	mw, err := RequestID(gen)
-	if err != nil {
-		t.Fatalf("RequestID: %v", err)
-	}
+	mw := RequestID(gen)
 
 	var fromGoCtx string
 	engine := gin.New()
@@ -226,7 +220,10 @@ func TestRequestIDExhaustionFailsClosed(t *testing.T) {
 func TestRequestIDMiddlewareRequiresGenerator(t *testing.T) {
 	t.Parallel()
 
-	if _, err := RequestID(nil); err == nil {
-		t.Fatal("RequestID(nil) returned no error; a missing generator must fail assembly")
-	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("RequestID(nil) was accepted: a missing generator must fail assembly")
+		}
+	}()
+	RequestID(nil)
 }

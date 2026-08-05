@@ -1,15 +1,15 @@
 package http
 
 import (
-	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/gtkit/gin-api/internal/middleware"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
-	"github.com/gtkit/gin-api/internal/module/user/dto"
-	"github.com/gtkit/gin-api/internal/router/routespec"
 )
 
-// 本模块路由的业务超时预算。
+// 本模块的业务超时预算。
 //
 // 显式声明而不是继承某个全局默认：不同模块的合理预算本就不同，
 // 而"全局默认"会让所有路由跟着最慢的那条走。
@@ -18,100 +18,58 @@ const (
 	userWriteGrace = 2 * time.Second
 )
 
-// UserModule 贡献 user 模块的路由契约。
+// Deps 是注册路由所需的依赖。
 //
-// 它不再接收 *gin.RouterGroup、也不自己注册路由与中间件：访问控制、超时、限流
-// 全部声明在描述符上，由中央 registrar 统一校验并翻译成 handler chain。
-// 模块因此不需要知道版本前缀与中间件顺序，也无法绕过契约注册路由。
-type UserModule struct {
-	service *userapp.Service
+// 用一个结构体而不是长参数列表：中间件会随功能增加，逐个加参数会让每次
+// 新增都改动全部模块的签名。
+type Deps struct {
+	Service *userapp.Service
+	// Auth 是认证中间件，由装配层构造后注入。
+	//
+	// 模块不自己构造它：认证依赖 token parser 与用户校验器，那些是进程级
+	// 资源，让每个模块各建一份会产生多份缓存与多份配置。
+	Auth gin.HandlerFunc
+	// RateLimit 按策略 ID 取限流中间件；未配置该策略时返回 nil。
+	RateLimit func(policyID string) gin.HandlerFunc
 }
 
-func NewModule(service *userapp.Service) *UserModule {
-	return &UserModule{service: service}
-}
-
-// Name 用于编译错误定位。
-func (m *UserModule) Name() string { return "module.user" }
-
-// Routes 返回 user 模块的路由契约。
+// Register 在给定路由组上注册 user 模块的路由。
 //
-// 路径是模块内相对路径；`/api/v1` 之类的版本前缀由中央 registrar 添加。
-func (m *UserModule) Routes() []routespec.RouteSpec {
-	handler := NewHandler(m.service)
-	timeout := routespec.TimeoutPolicy{
-		Mode:       routespec.TimeoutCooperative,
-		Deadline:   userDeadline,
-		WriteGrace: userWriteGrace,
-	}
+// 用法就是 gin 的用法：拿 *gin.RouterGroup，用 Group 挂中间件，
+// 用 GET/PUT/POST 注册处理函数。
+//
+// **访问控制由代码位置表达**：下面的路由必须写在 g 里面。写到 g 外面就是
+// 公开接口，而编译与测试都不会有任何异常——这是 gin 惯用写法的已知代价，
+// 新增路由时需要人工确认。
+func Register(r *gin.RouterGroup, deps Deps) {
+	handler := NewHandler(deps.Service)
+
+	g := r.Group("/user")
+	g.Use(middleware.Timeout(userDeadline, userWriteGrace))
 	// 默认限流：来源 + 身份两层。
 	//
-	// **两层都要**：只限身份时，一个来源可以用大量账号并发打满；只限来源时，
-	// 就失去了按账号的精确限额。策略本身在 config 的 ratelimit.policies 里定义，
-	// 这里只引用 ID——同一条限额往往被多条路由共享，内联参数会产生多份副本。
-	//
-	// 引用一个未登记的 ID 会在装配期失败，不会静默变成"这条路由没限流"。
-	defaultLimits := []string{"default.ip", "default.user"}
-
+	// **两层都要**：只限身份时，一个来源可以用大量账号并发打满；
+	// 只限来源时，就失去了按账号的精确限额。
+	useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
 	// 三条路由都要求已认证身份。
-	//
-	// 此前这是靠 group.Use(authMiddleware) 表达的——一旦有人新增路由时忘了挂进
-	// 同一个 group，它就会静默变成公开接口，而代码看上去毫无异常。
-	// 写进描述符后，漏写访问策略会被注册期直接拒绝（零值非法）。
-	authenticated := routespec.AccessPolicy{Mode: routespec.AccessAuthenticated}
+	g.Use(deps.Auth)
 
-	return []routespec.RouteSpec{
-		{
-			Method:             http.MethodGet,
-			Path:               "/user",
-			Handler:            handler.Get,
-			AccessPolicy:       authenticated,
-			TimeoutPolicy:      timeout,
-			RateLimitPolicyIDs: defaultLimits,
-			OperationID:        "getCurrentUserProfile",
-			Tags:               []string{"User"},
-			Summary:            "Get the current user profile",
-			Responses:          map[string]string{"500": "Internal error"},
-			ResponseShape:      routespec.ResponseShapeEnveloped,
-			ResponseBody:       dto.UserProfileResponse{},
-		},
-		{
-			Method:             http.MethodPut,
-			Path:               "/user",
-			Handler:            handler.Update,
-			AccessPolicy:       authenticated,
-			TimeoutPolicy:      timeout,
-			RateLimitPolicyIDs: defaultLimits,
-			OperationID:        "updateCurrentUserProfile",
-			Tags:               []string{"User"},
-			Summary:            "Update the current user profile",
-			Responses: map[string]string{
-				"422": "Request payload failed validation",
-				"500": "Internal error",
-			},
-			RequestBodyPolicy: routespec.RequestBodyPolicy{Mode: routespec.BodyModeJSON},
-			RequestBody:       dto.UserUpdateRequest{},
-			// 更新成功后不回传资料，handler 是 `resp.Ok(c, nil)`。
-			ResponseShape: routespec.ResponseShapeEmpty,
-		},
-		{
-			Method:             http.MethodPost,
-			Path:               "/user/deactivate",
-			Handler:            handler.Deactivate,
-			AccessPolicy:       authenticated,
-			TimeoutPolicy:      timeout,
-			RateLimitPolicyIDs: defaultLimits,
-			OperationID:        "deactivateCurrentUser",
-			Tags:               []string{"User"},
-			Summary:            "Deactivate the current user account",
-			Responses: map[string]string{
-				"422": "Request payload failed validation",
-				"500": "Internal error",
-			},
-			RequestBodyPolicy: routespec.RequestBodyPolicy{Mode: routespec.BodyModeJSON},
-			RequestBody:       dto.UserDeactivateRequest{},
-			// 停用成功后没有业务数据可返回，线上是 `{code,msg,data:null}`。
-			ResponseShape: routespec.ResponseShapeEmpty,
-		},
+	g.GET("", handler.Get)
+	g.PUT("", middleware.JSONBody(0), handler.Update)
+	g.POST("/deactivate", middleware.JSONBody(0), handler.Deactivate)
+}
+
+// useRateLimit 按 ID 挂载限流中间件，跳过未配置的策略。
+//
+// 跳过而不是报错：限流策略集合由部署配置决定，一个只跑单机的开发环境
+// 完全可以不配 redis 策略，那时这条路由不限流是预期行为。
+func useRateLimit(g *gin.RouterGroup, byID func(string) gin.HandlerFunc, ids ...string) {
+	if byID == nil {
+		return
+	}
+	for _, id := range ids {
+		if mw := byID(id); mw != nil {
+			g.Use(mw)
+		}
 	}
 }

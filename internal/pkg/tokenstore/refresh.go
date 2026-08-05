@@ -72,6 +72,11 @@ type RefreshStore struct {
 	prefix string
 	ttl    time.Duration
 
+	// replayWindow 是"响应丢失后客户端重试"的容忍窗口。
+	replayWindow time.Duration
+	// now 可注入，测试用它确定地驱动窗口边界。
+	now func() time.Time
+
 	// sha 是已加载脚本的摘要。
 	//
 	// 用原子指针：它在每次刷新时被读，并在 Redis 重启后的 NOSCRIPT 上被重写。
@@ -88,29 +93,59 @@ type RefreshStore struct {
 // 族撤销检查也在脚本内：放到 Go 侧会留出"消费成功但族刚被撤销"的窗口，
 // 那个窗口里签发的新令牌属于一个已被撤销的族。
 //
-// KEYS[1] 令牌记录；KEYS[2] 族撤销标记；KEYS[3] 轮换出的新记录
-// ARGV[1] 记录存活秒数
+// # 重放窗口
 //
-// 返回 {code, uid}：0 正常消费  1 令牌不存在  2 重用  3 族已撤销
+// 消费成功后，把**轮换出的秘密段**记在原记录上并保留一小段时间。窗口内用
+// 同一个令牌再来一次，直接返回那个秘密段，不再轮换、不报重用。
+//
+// 没有这个窗口的话，一次丢失的响应会被判成令牌泄漏：客户端手里仍是旧令牌，
+// 重试是它唯一合理的动作，而服务端撤销整族——一次网络抖动因此升级成一次
+// 强制登出。窗口取秒级即可覆盖这种重试，而攻击者拿到泄漏令牌后的使用时间
+// 几乎总是远大于此，重用检测的实际效力不受影响。
+//
+// **窗口过后记录必须继续存在**：过期删除会让泄漏令牌的迟到重放变成
+// "找不到"，而那条路径不撤销任何东西——重用检测就此失效，且完全静默。
+// 因此记录保留完整寿命，窗口用一个截止时刻字段表达。
+//
+// 时刻由调用方传入而不是脚本里取 `TIME`：那让脚本保持确定性，
+// 也让测试能确定地驱动窗口边界。同一个服务集群内的时钟偏差
+// 在秒级窗口上无关紧要。
+//
+// KEYS[1] 令牌记录；KEYS[2] 族撤销标记；KEYS[3] 轮换出的新记录
+// ARGV[1] 记录存活秒数；ARGV[2] 新秘密段；ARGV[3] 重放截止时刻（毫秒）
+// ARGV[4] 当前时刻（毫秒）
+//
+// 返回 {code, uid, replaySecret}：
+//
+//	0 正常消费  1 令牌不存在  2 重用  3 族已撤销  4 窗口内重放
 const consumeScript = `
 if redis.call('EXISTS', KEYS[2]) == 1 then
-  return {3, ''}
+  return {3, '', ''}
 end
 
-local record = redis.call('HMGET', KEYS[1], 'uid', 'used')
-local uid, used = record[1], record[2]
+local record = redis.call('HMGET', KEYS[1], 'uid', 'used', 'next', 'replay_until')
+local uid, used, next_secret, replay_until = record[1], record[2], record[3], record[4]
 
 if not uid then
-  return {1, ''}
+  return {1, '', ''}
 end
 if used == '1' then
-  return {2, uid}
+  -- 窗口内：把首次轮换出的秘密段原样返回，等价于那次调用的重放。
+  if next_secret and next_secret ~= '' and replay_until
+     and tonumber(ARGV[4]) < tonumber(replay_until) then
+    return {4, uid, next_secret}
+  end
+  -- 窗口外：这次重放说明令牌被复制了出去。
+  return {2, uid, ''}
 end
 
-redis.call('HSET', KEYS[1], 'used', '1')
+redis.call('HSET', KEYS[1], 'used', '1', 'next', ARGV[2], 'replay_until', ARGV[3])
+-- 原记录保留**完整寿命**，不缩短到重放窗口：缩短的话，窗口一过记录就消失，
+-- 泄漏令牌的迟到重放会走到"找不到"分支，而那条路径什么也不撤销。
+redis.call('EXPIRE', KEYS[1], ARGV[1])
 redis.call('HSET', KEYS[3], 'uid', uid, 'used', '0')
 redis.call('EXPIRE', KEYS[3], ARGV[1])
-return {0, uid}
+return {0, uid, ''}
 `
 
 // NewRefreshStore 构造 RefreshStore 并预加载脚本。
@@ -130,10 +165,29 @@ func NewRefreshStore(ctx context.Context, client RefreshClient, prefix string, t
 		return nil, fmt.Errorf("tokenstore: load refresh script: %w", err)
 	}
 
-	s := &RefreshStore{client: client, prefix: prefix, ttl: ttl}
+	s := &RefreshStore{
+		client: client, prefix: prefix, ttl: ttl,
+		replayWindow: defaultReplayWindow,
+		now:          time.Now,
+	}
 	s.sha.Store(&sha)
 	return s, nil
 }
+
+// defaultReplayWindow 是刷新重放的容忍窗口。
+//
+// 10 秒：足够覆盖一次丢失响应后的立即重试（客户端通常在几百毫秒到几秒内
+// 重试），又远短于攻击者拿到泄漏令牌后的典型使用时间。
+//
+// 这个取值是在两种错误之间选：太短会让正常重试被判成泄漏（一次网络抖动
+// 就把用户踢下线），太长会让真正的泄漏多出一段可用时间。前者天天发生，
+// 后者需要令牌先被窃取，因此宁可偏向前者。
+//
+// **窗口的实际代价要说清楚**：窗口内，持有同一个旧令牌的两方（合法客户端
+// 与攻击者）会拿到同一个新令牌，此后两者都能继续用下去，而重用检测看不到
+// 异常——它们用的是同一条链。这是所有重放窗口方案的共同代价，也是它必须
+// 取得足够短的原因。
+const defaultReplayWindow = 10 * time.Second
 
 // Issue 签发一个新的刷新令牌，开启一个新的令牌族。
 //
@@ -180,7 +234,7 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 		return 0, "", err
 	}
 
-	code, uid, err := s.runConsume(ctx, family, secret, nextSecret)
+	code, uid, replaySecret, err := s.runConsume(ctx, family, secret, nextSecret)
 	if err != nil {
 		return 0, "", err
 	}
@@ -188,6 +242,10 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 	switch code {
 	case 0:
 		return uid, family + tokenSeparator + nextSecret, nil
+	case 4:
+		// 窗口内重放：返回首次轮换出的那个令牌，与首次调用完全一致。
+		// **不报重用**——这次重放几乎可以肯定是客户端在重试一个丢失的响应。
+		return uid, family + tokenSeparator + replaySecret, nil
 	case 1:
 		return 0, "", ErrRefreshNotFound
 	case 2:
@@ -208,13 +266,21 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 }
 
 // runConsume 执行脚本，并在 NOSCRIPT 时重载后重试一次。
-func (s *RefreshStore) runConsume(ctx context.Context, family, secret, nextSecret string) (code, uid int64, err error) {
+func (s *RefreshStore) runConsume(
+	ctx context.Context, family, secret, nextSecret string,
+) (code, uid int64, replaySecret string, err error) {
 	keys := []string{
 		s.recordKey(family, secret),
 		s.familyKey(family),
 		s.recordKey(family, nextSecret),
 	}
-	args := []any{strconv.FormatInt(int64(s.ttl.Seconds()), 10)}
+	now := s.now()
+	args := []any{
+		strconv.FormatInt(int64(s.ttl.Seconds()), 10),
+		nextSecret,
+		strconv.FormatInt(now.Add(s.replayWindow).UnixMilli(), 10),
+		strconv.FormatInt(now.UnixMilli(), 10),
+	}
 
 	raw, err := s.client.EvalSha(ctx, *s.sha.Load(), keys, args...).Result()
 	if err != nil && isNoScript(err) {
@@ -222,39 +288,40 @@ func (s *RefreshStore) runConsume(ctx context.Context, family, secret, nextSecre
 		// 一次重启不该把所有在线用户都踢下线。
 		sha, loadErr := s.client.ScriptLoad(ctx, consumeScript).Result()
 		if loadErr != nil {
-			return 0, 0, fmt.Errorf("tokenstore: reload refresh script: %w", loadErr)
+			return 0, 0, "", fmt.Errorf("tokenstore: reload refresh script: %w", loadErr)
 		}
 		s.sha.Store(&sha)
 		raw, err = s.client.EvalSha(ctx, sha, keys, args...).Result()
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("tokenstore: consume refresh token: %w", err)
+		return 0, 0, "", fmt.Errorf("tokenstore: consume refresh token: %w", err)
 	}
 
 	return parseConsumeResult(raw)
 }
 
-// parseConsumeResult 解析脚本返回的二元组。
-func parseConsumeResult(raw any) (code, uid int64, err error) {
+// parseConsumeResult 解析脚本返回的三元组。
+func parseConsumeResult(raw any) (code, uid int64, replaySecret string, err error) {
 	values, ok := raw.([]any)
-	if !ok || len(values) != 2 {
-		return 0, 0, fmt.Errorf("tokenstore: malformed consume result %#v", raw)
+	if !ok || len(values) != 3 {
+		return 0, 0, "", fmt.Errorf("tokenstore: malformed consume result %#v", raw)
 	}
 
 	code, ok = values[0].(int64)
 	if !ok {
-		return 0, 0, fmt.Errorf("tokenstore: malformed consume code %#v", values[0])
+		return 0, 0, "", fmt.Errorf("tokenstore: malformed consume code %#v", values[0])
 	}
 
 	uidStr, _ := values[1].(string)
+	replaySecret, _ = values[2].(string)
 	if uidStr == "" {
-		return code, 0, nil
+		return code, 0, replaySecret, nil
 	}
 	uid, err = strconv.ParseInt(uidStr, 10, 64)
 	if err != nil {
-		return 0, 0, fmt.Errorf("tokenstore: malformed uid %q in refresh record: %w", uidStr, err)
+		return 0, 0, "", fmt.Errorf("tokenstore: malformed uid %q in refresh record: %w", uidStr, err)
 	}
-	return code, uid, nil
+	return code, uid, replaySecret, nil
 }
 
 // RevokeFamily 撤销一个令牌族的全部令牌。

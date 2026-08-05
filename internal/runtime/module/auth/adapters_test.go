@@ -126,7 +126,9 @@ func TestRefreshStoreTranslatesEveryRejection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			client := scriptedClient{evalVal: []any{tt.scriptCode, "7"}}
+			// 三元组：脚本返回 {code, uid, replaySecret}，第三项是重放窗口内
+			// 要原样返回的秘密段（本用例的几种拒绝码都不带它）。
+			client := scriptedClient{evalVal: []any{tt.scriptCode, "7", ""}}
 			store, err := tokenstore.NewRefreshStore(context.Background(), client, "p", time.Hour)
 			if err != nil {
 				t.Fatalf("NewRefreshStore: %v", err)

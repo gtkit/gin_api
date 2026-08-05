@@ -82,7 +82,7 @@ func TestToRateLimitPolicyTranslatesEnums(t *testing.T) {
 // TestToRateLimitPolicyRejectsBadInput 验证非法枚举与非法取值都在翻译层被拦。
 //
 // 拦不住的话，一个拼错的 `scope: users` 会变成零值——而零值恰好是
-// routespec 判定为非法的那个，最终报出来的是一个与 yaml 里的拼写
+// 配置校验判定为非法的那个，最终报出来的是一个与 yaml 里的拼写
 // 毫无关联的错误。在这里报能直接指出是哪个字段写错了。
 func TestToRateLimitPolicyRejectsBadInput(t *testing.T) {
 	t.Parallel()

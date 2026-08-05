@@ -8,9 +8,7 @@ import (
 	"time"
 
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
-	"github.com/gtkit/gin-api/internal/router/routespec"
 
-	"github.com/gin-contrib/timeout"
 	"github.com/gin-gonic/gin"
 	logger "github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
@@ -27,19 +25,42 @@ import (
 //  3. 只有调用链**真的观察 ctx 并返回 DeadlineExceeded** 时，终态中间件才会写 504。
 //
 // 文档、注释与门禁都不得声称"ctx 到点必然 504"或"write deadline 能终止 goroutine"。
-func RouteTimeout(policy routespec.TimeoutPolicy) (gin.HandlerFunc, error) {
-	switch policy.Mode {
-	case routespec.TimeoutCooperative:
-		return cooperativeTimeout(policy), nil
-	case routespec.TimeoutClientVisible:
-		return clientVisibleTimeout(policy), nil
-	case routespec.TimeoutStreaming:
-		return streamingTimeout(policy), nil
-	case routespec.TimeoutUnspecified:
-		return nil, errors.New("route timeout policy is unspecified")
-	default:
-		return nil, fmt.Errorf("unknown timeout mode %d", policy.Mode)
+// Timeout 给请求施加协作式超时，用法与任何 gin 中间件一致：
+//
+//	g := r.Group("/user", middleware.Timeout(5*time.Second, 2*time.Second))
+//
+// deadline 是业务预算（写进 ctx，handler 必须监听它）；writeGrace 是更晚的
+// socket 写宽限。**两级缺一不可**：write deadline 一旦过期这条连接的写就废了，
+// 无法再可靠写出 504，所以负责回 504 的必须是更短的业务预算。
+//
+// 参数非法直接 panic：那是装配错误，与 gin 生态的惯例一致
+// （gin-contrib 的中间件同样在配置非法时 panic），且它发生在启动期而非请求期。
+func Timeout(deadline, writeGrace time.Duration) gin.HandlerFunc {
+	if deadline <= 0 {
+		panic("middleware: timeout deadline must be positive")
 	}
+	if writeGrace <= 0 {
+		panic("middleware: timeout write grace must be positive")
+	}
+	return cooperativeTimeout(timeoutBudget{deadline: deadline, writeGrace: writeGrace})
+}
+
+// StreamTimeout 给流式响应（SSE 等）施加空闲写超时。
+//
+// 流式响应没有固定的总时长，能约束的是"多久没有写出任何东西"。
+// handler 每写一块后调用 RenewStreamDeadline 续期。
+func StreamTimeout(idleWrite time.Duration) gin.HandlerFunc {
+	if idleWrite <= 0 {
+		panic("middleware: stream idle-write timeout must be positive")
+	}
+	return streamingTimeout(timeoutBudget{idleWrite: idleWrite})
+}
+
+// timeoutBudget 是各超时中间件共用的时长集合。
+type timeoutBudget struct {
+	deadline   time.Duration
+	writeGrace time.Duration
+	idleWrite  time.Duration
 }
 
 // cooperativeTimeout 施加两级预算：业务 ctx deadline 与更晚的 socket 写 deadline。
@@ -47,38 +68,16 @@ func RouteTimeout(policy routespec.TimeoutPolicy) (gin.HandlerFunc, error) {
 // 两级缺一不可，且不能合并成一级：标准库明确 —— write deadline 一旦过期，
 // 这条连接的写就废了，**无法再可靠写出 504**。所以负责回 504 的必须是更短的
 // 业务预算（经协作式 ctx），socket deadline 只兜住慢客户端或失控 handler 的写阻塞。
-func cooperativeTimeout(policy routespec.TimeoutPolicy) gin.HandlerFunc {
+func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), policy.Deadline)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), policy.deadline)
 		defer cancel()
 		c.Request = c.Request.WithContext(ctx)
 
-		restore := applyWriteDeadline(c, policy.Deadline+policy.WriteGrace)
+		restore := applyWriteDeadline(c, policy.deadline+policy.writeGrace)
 		defer restore()
 
 		c.Next()
-	}
-}
-
-// clientVisibleTimeout 用 gin-contrib/timeout 给客户端一个可见的延迟上界。
-//
-// 它到点先写 504，但随后**仍会等待 handler goroutine**，且全程缓存响应体。
-// 因此它只提供"客户端可见的 deadline"，不提供强制取消、资源上界或关停上界。
-//
-// socket deadline 必须在**进入该 wrapper 之前**设置：wrapper 自身的 writer
-// 缓存响应且不透明，进去之后 ResponseController 拿不到底层连接。
-// 同理，本模式明确禁止流式与 Hijack（由 routespec 的方法约束与本注释共同约束）。
-func clientVisibleTimeout(policy routespec.TimeoutPolicy) gin.HandlerFunc {
-	inner := timeout.New(
-		timeout.WithTimeout(policy.Deadline),
-		timeout.WithResponse(timeoutResponse),
-	)
-
-	return func(c *gin.Context) {
-		restore := applyWriteDeadline(c, policy.Deadline+policy.WriteGrace)
-		defer restore()
-
-		inner(c)
 	}
 }
 
@@ -90,13 +89,13 @@ func clientVisibleTimeout(policy routespec.TimeoutPolicy) gin.HandlerFunc {
 // 续期由 StreamKeepAlive 在每次成功 flush 后调用，必须发生在过期**之前**——
 // 标准库约定 write deadline 过期后再设置不能延长它。心跳间隔严格小于
 // IdleWrite 由 routespec 在注册期强制。
-func streamingTimeout(policy routespec.TimeoutPolicy) gin.HandlerFunc {
+func streamingTimeout(policy timeoutBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		restore := applyWriteDeadline(c, policy.IdleWrite)
+		restore := applyWriteDeadline(c, policy.idleWrite)
 		defer restore()
 
 		// 把续期入口放进 context，供流式 handler 每次 flush 后调用。
-		c.Set(streamRenewKey, func() error { return renewWriteDeadline(c, policy.IdleWrite) })
+		c.Set(streamRenewKey, func() error { return renewWriteDeadline(c, policy.idleWrite) })
 
 		c.Next()
 	}
@@ -170,11 +169,6 @@ func renewWriteDeadline(c *gin.Context, idle time.Duration) error {
 func logWriteDeadlineIssue(op string, err error) {
 	logger.Warn("write deadline operation failed",
 		zap.String("op", op), zap.Error(err))
-}
-
-// timeoutResponse 是 ClientVisible 模式到点时写给客户端的响应。
-func timeoutResponse(c *gin.Context) {
-	respondGatewayTimeout(c)
 }
 
 // IsTimeoutError 报告错误是否为业务 deadline 到点。

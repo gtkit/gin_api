@@ -9,7 +9,6 @@ import (
 	"gorm.io/gorm"
 
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
-	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	"github.com/gtkit/gin-api/internal/pkg/credential"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
@@ -42,7 +41,8 @@ type Deps struct {
 // **中间件**使用（每个请求读取）。分两次构造会产生两份指向同一 Redis 的
 // 对象，看似无害，但任何一处将来加了本地缓存，两份状态就会分叉。
 type Assembly struct {
-	Module *authhttp.AuthModule
+	// Service 是认证业务服务；auth.mode 为 external 时为 nil。
+	Service *authapp.Service
 	// Revocation 供认证中间件检查令牌是否已被撤销。
 	Revocation *tokenstore.RevocationList
 }
@@ -97,7 +97,7 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 	}
 
 	return Assembly{
-		Module:     authhttp.NewModule(service),
+		Service:    service,
 		Revocation: revocation,
 	}, nil
 }

@@ -148,7 +148,7 @@ func TestScriptIsPreloadedAtAssembly(t *testing.T) {
 func TestKeysShareAClusterHashTag(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeRefreshClient{evalResults: []evalResult{{val: []any{int64(1), ""}}}}
+	client := &fakeRefreshClient{evalResults: []evalResult{{val: []any{int64(1), "", ""}}}}
 	store := newFakeStore(t, client)
 
 	_, _, _ = store.Consume(context.Background(), "fam1.secret1")
@@ -189,7 +189,7 @@ func hashTagOf(t *testing.T, key string) string {
 func TestSecretIsNotUsedRawInKeys(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeRefreshClient{evalResults: []evalResult{{val: []any{int64(1), ""}}}}
+	client := &fakeRefreshClient{evalResults: []evalResult{{val: []any{int64(1), "", ""}}}}
 	store := newFakeStore(t, client)
 
 	const secret = "distinctive-secret-value"
@@ -212,7 +212,7 @@ func TestNoScriptTriggersReloadAndRetry(t *testing.T) {
 	client := &fakeRefreshClient{
 		evalResults: []evalResult{
 			{err: errors.New("NOSCRIPT No matching script")},
-			{val: []any{int64(0), "42"}},
+			{val: []any{int64(0), "42", ""}},
 		},
 	}
 	store := newFakeStore(t, client)
@@ -258,7 +258,7 @@ func TestReuseWithFailedRevocationIsReported(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRefreshClient{
-		evalResults: []evalResult{{val: []any{int64(2), "7"}}}, // 2 = 重用
+		evalResults: []evalResult{{val: []any{int64(2), "7", ""}}}, // 2 = 重用
 		setErr:      errors.New("redis is down"),
 	}
 	store := newFakeStore(t, client)
@@ -285,9 +285,9 @@ func TestConsumeMapsEveryScriptCode(t *testing.T) {
 		val  any
 		want error
 	}{
-		{name: "not found", val: []any{int64(1), ""}, want: ErrRefreshNotFound},
-		{name: "reused", val: []any{int64(2), "7"}, want: ErrRefreshReused},
-		{name: "family revoked", val: []any{int64(3), "7"}, want: ErrFamilyRevoked},
+		{name: "not found", val: []any{int64(1), "", ""}, want: ErrRefreshNotFound},
+		{name: "reused", val: []any{int64(2), "7", ""}, want: ErrRefreshReused},
+		{name: "family revoked", val: []any{int64(3), "7", ""}, want: ErrFamilyRevoked},
 	}
 
 	for _, tt := range tests {
@@ -314,10 +314,10 @@ func TestMalformedScriptResultIsAnError(t *testing.T) {
 		val  any
 	}{
 		{name: "not a list", val: "ok"},
-		{name: "wrong arity", val: []any{int64(0)}},
-		{name: "non-integer code", val: []any{"zero", "7"}},
-		{name: "unknown code", val: []any{int64(99), "7"}},
-		{name: "non-numeric uid", val: []any{int64(0), "not-a-number"}},
+		{name: "wrong arity", val: []any{int64(0), ""}},
+		{name: "non-integer code", val: []any{"zero", "7", ""}},
+		{name: "unknown code", val: []any{int64(99), "7", ""}},
+		{name: "non-numeric uid", val: []any{int64(0), "not-a-number", ""}},
 	}
 
 	for _, tt := range tests {

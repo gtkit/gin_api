@@ -26,7 +26,16 @@ type User struct {
 	Email    *string    `gorm:"column:email;size:100;uniqueIndex;comment:邮箱"`
 	Password string     `gorm:"column:password;size:255;not null;comment:密码"`
 
-	Status      UserStatus `gorm:"column:status;type:tinyint(1);index;not null;default:1;comment:用户状态 1-正常 2-禁用 3-删除"`
+	Status UserStatus `gorm:"column:status;type:tinyint(1);index;not null;default:1;comment:用户状态 1-正常 2-禁用 3-删除"`
+
+	// 以下字段是**存量业务的形状，不是通用母版该有的东西**。
+	//
+	// 会员资格与公众号关注属于特定业务领域。派生项目应当按自身领域重塑
+	// 这张表，而不是默认继承它们——继承的代价不只是几个用不到的列：
+	// entitlement.vip authorizer、VIP 相关的 dto 字段与迁移都会跟着留下来，
+	// 而它们会让人以为这套判定是母版的通用能力。
+	//
+	// 删除步骤见 SCAFFOLD.md 的「示例 — 可按需删除」。
 	VipStatus   VipStatus  `gorm:"column:vip_status;type:tinyint(1);index;not null;default:0;comment:会员状态 0-非会员 1-会员 2-已过期 3-已取消"`
 	VipLevel    int8       `gorm:"column:vip_level;type:tinyint(1);index;not null;default:0;comment:会员级别"`
 	VipExpireAt *time.Time `gorm:"column:vip_expire_at;type:timestamp;comment:会员到期时间"`

@@ -40,12 +40,11 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	// 生成的模块必须产出 RouteSpec，而不是自行注册路由——
 	// 后者会绕过访问策略与超时预算，也不会出现在双向契约测试里。
 	routerFile := filepath.Join(root, "internal", "module", "admin", "transport", "http", "router.go")
-	assertFileContains(t, routerFile, "func (m *AdminModule) Routes() []routespec.RouteSpec {")
-	assertFileContains(t, routerFile, `Path:          "/admin"`)
-	assertFileContains(t, routerFile, `Path:          "/admin/:id"`)
+	assertFileContains(t, routerFile, "func Register(r *gin.RouterGroup, deps Deps) {")
+	assertFileContains(t, routerFile, `r.Group("/admin")`)
+	assertFileContains(t, routerFile, `g.GET("/:id", handler.Get)`)
 	// 策略必须显式声明：零值会在启动期被拒绝，生成物不能留下未声明的策略。
-	assertFileContains(t, routerFile, "routespec.AccessPolicy{Mode: routespec.AccessPublic}")
-	assertFileContains(t, routerFile, "Mode:       routespec.TimeoutCooperative")
+	assertFileContains(t, routerFile, "middleware.Timeout(")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "transport", "http", "handler_test.go"), "func TestHandlerList")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "func (r *Repository) Get")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "Limit(limit)")
@@ -87,7 +86,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, providersPath, "adminhttp \"github.com/gtkit/gin-api/internal/module/admin/transport/http\"")
 	assertFileContains(t, providersPath, "adminService *adminapp.Service")
 	assertFileContains(t, providersPath, "svc.adminService = adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
-	assertFileContains(t, providersPath, "adminhttp.NewModule(svc.adminService)")
+	assertFileContains(t, providersPath, "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService")
 
 	// 生成的代码必须符合架构边界（与 scripts/check-architecture.sh 一致）。
 	servicePath := filepath.Join(root, "internal", "module", "admin", "application", "service.go")
@@ -142,7 +141,7 @@ func TestModuleGeneratorGenerateIsIdempotentAndPreservesExistingModel(t *testing
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if count := strings.Count(string(providersContent), "adminhttp.NewModule(svc.adminService)"); count != 1 {
+	if count := strings.Count(string(providersContent), "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService"); count != 1 {
 		t.Fatalf("expected single admin module registration, got %d", count)
 	}
 	if count := strings.Count(string(providersContent), "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\""); count != 1 {
@@ -568,12 +567,11 @@ func buildServices(inf infra) services {
 }
 
 func buildEngine(svc services, mw middlewares) {
-	v1Modules := []router.Module{
-		userhttp.NewModule(svc.verifier, mw.auth),
+	opt.RegisterModules = func(v1 *gin.RouterGroup) {
+		userhttp.Register(v1, userhttp.Deps{Service: svc.user, Auth: mw.auth, RateLimit: rateLimitByID})
 		// scaffold:modules
 	}
 	_ = middleware.Auth
-	_ = v1Modules
 }
 
 func buildWorkers(_ services) {

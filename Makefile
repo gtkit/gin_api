@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-image-digests check-security-eval check-release-wiring release-check check-openapi gen-openapi check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -55,8 +55,8 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
 #
 # 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
-#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.2%  ← 下界
-#   正常路径（loopback 可用）：                          73.5%
+#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.3%  ← 下界
+#   正常路径（loopback 可用）：                          74.1%
 #
 # 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
 # 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
@@ -112,15 +112,6 @@ check-coverage: test-coverage ## Enforce the aggregate statement coverage baseli
 
 check-architecture: ## 校验分层架构边界
 	@ ./scripts/check-architecture.sh
-
-check-openapi: ## 契约一致性（生成物 vs 已提交）+ 双向路由契约 + 破坏性变更门禁
-	go test -count=1 -run '^TestOpenAPIContract$$' ./internal/router
-	@ GOWORK=off go run scripts/gen-openapi.go --check
-	@ bash ./scripts/check-openapi-breaking.sh --self-test
-	@ bash ./scripts/check-openapi-breaking.sh
-
-gen-openapi: ## 从路由描述符重新生成 api/openapi.json
-	GOWORK=off go run scripts/gen-openapi.go
 
 check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模块并验证编译/传感器/goimports（含门禁自检）
 	@ bash ./scripts/check-generator.sh --self-test
@@ -215,7 +206,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-openapi tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

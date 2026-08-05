@@ -101,10 +101,7 @@ func TestAuthorizeRequiresAuthenticatedPrincipal(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	// 刻意不装配认证：授权拿不到身份时必须拒绝，绝不能解释成"允许"。
-	authorize, err := Authorize(&stubAuthorizer{allowed: true}, "test.authorizer")
-	if err != nil {
-		t.Fatalf("Authorize: %v", err)
-	}
+	authorize := Authorize(&stubAuthorizer{allowed: true}, "test.authorizer")
 	engine.Use(authorize)
 	engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
@@ -142,10 +139,7 @@ func TestAuthorizeMapsOutcomes(t *testing.T) {
 				ginc.SetPrincipal(c, sharedauth.Principal{UserID: 42, Roles: []string{"user"}})
 				c.Next()
 			})
-			authorize, err := Authorize(tt.authorizer, "test.authorizer")
-			if err != nil {
-				t.Fatalf("Authorize: %v", err)
-			}
+			authorize := Authorize(tt.authorizer, "test.authorizer")
 			engine.Use(authorize)
 			engine.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
@@ -170,10 +164,7 @@ func TestAuthorizeRequestIsNeutralAndLowCardinality(t *testing.T) {
 		ginc.SetPrincipal(c, sharedauth.Principal{UserID: 99})
 		c.Next()
 	})
-	authorize, err := Authorize(auth, "test.authorizer")
-	if err != nil {
-		t.Fatalf("Authorize: %v", err)
-	}
+	authorize := Authorize(auth, "test.authorizer")
 	engine.Use(authorize)
 	engine.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
@@ -193,17 +184,37 @@ func TestAuthorizeRequestIsNeutralAndLowCardinality(t *testing.T) {
 	}
 }
 
-func TestAuthenticateAndAuthorizeRejectMissingDependencies(t *testing.T) {
+// TestAuthAndAuthorizeRejectMissingDependencies 钉住依赖缺失在装配期失败。
+//
+// panic 而不是返回 error：这与 gin 生态的惯例一致（gin-contrib 的中间件同样
+// 在配置非法时 panic），而且它发生在**启动期**——一个没有 parser 的认证
+// 中间件若被静默接受，每个请求都会在生产上崩，那才是真正危险的形态。
+func TestAuthAndAuthorizeRejectMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	if _, err := Authenticate(AuthOptions{Parser: nil, Verifier: fakeUserVerifier{}}); err == nil {
-		t.Fatal("missing parser must be an assembly error, not a panic")
+	tests := []struct {
+		name  string
+		build func()
+	}{
+		{name: "no parser", build: func() {
+			Auth(AuthOptions{Parser: nil, Verifier: fakeUserVerifier{}})
+		}},
+		{name: "no verifier", build: func() {
+			Auth(AuthOptions{Parser: newTestParser(t), Verifier: nil})
+		}},
+		{name: "no authorizer", build: func() { Authorize(nil, "x") }},
 	}
-	if _, err := Authenticate(AuthOptions{Parser: newTestParser(t), Verifier: nil}); err == nil {
-		t.Fatal("missing verifier must be an assembly error, not a panic")
-	}
-	if _, err := Authorize(nil, "x"); err == nil {
-		t.Fatal("missing authorizer must be an assembly error, not a panic")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("a missing dependency was accepted at assembly time: " +
+						"every request would then fail in production")
+				}
+			}()
+			tt.build()
+		})
 	}
 }
 

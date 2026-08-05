@@ -16,8 +16,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/testutil"
 
-	"github.com/gtkit/gin-api/internal/router/routespec"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -25,14 +23,9 @@ import (
 //
 // 顺序与生产一致：ErrorHandler 在全局层、RouteTimeout 在路由层，
 // 因此超时中间件返回后错误才被终态中间件观察到。
-func newTimeoutEngine(t *testing.T, policy routespec.TimeoutPolicy, handler gin.HandlerFunc) *gin.Engine {
+func newTimeoutEngine(t *testing.T, timeoutMW gin.HandlerFunc, handler gin.HandlerFunc) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-
-	timeoutMW, err := RouteTimeout(policy)
-	if err != nil {
-		t.Fatalf("RouteTimeout: %v", err)
-	}
 
 	engine := gin.New()
 	engine.Use(ErrorHandler())
@@ -41,10 +34,8 @@ func newTimeoutEngine(t *testing.T, policy routespec.TimeoutPolicy, handler gin.
 	return engine
 }
 
-func cooperativePolicy(deadline, grace time.Duration) routespec.TimeoutPolicy {
-	return routespec.TimeoutPolicy{
-		Mode: routespec.TimeoutCooperative, Deadline: deadline, WriteGrace: grace,
-	}
+func cooperativePolicy(deadline, grace time.Duration) gin.HandlerFunc {
+	return Timeout(deadline, grace)
 }
 
 // TestCooperativeTimeoutMapsDeadlineExceededTo504 验证协作式链路的 504。
@@ -135,12 +126,34 @@ func TestHandlerIgnoringContextIsNotTerminated(t *testing.T) {
 	}
 }
 
-// TestRouteTimeoutRejectsUnspecifiedPolicy 验证零值策略拒绝装配。
-func TestRouteTimeoutRejectsUnspecifiedPolicy(t *testing.T) {
+// TestTimeoutRejectsInvalidDurations 验证非法时长在装配期就被拒绝。
+//
+// panic 而不是返回 error：这与 gin 生态的惯例一致，且它发生在启动期——
+// 一个时长为 0 的超时中间件等于没有超时，必须响亮地失败。
+func TestTimeoutRejectsInvalidDurations(t *testing.T) {
 	t.Parallel()
 
-	if _, err := RouteTimeout(routespec.TimeoutPolicy{}); err == nil {
-		t.Fatal("RouteTimeout accepted an unspecified policy")
+	tests := []struct {
+		name            string
+		deadline, grace time.Duration
+	}{
+		{name: "zero deadline", deadline: 0, grace: time.Second},
+		{name: "negative deadline", deadline: -time.Second, grace: time.Second},
+		{name: "zero grace", deadline: time.Second, grace: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("Timeout(%s, %s) did not panic: a zero timeout is no timeout",
+						tt.deadline, tt.grace)
+				}
+			}()
+			Timeout(tt.deadline, tt.grace)
+		})
 	}
 }
 
@@ -215,10 +228,7 @@ func TestWriteDeadlineSurvivesResponseBodyLogging(t *testing.T) {
 		checked    bool
 	)
 
-	timeoutMW, err := RouteTimeout(cooperativePolicy(2*time.Second, time.Second))
-	if err != nil {
-		t.Fatalf("RouteTimeout: %v", err)
-	}
+	timeoutMW := cooperativePolicy(2*time.Second, time.Second)
 
 	engine := gin.New()
 	// 关键：开启响应体日志，让 responseBodyWriter 进入 writer 链。
@@ -263,14 +273,8 @@ func TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline(t *testing.T) {
 	testutil.RequireLoopback(t)
 	gin.SetMode(gin.TestMode)
 
-	shortMW, err := RouteTimeout(cooperativePolicy(150*time.Millisecond, 100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("RouteTimeout(short): %v", err)
-	}
-	longMW, err := RouteTimeout(cooperativePolicy(5*time.Second, 2*time.Second))
-	if err != nil {
-		t.Fatalf("RouteTimeout(long): %v", err)
-	}
+	shortMW := cooperativePolicy(150*time.Millisecond, 100*time.Millisecond)
+	longMW := cooperativePolicy(5*time.Second, 2*time.Second)
 
 	engine := gin.New()
 	engine.GET("/short", shortMW, func(c *gin.Context) { c.String(http.StatusOK, "short") })
@@ -342,12 +346,8 @@ func TestStreamingRenewsIdleWriteDeadline(t *testing.T) {
 		chunks    = 8 // 8 * 60ms = 480ms > idleWrite，不续期必然失败
 	)
 
-	streamMW, err := RouteTimeout(routespec.TimeoutPolicy{
-		Mode: routespec.TimeoutStreaming, IdleWrite: idleWrite, HeartbeatInterval: heartbeat,
-	})
-	if err != nil {
-		t.Fatalf("RouteTimeout(streaming): %v", err)
-	}
+	streamMW := StreamTimeout(idleWrite)
+	_ = heartbeat
 
 	var renewErr error
 	engine := gin.New()

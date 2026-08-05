@@ -64,21 +64,23 @@ type AuthOptions struct {
 	AllowMissingToken bool
 }
 
-// Authenticate 构造认证中间件。
+// Auth 构造认证中间件，用法与任何 gin 中间件一致：
 //
-// 返回 error 而不是 panic：依赖缺失是装配错误，应当在启动期以错误表达；
-// 生产请求路径上的 panic 会把一个可预防的配置问题变成运行期崩溃。
+//	g := r.Group("/user", middleware.Auth(opts))
+//
+// 依赖缺失直接 panic：那是装配错误，发生在启动期而非请求期，
+// 与 gin 生态的惯例一致（gin-contrib 的中间件同样在配置非法时 panic）。
 //
 // 本中间件**只做认证**（你是谁），不做任何业务角色判定（你能做什么）。
 // 此前它硬编码校验 ClientRole，后果有二：任何不含该角色的 token 在认证阶段就被拒绝，
 // 于是 admin/custom 之类的授权模式根本没有机会执行；而且"角色不符"被表达为 401，
 // 客户端据此重新登录也无济于事——它实际是 403。
-func Authenticate(opts AuthOptions) (gin.HandlerFunc, error) {
+func Auth(opts AuthOptions) gin.HandlerFunc {
 	if opts.Verifier == nil {
-		return nil, errors.New("authentication middleware requires a user verifier")
+		panic("middleware: Auth requires a user verifier")
 	}
 	if opts.Parser == nil {
-		return nil, errors.New("authentication middleware requires a token parser")
+		panic("middleware: Auth requires a token parser")
 	}
 
 	return func(c *gin.Context) {
@@ -144,16 +146,22 @@ func Authenticate(opts AuthOptions) (gin.HandlerFunc, error) {
 			ExpiresAt: claimsExpiry(claims),
 		})
 		c.Next()
-	}, nil
+	}
+}
+
+// OptionalAuth 是"带了 token 就必须合法、没带则放行"的认证中间件。
+func OptionalAuth(opts AuthOptions) gin.HandlerFunc {
+	opts.AllowMissingToken = true
+	return Auth(opts)
 }
 
 // Authorize 构造授权中间件，判定已认证主体能否执行本次请求。
 //
 // 它只消费**已经认证过**的 principal，不重复解析 token——
 // 重复解析既浪费，也可能让两个阶段的判定不一致。
-func Authorize(authorizer sharedauth.Authorizer, authorizerID string) (gin.HandlerFunc, error) {
+func Authorize(authorizer sharedauth.Authorizer, authorizerID string) gin.HandlerFunc {
 	if authorizer == nil {
-		return nil, fmt.Errorf("authorization middleware requires an authorizer for %q", authorizerID)
+		panic(fmt.Sprintf("middleware: Authorize requires an authorizer for %q", authorizerID))
 	}
 
 	return func(c *gin.Context) {
@@ -177,7 +185,7 @@ func Authorize(authorizer sharedauth.Authorizer, authorizerID string) (gin.Handl
 			return
 		}
 		c.Next()
-	}, nil
+	}
 }
 
 // authorizationRequest 把 Gin 请求翻译成中立的授权输入。

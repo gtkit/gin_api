@@ -85,9 +85,9 @@ func (g *RequestIDGenerator) Next() (string, error) {
 //
 // 写入请求头是有意的：下游中间件与 handler 读 header 就能拿到内部 ID，
 // 不必都去读 context。
-func RequestID(gen *RequestIDGenerator) (gin.HandlerFunc, error) {
+func RequestID(gen *RequestIDGenerator) gin.HandlerFunc {
 	if gen == nil {
-		return nil, errors.New("request id middleware requires a generator")
+		panic("middleware: RequestID requires a generator")
 	}
 
 	return func(c *gin.Context) {
@@ -106,7 +106,7 @@ func RequestID(gen *RequestIDGenerator) (gin.HandlerFunc, error) {
 			logger.ContextWithRequestID(c.Request.Context(), id))
 
 		c.Next()
-	}, nil
+	}
 }
 
 // RequestIDFromContext 从 gin 上下文取内部请求 ID。

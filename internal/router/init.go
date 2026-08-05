@@ -1,33 +1,28 @@
+// Package router 装配 Gin engine：全局中间件、系统探针与各业务模块的路由。
 package router
 
 import (
-	"context"
-	"fmt"
-
-	"github.com/gtkit/gin-api/internal/appmeta"
-	middleware "github.com/gtkit/gin-api/internal/middleware"
-	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/router/routespec"
-	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"slices"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
-type VersionedModules struct {
-	V1 []Module
-	V2 []Module
-}
-
-// RouterOptions 包含创建 Gin engine 时可选的额外配置。
-type RouterOptions struct {
+// Options 是装配 engine 所需的进程级配置与依赖。
+type Options struct {
 	AllowedOrigins []string
 	// LogRequestBody / LogResponseBody 控制访问日志是否记录（脱敏后的）请求/响应体。
-	// 默认 false，即不记录 body；由 bootstrap 从配置注入。
 	LogRequestBody  bool
 	LogResponseBody bool
-	// MaxBodyBytes 全局请求体大小上限（字节）；<=0 时中间件兜底默认 10MB。
+	// MaxBodyBytes 是全局请求体上限（字节）；<=0 时中间件兜底默认 10MB。
+	//
+	// 它是**兜底**，覆盖 404/405 这类不进任何路由组的请求——那些路径同样
+	// 会被灌大 body。路由级的 JSONBody 只表达"这条比全局更严"。
 	MaxBodyBytes int64
 	// TrustedProxies 是可信代理的 CIDR/IP 列表。**空 = 不信任任何代理**，
 	// 此时 ClientIP 只取真实 TCP peer 地址，客户端伪造的转发头一律忽略。
@@ -37,185 +32,148 @@ type RouterOptions struct {
 	// HealthChecker 供系统探针路由使用。为 nil 时 /ready 一律报未就绪——
 	// 装配错误必须表现为"未就绪"，而不是让错配的实例被纳入流量。
 	HealthChecker HealthChecker
-	// ProcessStatus 提供进程自身的就绪信息（draining 相位、已降级/已失效的能力）。
-	// 为 nil 时 readiness 只看依赖存活——那会让一个正在 draining 的实例
-	// 或一个 required worker 已经死掉的实例继续报告 ready。
+	// ProcessStatus 提供进程自身的就绪信息（draining 相位、已降级的能力）。
 	ProcessStatus ProcessStatus
-	// RedisRequired 声明 Redis 对本进程是否必需，与资源装配用的是同一份推导结果。
-	// 它决定 Redis 故障映射到 503（required）还是 200+degraded（optional）。
+	// RedisRequired 决定 Redis 故障映射到 503 还是 200+degraded。
 	RedisRequired bool
-	// AuthMiddleware 实现 AccessAuthenticated 与 AccessAuthorized 的认证段。
-	// 声明了该模式却没提供它，会在注册期直接失败——绝不把要求鉴权的路由当公开路由服务。
-	AuthMiddleware gin.HandlerFunc
-	// OptionalAuthMiddleware 实现 AccessOptionalAuthenticated。
-	OptionalAuthMiddleware gin.HandlerFunc
-	// Authorizers 是具名授权实现的注册表，AccessAuthorized 按 ID 解析。
-	// 注册表在 compile 前冻结，运行期不可变。
-	Authorizers *sharedauth.AuthorizerRegistry
-	// RateLimits 是限流策略注册表，RouteSpec.RateLimitPolicyIDs 按 ID 解析。
-	//
-	// **传 nil 不等于"不限流"**：业务路由硬引用默认策略，引用无法解析会在
-	// 装配期失败。nil 只对完全不声明策略的路由集合成立（如部分单测）。
-	// 为 nil 时所有路由不限流——这是母版的默认形态（没有配置任何策略）。
+	// RateLimits 是限流策略注册表；为 nil 时不限流。
 	RateLimits *ratelimit.Registry
-	// RateLimitKeys 生成限流键。声明了策略却没有它即装配失败。
+	// RateLimitKeys 生成限流键。有 RateLimits 就必须有它。
 	RateLimitKeys *ratelimit.KeyBuilder
-
 	// Metrics 记录请求量、时延与状态码；为 nil 时不记录。
-	//
-	// 允许为 nil 而不是要求必传：指标默认不接导出，测试与最小装配不该被迫
-	// 构造一份仪表。这与限流不同——那里 nil 意味着"声明的策略静默失效"，
-	// 是必须拦下的装配错误；这里 nil 只意味着"不记录"，没有任何东西被绕过。
 	Metrics *metrics.Recorder
-}
-
-// InitRouterWithModules 创建 Gin engine 并注册所有业务模块路由。
-func InitRouterWithModules(envName string, modules []Module, opts ...RouterOptions) (*gin.Engine, error) {
-	return InitRouterWithVersionedModules(envName, VersionedModules{V1: modules}, opts...)
-}
-
-// InitRouterWithVersionedModules 创建支持多版本 API 分组的 Gin engine。
-//
-// 返回 error 而不是 panic：路由契约不合法是**装配错误**，应当让启动失败并给出
-// 可定位的原因；panic 会崩在半配置好的 engine 上，且错误信息只有一个栈。
-//
-// 严格的两阶段：先把全部贡献编译并校验通过，再触碰生产 engine。
-// 边注册边校验的话，Gin 在路径树冲突时会直接 panic，而此时 engine 已被写入一半。
-func InitRouterWithVersionedModules(
-	envName string, modules VersionedModules, opts ...RouterOptions,
-) (*gin.Engine, error) {
-	var opt RouterOptions
-	if len(opts) > 0 {
-		opt = opts[0]
-	}
-
-	contributions := []routespec.Contribution{
-		{Source: "system", Prefix: "", Routes: systemRoutes(opt.HealthChecker, opt.ProcessStatus, opt.RedisRequired)},
-	}
-	contributions = append(contributions, moduleContributions(appmeta.APIV1Path, modules.V1)...)
-	contributions = append(contributions, moduleContributions(appmeta.APIV2Path, modules.V2)...)
-
-	compiled, err := routespec.Compile(contributions)
-	if err != nil {
-		return nil, describeCompileError(err)
-	}
-	index := routespec.BuildIndex(compiled)
-
-	authorizers := opt.Authorizers
-	if authorizers == nil {
-		authorizers = sharedauth.NewAuthorizerRegistry()
-	}
-	// 冻结后运行期不可再注册或替换：路由集合与授权实现都是启动期事实。
-	authorizers.Freeze()
-	access := accessMiddleware{
-		authenticate:         opt.AuthMiddleware,
-		authenticateOptional: opt.OptionalAuthMiddleware,
-		authorizers:          authorizers,
-		rateLimits:           opt.RateLimits,
-		rateLimitKeys:        opt.RateLimitKeys,
-		metrics:              opt.Metrics,
-		maxBodyBytes:         opt.MaxBodyBytes,
-	}
-	if err := validateAccessSupport(compiled, access); err != nil {
-		return nil, describeCompileError(err)
-	}
-	if err := validateRateLimitSupport(compiled, opt); err != nil {
-		return nil, describeCompileError(err)
-	}
-
-	// —— 自此才开始触碰生产 engine ——
+	// RegisterModules 在 /api/v1 组上注册各业务模块的路由。
 	//
-	// SetMode 必须在 gin.New() **之前**：New 会按当时的 mode 决定调试输出行为，
-	// 之后再改等于让 engine 以一份和声明不符的模式被创建。
-	gin.SetMode(ginModeFromEnv(envName))
+	// 由 bootstrap 提供：模块的依赖（service、认证中间件）是进程级装配的
+	// 产物，router 包不认识它们。
+	RegisterModules func(v1 *gin.RouterGroup)
+}
+
+// New 创建 Gin engine 并装配全局中间件、系统探针与业务路由。
+//
+// 装配顺序就是 gin 的惯例：先 engine 级 Use，再分组注册。
+func New(envName string, opt Options) (*gin.Engine, error) {
+	if config.Env(envName) == config.EnvProd {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	engine := gin.New()
 
-	// 可信代理边界必须无条件设置，不能依赖 Gin 默认值。
-	//
-	// Gin 默认 ForwardedByClientIP=true 且可信代理集合为 0.0.0.0/0——即**信任所有代理**，
-	// c.ClientIP() 会直接采信客户端完全可控的 X-Forwarded-For / X-Real-IP。
-	// 于是访问日志的 ip 与业务审计的操作者 IP 都能被零成本伪造。
-	//
-	// "不调用 SetTrustedProxies" 与 "传空列表" 在 Gin 里语义完全不同：前者沿用不安全默认，
-	// 后者才是"谁都不信任"。因此这里即使配置为空也显式调用。
-	applyTrustedProxies(engine, opt)
-
-	// 禁用重定向和方法不允许的处理
-	engine.RedirectTrailingSlash = false
-	engine.HandleMethodNotAllowed = true
-
-	// 初始化中间件。失败即装配失败：request ID 生成器要读进程随机源，
-	// 读不到就只能退回弱随机，而那会让跨实例的日志关联失效。
-	if err := middleware.InitMiddleware(engine, opt.AllowedOrigins, middleware.AccessLogOptions{
-		LogRequestBody:  opt.LogRequestBody,
-		LogResponseBody: opt.LogResponseBody,
-		// 预检需要知道目标路径上到底允许哪些方法：没有它，OPTIONS 会对不存在的
-		// 路径回 204，而随后的实际请求拿到 404——客户端排查的方向因此是错的。
-	}, opt.MaxBodyBytes, index.AllowHeaderValue, opt.Metrics); err != nil {
-		return nil, fmt.Errorf("init global middleware: %w", err)
+	// 可信代理必须显式设置。Gin 不设置时的默认是**信任所有代理**，
+	// 那会让任何客户端都能用转发头伪造自己的 IP，而限流与审计都按 IP 走。
+	if err := engine.SetTrustedProxies(opt.TrustedProxies); err != nil {
+		return nil, err
+	}
+	if len(opt.RemoteIPHeaders) > 0 {
+		engine.RemoteIPHeaders = opt.RemoteIPHeaders
 	}
 
-	installFallbacks(engine, index)
-	registerCompiledRoutes(engine, compiled, access)
+	if err := useGlobalMiddleware(engine, opt); err != nil {
+		return nil, err
+	}
+
+	registerSystemRoutes(engine, opt)
+
+	v1 := engine.Group("/api/v1")
+	if opt.RegisterModules != nil {
+		opt.RegisterModules(v1)
+	}
 
 	return engine, nil
 }
 
-// moduleContributions 把模块封装成带来源标识的贡献。
-func moduleContributions(prefix string, modules []Module) []routespec.Contribution {
-	out := make([]routespec.Contribution, 0, len(modules))
-	for _, m := range modules {
-		out = append(out, routespec.Contribution{
-			Source: m.Name(),
-			Prefix: prefix,
-			Routes: m.Routes(),
-		})
-	}
-	return out
-}
-
-// ginModeFromEnv 将运行环境映射为 gin mode。
-// case 直接复用 config.Env 常量，与 Env.IsProd() 共享同一套合法环境定义；
-// 不做大小写/空白归一化——config.Validate 已保证运行期只有三个精确值，
-// default 分支只服务测试/空串场景，落 DebugMode。
-func ginModeFromEnv(envName string) string {
-	switch envName {
-	case string(config.EnvProd):
-		return gin.ReleaseMode
-	case string(config.EnvTest):
-		return gin.TestMode
-	default:
-		return gin.DebugMode
-	}
-}
-
-// CompiledRoutesFor 编译给定模块集合并返回路由描述符，**不触碰任何 engine**。
+// useGlobalMiddleware 按**固定顺序**装配全局中间件。
 //
-// 供 OpenAPI 生成使用：契约必须来自与生产完全相同的编译路径。
-// 让生成器自己遍历模块的话，它与 registrar 就成了两套来源——
-// 而两套来源迟早分叉，分叉的表现是"文档里有的接口线上没有"或反过来。
-func CompiledRoutesFor(modules VersionedModules) ([]routespec.CompiledRoute, error) {
-	contributions := []routespec.Contribution{
-		// 系统探针的 handler 在契约层无关紧要，但 compile 拒绝 nil handler，
-		// 因此传一个空实现的 checker——描述符本身（方法/路径/策略）不受影响。
-		{Source: "system", Prefix: "", Routes: systemRoutes(contractOnlyChecker{}, nil, false)},
-	}
-	contributions = append(contributions, moduleContributions(appmeta.APIV1Path, modules.V1)...)
-	contributions = append(contributions, moduleContributions(appmeta.APIV2Path, modules.V2)...)
-
-	compiled, err := routespec.Compile(contributions)
+// 顺序是契约，不是实现细节。每一处相对位置都有具体理由：
+//
+//	Recovery          最外层。先注册 = 最外层，其 defer recover() 才能兜住
+//	                  后续所有中间件与业务 handler 的 panic。
+//	RequestID         紧随其后。它之后的每一条日志、每一个错误响应都要带上 ID。
+//	Logger            要覆盖到后续中间件产生的响应（413/403/404/405 都必须有
+//	                  一条访问记录），因此必须排在它们之前。
+//	Metrics           同理：它要统计的同样是全部请求，包括被后续中间件直接
+//	                  拒掉的与未匹配路由的。
+//	SecurityHeaders   必须在任何可能写响应体的中间件之前：body 一开始写，
+//	                  响应头就已发出，之后设置 header 不生效且**不会报错**。
+//	ErrorHandler      统一把 c.Errors 转成响应格式。
+//	Cors              先于 MaxBytesLimit：跨源预检必须拿到 CORS 头，
+//	                  而预检请求没有 body，不该被体积限制影响。
+//	MaxBytesLimit     最后，紧贴业务路由——这样即便开启 body 日志，
+//	                  logger 的读取也被同一上限约束。
+func useGlobalMiddleware(engine *gin.Engine, opt Options) error {
+	generator, err := middleware.NewRequestIDGenerator()
 	if err != nil {
-		return nil, describeCompileError(err)
+		return err
 	}
-	return compiled, nil
+
+	engine.Use(middleware.GinRecovery(true))
+	engine.Use(middleware.RequestID(generator))
+	engine.Use(middleware.GinLogger(middleware.AccessLogOptions{
+		LogRequestBody:  opt.LogRequestBody,
+		LogResponseBody: opt.LogResponseBody,
+	}))
+	engine.Use(middleware.Metrics(opt.Metrics))
+	engine.Use(middleware.SecurityHeaders())
+	engine.Use(middleware.ErrorHandler())
+	if len(opt.AllowedOrigins) > 0 {
+		engine.Use(middleware.Cors(opt.AllowedOrigins, allowedMethodsOf(engine)))
+	}
+	engine.Use(middleware.MaxBytesLimit(middleware.MaxBytesLimitConfig{MaxBytes: opt.MaxBodyBytes}))
+
+	return nil
 }
 
-// contractOnlyChecker 是契约生成用的空实现。
+// allowedMethodsOf 返回一个查询函数：给定路径，回答它允许哪些方法。
 //
-// 它只为满足"handler 非 nil"这条编译期约束而存在，永远不会被调用——
-// 生成契约不需要执行任何探针。
-type contractOnlyChecker struct{}
+// 预检必须回答"这个路径上这个方法真的能用吗"。无条件回 204 的后果是
+// **预检成功、实际请求失败**：浏览器据此放行，随后拿到 404 或 405，
+// 而开发者看到的现象是"CORS 明明通过了却还是失败"。
+//
+// 闭包在**请求期**读 engine.Routes()：路由此时已全部注册完毕，
+// 而中间件是在注册之前挂上去的。
+func allowedMethodsOf(engine *gin.Engine) middleware.AllowedMethodsFunc {
+	return func(path string) string {
+		var methods []string
+		for _, r := range engine.Routes() {
+			if r.Path == path {
+				methods = append(methods, r.Method)
+			}
+		}
+		return joinMethods(methods)
+	}
+}
 
-func (contractOnlyChecker) PingDB(context.Context) error    { return nil }
-func (contractOnlyChecker) PingRedis(context.Context) error { return nil }
+// RateLimitByID 返回一个按策略 ID 取限流中间件的函数，供模块注册时使用。
+//
+// 找不到策略时返回 nil，调用方跳过——限流策略集合由部署配置决定，
+// 一个只跑单机的开发环境完全可以不配某条策略。
+func RateLimitByID(opt Options) func(string) gin.HandlerFunc {
+	if opt.RateLimits == nil || opt.RateLimitKeys == nil {
+		return nil
+	}
+	return func(id string) gin.HandlerFunc {
+		limiter, ok := opt.RateLimits.Lookup(id)
+		if !ok {
+			return nil
+		}
+		return middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics)
+	}
+}
+
+// joinMethods 把方法列表拼成 Allow 头的值，顺序稳定。
+func joinMethods(methods []string) string {
+	if len(methods) == 0 {
+		return ""
+	}
+	slices.Sort(methods)
+	return strings.Join(slices.Compact(methods), ", ")
+}
+
+// registerSystemRoutes 注册存活与就绪探针。
+//
+// 它们不在 /api/v1 下：探针是运维接口，与业务 API 的版本无关，
+// 编排系统也不该因为业务版本升级而改探针地址。
+func registerSystemRoutes(engine *gin.Engine, opt Options) {
+	engine.GET("/health", healthHandler)
+	engine.GET("/ready", readyHandler(opt.HealthChecker, opt.ProcessStatus, opt.RedisRequired))
+}

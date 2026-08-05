@@ -3,7 +3,6 @@ module github.com/gtkit/gin-api
 go 1.26
 
 require (
-	github.com/gin-contrib/timeout v1.2.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/gtkit/goerr v1.2.8

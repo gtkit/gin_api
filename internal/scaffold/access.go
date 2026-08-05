@@ -47,7 +47,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 				"or --access=%s", strings.Join(accessOptions, "|"))
 	case public:
 		return accessChoice{
-			Expr: "routespec.AccessPolicy{Mode: routespec.AccessPublic}",
+			Expr: "",
 			Note: "模块声明为公开（--public）：所有生成的路由无需身份即可访问。",
 		}, nil
 	}
@@ -61,31 +61,31 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 	switch access {
 	case AccessOptionAuthenticated:
 		return accessChoice{
-			Expr: "routespec.AccessPolicy{Mode: routespec.AccessAuthenticated}",
-			Note: "模块要求已认证身份。",
+			Expr: "g.Use(deps.Auth)",
+			Note: "模块要求已认证身份：生成的 Register 里已挂 deps.Auth。",
 		}, nil
 	case AccessOptionOptional:
 		return accessChoice{
-			Expr: "routespec.AccessPolicy{Mode: routespec.AccessOptionalAuthenticated}",
+			Expr: "g.Use(deps.OptionalAuth)",
 			Note: "模块允许匿名访问；一旦提供 token 则必须合法。" +
 				"注意：user scope 的限流不能挂在可选认证路由上——匿名请求没有 user 维度。",
 		}, nil
 	case AccessOptionAdmin:
 		return accessChoice{
-			Expr: `routespec.AccessPolicy{Mode: routespec.AccessAuthorized, AuthorizerID: "role.admin"}`,
+			Expr: `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
 			Note: "模块要求 role.admin 授权。**当前没有权威角色源**，" +
 				"role.admin 是恒拒绝的占位实现，所有请求都会 403。" +
-				"接入数据库/IAM 等实时角色源后替换该 adapter，RouteSpec 无需改动。" +
+				"接入数据库/IAM 等实时角色源后替换该 adapter，路由代码无需改动。" +
 				"绝不要改成仅凭 JWT 的 role claim 放行——那是一次签发当成持续有效的高权限。",
 		}, nil
 	case AccessOptionCustom:
 		id := customAuthorizerID(moduleName)
 		return accessChoice{
-			Expr: fmt.Sprintf("routespec.AccessPolicy{Mode: routespec.AccessAuthorized, AuthorizerID: %q}", id),
+			Expr: fmt.Sprintf("g.Use(deps.Auth, deps.Authorize(%q))", id),
 			Note: fmt.Sprintf(
 				"模块要求自定义授权 %s。已在 runtime 层生成一个恒拒绝的 adapter："+
 					"可编译、可启动，但所有请求都被拒绝，不留 TODO、不默许放行。"+
-					"替换该 adapter 时不需要改 RouteSpec。", id),
+					"替换该 adapter 时不需要改路由代码。", id),
 		}, nil
 	}
 

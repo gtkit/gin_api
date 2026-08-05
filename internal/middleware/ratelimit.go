@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 
@@ -42,12 +41,12 @@ const (
 // recorder 为 nil 时不记录。
 func RateLimit(
 	limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder, recorder *metrics.Recorder,
-) (gin.HandlerFunc, error) {
+) gin.HandlerFunc {
 	if limiter == nil {
-		return nil, errors.New("rate limit middleware requires a limiter")
+		panic("middleware: RateLimit requires a limiter")
 	}
 	if keys == nil {
-		return nil, errors.New("rate limit middleware requires a key builder")
+		panic("middleware: RateLimit requires a key builder")
 	}
 
 	policy := limiter.Policy()
@@ -88,7 +87,7 @@ func RateLimit(
 			return
 		}
 		rejectRateLimited(c, decision)
-	}, nil
+	}
 }
 
 // rateLimitSubject 取限流主体。

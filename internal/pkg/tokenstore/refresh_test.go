@@ -36,6 +36,18 @@ func newTestStore(t *testing.T, ttl time.Duration) (*RefreshStore, *miniredis.Mi
 	return store, srv
 }
 
+// advanceBy 把 store 的注入时钟与 Redis 的时钟**一起**往前拨。
+//
+// 两个都要推进：窗口判断在 Go 侧（脚本刻意不取 Redis 的 TIME，那让它保持
+// 确定性），而记录的过期在 Redis 侧。只推 Go 时钟的话，测试看不到"记录被
+// 提前删掉"这类错误——而那正是最需要被发现的一种：记录一旦在重放窗口后
+// 消失，泄漏令牌的迟到重放会走到"找不到"分支，什么也不撤销，且完全静默。
+func advanceBy(store *RefreshStore, srv *miniredis.Miniredis, d time.Duration) {
+	base := time.Now().Add(d)
+	store.now = func() time.Time { return base }
+	srv.FastForward(d)
+}
+
 func TestIssueAndConsumeRotates(t *testing.T) {
 	t.Parallel()
 
@@ -71,7 +83,7 @@ func TestIssueAndConsumeRotates(t *testing.T) {
 func TestReuseRevokesTheWholeFamily(t *testing.T) {
 	t.Parallel()
 
-	store, _ := newTestStore(t, time.Hour)
+	store, srv := newTestStore(t, time.Hour)
 	ctx := context.Background()
 
 	first, err := store.Issue(ctx, 7)
@@ -82,6 +94,14 @@ func TestReuseRevokesTheWholeFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Consume: %v", err)
 	}
+
+	// 越过重放窗口：窗口**内**的重放是客户端在重试一个丢失的响应，
+	// 会拿回同一份令牌（见 TestReplayWithinTheWindowReturnsTheSameToken）；
+	// 只有窗口之外的重放才说明令牌被复制了出去。
+	//
+	// 推进的是 store 的注入时钟，不是 miniredis 的：窗口判断在 Go 侧完成
+	// （脚本保持确定性，时刻由调用方传入），FastForward 影响不到它。
+	advanceBy(store, srv, 2*defaultReplayWindow)
 
 	// 重放已消费的令牌。
 	if _, _, err := store.Consume(ctx, first); !errors.Is(err, ErrRefreshReused) {
@@ -192,11 +212,16 @@ func TestStoredRecordHoldsNoUsableSecret(t *testing.T) {
 	}
 }
 
-// TestConcurrentConsumeYieldsExactlyOneWinner 钉住消费的原子性。
+// TestConcurrentConsumeRotatesExactlyOnce 钉住消费的原子性。
 //
 // 读取、判断已用、标记已用若不在同一个脚本里，两个并发请求会同时读到
-// "未使用"，于是同一个令牌被消费两次——重用检测本身就成了它要检测的漏洞。
-func TestConcurrentConsumeYieldsExactlyOneWinner(t *testing.T) {
+// "未使用"，于是**轮换发生两次**——同一个族里凭空多出一条分叉链，
+// 而重用检测再也无法判断哪条是正当的。
+//
+// 断言的是"轮换恰好一次"，不是"恰好一个调用者成功"：并发的重复请求全都
+// 拿到**同一个**新令牌才是正确行为（那正是幂等的定义）。若断言只有一个
+// 成功、其余失败，等于要求实现在并发重试时随机踢掉一部分客户端。
+func TestConcurrentConsumeRotatesExactlyOnce(t *testing.T) {
 	t.Parallel()
 
 	store, _ := newTestStore(t, time.Hour)
@@ -208,26 +233,73 @@ func TestConcurrentConsumeYieldsExactlyOneWinner(t *testing.T) {
 	}
 
 	const racers = 8
-	results := make(chan error, racers)
+	type outcome struct {
+		next string
+		err  error
+	}
+	results := make(chan outcome, racers)
 	start := make(chan struct{})
 	for range racers {
 		go func() {
 			<-start
-			_, _, err := store.Consume(ctx, token)
-			results <- err
+			_, next, err := store.Consume(ctx, token)
+			results <- outcome{next: next, err: err}
 		}()
 	}
 	close(start)
 
-	var succeeded int
+	issued := make(map[string]struct{})
 	for range racers {
-		if err := <-results; err == nil {
-			succeeded++
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("a concurrent consume failed: %v", r.err)
 		}
+		issued[r.next] = struct{}{}
 	}
 
-	if succeeded != 1 {
-		t.Fatalf("%d concurrent consumes succeeded, want exactly 1: the token is not "+
-			"single-use under concurrency", succeeded)
+	if len(issued) != 1 {
+		t.Fatalf("%d distinct tokens were issued to %d concurrent identical requests, "+
+			"want 1: the rotation is not atomic, and the family now has forked chains",
+			len(issued), racers)
+	}
+}
+
+// TestReplayWithinTheWindowReturnsTheSameToken 覆盖丢失响应后的重试。
+//
+// 这是重放窗口存在的全部理由：刷新的响应在网络上丢失时，客户端手里仍是
+// 旧令牌，重试是它唯一合理的动作。没有窗口的话服务端会把它判成泄漏、
+// 撤销整族——一次网络抖动因此升级成一次强制登出。
+func TestReplayWithinTheWindowReturnsTheSameToken(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t, time.Hour)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, 21)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	uid, first, err := store.Consume(ctx, token)
+	if err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+
+	// 客户端没收到响应，立刻用同一个令牌重试。
+	replayUID, replayed, err := store.Consume(ctx, token)
+	if err != nil {
+		t.Fatalf("replaying within the window = %v, want the same result as the first call "+
+			"(a lost response must not look like a leak)", err)
+	}
+	if replayed != first {
+		t.Fatalf("replay returned %q, want the same token as the first call (%q)", replayed, first)
+	}
+	if replayUID != uid {
+		t.Errorf("replay uid = %d, want %d", replayUID, uid)
+	}
+
+	// 族没有被撤销：那个令牌仍然可用。
+	if _, _, err := store.Consume(ctx, first); err != nil {
+		t.Fatalf("the rotated token stopped working after a replay: %v", err)
 	}
 }

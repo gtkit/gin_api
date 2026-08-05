@@ -424,7 +424,10 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 	fieldLine := fmt.Sprintf("\t%s *%s.Service\n", data.ServiceVar, data.AppAlias)
 	serviceLine := fmt.Sprintf("\tsvc.%s = %s.NewService(inf.mysqlDB, inf.cfg.Modules.%s)\n",
 		data.ServiceVar, data.RuntimeAlias, data.ConfigFieldName)
-	moduleLine := fmt.Sprintf("\t\t%s.NewModule(svc.%s),\n", data.HTTPAlias, data.ServiceVar)
+	// 模块用 gin 的方式注册：在 RegisterModules 闭包里加一行 Register 调用。
+	moduleLine := fmt.Sprintf(
+		"\t\t%s.Register(v1, %s.Deps{Service: svc.%s, Auth: mw.auth, RateLimit: rateLimitByID})\n",
+		data.HTTPAlias, data.HTTPAlias, data.ServiceVar)
 
 	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := providersMarkers()
 
@@ -1368,74 +1371,63 @@ func NewService(db *gorm.DB, cfg config.{{.ConfigTypeName}}) *{{.AppAlias}}.Serv
 const transportRouterTemplate = `package http
 
 import (
-	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
+	"{{.ProjectModulePath}}/internal/middleware"
 	{{.AppAlias}} "{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
-	"{{.ProjectModulePath}}/internal/module/{{.PackageName}}/dto"
-	"{{.ProjectModulePath}}/internal/router/routespec"
 )
 
-// 本模块路由的业务超时预算。按实际情况调整。
+// 本模块的业务超时预算。按实际情况调整。
 const (
 	{{.ServiceVar}}Deadline   = 5 * time.Second
 	{{.ServiceVar}}WriteGrace = 2 * time.Second
 )
 
-type {{.StructName}}Module struct {
-	service *{{.AppAlias}}.Service
+// Deps 是注册路由所需的依赖。
+type Deps struct {
+	Service *{{.AppAlias}}.Service
+	// Auth 是认证中间件，由装配层注入。需要鉴权的路由挂它。
+	Auth gin.HandlerFunc
+	// OptionalAuth 允许匿名访问，但带了 token 就必须合法。
+	OptionalAuth gin.HandlerFunc
+	// Authorize 按 ID 取授权中间件。
+	Authorize func(authorizerID string) gin.HandlerFunc
+	// RateLimit 按策略 ID 取限流中间件；未配置该策略时返回 nil。
+	RateLimit func(policyID string) gin.HandlerFunc
 }
 
-func NewModule(service *{{.AppAlias}}.Service) *{{.StructName}}Module {
-	return &{{.StructName}}Module{service: service}
+// Register 在给定路由组上注册本模块的路由。
+//
+// 用法就是 gin 的用法：拿 *gin.RouterGroup，用 Group 挂中间件，
+// 用 GET/POST 注册处理函数。
+//
+// **访问控制由代码位置表达**：需要鉴权的路由必须挂上 deps.Auth。漏挂就是
+// 公开接口，而编译与测试都不会有任何异常——新增路由时需要人工确认。
+// 生成的路由默认是公开的，请按实际需要加上 deps.Auth。
+func Register(r *gin.RouterGroup, deps Deps) {
+	handler := NewHandler(deps.Service)
+
+	g := r.Group("/{{.RoutePath}}")
+	g.Use(middleware.Timeout({{.ServiceVar}}Deadline, {{.ServiceVar}}WriteGrace))
+	// 默认限流：来源 + 身份两层。策略在 config 的 ratelimit.policies 里定义。
+	useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
+	{{.AccessPolicyExpr}}
+
+	g.GET("", handler.List)
+	g.GET("/:id", handler.Get)
 }
 
-// Name 用于路由编译失败时定位来源。
-func (m *{{.StructName}}Module) Name() string { return "module.{{.PackageName}}" }
-
-// Routes 返回本模块的路由契约。
-//
-// 模块只声明"这条路由是什么、要什么策略"，不自行注册、不挂中间件、不拼版本前缀——
-// handler chain 与前缀由中央 registrar 统一构造。
-//
-// 策略字段没有默认值：AccessPolicy / TimeoutPolicy / ResponseShape 的零值会在
-// 启动期被拒绝。这是刻意的——"漏写访问策略"若默认为公开，一个本该鉴权的接口
-// 就会静默暴露；"漏写响应形状"则会让 OpenAPI 契约缺掉这个接口返回什么。
-// 生成的路由默认是 AccessPublic，请按实际需要改成 AccessAuthenticated 等。
-func (m *{{.StructName}}Module) Routes() []routespec.RouteSpec {
-	handler := NewHandler(m.service)
-	timeout := routespec.TimeoutPolicy{
-		Mode:       routespec.TimeoutCooperative,
-		Deadline:   {{.ServiceVar}}Deadline,
-		WriteGrace: {{.ServiceVar}}WriteGrace,
+// useRateLimit 按 ID 挂载限流中间件，跳过未配置的策略。
+func useRateLimit(g *gin.RouterGroup, byID func(string) gin.HandlerFunc, ids ...string) {
+	if byID == nil {
+		return
 	}
-	access := {{.AccessPolicyExpr}}
-
-	return []routespec.RouteSpec{
-		{
-			Method:        http.MethodGet,
-			Path:          "/{{.RoutePath}}",
-			OperationID:   "list{{.StructName}}",
-			Tags:          []string{"{{.StructName}}"},
-			Summary:       "List {{.StructName}} records",
-			Handler:       handler.List,
-			AccessPolicy:  access,
-			TimeoutPolicy: timeout,
-			ResponseShape: routespec.ResponseShapeEnveloped,
-			ResponseBody:  dto.{{.StructName}}ListResponse{},
-		},
-		{
-			Method:        http.MethodGet,
-			Path:          "/{{.RoutePath}}/:id",
-			OperationID:   "get{{.StructName}}",
-			Tags:          []string{"{{.StructName}}"},
-			Summary:       "Get a {{.StructName}} by id",
-			Handler:       handler.Get,
-			AccessPolicy:  access,
-			TimeoutPolicy: timeout,
-			ResponseShape: routespec.ResponseShapeEnveloped,
-			ResponseBody:  dto.{{.StructName}}Response{},
-		},
+	for _, id := range ids {
+		if mw := byID(id); mw != nil {
+			g.Use(mw)
+		}
 	}
 }
 `

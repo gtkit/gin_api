@@ -67,9 +67,6 @@ func newTestParser(t *testing.T) jwtauth.TokenParser {
 // 测试里用这个 helper 保持调用点简洁。
 func mustAuthenticate(t *testing.T, v sharedauth.UserVerifier, p TokenParser, optional bool) gin.HandlerFunc {
 	t.Helper()
-	h, err := Authenticate(AuthOptions{Verifier: v, Parser: p, AllowMissingToken: optional})
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
-	}
+	h := Auth(AuthOptions{Verifier: v, Parser: p, AllowMissingToken: optional})
 	return h
 }

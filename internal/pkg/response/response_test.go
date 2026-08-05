@@ -3,256 +3,391 @@ package resp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
 )
 
-func TestNewResponseWithoutDataUsesEmptyArray(t *testing.T) {
-	result := newResponse(0, "OK", nil)
-
-	body, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("marshal response: %v", err)
-	}
-	if !strings.Contains(string(body), "\"data\":[]") {
-		t.Fatalf("expected empty response data to marshal as [], got %s", string(body))
-	}
-}
-
-func TestErrUsesSharedEnvelopeForUnexpectedError(t *testing.T) {
+func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	m.Run()
+}
 
-	Err(context, errors.New("boom"))
+// newCtx 返回一个可写响应的测试上下文。
+func newCtx() (*gin.Context, *httptest.ResponseRecorder) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+	return c, rec
+}
 
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+// decode 解出响应信封。
+func decode(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
-	if strings.Contains(recorder.Body.String(), "boom") {
-		t.Fatalf("internal server response should not leak error detail, got %s", recorder.Body.String())
+	return out
+}
+
+// TestNilDataBecomesAnEmptyArray 钉住 data 永不为 null。
+//
+// 客户端按 `data` 的类型写解析代码。同一个接口有时给 null、有时给对象，
+// 会让弱类型客户端在成功路径上崩——而那条路径通常没有错误处理。
+func TestNilDataBecomesAnEmptyArray(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	Ok(c, nil)
+
+	body := decode(t, rec)
+	if _, isArray := body["data"].([]any); !isArray {
+		t.Fatalf("data = %#v, want an empty array rather than null", body["data"])
+	}
+	if body["code"] != float64(0) {
+		t.Errorf("code = %v, want 0", body["code"])
 	}
 }
 
-func TestErrSanitizesServerErrorMessage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestOkPassesDataThrough 钉住成功响应原样带上数据。
+func TestOkPassesDataThrough(t *testing.T) {
+	t.Parallel()
 
-	Err(context, goerr.New(errors.New("sql: connection refused"), goerr.StatusMysqlServer()))
+	c, rec := newCtx()
+	Ok(c, map[string]any{"id": 7})
 
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	body := decode(t, rec)
+	data, ok := body["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v, want an object", body["data"])
 	}
-	body := recorder.Body.String()
-	if strings.Contains(body, "connection refused") {
-		t.Fatalf("server error response should not leak raw detail, got %s", body)
+	if data["id"] != float64(7) {
+		t.Errorf("data.id = %v, want 7", data["id"])
 	}
-}
-
-func TestErrUsesExplicitClientMessage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	Err(context, goerr.New(errors.New("name is required"), goerr.StatusParams(), "name is required"))
-
-	body := recorder.Body.String()
-	if !strings.Contains(body, "name is required") {
-		t.Fatalf("client error response should preserve detail, got %s", body)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
 	}
 }
 
-func TestBindErrReturnsHTTP422(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestErrUsesTheStatusHTTPCode 钉住 HTTP 状态码取自 goerr 的 Status。
+//
+// 这一点容易被忽略：goerr 里有一批"业务码 + HTTP 200"型的状态，
+// 名字读起来像错误，实际返回 200——按名字选就会让客户端的状态码分支全部失效。
+func TestErrUsesTheStatusHTTPCode(t *testing.T) {
+	t.Parallel()
 
-	BindErr(context, errors.New("field age is required"))
-
-	if recorder.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnprocessableEntity)
-	}
-	if body := recorder.Body.String(); !strings.Contains(body, "field age is required") {
-		t.Fatalf("expected binding detail to be preserved, got %s", body)
-	}
-}
-
-func TestFormatBytes(t *testing.T) {
 	tests := []struct {
-		name  string
+		name       string
+		status     *goerr.Status
+		wantHTTP   int
+		wantNonNil bool
+	}{
+		{name: "auth is 401", status: goerr.StatusAuth(), wantHTTP: http.StatusUnauthorized},
+		{name: "not found is 404", status: goerr.StatusNotFound(), wantHTTP: http.StatusNotFound},
+		{name: "permission is 403", status: goerr.StatusPermission(), wantHTTP: http.StatusForbidden},
+		{name: "validate params is 422", status: goerr.StatusValidateParams(), wantHTTP: http.StatusUnprocessableEntity},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, rec := newCtx()
+			Err(c, goerr.New(nil, tt.status, "boom"))
+
+			if rec.Code != tt.wantHTTP {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantHTTP)
+			}
+			body := decode(t, rec)
+			if body["code"] == float64(0) {
+				t.Error("an error response carried business code 0")
+			}
+		})
+	}
+}
+
+// TestUnknownErrorFallsBackToInternal 钉住陌生错误不泄漏细节。
+//
+// 把裸 error 的文本回给客户端会泄漏内部实现（SQL 片段、文件路径、
+// 依赖的主机名），而客户端拿它也做不了任何事。
+func TestUnknownErrorFallsBackToInternal(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	Err(c, errors.New("dial tcp 10.0.0.7:3306: connection refused"))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if body := rec.Body.String(); contains(body, "10.0.0.7") || contains(body, "dial tcp") {
+		t.Fatalf("the response leaked internal details: %s", body)
+	}
+}
+
+// TestMapErrResolvesRegisteredSentinels 钉住 mapper 的匹配与兜底。
+func TestMapErrResolvesRegisteredSentinels(t *testing.T) {
+	t.Parallel()
+
+	known := errors.New("known business failure")
+	mapper := NewErrMapper(ErrMapping{
+		Target: known, Status: goerr.StatusNotFound(), Message: "没找到",
+	})
+
+	t.Run("registered error maps to its status", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newCtx()
+		MapErr(c, known, mapper)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rec.Code)
+		}
+		if body := decode(t, rec); body["msg"] != "没找到" {
+			t.Errorf("msg = %v, want the mapped message", body["msg"])
+		}
+	})
+
+	t.Run("wrapped error still matches", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newCtx()
+		MapErr(c, wrap(known), mapper)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("a wrapped sentinel returned %d: mapping must use errors.Is, "+
+				"otherwise every fmt.Errorf(\"...: %%w\") breaks it", rec.Code)
+		}
+	})
+
+	t.Run("unregistered error falls back to internal", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newCtx()
+		MapErr(c, errors.New("something else"), mapper)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", rec.Code)
+		}
+	})
+}
+
+// TestPayloadTooLargeCarriesTheLimit 钉住 413 告诉客户端上限是多少。
+//
+// 只说"太大"而不说多大，客户端无从判断该切成几块。
+func TestPayloadTooLargeCarriesTheLimit(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	PayloadTooLargeErr(c, "请求体过大，最大支持 "+FormatBytes(1<<20), 1<<20)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if body := rec.Body.String(); !contains(body, "1.0 MB") {
+		t.Errorf("the 413 response does not state the limit: %s", body)
+	}
+}
+
+// TestFormatBytes 覆盖各量级与边界。
+func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
 		bytes int64
 		want  string
 	}{
-		{name: "zero", bytes: 0, want: "0 B"},
-		{name: "below unit", bytes: 512, want: "512 B"},
-		{name: "exactly 1KB", bytes: 1024, want: "1.0 KB"},
-		{name: "1.5KB", bytes: 1536, want: "1.5 KB"},
-		{name: "1MB", bytes: 1 << 20, want: "1.0 MB"},
-		{name: "10MB", bytes: 10 << 20, want: "10.0 MB"},
-		{name: "1GB", bytes: 1 << 30, want: "1.0 GB"},
+		{0, "0 B"},
+		{1, "1 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1 << 20, "1.0 MB"},
+		{1 << 30, "1.0 GB"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := FormatBytes(tt.bytes); got != tt.want {
-				t.Errorf("FormatBytes(%d) = %q, want %q", tt.bytes, got, tt.want)
-			}
-		})
+		if got := FormatBytes(tt.bytes); got != tt.want {
+			t.Errorf("FormatBytes(%d) = %q, want %q", tt.bytes, got, tt.want)
+		}
 	}
 }
 
-func TestBindErrsMapMaxBytesErrorTo413(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+// TestErrorResponseHelpers 覆盖其余各状态码 helper。
+func TestErrorResponseHelpers(t *testing.T) {
+	t.Parallel()
 
-	maxBytesErr := &http.MaxBytesError{Limit: 4}
 	tests := []struct {
 		name     string
-		bindFunc func(*gin.Context, error)
-		err      error
-		wantCode int
-		wantBody string
+		call     func(*gin.Context)
+		wantHTTP int
 	}{
-		{
-			name:     "BindErr maps max bytes to 413",
-			bindFunc: BindErr,
-			err:      maxBytesErr,
-			wantCode: http.StatusRequestEntityTooLarge,
-			wantBody: "\"max_bytes\":4",
-		},
-		{
-			name:     "BindStructErr maps max bytes to 413",
-			bindFunc: BindStructErr,
-			err:      maxBytesErr,
-			wantCode: http.StatusRequestEntityTooLarge,
-			wantBody: "\"code\":10010019",
-		},
-		{
-			name:     "BindStructErr maps wrapped max bytes to 413",
-			bindFunc: BindStructErr,
-			err:      fmt.Errorf("bind: %w", maxBytesErr),
-			wantCode: http.StatusRequestEntityTooLarge,
-			wantBody: "\"code\":10010019",
-		},
-		{
-			name:     "BindStructErr keeps 422 for plain errors",
-			bindFunc: BindStructErr,
-			err:      errors.New("field age is required"),
-			wantCode: http.StatusUnprocessableEntity,
-			wantBody: "field age is required",
-		},
+		{name: "bad request", wantHTTP: http.StatusBadRequest,
+			call: func(c *gin.Context) { BadRequestErr(c, "坏请求") }},
+		{name: "unsupported media type", wantHTTP: http.StatusUnsupportedMediaType,
+			call: func(c *gin.Context) { UnsupportedMediaTypeErr(c, "只接受 JSON") }},
+		{name: "too many requests", wantHTTP: http.StatusTooManyRequests,
+			call: func(c *gin.Context) { TooManyRequestsErr(c, "太快了") }},
+		{name: "gateway timeout", wantHTTP: http.StatusGatewayTimeout,
+			call: func(c *gin.Context) { GatewayTimeoutErr(c, "超时") }},
+		{name: "not found", wantHTTP: http.StatusNotFound,
+			call: func(c *gin.Context) { NotFoundError(c, "没有") }},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
-			ctx.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			t.Parallel()
 
-			tt.bindFunc(ctx, tt.err)
+			c, rec := newCtx()
+			tt.call(c)
 
-			if recorder.Code != tt.wantCode {
-				t.Fatalf("status = %d, want %d", recorder.Code, tt.wantCode)
+			if rec.Code != tt.wantHTTP {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantHTTP)
 			}
-			if body := recorder.Body.String(); !strings.Contains(body, tt.wantBody) {
-				t.Fatalf("body = %s, want containing %q", body, tt.wantBody)
+			if body := decode(t, rec); body["code"] == float64(0) {
+				t.Error("an error response carried business code 0")
 			}
 		})
 	}
 }
 
-func TestBusinessErrorReturnsHTTP200(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestNotAllowedMethodCarriesAllow 钉住 405 与 Allow 头一致。
+//
+// HTTP 要求 405 必须带 Allow。此前它走的是 400，配上 Allow 头自相矛盾：
+// 客户端无从区分"请求格式错误"与"这个路径不支持该方法"。
+func TestNotAllowedMethodCarriesAllow(t *testing.T) {
+	t.Parallel()
 
-	sentinel := errors.New("not found")
-	mapper := NewErrMapper(
-		ErrMapping{Target: sentinel, Status: goerr.NewStatus(44101, http.StatusOK, "文章不存在")},
-	)
+	c, rec := newCtx()
+	c.Header("Allow", "GET, HEAD")
+	NotAllowedMethod(c, "")
 
-	MapErr(ctx, sentinel, mapper)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("business error status = %d, want %d", recorder.Code, http.StatusOK)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
 	}
-	body := recorder.Body.String()
-	if !strings.Contains(body, "\"code\":44101") {
-		t.Fatalf("expected business code 44101, got %s", body)
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want it preserved", got)
 	}
 }
 
-func TestErrPreservesCustomGoerrCode(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	context, _ := gin.CreateTestContext(recorder)
-	context.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestNewResponseBuildsTheEnvelope 覆盖供中间件直接使用的构造函数。
+func TestNewResponseBuildsTheEnvelope(t *testing.T) {
+	t.Parallel()
 
-	sentinel := errors.New("article not found")
-	status := goerr.NewStatus(13001, http.StatusOK, "文章不存在")
+	t.Run("without data", func(t *testing.T) {
+		t.Parallel()
+		r := NewResponse(1001, "boom")
+		if r.Code != 1001 || r.Message != "boom" {
+			t.Fatalf("envelope = %+v", r)
+		}
+	})
 
-	Err(context, goerr.New(sentinel, status))
+	t.Run("with data", func(t *testing.T) {
+		t.Parallel()
+		r := NewResponse(0, "OK", map[string]int{"n": 1})
+		if r.Data == nil {
+			t.Fatal("data was dropped")
+		}
+	})
+}
 
-	body := recorder.Body.String()
-	if !strings.Contains(body, "\"code\":13001") {
-		t.Fatalf("expected mapped business code to be preserved, got %s", body)
+func contains(s, sub string) bool {
+	return len(sub) > 0 && len(s) >= len(sub) && indexOf(s, sub) >= 0
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
 	}
-	if !strings.Contains(body, "文章不存在") {
-		t.Fatalf("expected mapped client message to be preserved, got %s", body)
+	return -1
+}
+
+func wrap(err error) error { return fmtErrorf(err) }
+
+func fmtErrorf(err error) error {
+	return errors.Join(errors.New("context: "), err)
+}
+
+// TestBindStructErrMapsValidationTo422 覆盖结构体绑定失败的映射。
+//
+// 422 而不是 400：客户端能区分"我发的 JSON 语法就不对"（400）与
+// "语法对但字段不合法"（422），两者的修法完全不同。
+func TestBindStructErrMapsValidationTo422(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	BindStructErr(c, errors.New("Key: 'Req.Phone' Error:Field validation failed"))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
 	}
 }
 
-func TestMapErrUsesBusinessCodeForMappedError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestBindErrMapsToValidation 覆盖参数绑定失败的映射。
+func TestBindErrMapsToValidation(t *testing.T) {
+	t.Parallel()
 
-	sentinel := errors.New("not found")
-	mapper := NewErrMapper(
-		ErrMapping{Target: sentinel, Status: goerr.NewStatus(13001, http.StatusOK, "文章不存在")},
-	)
+	c, rec := newCtx()
+	BindErr(c, errors.New("invalid query"))
 
-	MapErr(ctx, sentinel, mapper)
-
-	body := recorder.Body.String()
-	if !strings.Contains(body, "\"code\":13001") {
-		t.Fatalf("expected business code 13001, got %s", body)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	if !strings.Contains(body, "文章不存在") {
-		t.Fatalf("expected business message, got %s", body)
+	if body := rec.Body.String(); !contains(body, "invalid query") {
+		t.Errorf("the response does not carry the validation detail: %s", body)
 	}
 }
 
-func TestMapErrFallsBackToInternalServerForUnmappedError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+// TestOkErrKeepsHTTP200 钉住"请求成功但业务被拒"的形态。
+//
+// 有一类业务结果（如"余额不足"）在 HTTP 层面是成功的：请求被正确理解、
+// 正确处理，只是业务上不允许。用 4xx 表达会让重试逻辑与监控都把它当成故障。
+func TestOkErrKeepsHTTP200(t *testing.T) {
+	t.Parallel()
 
-	sentinel := errors.New("known")
-	mapper := NewErrMapper(
-		ErrMapping{Target: sentinel, Status: goerr.NewStatus(13001, http.StatusOK, "已知错误")},
-	)
+	c, rec := newCtx()
+	OkErr(c, goerr.New(nil, goerr.StatusRequestFail(), "余额不足"))
 
-	MapErr(ctx, errors.New("unknown db error"), mapper)
-
-	body := recorder.Body.String()
-	if strings.Contains(body, "13001") {
-		t.Fatalf("unmapped error should not use business code, got %s", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a rejected business action is not an HTTP failure", rec.Code)
 	}
-	if strings.Contains(body, "unknown db error") {
-		t.Fatalf("should not leak internal error detail, got %s", body)
+	body := decode(t, rec)
+	if body["code"] == float64(0) {
+		t.Error("the business code is 0, so the client cannot tell it was rejected")
+	}
+	if body["msg"] != "余额不足" {
+		t.Errorf("msg = %v, want the business message", body["msg"])
+	}
+}
+
+// TestErrWithDataCarriesThePayload 覆盖带数据的错误响应。
+func TestErrWithDataCarriesThePayload(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	ErrWithData(c, goerr.New(nil, goerr.StatusParams(), "字段错误"),
+		map[string]any{"field": "phone"})
+
+	body := decode(t, rec)
+	data, ok := body["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v, want the payload", body["data"])
+	}
+	if data["field"] != "phone" {
+		t.Errorf("data.field = %v, want phone", data["field"])
+	}
+}
+
+// TestErrorIsAnAliasOfErr 覆盖供中间件使用的别名。
+func TestErrorIsAnAliasOfErr(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	Error(c, goerr.New(nil, goerr.StatusNotFound(), "没有"))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }

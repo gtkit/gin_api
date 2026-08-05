@@ -22,12 +22,12 @@ func (s *stubChecker) PingRedis(_ context.Context) error { return s.redisErr }
 // newTestEngine 走与生产完全相同的装配路径：系统探针现在是 RouteSpec 的一部分，
 // 不再由旁路注册产生，因此测试也必须经 registrar 拿到 engine。
 func newTestEngine(checker HealthChecker) *gin.Engine {
-	return newTestEngineWith(RouterOptions{HealthChecker: checker})
+	return newTestEngineWith(Options{HealthChecker: checker})
 }
 
-func newTestEngineWith(opts RouterOptions) *gin.Engine {
+func newTestEngineWith(opts Options) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	engine, err := InitRouterWithVersionedModules("test", VersionedModules{}, opts)
+	engine, err := New("test", opts)
 	if err != nil {
 		panic(err)
 	}
@@ -100,7 +100,7 @@ func TestReadyEndpointRedisFollowsRequiredness(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := newTestEngineWith(RouterOptions{
+			engine := newTestEngineWith(Options{
 				HealthChecker: &stubChecker{redisErr: errors.New("timeout")},
 				RedisRequired: tc.redisRequired,
 			})
@@ -124,7 +124,7 @@ func TestReadyEndpointRedisFollowsRequiredness(t *testing.T) {
 // 并 kill 它，在飞请求被直接截断——优雅关停的全部工作白做。
 // 同时 /ready 必须是 503，让 LB 立刻停止转发新请求。
 func TestHealthStays200WhileDraining(t *testing.T) {
-	engine := newTestEngineWith(RouterOptions{
+	engine := newTestEngineWith(Options{
 		HealthChecker: &stubChecker{},
 		ProcessStatus: &stubStatus{draining: true},
 	})
@@ -170,7 +170,7 @@ func TestReadyReflectsProcessCapabilities(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := newTestEngineWith(RouterOptions{
+			engine := newTestEngineWith(Options{
 				HealthChecker: &stubChecker{},
 				ProcessStatus: tc.status,
 			})
