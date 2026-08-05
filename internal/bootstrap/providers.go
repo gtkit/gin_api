@@ -144,7 +144,7 @@ func newProviders(ctx context.Context, runtime *Runtime) (*providerSet, error) {
 
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
-	workers, err := buildWorkers(&inf, svc)
+	workers, err := buildWorkers(ctx, &inf, svc)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
 	}
@@ -375,7 +375,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-func buildWorkers(inf *infra, _ services) (*WorkerManager, error) {
+func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, error) {
 	var workers []Worker
 
 	// 注销档案清理：未配置保留期时不注册。
@@ -387,7 +387,12 @@ func buildWorkers(inf *infra, _ services) (*WorkerManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if w := newDeactivationCleanupWorker(cleanup); w != nil {
+	w, err := newDeactivationCleanupWorker(
+		ctx, cleanup, inf.resources.Rdb(0), inf.cfg.App.Name, inf.recorder)
+	if err != nil {
+		return nil, err
+	}
+	if w != nil {
 		workers = append(workers, w)
 
 		// 健康状态走异步回调：连续失败数与最后成功时间都是**状态**，

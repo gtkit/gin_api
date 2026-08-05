@@ -272,7 +272,7 @@ func TestRunReturnsNilOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := cleanup.Run(ctx); err != nil {
+	if err := cleanup.RunOnce(ctx); err != nil {
 		t.Fatalf("Run returned %v on cancellation, want nil", err)
 	}
 }

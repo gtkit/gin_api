@@ -207,6 +207,49 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 `internal/repository/authcredential/`、`internal/pkg/{credential,tokenstore}/`、
 配置里的 `auth.bcrypt_cost` / `auth.refresh_ttl` 与两条 `auth.*` 限流策略。
 
+### 后台任务的单实例执行
+
+多副本部署下，定时任务在每个实例上都会跑。`internal/pkg/singleton` 提供
+基于 Redis 的租约，让每轮只有一个实例执行。
+
+**注册时必须声明重复执行时靠什么保证正确**，零值会被拒绝：
+
+| 声明 | 含义 |
+|------|------|
+| `GuaranteeIdempotent` | 重复执行无副作用差异（如批量 `DELETE ... LIMIT`，第二次影响 0 行） |
+| `GuaranteeFenced` | 每个写操作携带 `Held.Fence` 序号，且**写路径拒绝比已见值更小的序号** |
+
+这个约束不是形式主义。**锁不是正确性保证**：网络分区、进程长时间暂停（GC、
+宿主机挂起）、租约过期后旧实例恢复，都会让两个实例同时在跑。声明强迫作者
+在注册时就回答"重复执行会怎样"，而不是把问题留到事故现场。
+
+两个容易混淆的概念：
+
+- **随机 token** 只解决"别删掉/续期别人的锁"（compare-and-delete / compare-and-renew）；
+- **fence 序号**才解决"租约过期后旧实例仍在写"。它必须单调递增，且由下游拒绝旧序号。
+
+把随机 token 当 fencing 用是一个看起来能工作、实际毫无保护的组合：
+两个随机值之间没有先后关系，下游无从判断谁更旧。
+
+新增单实例任务：
+
+```go
+lease, err := singleton.NewLease(ctx, redisClient, prefix, "my-task", 2*time.Minute)
+runner, err := singleton.NewRunner(lease, func(ctx context.Context, held singleton.Held) error {
+    // 幂等任务：忽略 held.Fence
+    // fenced 任务：把 held.Fence 传给写路径，并在那里 WHERE fence < :fence
+    return doWork(ctx)
+}, singleton.Config{
+    Interval:   time.Hour,
+    Guarantee:  singleton.GuaranteeIdempotent,
+    MaxRuntime: 30 * time.Minute,
+})
+```
+
+再用 `newSingletonWorker` 包成 Worker 注册进 `buildWorkers`。它的 `Prepare`
+会在启动期用随机探测键真跑一遍抢锁/续租/释放——只 PING 不能证明当前 ACL
+能执行脚本，也不能证明锁键与 fence 键在同一个集群 slot。
+
 ### 接指标导出
 
 母版只依赖 OTel 的 **API 包**，不带 SDK、不带 exporter：Prometheus 拉取、
@@ -256,7 +299,7 @@ defer provider.Shutdown(context.Background())
 | `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者。**注意其用户模型带具体业务形状**（VIP、渠道、邀请码、设备信息等字段来自存量业务）：派生项目应按自身领域重塑 users 表与 dto，而不是默认继承这些字段 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
-| 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |
+| 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。**它是单实例任务**（见下方「后台任务的单实例执行」），因此启用时 Redis 是硬依赖。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |
 
 ### 本地开发依赖（可选）
 

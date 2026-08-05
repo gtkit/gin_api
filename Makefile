@@ -56,7 +56,7 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 #
 # 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
 #   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.2%  ← 下界
-#   正常路径（loopback 可用）：                          73.0%
+#   正常路径（loopback 可用）：                          73.5%
 #
 # 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
 # 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
@@ -64,12 +64,16 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # testutil.RequireLoopback 在测试内部完成，标志在任意机器上都真正生效，
 # 上面两个数字因此可以被任何人重新测出来，而不是只能被声称。
 #
-# 门禁取 70.0：低于受限下界 **0.2 个点**。余量比上一轮更薄了——
-# 认证与指标两批新增了不少只在完整环境才跑得起来的测试（miniredis 要绑回环端口），
-# 它们在受限路径上被跳过，因此新增代码抬高了分母却没抬高受限分子。
+# 门禁取 70.0。**每批新增依赖 Redis 的能力都会压低受限下界**：miniredis 要绑
+# 回环端口，受限路径整包跳过，于是新增代码抬高了分母却没抬高受限分子。
+# 认证、指标、单实例租约三批都遇到过这一点，每次都是靠补一套**不碰网络的
+# 手写替身测试**把受限覆盖率拉回来的（见 internal/pkg/{tokenstore,singleton}
+# 的 logic_test.go）。
 #
-# 下一次动这个数字之前必须先做的事：给受限路径补覆盖（用不碰网络的替身，
-# 见 internal/pkg/tokenstore/logic_test.go 的做法），而不是直接改门禁。
+# 因此新增此类能力时的固定动作：miniredis 版覆盖真实语义，替身版覆盖故障
+# 处置与纯逻辑。两者不是重复——替身能精确制造 miniredis 难触发的故障。
+#
+# 下一次动这个数字之前必须先把受限实测抬上去，而不是直接改门禁。
 # 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
 COVERAGE_MIN ?= 70.0
 tool: ## Lint Go code with the installed golangci-lint

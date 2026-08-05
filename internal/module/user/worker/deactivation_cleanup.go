@@ -124,26 +124,23 @@ func NewDeactivationCleanup(
 	}, nil
 }
 
-// Run 按间隔清理，直到 ctx 取消。
+// RunOnce 执行一轮清理。
 //
-// **启动时立即跑一轮**再进入定时：只等第一个 tick 的话，一个频繁重启的部署
-// 可能永远等不到清理发生。
-func (w *DeactivationCleanup) Run(ctx context.Context) error {
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-
+// **本类型不负责调度**：间隔由外层的单实例 Runner 驱动。此前这里自带一个
+// ticker 循环，接上跨副本租约之后就成了两处调度——两个 ticker 各按各的
+// 节奏跑，而只有外层那个持有租约。调度职责必须只有一处。
+//
+// 返回 nil 而不是把删除失败上抛：一次失败的正确处置是下一轮重试（数据还在，
+// 没有丢失风险），而把它上抛会让 Runner 记一次"任务失败"，进而在监控上
+// 表现为需要人介入——那不成比例。失败已在 purge 内以告警级别留痕并计入
+// 连续失败数。
+func (w *DeactivationCleanup) RunOnce(ctx context.Context) error {
 	w.purge(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			// 关停不是错误：ctx 取消是这个 worker 唯一正常的结束方式。
-			return nil
-		case <-ticker.C:
-			w.purge(ctx)
-		}
-	}
+	return nil
 }
+
+// Interval 返回配置的清理间隔，供调度方使用。
+func (w *DeactivationCleanup) Interval() time.Duration { return w.interval }
 
 // purge 执行一轮清理，分批直到删完或 ctx 取消。
 //
