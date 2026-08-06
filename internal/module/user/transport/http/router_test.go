@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -89,9 +90,9 @@ func TestRateLimitIsAppliedWhenConfigured(t *testing.T) {
 	engine := gin.New()
 	Register(engine.Group("/api/v1"), Deps{
 		Auth: passthrough(),
-		RateLimit: func(id string) gin.HandlerFunc {
-			requested = append(requested, id)
-			return passthrough()
+		RateLimit: func(ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+			requested = append(requested, ids...)
+			return []gin.HandlerFunc{passthrough()}, []gin.HandlerFunc{passthrough()}
 		},
 	})
 
@@ -109,6 +110,63 @@ func TestRateLimitIsAppliedWhenConfigured(t *testing.T) {
 	}
 }
 
+// TestIdentityScopedRateLimitRunsAfterAuth 钉住身份作用域限流排在认证之后。
+//
+// 缺陷：两条策略都挂在 deps.Auth 之前，于是身份限流执行时 context 里还没有身份，
+// rateLimitSubject 取到 userID==0 返回错误，而中间件把"取不到主体"判为装配错误
+// 并拒绝——配了 default.user 策略的路由，**每个请求都是 429**。
+//
+// 断言执行序而不是注册序：注册顺序正确但被别的中间件插队同样会坏。
+func TestIdentityScopedRateLimitRunsAfterAuth(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	var order []string
+	mark := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			order = append(order, name)
+			c.Next()
+		}
+	}
+
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Service: nil,
+		Auth:    mark("auth"),
+		RateLimit: func(ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+			for _, id := range ids {
+				switch id {
+				case "default.ip":
+					preAuth = append(preAuth, mark("ratelimit.ip"))
+				case "default.user":
+					postAuth = append(postAuth, mark("ratelimit.user"))
+				}
+			}
+			return preAuth, postAuth
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user", nil)
+	engine.ServeHTTP(httptest.NewRecorder(), req)
+
+	idxOf := func(name string) int {
+		return slices.Index(order, name)
+	}
+	ip, auth, user := idxOf("ratelimit.ip"), idxOf("auth"), idxOf("ratelimit.user")
+
+	if ip < 0 || auth < 0 || user < 0 {
+		t.Fatalf("执行序缺项: %v", order)
+	}
+	if ip > auth {
+		t.Errorf("来源限流在认证之后执行（序列 %v）："+
+			"被限流的请求会先付一次完整的令牌校验，而那正是攻击者想消耗的资源", order)
+	}
+	if user < auth {
+		t.Errorf("身份限流在认证之前执行（序列 %v）："+
+			"此时取不到身份，该路由的每个请求都会被判 429", order)
+	}
+}
+
 // TestMissingRateLimitPolicyIsSkipped 钉住未配置的策略不导致 panic。
 //
 // 限流策略集合由部署配置决定，一个只跑单机的开发环境完全可以不配某条策略。
@@ -120,7 +178,7 @@ func TestMissingRateLimitPolicyIsSkipped(t *testing.T) {
 	engine := gin.New()
 	Register(engine.Group("/api/v1"), Deps{
 		Auth:      passthrough(),
-		RateLimit: func(string) gin.HandlerFunc { return nil },
+		RateLimit: func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc) { return nil, nil },
 	})
 
 	if len(engine.Routes()) == 0 {

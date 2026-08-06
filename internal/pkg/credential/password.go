@@ -28,13 +28,37 @@ var ErrPasswordTooLong = errors.New("credential: password is too long")
 // Hasher 按固定代价生成与校验密码哈希。
 type Hasher struct {
 	cost int
+	// dummyHash 是账号不存在时用来消耗时间的哈希，按 cost 现场生成。
+	//
+	// 必须与 cost 同代价：bcrypt 比对的耗时由**哈希串自身携带的 cost**
+	// 决定，与本结构体的 cost 字段无关。此前这里是一个硬编码的 cost 10
+	// 常量，而默认配置是 12，于是"账号存在"与"账号不存在"的耗时差约 4 倍、
+	// 稳定可远程测量——掩护只在配置恰好等于 10 时成立。
+	//
+	// 值本身不是秘密：口令是随机的，且永远不会有任何账号使用它。
+	dummyHash string
 }
 
 // NewHasher 构造 Hasher。
 //
 // cost 由配置校验保证在合法区间，这里不再重复校验区间——但仍会把 bcrypt 自身
 // 的拒绝如实返回：两处校验的边界万一漂移，静默接受比报错更糟。
-func NewHasher(cost int) *Hasher { return &Hasher{cost: cost} }
+//
+// 构造时按 cost 生成一份用于时间掩护的哈希，生成失败即构造失败：一个无法提供
+// 等价耗时掩护的 Hasher 不该被造出来，让它在启动期失败远好过在运行期静默
+// 泄漏账号存在性。代价是启动时多一次 bcrypt 运算（cost 12 约 250ms），只付一次。
+func NewHasher(cost int) (*Hasher, error) {
+	h := &Hasher{cost: cost}
+
+	// 口令内容无关紧要，只要不为空且不会被任何账号使用；随机性由 bcrypt 的 salt 提供。
+	dummy, err := bcrypt.GenerateFromPassword([]byte("dummy password for timing cover"), cost)
+	if err != nil {
+		return nil, fmt.Errorf("credential: build timing-cover hash at cost %d: %w", cost, err)
+	}
+	h.dummyHash = string(dummy)
+
+	return h, nil
+}
 
 // Hash 生成密码哈希。
 //
@@ -72,14 +96,6 @@ func (h *Hasher) Compare(hashed, password string) error {
 	}
 }
 
-// dummyHash 是账号不存在时用来消耗时间的哈希。
-//
-// 它是对一个随机口令、按 bcrypt 默认代价生成的真实哈希，因此比对它会走完
-// 完整的 bcrypt 计算——这正是目的。
-//
-// 值本身不是秘密：它的口令是随机的，且永远不会有任何账号使用它。
-const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
-
 // CompareWithDummy 在账号不存在时执行一次等价的比对。
 //
 // **必须调用它，而不是直接返回错误**：bcrypt 的比对要几百毫秒，直接返回
@@ -91,6 +107,6 @@ const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 // 直接写进报文。
 func (h *Hasher) CompareWithDummy(password string) error {
 	// 忽略返回值：这次比对的目的是消耗与真实比对相同的时间，结果不影响结论。
-	_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
+	_ = bcrypt.CompareHashAndPassword([]byte(h.dummyHash), []byte(password))
 	return ErrMismatch
 }

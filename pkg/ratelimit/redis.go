@@ -16,8 +16,6 @@ import (
 )
 
 const (
-	// maxClockSkew 是允许的最大前向时钟漂移。超过即视为**故障态**。
-	maxClockSkew = 5 * time.Second
 	// ttlSlack 是键 TTL 相对"补满一桶所需时间"的余量。
 	//
 	// 没有余量的话，一个刚好在补满边界到达的请求会读到已过期的键，
@@ -29,11 +27,6 @@ const (
 	// 而一个永久残留的探测键会长期占着 Redis 内存且无人认领。
 	probeKeyTTL = 10 * time.Second
 )
-
-// ErrClockSkew 表示传入时间超过了允许的前向漂移。
-//
-// 它是**故障态**而不是一次普通拒绝：调用方按 FailureMode 处理。
-var ErrClockSkew = errors.New("rate limit: clock skew beyond the allowed bound")
 
 // scriptRunner 是本包需要的 Redis 能力，便于测试替换。
 type scriptRunner interface {
@@ -60,8 +53,6 @@ type RedisBackend struct {
 	health *HealthState
 	// keyPrefix 隔离不同服务的限流键。
 	keyPrefix string
-	// now 可注入，测试用它确定性地驱动时钟场景。
-	now func() time.Time
 }
 
 // NewRedisBackend 构造并**实测**限流能力。
@@ -89,7 +80,6 @@ func NewRedisBackend(
 		health:    NewHealthState(DefaultHealthPolicy(), resolved.observer),
 		keyPrefix: resolved.keyPrefix,
 		observer:  resolved.observer,
-		now:       time.Now,
 	}
 	b.sha.Store(&sha)
 
@@ -143,18 +133,11 @@ func (b *RedisBackend) check(
 	}
 
 	decision, err := b.evaluate(ctx, policy, key)
-	switch {
-	case err == nil:
-		b.health.Observe(nil)
-		return decision, nil
-	case errors.Is(err, ErrClockSkew):
-		// 漂移超限是故障态，但不是 Redis 的错——不计依赖失败，
-		// 否则一次 NTP 抖动会把整个 backend 拖进 Degraded。
-		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, err
-	default:
-		b.health.Observe(err)
+	b.health.Observe(err)
+	if err != nil {
 		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, err
 	}
+	return decision, nil
 }
 
 // evaluate 执行一次脚本调用，处理 NOSCRIPT 重载。
@@ -172,8 +155,6 @@ func (b *RedisBackend) evaluate(
 	args := []any{
 		policy.FixedPointRate(),
 		policy.FixedPointBurst(),
-		b.now().UnixMilli(),
-		maxClockSkew.Milliseconds(),
 		bucketTTL(policy).Milliseconds(),
 	}
 
@@ -239,8 +220,6 @@ func parseScriptResult(raw any, policy Policy) (Decision, error) {
 	case statusRejected:
 		decision.Outcome = OutcomeRateLimited
 		decision.RetryAfter = time.Duration(retryAfterMS) * time.Millisecond
-	case statusClockSkew:
-		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, ErrClockSkew
 	default:
 		return Decision{}, fmt.Errorf("unknown rate limit script status %d", status)
 	}

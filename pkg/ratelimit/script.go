@@ -13,21 +13,28 @@ package ratelimit
 // KEYS[1] = 桶的键
 // ARGV[1] = 每秒补充的 microtokens（整数，> 0）
 // ARGV[2] = 桶容量 microtokens（整数，> 0）
-// ARGV[3] = 本次调用的时间戳（毫秒，整数）
-// ARGV[4] = 允许的最大前向时钟漂移（毫秒，整数）
-// ARGV[5] = 键的 TTL（毫秒，整数）
+// ARGV[3] = 键的 TTL（毫秒，整数）
 //
 // 返回 {status, remaining_micro, retry_after_ms}
 //
-//	status: 1 = 放行, 0 = 限速, -1 = 时钟漂移超限（调用方按 FailureMode 处理）
+//	status: 1 = 放行, 0 = 限速
 //
-// 时钟处理有两条独立规则：
+// **时间基准取自 Redis 自己**（`redis.call('TIME')`），调用方不提供时间戳。
 //
-//  1. **回拨保护**：传入时间早于上次补充时刻时，不倒退虚拟时间，按"零流逝"处理。
-//     倒退会让下一次正常请求补出一大段本不该有的 token。
-//  2. **前向漂移超限 = 故障态**：超过上限时**不推进、不写回任何状态**，
-//     直接返回 -1。绝不能"钳制到上限再继续算"——那样每个请求都把虚拟时间
-//     往前推一个上限，于是每个请求都白得 `上限 × rate` 个 token，限流完全失效。
+// 早先由调用方传入时间，并配一个"前向漂移上限"防止它把虚拟时间往前推而白得
+// token。那个上限只能拿"上次请求时刻"作参照，于是**任何超过上限的正常空闲都被
+// 判成故障**：fail_open 下限流被绕过，fail_closed 下持续拒绝且不写回状态，
+// 客户端重试到键过期为止。证据是下面"截到足以补满容量"那段专为长空闲而写，
+// 却因为守卫先返回而永远不可达——两段代码互相矛盾。
+//
+// 改由 Redis 供时后，调用方无法影响时间推进，超发 token 的风险从根上消失，
+// 那个无法正确判定的上限也就没有存在理由。副作用是多副本一致性变强：
+// 所有应用节点共享同一个钟，节点间时钟分歧不再影响判定。
+//
+// 仍保留**回拨保护**：Redis 宿主自身的时钟步退仍可能发生，倒退虚拟时间会让
+// 下一次正常请求补出一大段本不该有的 token。
+//
+// 依赖：Lua 内调用 TIME 需要 effect replication（Redis 3.2+ 可开启，5.0+ 默认）。
 //
 // 豁免理由：gosec 的 G101 是按变量名与字面量内容做启发式判定的，
 // 这里命中的是脚本文本里的 `tokens` 一词。它是令牌桶的令牌，不是凭据。
@@ -36,10 +43,12 @@ package ratelimit
 const tokenBucketScript = `
 local rate_micro   = tonumber(ARGV[1])
 local capacity     = tonumber(ARGV[2])
-local now_ms       = tonumber(ARGV[3])
-local max_skew_ms  = tonumber(ARGV[4])
-local ttl_ms       = tonumber(ARGV[5])
+local ttl_ms       = tonumber(ARGV[3])
 local cost         = 1000000
+
+-- 时间基准取自 Redis 自己：调用方不供时，因此无法把虚拟时间往前推。
+local t = redis.call('TIME')
+local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 
 local state = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
 local tokens = tonumber(state[1])
@@ -48,11 +57,6 @@ local last_ms = tonumber(state[2])
 if tokens == nil or last_ms == nil then
   tokens = capacity
   last_ms = now_ms
-end
-
--- 前向漂移超限：故障态，不动任何状态。
-if now_ms > last_ms + max_skew_ms then
-  return {-1, tokens, 0}
 end
 
 -- 回拨：不倒退虚拟时间。
@@ -92,7 +96,6 @@ return {status, tokens, retry_after_ms}
 
 // Lua 脚本的返回状态。
 const (
-	statusRejected  = 0
-	statusAllowed   = 1
-	statusClockSkew = -1
+	statusRejected = 0
+	statusAllowed  = 1
 )

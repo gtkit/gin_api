@@ -93,6 +93,11 @@ type middlewares struct {
 	auth         gin.HandlerFunc
 	optionalAuth gin.HandlerFunc
 	authorizers  *sharedauth.AuthorizerRegistry
+	// authorizeByID 按授权者标识取中间件，供引用了具名授权的模块路由使用。
+	//
+	// 装配期就绑定注册表：让模块路由拿一个只需传标识的函数，模块因此不必
+	// 认识注册表，也不可能拿到一个未绑定注册表的授权中间件。
+	authorizeByID func(string) gin.HandlerFunc
 }
 
 // newProviders 按「基础设施 → service → 中间件 → 路由引擎 → worker」五个阶段编排装配，
@@ -263,7 +268,12 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 		return middlewares{}, err
 	}
 
-	return middlewares{auth: auth, optionalAuth: optionalAuth, authorizers: authorizers}, nil
+	return middlewares{
+		auth:          auth,
+		optionalAuth:  optionalAuth,
+		authorizers:   authorizers,
+		authorizeByID: newAuthorizeByID(authorizers),
+	}, nil
 }
 
 // buildAuthorizers 登记进程内全部具名授权实现。
@@ -303,6 +313,24 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	return reg, nil
 }
 
+// newAuthorizeByID 返回按授权者标识取中间件的函数，供生成模块的路由使用。
+//
+// 未登记的标识返回**恒拒绝**中间件并记一条错误日志，既不 panic 也不放行：
+// middleware.Authorize 对 nil authorizer 是 panic，而那会把一个装配问题变成
+// 运行期崩溃；返回 nil 更糟——nil handler 挂进链同样在首个请求上崩。
+// 恒拒绝是唯一安全的兜底，配合日志使"某接口一直 403"不至于变成悬案。
+func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.HandlerFunc {
+	return func(id string) gin.HandlerFunc {
+		authorizer, ok := reg.Lookup(id)
+		if !ok {
+			logger.Errorf("authorizer %q is not registered; denying every request to the routes "+
+				"that reference it (register it at the scaffold:module-authorizers marker)", id)
+			authorizer = sharedauth.DenyAll(fmt.Sprintf("authorizer %q is not registered", id))
+		}
+		return middleware.Authorize(authorizer, id)
+	}
+}
+
 // buildEngine 组装 v1 模块路由切片并初始化 Gin engine（含健康检查路由）。
 // 新增模块时只需在 v1Modules 切片里追加一行（scaffold 生成器经 modules 标记注入）。
 func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
@@ -324,7 +352,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		RateLimitKeys: inf.rateLimits.keys,
 		ProcessStatus: status,
 	}
-	rateLimitByID := router.RateLimitByID(opt)
+	rateLimitStager := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -332,7 +360,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		userhttp.Register(v1, userhttp.Deps{
 			Service:   svc.user,
 			Auth:      mw.auth,
-			RateLimit: rateLimitByID,
+			RateLimit: rateLimitStager,
 		})
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
@@ -340,7 +368,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 			authhttp.Register(v1, authhttp.Deps{
 				Service:   svc.auth.Service,
 				Auth:      mw.auth,
-				RateLimit: rateLimitByID,
+				RateLimit: rateLimitStager,
 			})
 		}
 		// scaffold:modules

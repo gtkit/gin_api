@@ -533,7 +533,7 @@ func createProjectFixture(t *testing.T) string {
 	files := map[string]string{
 		"go.mod": "module github.com/gtkit/gin-api\n\ngo 1.26.1\n",
 		// fixture 镜像真实 providers.go 的分阶段结构与五个脚手架标记
-		// （四个注入型 + 校验型 scaffold:module-workers）。
+		// （四个注入型 + 两个校验型：scaffold:module-workers、scaffold:module-authorizers）。
 		"internal/bootstrap/providers.go": `package bootstrap
 
 import (
@@ -576,6 +576,10 @@ func buildEngine(svc services, mw middlewares) {
 
 func buildWorkers(_ services) {
 	// scaffold:module-workers
+}
+
+func buildAuthorizers() {
+	// scaffold:module-authorizers
 }
 `,
 		// config 锚点文件：模块配置字段与校验器的注入点。

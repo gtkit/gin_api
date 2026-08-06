@@ -8,12 +8,37 @@ import (
 )
 
 // accessChoice 是生成模块时必须做出的访问策略选择。
+//
+// 它同时承载该策略**所需的接线信息**：需要哪些中间件依赖、适用哪些限流作用域、
+// 是否要生成模块专属的授权实现。此前只有 Expr，于是"表达式用了 deps.Authorize"
+// 与"装配层要不要注入 Authorize"是两处独立信息，接线漏了也没有任何信号——
+// 生成的模块能编译、启动即空指针 panic。
 type accessChoice struct {
-	// Expr 是写进生成代码的 AccessPolicy 字面量。
+	// Expr 是写进生成代码的访问策略语句。
 	Expr string
 	// Note 出现在生成结果的提示里，说明该选择的后果与后续动作。
 	Note string
+	// NeedsAuth 表示该策略用到 deps.Auth。
+	NeedsAuth bool
+	// NeedsOptionalAuth 表示该策略用到 deps.OptionalAuth。
+	NeedsOptionalAuth bool
+	// AuthorizerID 非空时表示该策略用到 deps.Authorize(AuthorizerID)。
+	AuthorizerID string
+	// OwnsAuthorizer 为真时，该 AuthorizerID 是模块专属的，需要在 runtime 层
+	// 生成恒拒绝实现并注册进注册表；为假表示复用母版已注册的实现。
+	OwnsAuthorizer bool
+	// RateLimitPolicies 是写进生成代码的限流策略标识列表（已带引号）。
+	//
+	// 随访问策略变化：没有身份的路由不能引用身份作用域的策略——那类策略取不到
+	// 主体，中间件把它判为装配错误并拒绝，于是该路由的每个请求都是 429。
+	RateLimitPolicies string
 }
+
+// 限流策略集合按"有无身份"分两档。
+const (
+	rateLimitPoliciesSourceOnly = `"default.ip"`
+	rateLimitPoliciesWithUser   = `"default.ip", "default.user"`
+)
 
 // 可选的 --access 取值。
 const (
@@ -48,7 +73,9 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 	case public:
 		return accessChoice{
 			Expr: "",
-			Note: "模块声明为公开（--public）：所有生成的路由无需身份即可访问。",
+			Note: "模块声明为公开（--public）：所有生成的路由无需身份即可访问。" +
+				"限流只按来源：公开路由没有身份维度。",
+			RateLimitPolicies: rateLimitPoliciesSourceOnly,
 		}, nil
 	}
 
@@ -61,18 +88,25 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 	switch access {
 	case AccessOptionAuthenticated:
 		return accessChoice{
-			Expr: "g.Use(deps.Auth)",
-			Note: "模块要求已认证身份：生成的 Register 里已挂 deps.Auth。",
+			Expr:              "g.Use(deps.Auth)",
+			Note:              "模块要求已认证身份：生成的 Register 里已挂 deps.Auth。",
+			NeedsAuth:         true,
+			RateLimitPolicies: rateLimitPoliciesWithUser,
 		}, nil
 	case AccessOptionOptional:
 		return accessChoice{
 			Expr: "g.Use(deps.OptionalAuth)",
 			Note: "模块允许匿名访问；一旦提供 token 则必须合法。" +
-				"注意：user scope 的限流不能挂在可选认证路由上——匿名请求没有 user 维度。",
+				"限流只按来源：匿名请求没有 user 维度，身份作用域的策略在这里取不到主体。",
+			NeedsOptionalAuth: true,
+			RateLimitPolicies: rateLimitPoliciesSourceOnly,
 		}, nil
 	case AccessOptionAdmin:
 		return accessChoice{
-			Expr: `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
+			Expr:              `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
+			NeedsAuth:         true,
+			AuthorizerID:      "role.admin",
+			RateLimitPolicies: rateLimitPoliciesWithUser,
 			Note: "模块要求 role.admin 授权。**当前没有权威角色源**，" +
 				"role.admin 是恒拒绝的占位实现，所有请求都会 403。" +
 				"接入数据库/IAM 等实时角色源后替换该 adapter，路由代码无需改动。" +
@@ -81,11 +115,16 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 	case AccessOptionCustom:
 		id := customAuthorizerID(moduleName)
 		return accessChoice{
-			Expr: fmt.Sprintf("g.Use(deps.Auth, deps.Authorize(%q))", id),
+			Expr:              fmt.Sprintf("g.Use(deps.Auth, deps.Authorize(%q))", id),
+			NeedsAuth:         true,
+			AuthorizerID:      id,
+			OwnsAuthorizer:    true,
+			RateLimitPolicies: rateLimitPoliciesWithUser,
 			Note: fmt.Sprintf(
-				"模块要求自定义授权 %s。已在 runtime 层生成一个恒拒绝的 adapter："+
-					"可编译、可启动，但所有请求都被拒绝，不留 TODO、不默许放行。"+
-					"替换该 adapter 时不需要改路由代码。", id),
+				"模块要求自定义授权 %s。该标识**尚未注册**，装配层会兜底为恒拒绝并打一条"+
+					"错误日志：可编译、可启动，所有请求都被拒绝，不留 TODO、不默许放行。"+
+					"接入真实实现的方式是在 providers.go 的 scaffold:module-authorizers 标记处"+
+					"注册它，路由代码无需改动。", id),
 		}, nil
 	}
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -83,7 +82,6 @@ func TestKeyPrefixReachesTheBackend(t *testing.T) {
 				keyPrefix: tt.prefix,
 				health:    NewHealthState(DefaultHealthPolicy(), nil),
 				observer:  nopObserver{},
-				now:       func() time.Time { return time.Unix(1754000000, 0) },
 			}
 			sha := "sha"
 			backend.sha.Store(&sha)

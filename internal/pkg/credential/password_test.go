@@ -17,7 +17,7 @@ const testCost = bcrypt.MinCost
 func TestHashAndCompare(t *testing.T) {
 	t.Parallel()
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 
 	tests := []struct {
 		name     string
@@ -73,7 +73,7 @@ func TestHashDoesNotContainThePlaintext(t *testing.T) {
 
 	const plaintext = "zq7-distinctive-plaintext-marker-9wx"
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 	hashed, err := h.Hash(plaintext)
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
@@ -90,7 +90,7 @@ func TestHashDoesNotContainThePlaintext(t *testing.T) {
 func TestHashIsSalted(t *testing.T) {
 	t.Parallel()
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 	first, err := h.Hash("same password")
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
@@ -117,7 +117,7 @@ func TestHashIsSalted(t *testing.T) {
 func TestTooLongPasswordIsRejectedOnHash(t *testing.T) {
 	t.Parallel()
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 	_, err := h.Hash(strings.Repeat("a", 73))
 	if !errors.Is(err, ErrPasswordTooLong) {
 		t.Fatalf("Hash of an over-long password = %v, want ErrPasswordTooLong", err)
@@ -131,7 +131,7 @@ func TestTooLongPasswordIsRejectedOnHash(t *testing.T) {
 func TestTooLongPasswordLooksLikeAMismatchOnLogin(t *testing.T) {
 	t.Parallel()
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 	hashed, err := h.Hash("real password")
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
@@ -151,7 +151,7 @@ func TestTooLongPasswordLooksLikeAMismatchOnLogin(t *testing.T) {
 func TestCorruptHashIsNotAMismatch(t *testing.T) {
 	t.Parallel()
 
-	h := NewHasher(testCost)
+	h := mustHasher(t, testCost)
 
 	for _, hashed := range []string{"", "not-a-hash", "$2a$", "$9z$10$" + strings.Repeat("x", 53)} {
 		err := h.Compare(hashed, "whatever")
@@ -173,22 +173,31 @@ func TestCorruptHashIsNotAMismatch(t *testing.T) {
 func TestDummyHashIsRealAndDoesTheWork(t *testing.T) {
 	t.Parallel()
 
-	// bcrypt.Cost 只在输入是合法哈希时成功：它证明这个常量不是随手编的字符串。
-	cost, err := bcrypt.Cost([]byte(dummyHash))
-	if err != nil {
+	h := mustHasher(t, testCost)
+
+	// bcrypt.Cost 只在输入是合法哈希时成功：它证明掩护用的不是随手编的字符串。
+	if _, err := bcrypt.Cost([]byte(h.dummyHash)); err != nil {
 		t.Fatalf("the dummy hash is not a valid bcrypt hash, so comparing against it "+
 			"costs nothing and the timing cover is fake: %v", err)
 	}
-	// 代价过低同样让掩护失效：比对若比真实登录快一个数量级，时间差依然可测。
-	if cost < bcrypt.DefaultCost {
-		t.Errorf("dummy hash cost = %d, want >= %d: a cheap dummy is measurably faster "+
-			"than a real comparison, which is the very signal it exists to hide",
-			cost, bcrypt.DefaultCost)
-	}
-
-	h := NewHasher(testCost)
+	// 代价是否与配置一致由 TestDummyHashCostMatchesConfiguredCost 断言——
+	// 那才是掩护成立的条件，固定下限（如 >= DefaultCost）会在低代价配置下误报。
 	if err := h.CompareWithDummy("anything"); !errors.Is(err, ErrMismatch) {
 		t.Fatalf("CompareWithDummy = %v, want ErrMismatch (it must be indistinguishable "+
 			"from a wrong password)", err)
 	}
+}
+
+// mustHasher 构造 Hasher，构造失败即测试失败。
+//
+// NewHasher 会返回错误：它在构造期按配置代价生成时间掩护用的哈希，
+// 生成不出来就不该产出一个静默失去掩护的 Hasher。
+func mustHasher(t *testing.T, cost int) *Hasher {
+	t.Helper()
+
+	h, err := NewHasher(cost)
+	if err != nil {
+		t.Fatalf("NewHasher(%d): %v", cost, err)
+	}
+	return h
 }

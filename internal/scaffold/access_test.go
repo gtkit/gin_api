@@ -149,3 +149,96 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestGeneratedWiringFillsEveryAccessDependency 钉住注入的 Deps 不含空值字段。
+//
+// 缺陷：注入行此前只填 Service/Auth/RateLimit，而路由模板的 Deps 还声明了
+// OptionalAuth 与 Authorize。于是 `--access=admin/custom` 生成的模块启动即
+// panic（nil 函数调用），`--access=optional` 每请求 500（nil handler 挂进链）——
+// 四种访问策略里只有 authenticated 与 public 真正可用。
+//
+// 两者都能通过编译，因此编译型门禁抓不到；断言注入行本身才抓得到。
+func TestGeneratedWiringFillsEveryAccessDependency(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		access string
+		public bool
+	}{
+		{name: "public", public: true},
+		{name: "authenticated", access: AccessOptionAuthenticated},
+		{name: "optional", access: AccessOptionOptional},
+		{name: "admin", access: AccessOptionAdmin},
+		{name: "custom", access: AccessOptionCustom},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := createProjectFixture(t)
+			generator, err := NewModuleGenerator(root)
+			if err != nil {
+				t.Fatalf("NewModuleGenerator: %v", err)
+			}
+			if _, err := generator.GenerateWithOptions("admin", GenerateOptions{
+				Bootstrap: true, Access: tt.access, Public: tt.public,
+			}); err != nil {
+				t.Fatalf("GenerateWithOptions: %v", err)
+			}
+
+			providers := root + "/internal/bootstrap/providers.go"
+			// 模板 Deps 声明的每个依赖都必须被填上，与所选策略无关：
+			// 留空能编译，却在启动或首个请求上以空值调用崩溃。
+			for _, field := range []string{
+				"Service: svc.admin",
+				"Auth: mw.auth",
+				"OptionalAuth: mw.optionalAuth",
+				"Authorize: mw.authorizeByID",
+				"RateLimit: rateLimitStager",
+			} {
+				assertFileContains(t, providers, field)
+			}
+		})
+	}
+}
+
+// TestAccessChoiceRateLimitScopeMatchesIdentity 钉住限流策略集合随访问策略变化。
+//
+// 没有身份的路由不能引用身份作用域的策略：那类策略取不到主体，中间件把它判为
+// 装配错误并拒绝，于是该路由的每个请求都是 429。模板此前硬编码 default.user，
+// 因此公开/可选认证模块一旦配上该策略就全量瘫痪。
+func TestAccessChoiceRateLimitScopeMatchesIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		access    string
+		public    bool
+		wantsUser bool
+	}{
+		{name: "public 只按来源", public: true, wantsUser: false},
+		{name: "optional 只按来源", access: AccessOptionOptional, wantsUser: false},
+		{name: "authenticated 含身份", access: AccessOptionAuthenticated, wantsUser: true},
+		{name: "admin 含身份", access: AccessOptionAdmin, wantsUser: true},
+		{name: "custom 含身份", access: AccessOptionCustom, wantsUser: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ResolveAccessChoice(tt.access, tt.public, "admin")
+			if err != nil {
+				t.Fatalf("ResolveAccessChoice: %v", err)
+			}
+			hasUser := strings.Contains(got.RateLimitPolicies, "default.user")
+			if hasUser != tt.wantsUser {
+				t.Fatalf("RateLimitPolicies = %q, 含 default.user = %v, want %v",
+					got.RateLimitPolicies, hasUser, tt.wantsUser)
+			}
+			if !strings.Contains(got.RateLimitPolicies, "default.ip") {
+				t.Errorf("RateLimitPolicies = %q, 必须始终包含来源作用域策略",
+					got.RateLimitPolicies)
+			}
+		})
+	}
+}

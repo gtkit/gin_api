@@ -43,8 +43,17 @@ func NewManager(db *gorm.DB) Manager {
 }
 
 // Do 在单个 gorm 事务内执行 fn，并把 tx 注入 ctx，供 repo 经 mdbCtx 自动参与同一事务。
+//
+// ctx 必须绑定到 db 上：GORM 用 Statement.Context 执行 BeginTx，不绑定即为
+// background，于是**事务的建立、提交与回滚都不受调用方超时约束**——而事务内的
+// 查询经 DB(ctx, …) 绑定了 ctx，会按时超时。这种半绑定的故障形态最难查：
+// 连接池耗尽时请求侧超时已经返回，goroutine 仍挂在池上等连接并持续堆积，
+// 而观测上看到的是"超时正常生效"，与真实原因相反。
+//
+// 已知遗留：本方法不感知 ctx 中已有事务，嵌套调用会开出第二个独立事务。
+// 当前无嵌套调用点；要支持嵌套需引入"是否已在事务中"的语义判定，属独立决策。
 func (m Manager) Do(ctx context.Context, fn func(ctx context.Context) error) error {
-	return m.db.Transaction(func(tx *gorm.DB) error {
+	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return fn(With(ctx, tx))
 	})
 }

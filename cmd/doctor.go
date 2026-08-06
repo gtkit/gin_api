@@ -65,9 +65,11 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 			if deep && buildProbes != nil {
 				probes, release, probeErr := buildProbes(cmd.Context())
 				if probeErr != nil {
-					// 连不上正是 deep 检查要报告的结论本身，不该让命令直接崩掉：
-					// 报告里会以 unreachable 呈现，退出码也随之确定。
+					// 连不上正是 deep 检查要报告的结论本身，不该让命令直接崩掉。
+					// 必须显式告知诊断层"探测能力没建起来"：只把 Probes 留空的话，
+					// 它与"没接探针"无法区分，会被记成 skipped 而让退出码变成 0。
 					cmd.PrintErrf("deep probes unavailable: %v\n", probeErr)
+					opts.ProbesUnavailable = true
 				} else {
 					defer release()
 					opts.Probes = probes

@@ -96,8 +96,15 @@ type moduleTemplateData struct {
 	ConfigFieldName string
 	// AccessPolicyExpr 是写进生成代码的访问策略字面量，由 --access/--public 决定。
 	AccessPolicyExpr string
-	Fields           []moduleField
-	NeedsModelTime   bool
+	// RateLimitPolicies 是写进生成代码的限流策略标识列表，随访问策略变化：
+	// 没有身份的路由不能引用身份作用域的策略。
+	RateLimitPolicies string
+	// AuthorizerID 非空时表示本模块的访问策略需要一个具名授权实现。
+	AuthorizerID string
+	// OwnsAuthorizer 为真时需要在 runtime 层生成该授权实现并注册。
+	OwnsAuthorizer bool
+	Fields         []moduleField
+	NeedsModelTime bool
 }
 
 type generatedFile struct {
@@ -145,6 +152,9 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 		return nil, err
 	}
 	data.AccessPolicyExpr = choice.Expr
+	data.RateLimitPolicies = choice.RateLimitPolicies
+	data.AuthorizerID = choice.AuthorizerID
+	data.OwnsAuthorizer = choice.OwnsAuthorizer
 
 	result := &GenerateResult{}
 	result.Notes = append(result.Notes, choice.Note)
@@ -425,8 +435,16 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 	serviceLine := fmt.Sprintf("\tsvc.%s = %s.NewService(inf.mysqlDB, inf.cfg.Modules.%s)\n",
 		data.ServiceVar, data.RuntimeAlias, data.ConfigFieldName)
 	// 模块用 gin 的方式注册：在 RegisterModules 闭包里加一行 Register 调用。
+	//
+	// **四个依赖字段全部填齐**，与所选访问策略无关：模板的 Deps 声明了它们，
+	// 而任一项留空都能通过编译、却在启动或首个请求上以空值调用崩溃，
+	// 崩溃点在业务路由注册处、与真正的原因（接线缺失）相隔很远。
+	// 早先这里只填 Service/Auth/RateLimit，于是 --access=admin/custom 生成的模块
+	// 启动即 panic，--access=optional 每请求 500。
 	moduleLine := fmt.Sprintf(
-		"\t\t%s.Register(v1, %s.Deps{Service: svc.%s, Auth: mw.auth, RateLimit: rateLimitByID})\n",
+		"\t\t%s.Register(v1, %s.Deps{Service: svc.%s, Auth: mw.auth, "+
+			"OptionalAuth: mw.optionalAuth, Authorize: mw.authorizeByID, "+
+			"RateLimit: rateLimitStager})\n",
 		data.HTTPAlias, data.HTTPAlias, data.ServiceVar)
 
 	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := providersMarkers()
@@ -514,7 +532,16 @@ func providersMarkers() (imports, serviceFields, services, modules string) {
 // 但它仍须被生成器认领并校验，否则会退化成无人负责的裸注释——母版的五阶段结构
 // 被破坏时不会有任何信号，违反 scaffold-mother-integrity 的标记完整性要求。
 func providersValidateOnlyMarkers() []string {
-	return []string{"\t// scaffold:module-workers\n"}
+	return []string{
+		"\t// scaffold:module-workers\n",
+		// scaffold:module-authorizers 位于 buildAuthorizers 内，是模块专属授权实现的
+		// 注册锚点。它同样不参与注入：生成器不产出授权实现，未注册的标识由装配层
+		// 兜底为恒拒绝并告警，因此"可启动且不放行"无需注入任何东西即成立。
+		//
+		// 但它必须被认领并校验。此前它既不在注入集也不在校验集里——是一个看起来
+		// 是接线点、实际不参与任何流程的裸注释，而依赖它的功能会静默不生效。
+		"\t// scaffold:module-authorizers\n",
+	}
 }
 
 func (g *ModuleGenerator) writeManagedFile(file generatedFile, content []byte, force, dryRun bool, result *GenerateResult) error {
@@ -1394,8 +1421,10 @@ type Deps struct {
 	OptionalAuth gin.HandlerFunc
 	// Authorize 按 ID 取授权中间件。
 	Authorize func(authorizerID string) gin.HandlerFunc
-	// RateLimit 按策略 ID 取限流中间件；未配置该策略时返回 nil。
-	RateLimit func(policyID string) gin.HandlerFunc
+	// RateLimit 按策略标识取限流中间件，并按作用域分成认证前、认证后两组。
+	//
+	// 模块只声明受哪些策略约束，位置由策略自身的作用域决定。
+	RateLimit func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 }
 
 // Register 在给定路由组上注册本模块的路由。
@@ -1403,32 +1432,41 @@ type Deps struct {
 // 用法就是 gin 的用法：拿 *gin.RouterGroup，用 Group 挂中间件，
 // 用 GET/POST 注册处理函数。
 //
-// **访问控制由代码位置表达**：需要鉴权的路由必须挂上 deps.Auth。漏挂就是
-// 公开接口，而编译与测试都不会有任何异常——新增路由时需要人工确认。
-// 生成的路由默认是公开的，请按实际需要加上 deps.Auth。
+// **访问控制由代码位置表达**：新增路由必须写在 g 里面。写到 g 外面就是公开
+// 接口，而编译与测试都不会有任何异常——新增路由时需要人工确认。
+// 本模块的访问策略在生成时由 --access/--public 选定，已注入到下面的位置。
 func Register(r *gin.RouterGroup, deps Deps) {
 	handler := NewHandler(deps.Service)
 
 	g := r.Group("/{{.RoutePath}}")
 	g.Use(middleware.Timeout({{.ServiceVar}}Deadline, {{.ServiceVar}}WriteGrace))
-	// 默认限流：来源 + 身份两层。策略在 config 的 ratelimit.policies 里定义。
-	useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
+
+	// 限流策略在 config 的 ratelimit.policies 里定义。
+	//
+	// 每条挂在访问策略的哪一侧由它自身的作用域决定，这里只声明受哪些策略约束：
+	// 不需要身份的作用域必须在访问策略之前（它挡的是尚未证明身份的流量），
+	// 需要身份的作用域必须在之后（否则取不到主体，每个请求都被判 429）。
+	preAuth, postAuth := stageRateLimits(deps.RateLimit, {{.RateLimitPolicies}})
+
+	g.Use(preAuth...)
 	{{.AccessPolicyExpr}}
+	g.Use(postAuth...)
 
 	g.GET("", handler.List)
 	g.GET("/:id", handler.Get)
 }
 
-// useRateLimit 按 ID 挂载限流中间件，跳过未配置的策略。
-func useRateLimit(g *gin.RouterGroup, byID func(string) gin.HandlerFunc, ids ...string) {
-	if byID == nil {
-		return
+// stageRateLimits 容错地调用装配层注入的分组函数。
+//
+// 未注入时返回两个空切片：限流策略集合由部署配置决定，一个只跑单机的开发环境
+// 完全可以不配，那时这条路由不限流是预期行为。
+func stageRateLimits(
+	stager func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc), ids ...string,
+) (preAuth, postAuth []gin.HandlerFunc) {
+	if stager == nil {
+		return nil, nil
 	}
-	for _, id := range ids {
-		if mw := byID(id); mw != nil {
-			g.Use(mw)
-		}
-	}
+	return stager(ids...)
 }
 `
 

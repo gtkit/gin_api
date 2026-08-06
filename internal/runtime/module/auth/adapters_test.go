@@ -28,7 +28,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 	t.Parallel()
 
 	// cost 用 bcrypt 的最低值：本测试关心翻译，不关心哈希强度。
-	h := passwordHasher{hasher: credential.NewHasher(4)}
+	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
 
 	hashed, err := h.Hash("correct")
 	if err != nil {
@@ -52,7 +52,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 	t.Parallel()
 
-	h := passwordHasher{hasher: credential.NewHasher(4)}
+	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
 
 	long := make([]byte, 100)
 	for i := range long {
@@ -69,7 +69,7 @@ func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 	t.Parallel()
 
-	h := passwordHasher{hasher: credential.NewHasher(4)}
+	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
 	if err := h.CompareWithDummy("anything"); !errors.Is(err, authapp.ErrInvalidCredentials) {
 		t.Fatalf("CompareWithDummy = %v, want authapp.ErrInvalidCredentials "+
 			"(it must be indistinguishable from a wrong password)", err)
@@ -276,4 +276,17 @@ type stubIssuer struct{}
 
 func (stubIssuer) Issue(context.Context, int64, ...string) (string, error) {
 	return "access", nil
+}
+
+// mustCredentialHasher 构造 credential.Hasher，构造失败即测试失败。
+//
+// NewHasher 在构造期按代价生成时间掩护用的哈希，生成不出来就不产出 Hasher。
+func mustCredentialHasher(t *testing.T, cost int) *credential.Hasher {
+	t.Helper()
+
+	h, err := credential.NewHasher(cost)
+	if err != nil {
+		t.Fatalf("credential.NewHasher(%d): %v", cost, err)
+	}
+	return h
 }

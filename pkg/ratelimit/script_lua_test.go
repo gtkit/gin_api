@@ -1,0 +1,141 @@
+package ratelimit
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+)
+
+// 本文件用 miniredis **真实执行** Lua 脚本。
+//
+// 此前 pkg/ratelimit 的 Redis 测试用的是不解释 Lua 的假客户端，于是脚本内的
+// 逻辑零覆盖——而恰恰是脚本里的一条守卫把"正常空闲"误判成了时钟故障，
+// 这个缺陷因此长期存活。判定逻辑住在脚本里，测试就必须执行脚本。
+
+// luaBase 是存储时钟的固定起点，使各用例的时间推进确定可复现。
+var luaBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// newLuaBackend 造一个跑真实 Lua 的 backend，并把存储时钟钉在 luaBase。
+func newLuaBackend(t *testing.T) (*RedisBackend, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	mr.SetTime(luaBase)
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	backend, err := NewRedisBackend(context.Background(), client, WithKeyPrefix("lua"))
+	if err != nil {
+		t.Fatalf("NewRedisBackend: %v", err)
+	}
+	return backend, mr
+}
+
+// advanceStore 把存储时钟往前推 d。
+//
+// 只需推这一个钟：判定的时间基准现在完全取自 Redis，调用方不再供时。
+func advanceStore(mr *miniredis.Miniredis, d time.Duration) {
+	mr.SetTime(luaBase.Add(d))
+}
+
+func luaTestPolicy() Policy {
+	return Policy{
+		ID:    "lua.test",
+		Scope: ScopeIP,
+		Rate:  10,
+		Burst: 2,
+	}
+}
+
+// TestLuaLongIdleIsNotAFault 钉住长时间空闲后按正常请求处理。
+//
+// 缺陷：守卫写的是 `now_ms > last_ms + max_skew_ms`，而 last_ms 是**上一次
+// 请求**写入的时间戳、上限只有 5 秒、键 TTL 却是补满时间 +60 秒。于是任何
+// 间隔超过 5 秒的正常请求都被判成时钟故障——fail_open 下限流被绕过，
+// fail_closed 下持续 429 且不写回状态，客户端重试到键过期为止。
+//
+// 同一份脚本里第 64-69 行专门写了"一段很长的空闲之后"的截断逻辑，
+// 却因为守卫先返回而永远不可达：两段代码互相矛盾。
+func TestLuaLongIdleIsNotAFault(t *testing.T) {
+	backend, mr := newLuaBackend(t)
+	policy := luaTestPolicy()
+	ctx := context.Background()
+
+	// 先打一次，把状态写进去（此后 last_ms 就是"上一次请求时刻"）。
+	if _, err := backend.check(ctx, policy, "idle-key"); err != nil {
+		t.Fatalf("首次请求: %v", err)
+	}
+
+	// 让存储时钟前进到远超任何漂移上限之后再打一次。
+	advanceStore(mr, 10*time.Minute)
+
+	decision, err := backend.check(ctx, policy, "idle-key")
+	if err != nil {
+		t.Fatalf("长时间空闲后的请求被判为故障: %v（空闲不是时钟异常）", err)
+	}
+	if decision.Outcome != OutcomeAllowed {
+		t.Fatalf("Outcome = %v, want %v：空闲后令牌应已补满", decision.Outcome, OutcomeAllowed)
+	}
+}
+
+// TestLuaRejectsWhenBurstExhausted 回归保护：正常限流仍然生效。
+//
+// 时间基准换成存储时钟之后，"超出突发即拒绝"必须不变——否则上一条用例
+// 可以靠"永远放行"通过。
+func TestLuaRejectsWhenBurstExhausted(t *testing.T) {
+	backend, _ := newLuaBackend(t)
+	policy := luaTestPolicy() // Burst = 2
+	ctx := context.Background()
+
+	for i := range policy.Burst {
+		decision, err := backend.check(ctx, policy, "burst-key")
+		if err != nil {
+			t.Fatalf("第 %d 次请求: %v", i+1, err)
+		}
+		if decision.Outcome != OutcomeAllowed {
+			t.Fatalf("第 %d 次请求 Outcome = %v, want %v", i+1, decision.Outcome, OutcomeAllowed)
+		}
+	}
+
+	decision, err := backend.check(ctx, policy, "burst-key")
+	if err != nil {
+		t.Fatalf("超额请求返回错误: %v", err)
+	}
+	if decision.Outcome != OutcomeRateLimited {
+		t.Fatalf("Outcome = %v, want %v：突发耗尽后应当拒绝", decision.Outcome, OutcomeRateLimited)
+	}
+	if decision.RetryAfter <= 0 {
+		t.Error("被拒绝时 RetryAfter 应为正值")
+	}
+}
+
+// TestLuaRefillsOverTime 钉住令牌按存储时钟补充。
+func TestLuaRefillsOverTime(t *testing.T) {
+	backend, mr := newLuaBackend(t)
+	policy := luaTestPolicy() // Rate = 10/s，Burst = 2
+	ctx := context.Background()
+
+	for range policy.Burst {
+		if _, err := backend.check(ctx, policy, "refill-key"); err != nil {
+			t.Fatalf("预热请求: %v", err)
+		}
+	}
+	if d, _ := backend.check(ctx, policy, "refill-key"); d.Outcome != OutcomeRateLimited {
+		t.Fatalf("预热后应处于限流状态，实际 %v", d.Outcome)
+	}
+
+	// 10/s 下 200ms 足够补出 1 个令牌。
+	advanceStore(mr, 200*time.Millisecond)
+
+	decision, err := backend.check(ctx, policy, "refill-key")
+	if err != nil {
+		t.Fatalf("补充后请求: %v", err)
+	}
+	if decision.Outcome != OutcomeAllowed {
+		t.Fatalf("Outcome = %v, want %v：等待之后应当补出令牌", decision.Outcome, OutcomeAllowed)
+	}
+}

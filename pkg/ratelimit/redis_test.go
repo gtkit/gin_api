@@ -196,53 +196,6 @@ func TestRedisBackendRetriesOnNoScript(t *testing.T) {
 	}
 }
 
-// TestRedisBackendClockSkewIsAFaultNotAClamp 钉住时钟漂移的处置。
-//
-// v9 的做法是"钳制到上限再继续算"——那本身就是绕过：每个请求都把虚拟时间
-// 往前推一个上限，于是每个请求都白得 `上限 × rate` 个 token，限流完全失效。
-// 定稿是：漂移超限 = 故障态，不推进不写回，按 FailureMode 处理。
-func TestRedisBackendClockSkewIsAFaultNotAClamp(t *testing.T) {
-	t.Parallel()
-
-	fake := &fakeRedis{}
-	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
-	if err != nil {
-		t.Fatalf("NewRedisBackend: %v", err)
-	}
-
-	// 让后续调用一律返回"漂移超限"。
-	fake.mu.Lock()
-	fake.evalResults = []any{
-		[]any{int64(statusAllowed), int64(4_000_000), int64(0)}, // probe
-		[]any{int64(statusClockSkew), int64(0), int64(0)},
-	}
-	fake.mu.Unlock()
-
-	policy := redisTestPolicy()
-	limiter, err := NewRedisLimiter(backend, policy)
-	if err != nil {
-		t.Fatalf("NewRedisLimiter: %v", err)
-	}
-
-	decision, err := limiter.Check(context.Background(), "k")
-	if !errors.Is(err, ErrClockSkew) {
-		t.Fatalf("error = %v, want ErrClockSkew", err)
-	}
-	// FailureClosed → 拒绝。
-	if decision.Allowed() {
-		t.Fatal("a clock-skew fault was allowed under fail_closed")
-	}
-	if !decision.Degraded {
-		t.Fatal("the decision is not marked as degraded")
-	}
-
-	// **漂移不得把 backend 拖进 Degraded**：那不是 Redis 的错，
-	// 否则一次 NTP 抖动会让整条限流链路切到降级路径。
-	if got := backend.Health().Phase(); got != PhaseHealthy {
-		t.Fatalf("backend phase = %s after clock skew, want healthy", got)
-	}
-}
-
 // TestRedisLimiterFailureModes 验证后端故障时三种模式的最终判定。
 func TestRedisLimiterFailureModes(t *testing.T) {
 	t.Parallel()

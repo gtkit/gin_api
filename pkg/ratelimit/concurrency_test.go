@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -49,7 +48,6 @@ func TestConcurrentScriptReloadIsRaceFree(t *testing.T) {
 		client:   alwaysNoScript{},
 		health:   NewHealthState(DefaultHealthPolicy(), nil),
 		observer: nopObserver{},
-		now:      func() time.Time { return time.Unix(1754000000, 0) },
 	}
 	initial := "initial-sha"
 	backend.sha.Store(&initial)

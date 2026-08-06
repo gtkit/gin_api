@@ -117,6 +117,16 @@ type Options struct {
 	Timeout time.Duration
 	// Probes 提供 deep 检查的执行体；为 nil 时 deep 检查记为 skipped。
 	Probes Probes
+	// ProbesUnavailable 表示 deep 检查的探测能力**建立失败**（如数据库连不上
+	// 导致运行时起不来），与"没有注入探针"区分开。
+	//
+	// 两者都表现为 Probes 为空，但结论相反：没注入是装配选择，记 skipped 正确；
+	// 建立失败恰恰是 deep 检查要报告的结论本身，必须记为失败，否则退出码为 0，
+	// 而运维脚本按退出码判定，会把一台连不上依赖的机器判成全通。
+	//
+	// 用 bool 而不是 error：构建错误常带完整 DSN（含用户名，有时含密码），
+	// 而报告是会被贴进工单的。原始错误由命令层打到 stderr，不进结构化报告。
+	ProbesUnavailable bool
 }
 
 // Probes 是 deep 检查需要的真实 I/O 能力，由调用方注入。
@@ -372,6 +382,19 @@ func checkProbe(ctx context.Context, opts Options, probe func(context.Context) e
 		return CheckResult{Status: StatusSkipped, ErrorCode: CodeNotRequestedDeep, Detail: "requires --deep"}
 	}
 	if probe == nil {
+		// 探测能力建立失败与"没接探针"必须区分：前者是 deep 检查要报告的结论本身。
+		// 记成 skipped 会让退出码为 0，而使用者加 --deep 要的正是连通性结论。
+		if opts.ProbesUnavailable {
+			status := StatusDegraded
+			if required {
+				status = StatusFail
+			}
+			// 不回显构建错误：它常带完整 DSN。原因由命令层打到 stderr。
+			return CheckResult{
+				Status: status, ErrorCode: CodeUnreachable,
+				Detail: "probe capability could not be established; see stderr for the reason",
+			}
+		}
 		return CheckResult{Status: StatusSkipped, ErrorCode: CodeCapabilityOff, Detail: "no probe wired"}
 	}
 

@@ -29,8 +29,11 @@ type Deps struct {
 	// 模块不自己构造它：认证依赖 token parser 与用户校验器，那些是进程级
 	// 资源，让每个模块各建一份会产生多份缓存与多份配置。
 	Auth gin.HandlerFunc
-	// RateLimit 按策略 ID 取限流中间件；未配置该策略时返回 nil。
-	RateLimit func(policyID string) gin.HandlerFunc
+	// RateLimit 按策略标识取限流中间件，并按作用域分成认证前、认证后两组。
+	//
+	// 模块只声明受哪些策略约束，不决定每条挂在认证的哪一侧——那个位置由策略
+	// 自身的作用域决定，推导逻辑收口在装配层的唯一一处。
+	RateLimit func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 }
 
 // Register 在给定路由组上注册 user 模块的路由。
@@ -46,30 +49,36 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 	g := r.Group("/user")
 	g.Use(middleware.Timeout(userDeadline, userWriteGrace))
+
 	// 默认限流：来源 + 身份两层。
 	//
 	// **两层都要**：只限身份时，一个来源可以用大量账号并发打满；
 	// 只限来源时，就失去了按账号的精确限额。
-	useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
+	//
+	// 两条策略挂在认证的哪一侧由它们各自的作用域决定，这里只声明受哪些策略约束。
+	preAuth, postAuth := stageRateLimits(deps.RateLimit, "default.ip", "default.user")
+
+	// 顺序是契约：来源限流挡的是尚未证明身份的流量，必须在认证之前；
+	// 身份限流拿不到身份就退化成"每个请求都被拒"，必须在认证之后。
+	g.Use(preAuth...)
 	// 三条路由都要求已认证身份。
 	g.Use(deps.Auth)
+	g.Use(postAuth...)
 
 	g.GET("", handler.Get)
 	g.PUT("", middleware.JSONBody(0), handler.Update)
 	g.POST("/deactivate", middleware.JSONBody(0), handler.Deactivate)
 }
 
-// useRateLimit 按 ID 挂载限流中间件，跳过未配置的策略。
+// stageRateLimits 容错地调用装配层注入的分组函数。
 //
-// 跳过而不是报错：限流策略集合由部署配置决定，一个只跑单机的开发环境
-// 完全可以不配 redis 策略，那时这条路由不限流是预期行为。
-func useRateLimit(g *gin.RouterGroup, byID func(string) gin.HandlerFunc, ids ...string) {
-	if byID == nil {
-		return
+// 未注入时返回两个空切片：限流策略集合由部署配置决定，一个只跑单机的开发环境
+// 完全可以不配，那时这条路由不限流是预期行为。
+func stageRateLimits(
+	stager func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc), ids ...string,
+) (preAuth, postAuth []gin.HandlerFunc) {
+	if stager == nil {
+		return nil, nil
 	}
-	for _, id := range ids {
-		if mw := byID(id); mw != nil {
-			g.Use(mw)
-		}
-	}
+	return stager(ids...)
 }

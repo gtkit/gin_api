@@ -229,20 +229,44 @@ func allowedMethodsOf(engine *gin.Engine) middleware.AllowedMethodsFunc {
 	}
 }
 
-// RateLimitByID 返回一个按策略 ID 取限流中间件的函数，供模块注册时使用。
+// RateLimitStager 按策略标识取限流中间件，并**按作用域**分成认证前、认证后两组。
 //
-// 找不到策略时返回 nil，调用方跳过——限流策略集合由部署配置决定，
-// 一个只跑单机的开发环境完全可以不配某条策略。
-func RateLimitByID(opt Options) func(string) gin.HandlerFunc {
+// 模块只声明"这条路由受哪些策略约束"，不决定每条挂在认证之前还是之后。
+type RateLimitStager func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+
+// NewRateLimitStager 构造分组函数。
+//
+// 阶段由 Policy.Scope 推导，模块不参与：不需要身份的作用域（IP/全局）必须排在
+// 认证**之前**——它挡的是"还没证明自己是谁"的流量，排在认证之后等于让每个被限流
+// 的请求先完成一次完整的令牌校验，而那正是攻击者想消耗的资源；需要身份的作用域
+// 必须排在认证**之后**，否则取不到身份，中间件把"取不到主体"判为装配错误并拒绝，
+// 于是该路由的每个请求都是 429。
+//
+// 为什么不让模块自己分组：那会多出一处可能与作用域矛盾的信息，而矛盾时以哪边
+// 为准没有好答案。更糟的是这段推导若在每个模块各存一份，每份都能独立写错，
+// 而代码生成器会把其中一份复制给所有新模块——一次写错因此会扩散。
+//
+// 找不到策略时跳过：策略集合由部署配置决定，一个只跑单机的开发环境完全可以不配。
+// 未接限流注册表时返回的函数恒返回两个空切片，调用方无需判空。
+func NewRateLimitStager(opt Options) RateLimitStager {
 	if opt.RateLimits == nil || opt.RateLimitKeys == nil {
-		return nil
+		return func(...string) (preAuth, postAuth []gin.HandlerFunc) { return nil, nil }
 	}
-	return func(id string) gin.HandlerFunc {
-		limiter, ok := opt.RateLimits.Lookup(id)
-		if !ok {
-			return nil
+
+	return func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc) {
+		for _, id := range policyIDs {
+			limiter, ok := opt.RateLimits.Lookup(id)
+			if !ok {
+				continue
+			}
+			mw := middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics)
+			if limiter.Policy().Scope == ratelimit.ScopeUser {
+				postAuth = append(postAuth, mw)
+				continue
+			}
+			preAuth = append(preAuth, mw)
 		}
-		return middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics)
+		return preAuth, postAuth
 	}
 }
 

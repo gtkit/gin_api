@@ -26,6 +26,9 @@ go run . project init --name your-project             # 执行
 
 2. 填写 MySQL、Redis、JWT 等本机配置。
 
+   Redis 需 5.0 及以上：分布式限流的 Lua 脚本用 `TIME` 取时间基准，
+   该调用要求 effect replication（Redis 5.0 起为默认）。
+
    其中 `auth.mode` **没有默认值，必须显式选择**：
 
    - `local` —— 本服务保管用户凭据，开箱提供注册/登录/刷新/登出端点

@@ -95,9 +95,12 @@ func TestCredentialAndTokenEndpointsUseDifferentLimits(t *testing.T) {
 	engine := gin.New()
 	Register(engine.Group("/api/v1"), Deps{
 		Auth: passthrough(),
-		RateLimit: func(id string) gin.HandlerFunc {
-			requested[id] = true
-			return passthrough()
+		RateLimit: func(ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+			for _, id := range ids {
+				requested[id] = true
+				preAuth = append(preAuth, passthrough())
+			}
+			return preAuth, nil
 		},
 	})
 

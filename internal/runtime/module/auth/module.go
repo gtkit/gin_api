@@ -82,9 +82,16 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: build revocation list: %w", err)
 	}
 
+	// 构造期即生成时间掩护用的哈希，失败即装配失败：一个无法提供等价耗时掩护的
+	// Hasher 会让账号存在性经时间信道泄漏，而那不会有任何运行期信号。
+	hasher, err := credential.NewHasher(deps.Config.EffectiveBcryptCost())
+	if err != nil {
+		return Assembly{}, fmt.Errorf("auth: build password hasher: %w", err)
+	}
+
 	service, err := authapp.NewService(authapp.Options{
 		Credentials:    credentialRepo{repo: authcredential.New(deps.DB)},
-		Hasher:         passwordHasher{hasher: credential.NewHasher(deps.Config.EffectiveBcryptCost())},
+		Hasher:         passwordHasher{hasher: hasher},
 		AccessIssuer:   deps.Issuer,
 		RefreshStore:   refreshStore{store: refresh},
 		RevocationList: revocationList{list: revocation},
