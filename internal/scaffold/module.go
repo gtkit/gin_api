@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/format"
 	"os"
@@ -166,13 +167,17 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 	}
 	files = append(files, migrationFiles...)
 
+	// 两阶段生成：先完成全部渲染与预检（含所有锚点存在性），只暂存不落盘；
+	// 预检全部通过后统一提交。任何一步失败时工作区保持原样（零落盘）。
+	var plan []pendingWrite
+
 	for _, file := range files {
 		content, err := renderTemplate(file.template, data, file.formatGo)
 		if err != nil {
 			return nil, fmt.Errorf("render %s: %w", g.rel(file.path), err)
 		}
 
-		if err := g.writeManagedFile(file, content, opts.Force, opts.DryRun, result); err != nil {
+		if err := g.writeManagedFile(file, content, opts.Force, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
 	}
@@ -180,15 +185,22 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 	if opts.Bootstrap {
 		// 配置注册先于 providers：providers 的 service 构造行引用
 		// inf.cfg.Modules.<Name>，那个字段必须已经存在。
-		if err := g.updateModuleConfigs(data, opts.DryRun, result); err != nil {
+		if err := g.updateModuleConfigs(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
-		if err := g.updateConfigExample(data, opts.DryRun, result); err != nil {
+		if err := g.updateConfigExample(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
-		if err := g.updateProviders(data, opts.DryRun, result); err != nil {
+		if err := g.updateProviders(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
+	}
+
+	if opts.DryRun {
+		return result, nil
+	}
+	if err := commitWrites(plan); err != nil {
+		return nil, fmt.Errorf("commit generated files: %w", err)
 	}
 
 	return result, nil
@@ -201,7 +213,7 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 //     进程直接启动失败；
 //   - 校验器进 validateModuleConfigs —— 严格解码只保证"字段名认识"，
 //     不保证取值有意义，缺了它 `page_size: -1` 会一路带到运行期。
-func (g *ModuleGenerator) updateModuleConfigs(data moduleTemplateData, dryRun bool, result *GenerateResult) error {
+func (g *ModuleGenerator) updateModuleConfigs(data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
 	path := filepath.Join(g.root, "internal", "platform", "config", "modules.go")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -237,9 +249,7 @@ func (g *ModuleGenerator) updateModuleConfigs(data moduleTemplateData, dryRun bo
 	if err != nil {
 		return fmt.Errorf("format %s: %w", g.rel(path), err)
 	}
-	if err := os.WriteFile(path, formatted, 0o644); err != nil { //nolint:gosec // generated Go source files are expected to be user-readable.
-		return fmt.Errorf("write %s: %w", g.rel(path), err)
-	}
+	*plan = append(*plan, pendingWrite{path: path, content: formatted, existed: true, original: content})
 
 	result.Updated = append(result.Updated, g.rel(path))
 	return nil
@@ -258,7 +268,7 @@ const configExampleMarker = "  # scaffold:module-config-example\n"
 //
 // 示例必须与字段同批产出：模板是使用者唯一的配置参照，一个存在于代码里
 // 却不在模板里的配置项，等于没人知道它可以配。
-func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bool, result *GenerateResult) error {
+func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
 	path := filepath.Join(g.root, "config", "env.yml.example")
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -266,9 +276,8 @@ func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bo
 	}
 
 	block := fmt.Sprintf(
-		"  %s:\n    enabled: false                 # 是否启用 %s 模块的可选能力\n"+
-			"    page_size: 20                  # 列表默认分页大小；<=0 时兜底 20，上界由代码固定\n",
-		data.PackageName, data.PackageName)
+		"  %s:\n    page_size: 20                  # 列表默认分页大小；<=0 时兜底 20，上界由代码固定\n",
+		data.PackageName)
 
 	updated, changed, err := ensureLineBefore(string(content), block, configExampleMarker)
 	if err != nil {
@@ -282,9 +291,7 @@ func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bo
 		result.Updated = append(result.Updated, g.rel(path))
 		return nil
 	}
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil { //nolint:gosec // config template is expected to be user-readable.
-		return fmt.Errorf("write %s: %w", g.rel(path), err)
-	}
+	*plan = append(*plan, pendingWrite{path: path, content: []byte(updated), existed: true, original: content})
 
 	result.Updated = append(result.Updated, g.rel(path))
 	return nil
@@ -411,7 +418,7 @@ func (g *ModuleGenerator) generatedMigrationFiles(data moduleTemplateData) ([]ge
 	}, nil
 }
 
-func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, result *GenerateResult) error {
+func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
 	providersPath := filepath.Join(g.root, "internal", "bootstrap", "providers.go")
 	content, err := os.ReadFile(providersPath)
 	if err != nil {
@@ -501,10 +508,7 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 	if err != nil {
 		return fmt.Errorf("format %s: %w", g.rel(providersPath), err)
 	}
-
-	if err := os.WriteFile(providersPath, formatted, 0o644); err != nil { //nolint:gosec // generated Go source files are expected to be user-readable.
-		return fmt.Errorf("write %s: %w", g.rel(providersPath), err)
-	}
+	*plan = append(*plan, pendingWrite{path: providersPath, content: formatted, existed: true, original: content})
 
 	result.Updated = append(result.Updated, g.rel(providersPath))
 	return nil
@@ -544,7 +548,7 @@ func providersValidateOnlyMarkers() []string {
 	}
 }
 
-func (g *ModuleGenerator) writeManagedFile(file generatedFile, content []byte, force, dryRun bool, result *GenerateResult) error {
+func (g *ModuleGenerator) writeManagedFile(file generatedFile, content []byte, force, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
 	relPath := g.rel(file.path)
 	existing, err := os.ReadFile(file.path)
 	if err == nil {
@@ -567,20 +571,98 @@ func (g *ModuleGenerator) writeManagedFile(file generatedFile, content []byte, f
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(file.path), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(relPath), err)
-	}
-	if err := os.WriteFile(file.path, content, 0o644); err != nil { //nolint:gosec // generated project files are expected to be user-readable.
-		return fmt.Errorf("write %s: %w", relPath, err)
-	}
+	// 只暂存不落盘：全部预检通过后由 commitWrites 统一写入（要么全部、要么零落盘）。
+	existed := err == nil
+	*plan = append(*plan, pendingWrite{path: file.path, content: content, existed: existed, original: existing})
 
-	if err == nil {
+	if existed {
 		result.Updated = append(result.Updated, relPath)
 		return nil
 	}
 
 	result.Created = append(result.Created, relPath)
 	return nil
+}
+
+// pendingWrite 是一次待提交的文件写入，携带恢复所需的原始状态。
+type pendingWrite struct {
+	path    string
+	content []byte
+	// existed 为真时 original 是提交前的文件内容，恢复时写回；
+	// 为假时该文件是本次新建，恢复时删除。
+	existed  bool
+	original []byte
+}
+
+// writeGeneratedFile 是提交阶段的写入缝，测试用它注入写入失败。
+var writeGeneratedFile = os.WriteFile
+
+// commitWrites 统一落盘全部暂存写入；任一失败时逆序恢复本次已写入的文件与
+// 新建的目录，主错误在前、恢复错误聚合在后。
+func commitWrites(plan []pendingWrite) error {
+	written := make([]pendingWrite, 0, len(plan))
+	var createdDirs []string
+	for _, w := range plan {
+		dir := filepath.Dir(w.path)
+		// 在 MkdirAll 之前记录将要新建的最外层目录：恢复必须把工作区还原到
+		// 生成之前的样子，残留的空目录树同样是"失败留下的痕迹"。
+		if root := firstMissingAncestor(dir); root != "" {
+			createdDirs = append(createdDirs, root)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return errors.Join(
+				fmt.Errorf("mkdir %s: %w", dir, err), rollbackWrites(written, createdDirs))
+		}
+		if err := writeGeneratedFile(w.path, w.content, 0o644); err != nil {
+			return errors.Join(
+				fmt.Errorf("write %s: %w", w.path, err), rollbackWrites(written, createdDirs))
+		}
+		written = append(written, w)
+	}
+	return nil
+}
+
+// firstMissingAncestor 返回为创建 dir 而将要新建的最外层目录；dir 已存在时返回空串。
+func firstMissingAncestor(dir string) string {
+	if _, err := os.Stat(dir); err == nil {
+		return ""
+	}
+	missing := dir
+	for {
+		parent := filepath.Dir(missing)
+		if parent == missing {
+			return missing
+		}
+		if _, err := os.Stat(parent); err == nil {
+			return missing
+		}
+		missing = parent
+	}
+}
+
+// rollbackWrites 逆序恢复已写文件（更新的写回原内容，新建的删除），
+// 再移除本次新建的目录树。新建目录下只可能有本次的产物——已存在文件的
+// 更新发生在既有目录里，因此 RemoveAll 不会波及任何既有内容。
+func rollbackWrites(written []pendingWrite, createdDirs []string) error {
+	var errs []error
+	for i := len(written) - 1; i >= 0; i-- {
+		w := written[i]
+		if w.existed {
+			if err := os.WriteFile(w.path, w.original, 0o644); err != nil { //nolint:gosec // 恢复的是使用者可读的项目文件
+				errs = append(errs, fmt.Errorf("restore %s: %w", w.path, err))
+			}
+			continue
+		}
+		if err := os.Remove(w.path); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", w.path, err))
+		}
+	}
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := os.RemoveAll(createdDirs[i]); err != nil {
+			errs = append(errs, fmt.Errorf("remove created dir %s: %w", createdDirs[i], err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (g *ModuleGenerator) rel(path string) string {
@@ -897,8 +979,6 @@ import "fmt"
 // 同步在 validate{{.ConfigTypeName}} 里给出它的语义约束（严格解码只保证
 // 字段名认识，不保证取值有意义），并在 config/env.yml.example 里给出示例。
 type {{.ConfigTypeName}} struct {
-	// Enabled 控制该模块的可选能力是否启用。
-	Enabled bool ` + "`" + `mapstructure:"enabled"` + "`" + `
 	// PageSize 是列表接口的默认分页大小。
 	PageSize int ` + "`" + `mapstructure:"page_size"` + "`" + `
 }

@@ -37,10 +37,10 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 			"Supported field types: string, bool, int/int8/int16/int32/int64, uint/uint8/uint16/uint32/uint64,\n" +
 			"float32, float64, time.Time, *time.Time.",
 		Example: "" +
-			"  " + appmeta.CommandName + " module admin\n" +
-			"  " + appmeta.CommandName + " module staff --field nickname:string --field status:uint8\n" +
-			"  " + appmeta.CommandName + " module article_tag --field title:string --field sort:int --field enabled:bool\n" +
-			"  " + appmeta.CommandName + " module draft_feature --no-bootstrap --dry-run",
+			"  " + appmeta.CommandName + " module admin --access authenticated\n" +
+			"  " + appmeta.CommandName + " module staff --field nickname:string --field status:uint8 --access admin\n" +
+			"  " + appmeta.CommandName + " module article_tag --field title:string --field sort:int --field enabled:bool --public\n" +
+			"  " + appmeta.CommandName + " module draft_feature --no-bootstrap --dry-run --access optional",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			generator, err := scaffold.NewModuleGenerator("")
