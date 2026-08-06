@@ -87,3 +87,24 @@ func (c UserModuleConfig) Validate() []error {
 
 	return errs
 }
+
+// RetentionWarnings 返回未设置保留期的个人信息表清单。
+//
+// 只提示不阻断：保留期是使用方按司法辖区决定的事实，母版无从判断，
+// 也不该因为它没决定而拒绝启动。一份无人清理、越积越多的个人信息档案，
+// 出问题时才被发现的代价最高，而它恰恰是最容易被忽略的。
+func (c *Config) RetentionWarnings() []string {
+	if c == nil {
+		return nil
+	}
+
+	var warnings []string
+	if !c.Modules.User.RetentionEnabled() {
+		warnings = append(warnings,
+			"modules.user.deactivation_retention_days is 0: deactivation records keep the "+
+				"user's phone, email, nickname and source IP indefinitely, and no cleanup task "+
+				"is registered. Set a retention window that matches your jurisdiction, or make "+
+				"sure an external process purges the table.")
+	}
+	return warnings
+}

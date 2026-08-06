@@ -27,7 +27,7 @@ var _ newslib.AppNewser = (*fakeAppNewser)(nil)
 // 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
 // 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
 func newTestNotifier(url, env, now string, sender func(string, ...string) error, errLogger func(string)) *Notifier {
-	n := NewWithConfig(nil)
+	n, _ := NewWithConfig(nil) // nil 配置不启用任何通道，构造不可能失败
 	n.defaultURL = url
 	n.envName = env
 	n.now = func() string { return now }

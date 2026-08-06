@@ -1,6 +1,6 @@
 module github.com/gtkit/gin-api
 
-go 1.26
+go 1.26.4
 
 require (
 	github.com/gin-gonic/gin v1.12.0
@@ -25,7 +25,10 @@ require (
 	github.com/gtkit/news v1.1.10
 	github.com/gtkit/ormx v1.5.0
 	github.com/gtkit/redisx v1.3.0
+	github.com/gtkit/smsx v1.4.3
+	github.com/gtkit/smsx/providers/aliyun v0.0.0-20260418190407-648277873486
 	github.com/gtkit/stringx v1.1.6
+	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
 	github.com/knadh/koanf/parsers/yaml v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
@@ -54,6 +57,14 @@ require (
 )
 
 require (
+	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5 // indirect
+	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.16 // indirect
+	github.com/alibabacloud-go/debug v1.0.1 // indirect
+	github.com/alibabacloud-go/dysmsapi-20170525/v5 v5.5.1 // indirect
+	github.com/alibabacloud-go/tea v1.4.0 // indirect
+	github.com/alibabacloud-go/tea-utils/v2 v2.0.7 // indirect
+	github.com/aliyun/credentials-go v1.4.5 // indirect
+	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -65,6 +76,8 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
+	github.com/tjfoc/gmsm v1.4.1 // indirect
+	github.com/wneessen/go-mail v0.8.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
@@ -72,6 +85,7 @@ require (
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260708182218-49f421fb7959 // indirect
 	golang.org/x/vuln v1.6.0 // indirect
+	gopkg.in/ini.v1 v1.67.0 // indirect
 )
 
 require (
@@ -110,3 +124,5 @@ require (
 )
 
 tool golang.org/x/vuln/cmd/govulncheck
+
+replace github.com/gtkit/smsx v1.4.3 => github.com/gtkit/smsx v1.0.0

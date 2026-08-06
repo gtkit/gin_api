@@ -40,7 +40,9 @@ func NewMigrationRuntime(ctx context.Context) (*MigrationRuntime, error) {
 	}
 
 	applyRuntimeTimezone(cfg)
-	initLogWithConfig(cfg)
+	if err := initLogWithConfig(cfg); err != nil {
+		return nil, fmt.Errorf("init logging: %w", err)
+	}
 
 	openCtx, cancel := context.WithTimeout(ctx, defaultMigrationStartupTimeout)
 	defer cancel()

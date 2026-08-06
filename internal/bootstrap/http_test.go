@@ -45,33 +45,10 @@ func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 // 旧实现按 LLM 配置抬高全局值：流式因此能跑，代价是所有非流式路由
 // 同时失去写超时保护，而这个副作用在配置里完全看不出来。
 func TestServerWriteTimeoutIsAlwaysZero(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  *config.Config
-	}{
-		{
-			name: "no llm providers",
-			cfg: &config.Config{
-				App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
-			},
-		},
-		{
-			name: "llm providers configured",
-			cfg: &config.Config{
-				App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
-				LLM: config.LLMConfig{
-					Providers:      []config.LLMProviderConfig{{Name: "deepseek", APIKey: "k"}},
-					TimeoutSeconds: 600,
-				},
-			},
-		},
+	cfg := &config.Config{
+		App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := newHTTPConfig(tc.cfg).WriteTimeout; got != 0 {
-				t.Fatalf("WriteTimeout = %s, want 0: the server must not impose an implicit ceiling", got)
-			}
-		})
+	if got := newHTTPConfig(cfg).WriteTimeout; got != 0 {
+		t.Fatalf("WriteTimeout = %s, want 0: the server must not impose an implicit ceiling", got)
 	}
 }

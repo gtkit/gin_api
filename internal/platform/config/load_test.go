@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -37,39 +38,24 @@ database:
   maxopenconn: 25
   maxidleconn: 10
   maxlifeseconds: 1800
+email:
+  host: smtp.example.com
+  port: 587
+  user: mailer
+  pass: secret
+  from: noreply@example.com
+  from_name: gin-api
+  alert_to: ["ops@example.com"]
 sms:
-  enabled: true
-pay:
-  wechat:
-    enabled: true
-    app_id: wx-app-id
-    mch_id: mch-id
-    mch_cert_serial_number: cert-serial
-    mch_apiv3_key: apiv3-key
-    mch_private_key_pem: |
-      -----BEGIN PRIVATE KEY-----
-      test
-      -----END PRIVATE KEY-----
-    wechatpay_certificate_pem: |
-      -----BEGIN CERTIFICATE-----
-      test
-      -----END CERTIFICATE-----
-  alipay:
-    enabled: true
-    app_id: alipay-app-id
-    private_key: test-private-key
-    alipay_public_key: test-public-key
-    is_production: false
-aliyun:
-  sms_access_id: access-id
-  sms_access_secret: access-secret
-  sms_sign_name: sign-name
-  sms_template_code: template-code
-baidu:
-  voice:
-    appid: voice-app-id
-    apikey: voice-api-key
-    secretkey: voice-secret-key
+  provider: aliyun
+  access_id: access-id
+  access_secret: access-secret
+  sign_name: sign-name
+  templates:
+    alert:
+      code: SMS_123
+  alert_phones: ["13800000000"]
+  alert_template: alert
 log:
   level: debug
   path: ./logs/app_client
@@ -92,14 +78,6 @@ ssl:
   pem: temp/pem.pem
 news:
   fsurl: ""
-llm:
-  providers:
-    - name: qianfan
-      api_key: test-api-key
-      models:
-        - model-a
-        - model-b
-  redis_db: 1
 `, appmeta.CommandName)))
 	if err != nil {
 		t.Fatalf("loadFromReader returned error: %v", err)
@@ -117,30 +95,20 @@ llm:
 	if len(cfg.Redis.DBs) != 3 {
 		t.Fatalf("cfg.Redis.DBs len = %d, want 3", len(cfg.Redis.DBs))
 	}
-	if !cfg.SMS.Enabled {
-		t.Fatal("cfg.SMS.Enabled = false, want true")
+	if !cfg.Email.Enabled() || cfg.Email.From != "noreply@example.com" || cfg.Email.Port != 587 {
+		t.Fatalf("cfg.Email = %+v", cfg.Email)
 	}
-	if !cfg.Pay.Wechat.Enabled || cfg.Pay.Wechat.AppID != "wx-app-id" {
-		t.Fatalf("cfg.Pay.Wechat = %+v", cfg.Pay.Wechat)
+	if !slices.Equal(cfg.Email.AlertTo, []string{"ops@example.com"}) {
+		t.Fatalf("cfg.Email.AlertTo = %v", cfg.Email.AlertTo)
 	}
-	if !cfg.Pay.Alipay.Enabled || cfg.Pay.Alipay.AppID != "alipay-app-id" {
-		t.Fatalf("cfg.Pay.Alipay = %+v", cfg.Pay.Alipay)
+	if !cfg.SMS.Enabled() || cfg.SMS.Provider != "aliyun" || cfg.SMS.AccessID != "access-id" {
+		t.Fatalf("cfg.SMS = %+v", cfg.SMS)
 	}
-	if cfg.Aliyun.SMS.AccessID != "access-id" || cfg.Aliyun.SMS.TemplateCode != "template-code" {
-		t.Fatalf("cfg.Aliyun.SMS = %+v", cfg.Aliyun.SMS)
+	if tpl, ok := cfg.SMS.Templates["alert"]; !ok || tpl.Code != "SMS_123" {
+		t.Fatalf("cfg.SMS.Templates = %+v", cfg.SMS.Templates)
 	}
-	if cfg.Baidu.Voice.APIKey != "voice-api-key" || cfg.Baidu.Voice.SecretKey != "voice-secret-key" {
-		t.Fatalf("cfg.Baidu.Voice = %+v", cfg.Baidu.Voice)
-	}
-	if len(cfg.LLM.Providers) != 1 {
-		t.Fatalf("cfg.LLM.Providers len = %d, want 1", len(cfg.LLM.Providers))
-	}
-	if p := cfg.LLM.Providers[0]; p.Name != "qianfan" || p.APIKey != "test-api-key" ||
-		!slices.Equal(p.Models, []string{"model-a", "model-b"}) {
-		t.Fatalf("cfg.LLM.Providers[0] = %+v", p)
-	}
-	if cfg.LLM.RedisDB != 1 {
-		t.Fatalf("cfg.LLM.RedisDB = %d, want 1", cfg.LLM.RedisDB)
+	if cfg.SMS.AlertTemplate != "alert" || !slices.Equal(cfg.SMS.AlertPhones, []string{"13800000000"}) {
+		t.Fatalf("cfg.SMS alert channel = %+v", cfg.SMS)
 	}
 }
 
@@ -220,9 +188,16 @@ log:
 			wantKey: "token_ttl_hour",
 		},
 		{
-			name:    "typo inside aliyun rejected",
-			extra:   "aliyun:\n  sms_acess_id: oops\n",
-			wantKey: "sms_acess_id",
+			// 已移除的死配置段（pay/llm/baidu/aliyun）必须以未知键失败，
+			// 而不是静默接受：fail-closed 迁移的负向证明。
+			name:    "removed pay section rejected",
+			extra:   "pay:\n  wechat:\n    enabled: true\n",
+			wantKey: "pay",
+		},
+		{
+			name:    "removed aliyun flat keys rejected",
+			extra:   "aliyun:\n  sms_access_id: access-id\n",
+			wantKey: "aliyun",
 		},
 	}
 
@@ -243,20 +218,6 @@ log:
 				t.Fatalf("error = %q, want containing key %q", err.Error(), tt.wantKey)
 			}
 		})
-	}
-
-	// 合法的 aliyun 扁平键不受严格模式影响（白名单先读后删）。
-	cfg, err := loadFromReader(strings.NewReader(base + jwtBlock + `aliyun:
-  sms_access_id: access-id
-  sms_access_secret: access-secret
-  sms_sign_name: sign-name
-  sms_template_code: template-code
-`))
-	if err != nil {
-		t.Fatalf("loadFromReader returned error for legal aliyun flat keys: %v", err)
-	}
-	if cfg.Aliyun.SMS.AccessID != "access-id" || cfg.Aliyun.SMS.TemplateCode != "template-code" {
-		t.Fatalf("cfg.Aliyun.SMS = %+v", cfg.Aliyun.SMS)
 	}
 }
 
@@ -386,48 +347,90 @@ func TestValidateRequiresAliyunSMSConfigWhenSMSEnabled(t *testing.T) {
 			Path:  "./logs/app_client",
 		},
 		SMS: SMSConfig{
-			Enabled: true,
+			Provider: "aliyun",
 		},
 	}
 
-	if err := cfg.Validate(); err == nil {
+	err := cfg.Validate()
+	if err == nil {
 		t.Fatal("Validate expected sms config error, got nil")
+	}
+	for _, want := range []string{"sms.access_id", "sms.access_secret", "sms.sign_name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
-func TestValidateRequiresPayConfigWhenEnabled(t *testing.T) {
+// TestValidateOutboundChannelShapes 钉住出站通道的配置门与告警配对约束。
+func TestValidateOutboundChannelShapes(t *testing.T) {
 	t.Parallel()
 
-	cfg := &Config{
-		Env: "dev",
-		App: AppConfig{
-			Name: "app_client",
-			Host: "localhost",
-			Port: "8008",
+	cases := []struct {
+		name    string
+		email   EmailConfig
+		sms     SMSConfig
+		wantErr string
+	}{
+		{
+			name:    "email 半配置被拒绝",
+			email:   EmailConfig{From: "a@b.c"},
+			wantErr: "email.host is empty",
 		},
-		Database: DatabaseConfig{
-			DBType:   "mysql",
-			Host:     "127.0.0.1",
-			Port:     "3306",
-			Name:     "sleep",
-			Username: "root",
+		{
+			name:    "email from 非法地址被拒绝",
+			email:   EmailConfig{Host: "smtp.example.com", From: "not-an-address"},
+			wantErr: "email.from",
 		},
-		Redis: RedisConfig{
-			Addr: "127.0.0.1:6379",
-			DBs:  []int{0, 1, 2},
+		{
+			name:    "sms 半配置被拒绝",
+			sms:     SMSConfig{SignName: "sign"},
+			wantErr: "sms.provider is empty",
 		},
-		Log: LogConfig{
-			Level: "info",
-			Path:  "./logs/app_client",
+		{
+			name: "sms 告警键必须成对",
+			sms: SMSConfig{
+				Provider: "aliyun", AccessID: "a", AccessSecret: "s", SignName: "n",
+				AlertPhones: []string{"13800000000"},
+			},
+			wantErr: "must be set together",
 		},
-		Pay: PayConfig{
-			Wechat: WechatPayConfig{Enabled: true},
-			Alipay: AlipayConfig{Enabled: true},
+		{
+			name: "sms 告警模板必须已定义",
+			sms: SMSConfig{
+				Provider: "aliyun", AccessID: "a", AccessSecret: "s", SignName: "n",
+				AlertPhones: []string{"13800000000"}, AlertTemplate: "missing",
+			},
+			wantErr: "is not defined in sms.templates",
+		},
+		{
+			name: "合法配置通过",
+			email: EmailConfig{
+				Host: "smtp.example.com", From: "noreply@example.com",
+				AlertTo: []string{"ops@example.com"},
+			},
+			sms: SMSConfig{
+				Provider: "aliyun", AccessID: "a", AccessSecret: "s", SignName: "n",
+				Templates:   map[string]SMSTemplateConfig{"alert": {Code: "SMS_1"}},
+				AlertPhones: []string{"13800000000"}, AlertTemplate: "alert",
+			},
 		},
 	}
 
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate expected pay config error, got nil")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := errors.Join(validateEmailConfig(tc.email), validateSMSConfig(tc.sms))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate returned %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %v does not contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@
 package log
 
 import (
+	"fmt"
 	"strings"
 
 	loggerv2 "github.com/gtkit/logger/v2"
@@ -32,15 +33,24 @@ const (
 var newLogger = loggerv2.MustNew
 
 func Init() {
-	InitWithConfig(&config.Config{})
+	// 空配置不启用任何告警通道，构造不可能失败。
+	_ = InitWithConfig(&config.Config{})
 }
 
 // InitWithConfig 构建主 logger 并设为进程默认实例（loggerv2.SetDefault），
 // 之后各层直接用 loggerv2 包级函数记录日志。仅在进程启动阶段（单 goroutine）调用一次。
 // 未初始化时包级函数写入 loggerv2 的纯控制台兜底实例（库内保证不落盘、不抢占 zap 全局）。
-func InitWithConfig(cfg *config.Config) {
+//
+// 返回 error：告警通道（邮件/短信客户端）在通知器构造中建立，
+// 构造失败必须让启动失败，不得静默降级为"配置了却没有通道"。
+func InitWithConfig(cfg *config.Config) error {
 	if cfg == nil {
 		cfg = &config.Config{}
+	}
+
+	notifier, err := news.NewWithConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("init alert notifier: %w", err)
 	}
 
 	opts := []loggerv2.Option{
@@ -53,7 +63,7 @@ func InitWithConfig(cfg *config.Config) {
 		loggerv2.WithDivision("daily"),
 		loggerv2.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
 		loggerv2.WithCompress(cfg.Log.Compress != 0),
-		loggerv2.WithMessager(&News{notifier: news.NewWithConfig(cfg)}),
+		loggerv2.WithMessager(&News{notifier: notifier}),
 	}
 	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
 	// 未配置时不透传，保留库默认的保留策略。
@@ -65,6 +75,7 @@ func InitWithConfig(cfg *config.Config) {
 	}
 
 	loggerv2.SetDefault(newLogger(opts...))
+	return nil
 }
 
 // resolvePath 空白路径回退到默认值；锚定交给库的 WithBasePath。

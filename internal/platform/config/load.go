@@ -44,28 +44,7 @@ func loadFromReader(r io.Reader) (*Config, error) {
 	return decode(k)
 }
 
-// aliyunSMSFlatKeys 是 aliyun 段下允许的扁平 key 白名单：
-// 结构体侧标了 mapstructure:"-"，严格解码前先读出并移除、解码后手动组装。
-var aliyunSMSFlatKeys = []string{
-	"aliyun.sms_access_id",
-	"aliyun.sms_access_secret",
-	"aliyun.sms_sign_name",
-	"aliyun.sms_template_code",
-}
-
 func decode(k *koanf.Koanf) (*Config, error) {
-	// aliyun.SMS 在 yml 里是扁平 key（aliyun.sms_access_id 等），与嵌套 struct 不匹配；
-	// 白名单内的键先读出再从 koanf 删除，这样 aliyun 段下其余拼写错误仍会被严格模式抓住。
-	aliyunSMS := AliyunSMSConfig{
-		AccessID:     k.String("aliyun.sms_access_id"),
-		AccessSecret: k.String("aliyun.sms_access_secret"),
-		SignName:     k.String("aliyun.sms_sign_name"),
-		TemplateCode: k.String("aliyun.sms_template_code"),
-	}
-	for _, key := range aliyunSMSFlatKeys {
-		k.Delete(key)
-	}
-
 	var cfg Config
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。
@@ -86,8 +65,6 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	}); err != nil {
 		return nil, fmt.Errorf("decode config (存在未知配置项，检查拼写或删除): %w", err)
 	}
-
-	cfg.Aliyun.SMS = aliyunSMS
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)

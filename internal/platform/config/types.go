@@ -9,30 +9,20 @@ type Config struct {
 	Env      Env            `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
 	Database DatabaseConfig `mapstructure:"database"`
-	// Email / SMS / Pay / Aliyun / Baidu 是**预留的扩展位**，母版不带运行时实现。
-	//
-	// 保留它们是刻意的：这些是绝大多数业务迟早要接的能力，先把配置形状定下来，
-	// 使用者接线时不必再改一次配置契约（而那次改动会波及所有已派生项目）。
-	//
-	// 但必须说清楚：**填了这些配置不会产生任何行为**，直到接上对应的客户端。
-	// 启动期会对"填了却没接线"的段落发出提示——一个填了却静默失效的配置，
-	// 比没有这个配置更容易让人误判能力边界。接线方式见 SCAFFOLD.md 的注册位清单。
+	// Email / SMS 是出站通知通道：host / provider 为空即不启用（不构造客户端），
+	// 启用时其余必填字段在 Validate fail-fast。告警多通道消费见 internal/pkg/news。
 	Email EmailConfig `mapstructure:"email"`
 	SMS   SMSConfig   `mapstructure:"sms"`
-	Pay   PayConfig   `mapstructure:"pay"`
-	LLM   LLMConfig   `mapstructure:"llm"`
 	Log   LogConfig   `mapstructure:"log"`
 	Redis RedisConfig `mapstructure:"redis"`
 	JWT   JWTConfig   `mapstructure:"jwt"`
 	// Auth 是认证模式与本地认证参数。模式零值非法，见 AuthConfig.Mode。
-	Auth   AuthConfig   `mapstructure:"auth"`
-	SSL    SSLConfig    `mapstructure:"ssl"`
-	News   NewsConfig   `mapstructure:"news"`
-	Aliyun AliyunConfig `mapstructure:"aliyun"`
-	Baidu  BaiduConfig  `mapstructure:"baidu"`
-	CORS   CORSConfig   `mapstructure:"cors"`
-	Pprof  PprofConfig  `mapstructure:"pprof"`
-	Proxy  ProxyConfig  `mapstructure:"proxy"`
+	Auth  AuthConfig  `mapstructure:"auth"`
+	SSL   SSLConfig   `mapstructure:"ssl"`
+	News  NewsConfig  `mapstructure:"news"`
+	CORS  CORSConfig  `mapstructure:"cors"`
+	Pprof PprofConfig `mapstructure:"pprof"`
+	Proxy ProxyConfig `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
@@ -155,83 +145,48 @@ type DBCredentials struct {
 	Password string
 }
 
+// EmailConfig 是 SMTP 出站通道。Host 为空 = 不启用；启用时 From 必填。
+// AlertTo 非空即启用邮件告警通道（经 internal/pkg/news 扇出）。
 type EmailConfig struct {
-	Alias string `mapstructure:"alias"`
-	Host  string `mapstructure:"host"`
-	Pass  string `mapstructure:"pass"`
-	Port  int    `mapstructure:"port"`
-	User  string `mapstructure:"user"`
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"` // 0 走库默认 25；587 提交口；465 配 implicit_ssl
+	User     string `mapstructure:"user"` // 空 = 不认证（可信内网中继）
+	Pass     string `mapstructure:"pass"`
+	From     string `mapstructure:"from"`
+	FromName string `mapstructure:"from_name"`
+	// ImplicitSSL 使用 465 端口式 SMTPS；默认策略为 STARTTLS 强制 TLS。
+	ImplicitSSL bool     `mapstructure:"implicit_ssl"`
+	AlertTo     []string `mapstructure:"alert_to"`
 }
 
+// Enabled 报告邮件通道是否启用。
+func (c EmailConfig) Enabled() bool { return c.Host != "" }
+
+// SMSConfig 是出站短信通道。Provider 为空 = 不启用；当前仅支持 "aliyun"。
+// AlertPhones 与 AlertTemplate 同时非空即启用短信告警通道；
+// 告警模板必须声明 ${env} 变量（发送参数固定为 {"env": 环境名}）。
 type SMSConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-	// SendLimitEnabled 开启 60 秒发送频控；显式配置,替代按 Env.IsProd() 推导。
-	SendLimitEnabled bool `mapstructure:"send_limit_enabled"`
-	// DeleteCodeOnVerify 验证成功后立即作废 code 防重放；显式配置,替代按 Env.IsProd() 推导。
-	DeleteCodeOnVerify bool     `mapstructure:"delete_code_on_verify"`
-	AllowTestCodes     bool     `mapstructure:"allow_test_codes"`
-	TestPhones         []string `mapstructure:"test_phones"`
-	TestCode           string   `mapstructure:"test_code"`
-	CodeTTLSeconds     int      `mapstructure:"code_ttl_seconds"`
-	MaxVerifyAttempts  int      `mapstructure:"max_verify_attempts"`
+	Provider     string `mapstructure:"provider"`
+	AccessID     string `mapstructure:"access_id"`
+	AccessSecret string `mapstructure:"access_secret"`
+	RegionID     string `mapstructure:"region_id"` // 空走驱动默认 cn-hangzhou
+	SignName     string `mapstructure:"sign_name"`
+	// Templates 逻辑模板名 → 供应商模板；业务与告警都以逻辑名引用，
+	// 供应商编号只出现在配置里。
+	Templates     map[string]SMSTemplateConfig `mapstructure:"templates"`
+	AlertPhones   []string                     `mapstructure:"alert_phones"`
+	AlertTemplate string                       `mapstructure:"alert_template"`
 }
 
-type PayConfig struct {
-	Wechat WechatPayConfig `mapstructure:"wechat"`
-	Alipay AlipayConfig    `mapstructure:"alipay"`
+// SMSTemplateConfig 是一条逻辑模板到供应商模板的映射。
+type SMSTemplateConfig struct {
+	Code string `mapstructure:"code"`
+	// SignName 逐模板签名，空回退 SMSConfig.SignName。
+	SignName string `mapstructure:"sign_name"`
 }
 
-type WechatPayConfig struct {
-	Enabled bool   `mapstructure:"enabled"`
-	AppID   string `mapstructure:"app_id"`
-	MchID   string `mapstructure:"mch_id"`
-
-	// === 微信支付 V3 ===
-	MchCertSerialNumber      string `mapstructure:"mch_cert_serial_number"`
-	MchAPIv3Key              string `mapstructure:"mch_apiv3_key"`
-	MchPrivateKeyPath        string `mapstructure:"mch_private_key_path"`
-	MchPrivateKeyPEM         string `mapstructure:"mch_private_key_pem"`
-	WechatPayCertificatePath string `mapstructure:"wechatpay_certificate_path"`
-	WechatPayCertificatePEM  string `mapstructure:"wechatpay_certificate_pem"`
-	// 微信支付公钥模式（2024 年起新进件商户只下发公钥，不再签发平台证书）。
-	// 配置 WechatPayPublicKeyID 且提供公钥来源之一（路径或 PEM）即启用公钥验签。
-	WechatPayPublicKeyID   string `mapstructure:"wechatpay_public_key_id"`
-	WechatPayPublicKeyPath string `mapstructure:"wechatpay_public_key_path"`
-	WechatPayPublicKeyPEM  string `mapstructure:"wechatpay_public_key_pem"`
-}
-
-type AlipayConfig struct {
-	Enabled                 bool   `mapstructure:"enabled"`
-	AppID                   string `mapstructure:"app_id"`
-	PrivateKey              string `mapstructure:"private_key"`
-	PrivateKeyPath          string `mapstructure:"private_key_path"`
-	IsProduction            bool   `mapstructure:"is_production"`
-	AppCertPublicKey        string `mapstructure:"app_cert_public_key"`
-	AppCertPublicKeyPath    string `mapstructure:"app_cert_public_key_path"`
-	AlipayRootCert          string `mapstructure:"alipay_root_cert"`
-	AlipayRootCertPath      string `mapstructure:"alipay_root_cert_path"`
-	AlipayCertPublicKey     string `mapstructure:"alipay_cert_public_key"`
-	AlipayCertPublicKeyPath string `mapstructure:"alipay_cert_public_key_path"`
-	AlipayPublicKey         string `mapstructure:"alipay_public_key"`
-}
-
-type LLMConfig struct {
-	// Providers 按优先级从高到低排列；每家的 Models 同样按优先级从高到低。
-	// 深度优先故障转移：同家模型全部失败后再切换到下一家。
-	Providers          []LLMProviderConfig `mapstructure:"providers"`
-	SystemPrompt       string              `mapstructure:"system_prompt"`
-	TimeoutSeconds     int                 `mapstructure:"timeout_seconds"`
-	SessionTTLSeconds  int                 `mapstructure:"session_ttl_seconds"`
-	MaxHistoryMessages int                 `mapstructure:"max_history_messages"`
-	MaxMessageChars    int                 `mapstructure:"max_message_chars"`
-	RedisDB            int                 `mapstructure:"redis_db"`
-}
-
-type LLMProviderConfig struct {
-	Name   string   `mapstructure:"name"`
-	APIKey string   `mapstructure:"api_key"`
-	Models []string `mapstructure:"models"`
-}
+// Enabled 报告短信通道是否启用。
+func (c SMSConfig) Enabled() bool { return c.Provider != "" }
 
 type LogConfig struct {
 	SQL           int    `mapstructure:"sql"`
@@ -375,21 +330,6 @@ type NewsConfig struct {
 	AppSecret string `mapstructure:"appsecret"`
 }
 
-type AliyunConfig struct {
-	SMS AliyunSMSConfig `mapstructure:"-"`
-}
-
-type AliyunSMSConfig struct {
-	AccessID     string
-	AccessSecret string
-	SignName     string
-	TemplateCode string
-}
-
-type BaiduConfig struct {
-	Voice BaiduVoiceConfig `mapstructure:"voice"`
-}
-
 type CORSConfig struct {
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
@@ -411,12 +351,6 @@ type PprofConfig struct {
 	// MutexProfileFraction mutex profile 采样比例：1/N 的锁竞争事件被采样，0 表示关闭。
 	// 典型排查值 100，排查完应改回 0。该采样有运行时开销。
 	MutexProfileFraction int `mapstructure:"mutex_profile_fraction"`
-}
-
-type BaiduVoiceConfig struct {
-	AppID     string `mapstructure:"appid"`
-	APIKey    string `mapstructure:"apikey"`
-	SecretKey string `mapstructure:"secretkey"`
 }
 
 // laravelAlgorithms 是 Laravel 存量 token 验证器允许的 HMAC 算法白名单。

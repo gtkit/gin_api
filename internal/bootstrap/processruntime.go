@@ -31,7 +31,9 @@ var (
 // 失败路径要清理哪些就没有确定答案。
 func initProcessRuntime(cfg *config.Config) error {
 	applyRuntimeTimezone(cfg)
-	initLogWithConfig(cfg)
+	if err := initLogWithConfig(cfg); err != nil {
+		return fmt.Errorf("init logging: %w", err)
+	}
 	installGinDiagnostics()
 	// JWT issuer 不在此处创建：改由 NewRuntime 创建一次并持有，避免"预检创建一份又丢弃、
 	// 随后再创建一份"的冗余（见 runtime.go）。
@@ -41,14 +43,6 @@ func initProcessRuntime(cfg *config.Config) error {
 	checkJSONRuntime()
 
 	applog.InitAccessLog(cfg)
-
-	// 非生产允许 0.0.0.0/0 以便本地调试转发头，但不能让它无声地被带到预发环境。
-	// 生产环境该配置由 config.Validate 直接拒绝，走不到这里。
-	// 填了却没接线的扩展位：不阻断启动，但必须说出来。
-	// 一个填了却静默无效的配置，比没有这个配置更容易让人误判能力边界。
-	for _, w := range cfg.UnwiredExtensionWarnings() {
-		logger.Warn(w)
-	}
 
 	// 个人信息无保留期：配置注释承诺过会提示一次，此前只是承诺。
 	for _, w := range cfg.RetentionWarnings() {

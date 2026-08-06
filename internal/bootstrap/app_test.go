@@ -439,7 +439,7 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 		checkJSONRuntime = originalJSONCheck
 	}()
 
-	initLogWithConfig = func(*config.Config) {}
+	initLogWithConfig = func(*config.Config) error { return nil }
 	initJWTWithConfig = func(*config.Config) (*jwtauth.Assembly, error) { return nil, nil }
 	initVerify = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}

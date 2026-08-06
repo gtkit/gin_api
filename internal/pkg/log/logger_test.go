@@ -26,7 +26,7 @@ func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 		return built
 	})
 
-	InitWithConfig(&config.Config{
+	if err := InitWithConfig(&config.Config{
 		Log: config.LogConfig{
 			Path:          "logs/app",
 			Level:         "warn",
@@ -34,7 +34,9 @@ func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 			MaxAge:        30,
 			MaxBackups:    7,
 		},
-	})
+	}); err != nil {
+		t.Fatalf("InitWithConfig: %v", err)
+	}
 
 	if loggerv2.Default() != built {
 		t.Fatal("InitWithConfig 应把构建的实例设为 loggerv2 默认实例")
@@ -55,7 +57,9 @@ func TestInitWithConfigOmitsZeroRetentionOptions(t *testing.T) {
 	})
 
 	// MaxAge/MaxBackups 为 0 时不透传（0 在库内语义为「关闭清理」，与未配置不同）
-	InitWithConfig(&config.Config{})
+	if err := InitWithConfig(&config.Config{}); err != nil {
+		t.Fatalf("InitWithConfig: %v", err)
+	}
 	if gotOpts != 9 {
 		t.Fatalf("options 数量 = %d, want 9（零值保留策略不应透传）", gotOpts)
 	}
@@ -65,7 +69,9 @@ func TestInitWithConfigNilConfigDoesNotPanic(t *testing.T) {
 	resetLogHooksForTest()
 	setNewLoggerForTest(func(...loggerv2.Option) *loggerv2.Logger { return newConsoleLogger() })
 
-	InitWithConfig(nil)
+	if err := InitWithConfig(nil); err != nil {
+		t.Fatalf("InitWithConfig(nil): %v", err)
+	}
 	Init()
 }
 

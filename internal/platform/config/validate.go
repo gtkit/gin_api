@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -113,10 +114,10 @@ func (c *Config) Validate() error {
 	if err := validateLogConfig(c.Env, c.Log, os.Getenv("APP_ROOT")); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateSMSConfig(c.SMS, c.Aliyun.SMS); err != nil {
+	if err := validateEmailConfig(c.Email); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validatePayConfig(c.Pay); err != nil {
+	if err := validateSMSConfig(c.SMS); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validatePprofConfig(c.Env, c.Pprof); err != nil {
@@ -371,109 +372,81 @@ func hasDuplicateInts(values []int) bool {
 	return false
 }
 
-func validateSMSConfig(sms SMSConfig, aliyunSMS AliyunSMSConfig) error {
-	if !sms.Enabled {
+// validateEmailConfig 校验 SMTP 出站通道。
+//
+// 启用键（host）为空时其余字段必须同为零值：填了一半的配置意味着使用者
+// 以为通道已启用，而它静默不存在——那比校验失败更难排查。
+func validateEmailConfig(email EmailConfig) error {
+	if !email.Enabled() {
+		if email.Port != 0 || email.User != "" || email.Pass != "" || email.From != "" ||
+			email.FromName != "" || email.ImplicitSSL || len(email.AlertTo) > 0 {
+			return errors.New("email.host is empty but other email.* fields are set: " +
+				"set email.host to enable the channel, or remove the leftover fields")
+		}
 		return nil
 	}
 
 	var errs []error
-
-	if aliyunSMS.AccessID == "" {
-		errs = append(errs, errors.New("aliyun.sms_access_id is required when sms.enabled is true"))
+	if email.From == "" {
+		errs = append(errs, errors.New("email.from is required when email.host is set"))
+	} else if _, err := mail.ParseAddress(email.From); err != nil {
+		errs = append(errs, fmt.Errorf("email.from %q is not a valid address: %w", email.From, err))
 	}
-	if aliyunSMS.AccessSecret == "" {
-		errs = append(errs, errors.New("aliyun.sms_access_secret is required when sms.enabled is true"))
+	if email.Port < 0 || email.Port > maxTCPPort {
+		errs = append(errs, fmt.Errorf("email.port %d is out of the TCP port range [0, %d] (0 = library default)", email.Port, maxTCPPort))
 	}
-	if aliyunSMS.SignName == "" {
-		errs = append(errs, errors.New("aliyun.sms_sign_name is required when sms.enabled is true"))
+	for _, to := range email.AlertTo {
+		if _, err := mail.ParseAddress(to); err != nil {
+			errs = append(errs, fmt.Errorf("email.alert_to %q is not a valid address: %w", to, err))
+		}
 	}
-	if aliyunSMS.TemplateCode == "" {
-		errs = append(errs, errors.New("aliyun.sms_template_code is required when sms.enabled is true"))
-	}
-
 	return errors.Join(errs...)
 }
 
-func validatePayConfig(pay PayConfig) error {
-	return errors.Join(
-		validateWechatPayConfig(pay.Wechat),
-		validateAlipayConfig(pay.Alipay),
-	)
-}
-
-func validateWechatPayConfig(wechat WechatPayConfig) error {
-	if !wechat.Enabled {
+// validateSMSConfig 校验出站短信通道。
+func validateSMSConfig(sms SMSConfig) error {
+	if !sms.Enabled() {
+		if sms.AccessID != "" || sms.AccessSecret != "" || sms.RegionID != "" || sms.SignName != "" ||
+			len(sms.Templates) > 0 || len(sms.AlertPhones) > 0 || sms.AlertTemplate != "" {
+			return errors.New("sms.provider is empty but other sms.* fields are set: " +
+				"set sms.provider to enable the channel, or remove the leftover fields")
+		}
 		return nil
 	}
 
 	var errs []error
-
-	if wechat.AppID == "" {
-		errs = append(errs, errors.New("pay.wechat.app_id is required when pay.wechat.enabled is true"))
+	if sms.Provider != "aliyun" {
+		errs = append(errs, fmt.Errorf("sms.provider %q is invalid: only \"aliyun\" is supported", sms.Provider))
 	}
-	if wechat.MchID == "" {
-		errs = append(errs, errors.New("pay.wechat.mch_id is required when pay.wechat.enabled is true"))
+	if sms.AccessID == "" {
+		errs = append(errs, errors.New("sms.access_id is required when sms.provider is set"))
 	}
-
-	// V3 校验。
-	if wechat.MchCertSerialNumber == "" {
-		errs = append(errs, errors.New("pay.wechat.mch_cert_serial_number is required when pay.wechat.enabled is true"))
+	if sms.AccessSecret == "" {
+		errs = append(errs, errors.New("sms.access_secret is required when sms.provider is set"))
 	}
-	if wechat.MchAPIv3Key == "" {
-		errs = append(errs, errors.New("pay.wechat.mch_apiv3_key is required when pay.wechat.enabled is true"))
+	if sms.SignName == "" {
+		errs = append(errs, errors.New("sms.sign_name is required when sms.provider is set"))
 	}
-	if wechat.MchPrivateKeyPath == "" && wechat.MchPrivateKeyPEM == "" {
-		errs = append(errs, errors.New("pay.wechat.mch_private_key_path or pay.wechat.mch_private_key_pem is required when pay.wechat.enabled is true"))
+	for name, tpl := range sms.Templates {
+		if tpl.Code == "" {
+			errs = append(errs, fmt.Errorf("sms.templates.%s.code is required", name))
+		}
 	}
-	if !hasWechatCertSource(wechat) && !hasWechatPublicKeySource(wechat) {
-		errs = append(errs, errors.New("pay.wechat requires either wechatpay_certificate_path/pem (证书模式) or wechatpay_public_key_id with wechatpay_public_key_path/pem (公钥模式) when pay.wechat.enabled is true"))
+	// 告警通道两个键必须成对：只配其一等于"以为开了告警而它不存在"。
+	if (len(sms.AlertPhones) > 0) != (sms.AlertTemplate != "") {
+		errs = append(errs, errors.New("sms.alert_phones and sms.alert_template must be set together"))
 	}
-
+	if sms.AlertTemplate != "" {
+		if _, ok := sms.Templates[sms.AlertTemplate]; !ok {
+			errs = append(errs, fmt.Errorf("sms.alert_template %q is not defined in sms.templates", sms.AlertTemplate))
+		}
+	}
+	for _, phone := range sms.AlertPhones {
+		if strings.TrimSpace(phone) == "" {
+			errs = append(errs, errors.New("sms.alert_phones contains an empty entry"))
+		}
+	}
 	return errors.Join(errs...)
-}
-
-func hasWechatCertSource(wechat WechatPayConfig) bool {
-	return wechat.WechatPayCertificatePath != "" || wechat.WechatPayCertificatePEM != ""
-}
-
-func hasWechatPublicKeySource(wechat WechatPayConfig) bool {
-	return wechat.WechatPayPublicKeyID != "" &&
-		(wechat.WechatPayPublicKeyPath != "" || wechat.WechatPayPublicKeyPEM != "")
-}
-
-func validateAlipayConfig(alipay AlipayConfig) error {
-	if !alipay.Enabled {
-		return nil
-	}
-
-	var errs []error
-
-	if alipay.AppID == "" {
-		errs = append(errs, errors.New("pay.alipay.app_id is required when pay.alipay.enabled is true"))
-	}
-	if alipay.PrivateKey == "" && alipay.PrivateKeyPath == "" {
-		errs = append(errs, errors.New("pay.alipay.private_key or pay.alipay.private_key_path is required when pay.alipay.enabled is true"))
-	}
-	if hasAlipayCertSource(alipay) && !hasCompleteAlipayCertSource(alipay) {
-		errs = append(errs, errors.New("pay.alipay cert mode requires app cert, root cert and alipay cert when pay.alipay.enabled is true"))
-	}
-	if !hasAlipayCertSource(alipay) && alipay.AlipayPublicKey == "" {
-		errs = append(errs, errors.New("pay.alipay.alipay_public_key is required when pay.alipay.enabled is true and cert mode is not configured"))
-	}
-
-	return errors.Join(errs...)
-}
-
-func hasAlipayCertSource(alipay AlipayConfig) bool {
-	return alipay.AppCertPublicKey != "" || alipay.AppCertPublicKeyPath != "" ||
-		alipay.AlipayRootCert != "" || alipay.AlipayRootCertPath != "" ||
-		alipay.AlipayCertPublicKey != "" || alipay.AlipayCertPublicKeyPath != ""
-}
-
-func hasCompleteAlipayCertSource(alipay AlipayConfig) bool {
-	return (alipay.AppCertPublicKey != "" || alipay.AppCertPublicKeyPath != "") &&
-		(alipay.AlipayRootCert != "" || alipay.AlipayRootCertPath != "") &&
-		(alipay.AlipayCertPublicKey != "" || alipay.AlipayCertPublicKeyPath != "")
 }
 
 func validateLogConfig(env Env, logCfg LogConfig, appRoot string) error {
