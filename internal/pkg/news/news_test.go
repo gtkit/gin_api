@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	newslib "github.com/gtkit/news"
 )
@@ -26,7 +27,7 @@ var _ newslib.AppNewser = (*fakeAppNewser)(nil)
 //
 // 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
 // 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
-func newTestNotifier(url, env, now string, sender func(string, ...string) error, errLogger func(string)) *Notifier {
+func newTestNotifier(url, env, now string, sender func(context.Context, string, ...string) error, errLogger func(string)) *Notifier {
 	n, _ := NewWithConfig(nil) // nil 配置不启用任何通道，构造不可能失败
 	n.defaultURL = url
 	n.envName = env
@@ -46,7 +47,7 @@ func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	var gotArgs []string
 
 	n := newTestNotifier("https://example.invalid/hook", "TEST-ENV", "2026-03-22 22:00:00",
-		func(url string, args ...string) error {
+		func(_ context.Context, url string, args ...string) error {
 			called = true
 			gotURL = url
 			gotArgs = append([]string(nil), args...)
@@ -66,6 +67,30 @@ func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	}
 	if !strings.Contains(gotArgs[0], "TEST-ENV") || !strings.Contains(gotArgs[0], "2026-03-22 22:00:00") {
 		t.Fatalf("unexpected title %q", gotArgs[0])
+	}
+}
+
+// TestWarnWebhookSendHasTimeout 钉住 webhook 发送的独立超时
+// （outbound-notification spec：每次通道发送必须有独立超时）：
+// 无超时的 webhook 会让 logger.Sync 的队列排空被一个外部端点无限拖住。
+func TestWarnWebhookSendHasTimeout(t *testing.T) {
+	var gotDeadline time.Time
+	var hasDeadline bool
+
+	n := newTestNotifier("https://example.invalid/hook", "TEST-ENV", "2026-03-22 22:00:00",
+		func(ctx context.Context, _ string, _ ...string) error {
+			gotDeadline, hasDeadline = ctx.Deadline()
+			return nil
+		}, nil)
+
+	before := time.Now()
+	n.Warn("", "body")
+
+	if !hasDeadline {
+		t.Fatal("webhook send context has no deadline; a stuck endpoint would stall log draining forever")
+	}
+	if remain := gotDeadline.Sub(before); remain <= 0 || remain > alertSendTimeout+time.Second {
+		t.Fatalf("webhook deadline %v from call time, want within (0, %v]", remain, alertSendTimeout)
 	}
 }
 

@@ -415,6 +415,80 @@ func TestAppRunRequiredPrepareFailureNeverStartsHTTP(t *testing.T) {
 	}
 }
 
+// TestAppRunReturnsWorkerCleanupErrors 钉住终止错误的收割（runtime-state-machine spec）：
+// 关停期间任务的 Cleanup 失败必须进入 Run 的返回值——required 与 optional 一视同仁。
+// 清理失败意味着进程退出时存在未释放的资源，带着失败以零退出码结束会让
+// 编排器把一次异常退出当成正常关停。
+func TestAppRunReturnsWorkerCleanupErrors(t *testing.T) {
+	testutil.RequireLoopback(t)
+
+	tests := []struct {
+		name     string
+		required bool
+	}{
+		{name: "required 任务的清理失败进入返回值", required: true},
+		{name: "optional 任务的清理失败进入返回值", required: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestHTTPServer()
+			app := newTestApp(t, server, &funcWorker{
+				name: "cleanup-fails", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: tt.required,
+				cleanup: func(context.Context) error { return errors.New("cleanup boom") },
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			go func() { errCh <- app.Run(ctx) }()
+
+			waitClosed(t, server.listenCalled, "server did not start")
+			cancel()
+
+			select {
+			case err := <-errCh:
+				if err == nil {
+					t.Fatal("Run returned nil although a worker cleanup failed during shutdown")
+				}
+				for _, want := range []string{"cleanup-fails", "cleanup boom"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("error %q does not contain %q", err, want)
+					}
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Run did not return after cancellation")
+			}
+		})
+	}
+}
+
+// TestAppRunDoesNotDuplicateShutdownCause 钉住终止错误收割的去重：
+// 触发关停的那个错误已作为 cause 记录，末端收割不得再次计入。
+func TestAppRunDoesNotDuplicateShutdownCause(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := newTestHTTPServer()
+	app := newTestApp(t, server, &funcWorker{
+		name: "failing-worker", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: true,
+		run: func(context.Context) error { return errors.New("uniquely-marked-boom") },
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- app.Run(context.Background()) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Run returned nil after a required worker failed")
+		}
+		if got := strings.Count(err.Error(), "uniquely-marked-boom"); got != 1 {
+			t.Fatalf("shutdown cause appears %d times in %q, want exactly 1", got, err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after a required worker failed")
+	}
+}
+
 // waitClosed 等待通道关闭，超时即失败。
 func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
 	t.Helper()

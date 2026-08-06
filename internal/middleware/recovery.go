@@ -46,6 +46,10 @@ var (
 // 1. 统一记录结构化日志，方便排查。
 // 2. 对普通 panic 返回项目统一的 500 响应。
 // 3. 对连接已断开或响应已开始写出的场景，只记录日志，不再强行改写响应。
+//
+// 刻意不接告警（不用 H 系列）：请求级异常接入告警会在一次流量异常里形成
+// 告警风暴，淹没真正的进程级事件。告警执行点收口在 bootstrap
+// （worker 异常/降级与进程退出错误），本中间件只走日志与指标。
 func GinRecovery(includeStack bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {

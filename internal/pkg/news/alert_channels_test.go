@@ -42,7 +42,7 @@ func TestWarnFansOutToConfiguredChannels(t *testing.T) {
 	fm := &fakeMail{}
 	fs := &fakeSMSChannel{}
 	n := newTestNotifier("http://hook", "prod", "2026-08-06 10:00:00",
-		func(string, ...string) error { return nil }, nil)
+		func(context.Context, string, ...string) error { return nil }, nil)
 	n.mail, n.mailTo = fm, []string{"ops@example.com"}
 	n.sms, n.smsPhones, n.smsTemplate = fs, []string{"13800000000", "13900000000"}, "alert"
 
@@ -66,7 +66,7 @@ func TestWarnSingleChannelFailureIsIsolated(t *testing.T) {
 	fm := &fakeMail{fail: errors.New("smtp down")}
 	fs := &fakeSMSChannel{}
 	n := newTestNotifier("http://hook", "prod", "2026-08-06 10:00:00",
-		func(string, ...string) error { return nil },
+		func(context.Context, string, ...string) error { return nil },
 		func(msg string) { logged = append(logged, msg) })
 	n.mail, n.mailTo = fm, []string{"ops@example.com"}
 	n.sms, n.smsPhones, n.smsTemplate = fs, []string{"13800000000"}, "alert"
@@ -86,7 +86,7 @@ func TestWarnSkipsUnconfiguredChannels(t *testing.T) {
 	t.Parallel()
 
 	n := newTestNotifier("http://hook", "dev", "2026-08-06 10:00:00",
-		func(string, ...string) error { return nil }, nil)
+		func(context.Context, string, ...string) error { return nil }, nil)
 
 	// 不接线 mail/sms：Warn 只走 webhook，不 panic、无其他调用。
 	n.Warn("", "quiet")

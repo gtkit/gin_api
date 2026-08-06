@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +56,8 @@ type App struct {
 	drainWait time.Duration
 	// status 供 readiness 读取进程自身状态；pprof 启动后登记进去。
 	status *processStatus
+	// started 保证 Run 至多执行一次（见 ErrLifecycleReused）。
+	started atomic.Bool
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
@@ -105,8 +108,19 @@ func drainWaitFrom(cfg *config.Config) time.Duration {
 // required OneShot 必须先跑完：它们代表"对外服务之前必须做完的事"，
 // 放到 HTTP 之后就失去了全部意义。
 func (a *App) Run(ctx context.Context) (err error) {
+	// 一次性守卫必须在任何 defer 与副作用之前：第二次调用不得触发
+	// 资源关闭、退出告警或信号监听。
+	if !a.started.CompareAndSwap(false, true) {
+		return fmt.Errorf("App.Run: %w", ErrLifecycleReused)
+	}
+
 	// 资源关闭错误必须进入返回值：只记日志会让关闭失败的进程仍报告"正常退出"。
+	//
+	// 退出告警必须先于 closeResources：runtime.Close 内的日志刷写会关闭并
+	// 排空告警队列，之后入队的消息被静默丢弃。资源关闭阶段自身的错误因此
+	// 物理上无法再经告警通道送出，它们只进返回值与日志。
 	defer func() {
+		alertExitError(err)
 		err = errors.Join(err, a.closeResources())
 	}()
 
@@ -168,9 +182,52 @@ func (a *App) Run(ctx context.Context) (err error) {
 	}
 
 	// ② worker 启动屏障。失败即启动失败：HTTP 从不开始服务。
-	if err := a.workers.Start(ctx); err != nil {
+	//
+	// 屏障必须响应关停请求：signal.Notify 接管信号后默认的进程终止已被禁用，
+	// 若关停请求不作用于屏障，操作者面对一个卡住的启动任务连按 Ctrl+C 也只能
+	// 等启动预算耗尽——信号被捕获却不被执行。startCtx 在关停被请求时取消
+	// （Force 内部同样经 RequestShutdown，第二个信号无需单独监听）；启动回滚的
+	// 清理经 WithoutCancel 剥离取消，预算不受 startCtx 取消影响。
+	startCtx, cancelStart := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-a.shutdown.Requested():
+			cancelStart()
+		case <-startCtx.Done():
+		}
+	}()
+	startErr := a.workers.Start(startCtx)
+	cancelStart()
+	if startErr != nil {
 		_ = pprofEndpoint.Shutdown(context.WithoutCancel(ctx))
-		return fmt.Errorf("start workers: %w", err)
+		// 上层 ctx 取消同样是一次关停请求；把它幂等登记进协调器，
+		// 使"因关停而中止"的判定不依赖 ctx 翻译协程的调度时序。
+		if ctx.Err() != nil {
+			a.shutdown.RequestShutdown(nil)
+		}
+		if a.shutdownRequested() {
+			// 屏障因关停请求而中止：按关停语义退出（纯信号为 nil、强制为
+			// ErrForcedShutdown），不是一次启动失败。已 Prepare 的任务
+			// 已由 Start 内部逆序清理。取消衍生的错误（context.Canceled 链）
+			// 是中止的现象而不是原因，不进入返回值；非取消形状的错误则是
+			// 与关停并发的真实故障，必须保留上报。
+			if errors.Is(startErr, context.Canceled) {
+				logger.Infof("startup barrier canceled by a shutdown request: %v", startErr)
+				return a.shutdown.Cause()
+			}
+			return errors.Join(a.shutdown.Cause(), fmt.Errorf("start workers: %w", startErr))
+		}
+		return fmt.Errorf("start workers: %w", startErr)
+	}
+
+	// 屏障成功但关停已被请求：HTTP 不再开始服务，消除"先 serve 再立即关停"
+	// 的窗口——编排器不该观察到一次毫无意义的 serving 相位。
+	if ctx.Err() != nil {
+		a.shutdown.RequestShutdown(nil)
+	}
+	if a.shutdownRequested() {
+		logger.Info("shutdown requested during startup: skipping http serve")
+		return a.gracefulShutdown(ctx, nil, true, pprofEndpoint)
 	}
 
 	// ③ HTTP。监听器所有权自此转交给 server，由 Shutdown/Close 关闭。
@@ -186,6 +243,28 @@ func (a *App) Run(ctx context.Context) (err error) {
 
 	// ⑤ 分相关停。
 	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
+}
+
+// alertExitError 对非 nil 的退出错误发出一次进程级告警。
+//
+// H 系列（HErrorf）是告警执行点：进程以错误结束是进程级事件，与 worker
+// 异常/降级（reportRunFailure）同属唯一的一组告警触发面。请求级异常
+// （HTTP panic、单请求错误）不接告警，只走日志与指标。
+func alertExitError(err error) {
+	if err == nil {
+		return
+	}
+	logger.HErrorf("process exiting with error: %v", err)
+}
+
+// shutdownRequested 非阻塞探测是否已有关停请求。
+func (a *App) shutdownRequested() bool {
+	select {
+	case <-a.shutdown.Requested():
+		return true
+	default:
+		return false
+	}
 }
 
 // watchSignals 把第一个信号翻译成优雅关停请求，第二个翻译成强制关停；
@@ -282,6 +361,11 @@ func (a *App) gracefulShutdown(
 	// 6. 兜底清理：正常路径上各 worker 的 Cleanup 已在 Run 返回后执行，
 	//    这里只覆盖关停超时导致 supervise 未走完的条目，保证"恰好一次"不漏。
 	collect(a.workers.CleanupRemaining(base))
+
+	// 6b. 收割终止错误：关停开始后 required 任务的运行错误与全部任务的
+	//     Cleanup 错误再无其他消费者，不收割就是静默丢失——进程会带着
+	//     失败以零退出码结束。必须在全部 StopKind 与兜底清理之后执行。
+	collect(a.workers.TerminationErrors())
 
 	// 7. 关限流：每条本地策略都有一个后台清理 goroutine。
 	//    排在 HTTP 之后：在飞请求可能仍要做限流判定。

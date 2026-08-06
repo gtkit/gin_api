@@ -2,6 +2,7 @@
 package router
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -230,11 +231,12 @@ func allowedMethodsOf(engine *gin.Engine) middleware.AllowedMethodsFunc {
 }
 
 // RateLimitStager 按策略标识取限流中间件，并**按作用域**分成认证前、认证后两组。
+// route 是引用发生处的路由标识（如 "/user"），装配失败时用它指认现场。
 //
 // 模块只声明"这条路由受哪些策略约束"，不决定每条挂在认证之前还是之后。
-type RateLimitStager func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+type RateLimitStager func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 
-// NewRateLimitStager 构造分组函数。
+// NewRateLimitStager 构造分组函数与未解析引用的判定函数。
 //
 // 阶段由 Policy.Scope 推导，模块不参与：不需要身份的作用域（IP/全局）必须排在
 // 认证**之前**——它挡的是"还没证明自己是谁"的流量，排在认证之后等于让每个被限流
@@ -246,17 +248,25 @@ type RateLimitStager func(policyIDs ...string) (preAuth, postAuth []gin.HandlerF
 // 为准没有好答案。更糟的是这段推导若在每个模块各存一份，每份都能独立写错，
 // 而代码生成器会把其中一份复制给所有新模块——一次写错因此会扩散。
 //
-// 找不到策略时跳过：策略集合由部署配置决定，一个只跑单机的开发环境完全可以不配。
-// 未接限流注册表时返回的函数恒返回两个空切片，调用方无需判空。
-func NewRateLimitStager(opt Options) RateLimitStager {
-	if opt.RateLimits == nil || opt.RateLimitKeys == nil {
-		return func(...string) (preAuth, postAuth []gin.HandlerFunc) { return nil, nil }
-	}
+// 解析不到的引用（含注册表缺失时的一切引用）**不跳过**：记入收集器，由装配方
+// 在全部路由注册完成后调用判定函数统一失败。引用一个未登记的策略若不拦住，
+// 那条路由会完全没有限流，而描述符里明明写着一个标识，配置漏项或拼写错误
+// 就此静默失效。没有任何路由引用策略时，空注册表可正常启动——下游删掉
+// 限流引用的项目不被强制配置策略。
+//
+// 收集器不加锁：stager 只在 New 的单线程装配窗口内被各模块调用。
+func NewRateLimitStager(opt Options) (RateLimitStager, func() error) {
+	var unresolved []string // "route -> id"，保持引用出现顺序
 
-	return func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc) {
+	stager := func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc) {
 		for _, id := range policyIDs {
+			if opt.RateLimits == nil || opt.RateLimitKeys == nil {
+				unresolved = append(unresolved, route+" -> "+id)
+				continue
+			}
 			limiter, ok := opt.RateLimits.Lookup(id)
 			if !ok {
+				unresolved = append(unresolved, route+" -> "+id)
 				continue
 			}
 			mw := middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics)
@@ -268,6 +278,22 @@ func NewRateLimitStager(opt Options) RateLimitStager {
 		}
 		return preAuth, postAuth
 	}
+
+	verify := func() error {
+		if len(unresolved) == 0 {
+			return nil
+		}
+		var registered []string
+		if opt.RateLimits != nil {
+			registered = opt.RateLimits.IDs()
+		}
+		return fmt.Errorf("unresolvable rate limit policy references (route -> policy): %s; "+
+			"registered policies: %v; define the missing policies under ratelimit.policies "+
+			"(see config/env.yml.example) or remove the references from the route registrations",
+			strings.Join(unresolved, ", "), registered)
+	}
+
+	return stager, verify
 }
 
 // joinMethods 把方法列表拼成 Allow 头的值，顺序稳定。

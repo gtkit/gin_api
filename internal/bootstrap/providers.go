@@ -363,7 +363,10 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		RateLimitKeys: inf.rateLimits.keys,
 		ProcessStatus: status,
 	}
-	rateLimitStager := router.NewRateLimitStager(opt)
+	// 限流引用的解析结果在全部路由注册完成后统一判定（fail-closed）：
+	// 引用了未注册策略的路由若被静默跳过，配置漏项或拼写错误会让保护
+	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
+	rateLimitStager, unresolvedRateLimits := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -385,7 +388,15 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		// scaffold:modules
 	}
 
-	return router.New(string(cfg.Env), opt)
+	engine, err := router.New(string(cfg.Env), opt)
+	if err != nil {
+		return nil, err
+	}
+	// 判定必须在 router.New 之后：引用记录发生在 RegisterModules 执行期间。
+	if err := unresolvedRateLimits(); err != nil {
+		return nil, fmt.Errorf("resolve rate limit policy references: %w", err)
+	}
+	return engine, nil
 }
 
 // buildWorkers 组装进程级后台任务。
@@ -403,6 +414,9 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
 func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, error) {
+	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任，
+	// 见 newWorkerManagerOwningCleanups。
+	cleanupsBefore := len(inf.metricsCleanup)
 	var workers []Worker
 
 	// 注销档案清理：未配置保留期时不注册。
@@ -442,7 +456,31 @@ func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, 
 
 	// scaffold:module-workers
 
-	return NewWorkerManager(DefaultWorkerBudget(), workers...)
+	return newWorkerManagerOwningCleanups(inf, cleanupsBefore, workers...)
+}
+
+// newWorkerManagerOwningCleanups 构造 WorkerManager，并对本装配段新增的
+// 指标注销回调承担失败回滚责任。
+//
+// 副作用产生点与错误返回点之间的窗口只有构造者自己看得见：调用方按
+// "成功后登记回滚"的模式工作，凡在 buildWorkers 内部注册、又在构造校验
+// 上失败的回调必然逃逸调用方的回滚栈——那是机制上的系统性缺口，
+// 不是某一处的偶然遗漏（bootstrap-module-assembly spec）。
+func newWorkerManagerOwningCleanups(inf *infra, cleanupsBefore int, workers ...Worker) (*WorkerManager, error) {
+	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
+	if err == nil {
+		return manager, nil
+	}
+
+	// 逆序撤销本段新增的注销回调并截断切片，让失败后的 infra 状态与进入前一致。
+	added := inf.metricsCleanup[cleanupsBefore:]
+	for i := len(added) - 1; i >= 0; i-- {
+		if cerr := added[i](); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("unregister worker metrics during rollback: %w", cerr))
+		}
+	}
+	inf.metricsCleanup = inf.metricsCleanup[:cleanupsBefore]
+	return nil, err
 }
 
 // newTokenParser 按配置装配注入 Auth 中间件的 token parser：

@@ -33,7 +33,7 @@ type Notifier struct {
 	defaultURL    string
 	envName       string
 	now           func() string
-	webhookSender func(url string, args ...string) error
+	webhookSender func(ctx context.Context, url string, args ...string) error
 	errorLogger   func(msg string)
 
 	// 告警多通道：字段为 nil 即该通道未启用，Warn 扇出时跳过。
@@ -51,8 +51,11 @@ type Notifier struct {
 // 构造失败返回 error 让启动失败：配置了却静默没有通道是禁止形态。
 func NewWithConfig(cfg *config.Config) (*Notifier, error) {
 	n := &Notifier{
-		now:           func() string { return time.Now().Format(time.DateTime) },
-		webhookSender: func(url string, args ...string) error { return fs.WebHookSend(url, args...) },
+		now: func() string { return time.Now().Format(time.DateTime) },
+		// WebHookSendCtx 而不是 WebHookSend：告警发生在日志调用路径上，且
+		// logger.Sync 关停时会逐条排空异步队列——无超时的 webhook 会让
+		// 优雅关闭被一个外部端点无限拖住。
+		webhookSender: fs.WebHookSendCtx,
 		errorLogger:   func(msg string) { logger.Error(msg) },
 	}
 	if cfg == nil {
@@ -100,7 +103,11 @@ func (n *Notifier) Warn(url string, args ...string) {
 	callArgs := make([]string, 0, len(args)+1)
 	callArgs = append(callArgs, title)
 	callArgs = append(callArgs, args...)
-	_ = n.webhookSender(url, callArgs...)
+	// 与邮件/短信通道同值同语义的独立超时（outbound-notification spec：
+	// 每次通道发送必须有独立超时）。
+	ctx, cancel := context.WithTimeout(context.Background(), alertSendTimeout)
+	_ = n.webhookSender(ctx, url, callArgs...)
+	cancel()
 
 	// 扇出到其余已启用通道：单通道失败只记录，不阻断其余、不影响进程。
 	msg := strings.Join(args, " ")

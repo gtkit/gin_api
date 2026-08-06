@@ -90,7 +90,7 @@ func TestRateLimitIsAppliedWhenConfigured(t *testing.T) {
 	engine := gin.New()
 	Register(engine.Group("/api/v1"), Deps{
 		Auth: passthrough(),
-		RateLimit: func(ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+		RateLimit: func(_ string, ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
 			requested = append(requested, ids...)
 			return []gin.HandlerFunc{passthrough()}, []gin.HandlerFunc{passthrough()}
 		},
@@ -133,7 +133,7 @@ func TestIdentityScopedRateLimitRunsAfterAuth(t *testing.T) {
 	Register(engine.Group("/api/v1"), Deps{
 		Service: nil,
 		Auth:    mark("auth"),
-		RateLimit: func(ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+		RateLimit: func(_ string, ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
 			for _, id := range ids {
 				switch id {
 				case "default.ip":
@@ -167,22 +167,21 @@ func TestIdentityScopedRateLimitRunsAfterAuth(t *testing.T) {
 	}
 }
 
-// TestMissingRateLimitPolicyIsSkipped 钉住未配置的策略不导致 panic。
-//
-// 限流策略集合由部署配置决定，一个只跑单机的开发环境完全可以不配某条策略。
-// 那时应当跳过，而不是让整个进程起不来。
-func TestMissingRateLimitPolicyIsSkipped(t *testing.T) {
+// TestRegistrationSucceedsWithEmptyRateLimitGroups 钉住注册期与判定期的分工：
+// stager 返回空分组时模块注册本身不 panic、路由照常产出——
+// 引用解析不到的失败由装配层在全部注册完成后统一报出，不在注册现场炸。
+func TestRegistrationSucceedsWithEmptyRateLimitGroups(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	engine := gin.New()
 	Register(engine.Group("/api/v1"), Deps{
 		Auth:      passthrough(),
-		RateLimit: func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc) { return nil, nil },
+		RateLimit: func(string, ...string) ([]gin.HandlerFunc, []gin.HandlerFunc) { return nil, nil },
 	})
 
 	if len(engine.Routes()) == 0 {
-		t.Fatal("registration produced no routes when no policy is configured")
+		t.Fatal("registration produced no routes when the stager returned empty groups")
 	}
 }
 

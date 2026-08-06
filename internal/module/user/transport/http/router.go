@@ -30,10 +30,11 @@ type Deps struct {
 	// 资源，让每个模块各建一份会产生多份缓存与多份配置。
 	Auth gin.HandlerFunc
 	// RateLimit 按策略标识取限流中间件，并按作用域分成认证前、认证后两组。
+	// 首参是引用发生处的路由标识，装配失败时用于指认现场。
 	//
 	// 模块只声明受哪些策略约束，不决定每条挂在认证的哪一侧——那个位置由策略
 	// 自身的作用域决定，推导逻辑收口在装配层的唯一一处。
-	RateLimit func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+	RateLimit func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 }
 
 // Register 在给定路由组上注册 user 模块的路由。
@@ -56,7 +57,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 只限来源时，就失去了按账号的精确限额。
 	//
 	// 两条策略挂在认证的哪一侧由它们各自的作用域决定，这里只声明受哪些策略约束。
-	preAuth, postAuth := stageRateLimits(deps.RateLimit, "default.ip", "default.user")
+	preAuth, postAuth := stageRateLimits(deps.RateLimit, "/user", "default.ip", "default.user")
 
 	// 顺序是契约：来源限流挡的是尚未证明身份的流量，必须在认证之前；
 	// 身份限流拿不到身份就退化成"每个请求都被拒"，必须在认证之后。
@@ -72,13 +73,13 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 // stageRateLimits 容错地调用装配层注入的分组函数。
 //
-// 未注入时返回两个空切片：限流策略集合由部署配置决定，一个只跑单机的开发环境
-// 完全可以不配，那时这条路由不限流是预期行为。
+// nil 容错只服务于单测手工构造 Deps 的场景；生产装配恒注入 stager，
+// 引用解析不到时由装配层在路由注册完成后统一失败，不存在静默不限流的通道。
 func stageRateLimits(
-	stager func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc), ids ...string,
+	stager func(string, ...string) ([]gin.HandlerFunc, []gin.HandlerFunc), route string, ids ...string,
 ) (preAuth, postAuth []gin.HandlerFunc) {
 	if stager == nil {
 		return nil, nil
 	}
-	return stager(ids...)
+	return stager(route, ids...)
 }

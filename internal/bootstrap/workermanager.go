@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
@@ -77,6 +78,9 @@ type WorkerManager struct {
 	workers []Worker
 	budget  WorkerBudget
 
+	// started 保证 Start 至多执行一次（见 ErrLifecycleReused）。
+	started atomic.Bool
+
 	mu       sync.Mutex
 	prepared []*preparedWorker // 按 Prepare 成功的顺序追加，清理时逆序
 
@@ -92,6 +96,10 @@ type WorkerManager struct {
 	// 由 supervise 执行；兜底清理与共享资源关闭都必须跳过它们——
 	// 对仍在 Run 中的任务执行清理是数据竞争。
 	stuck []*runningWorker
+	// termErrs 汇集运行期 Cleanup 的失败（required 与 optional 一视同仁）：
+	// 清理失败是进程退出时的资源事实，与"optional 运行故障不影响进程"的
+	// 运行期语义无关。由 TerminationErrors 在关停末端一次性收割。
+	termErrs []error
 }
 
 // runningWorker 持有一个已启动 worker 的取消入口与退出信号。
@@ -173,6 +181,10 @@ func (m *WorkerManager) Degraded() map[string]error {
 func (m *WorkerManager) Start(ctx context.Context) error {
 	if m == nil {
 		return nil
+	}
+	// 一次性守卫：重复 Start 会重复 Prepare 全部 worker、重复启动 goroutine。
+	if !m.started.CompareAndSwap(false, true) {
+		return fmt.Errorf("WorkerManager.Start: %w", ErrLifecycleReused)
 	}
 
 	startupCtx, cancel := context.WithTimeout(ctx, m.budget.Startup)
@@ -319,9 +331,21 @@ func (m *WorkerManager) supervise(ctx context.Context, rw *runningWorker) {
 
 	// 正常 Run 结束后同样要 Cleanup：只在"不会进入 Run"时清理，
 	// 会让 Prepare 建立的连接与持有的锁在正常退出路径上无人释放。
+	//
+	// 清理错误不走 reportRunFailure：它在关停开始后无人消费 errCh，错误会
+	// 静默消失，而进程带着清理失败以零退出码结束。改投终止错误集合，
+	// 由关停末端统一收割进 Run 的返回值。
 	if cerr := m.cleanupEntry(ctx, rw.entry); cerr != nil {
-		m.reportRunFailure(w, fmt.Errorf("cleanup worker %q: %w", w.Name(), cerr))
+		m.recordTermination(fmt.Errorf("cleanup worker %q: %w", w.Name(), cerr))
 	}
+}
+
+// recordTermination 登记一条终止期错误并落一次日志。
+func (m *WorkerManager) recordTermination(err error) {
+	logger.Errorf("worker termination error: %v", err)
+	m.runMu.Lock()
+	m.termErrs = append(m.termErrs, err)
+	m.runMu.Unlock()
 }
 
 // reportRunFailure 按 Required 语义分派运行期异常。
@@ -338,19 +362,53 @@ func (m *WorkerManager) reportRunFailure(w Worker, err error) {
 		logger.Errorf("worker %s panicked: %v\n%s", panicErr.Worker, panicErr.Value, panicErr.Stack)
 	}
 
+	// H 系列（HErrorf）是告警执行点：worker 运行期异常与降级是进程级事件，
+	// 经 Messager 扇出到已启用的告警通道。请求级异常不在此列——它们只走
+	// 日志与指标，接入告警会在一次流量异常里形成告警风暴。
 	if !w.Required() {
 		m.markDegraded(w.Name(), err)
-		logger.Warnf("optional worker %s stopped: %v", w.Name(), err)
+		// Error 而不是 Warn：能力已经没了，只是进程还活着。
+		logger.HErrorf("optional worker %s stopped and was marked degraded: %v", w.Name(), err)
 		return
 	}
 
 	wrapped := fmt.Errorf("worker %s: %w", w.Name(), err)
 	select {
 	case m.errCh <- wrapped:
+		// 入队成功也要落日志：关停开始后通道可能再无消费者（错误由
+		// TerminationErrors 在末端排空），不落日志的话，从入队到收割
+		// 之间这个错误在任何输出里都不存在。
+		logger.HErrorf("required worker failed: %v", wrapped)
 	default:
 		// 通道容量按 worker 数分配，写满说明已有足够多的异常在等待处理；
 		// 丢弃后仍记录，避免在关停路径上阻塞。
-		logger.Errorf("worker error channel is full, dropping: %v", wrapped)
+		logger.HErrorf("worker error channel is full, dropping: %v", wrapped)
+	}
+}
+
+// TerminationErrors 收割终止期无人消费的任务错误：非阻塞排空 errCh
+// （关停开始后 required 任务的运行错误再无消费者），并取走 Cleanup 错误集合。
+//
+// 只应在全部 StopKind 与 CleanupRemaining 完成之后调用：StopKind 等待
+// rw.done，而 done 在 supervise 写完错误之后才关闭，此时序保证收割不漏。
+// 已被 awaitShutdown 消费并记为关停 cause 的那个错误不在通道里，天然不重复。
+func (m *WorkerManager) TerminationErrors() error {
+	if m == nil {
+		return nil
+	}
+
+	var errs []error
+	for {
+		select {
+		case err := <-m.errCh:
+			errs = append(errs, err)
+		default:
+			m.runMu.Lock()
+			errs = append(errs, m.termErrs...)
+			m.termErrs = nil
+			m.runMu.Unlock()
+			return errors.Join(errs...)
+		}
 	}
 }
 

@@ -40,6 +40,13 @@ func (p ProcessPhase) String() string {
 // ErrForcedShutdown 表示进程走了强制关停路径（第二个信号）。
 var ErrForcedShutdown = errors.New("shutdown forced by a second signal")
 
+// ErrLifecycleReused 表示生命周期入口（App.Run / WorkerManager.Start）被第二次调用。
+//
+// 重复调用是编码错误：重复 Prepare、重复启动 goroutine、复用已消费的内部
+// 状态都是未定义行为。母版会被下游直接嵌用，显式错误的排查成本远低于
+// 观察行为反推。
+var ErrLifecycleReused = errors.New("lifecycle entrypoint may be invoked at most once")
+
 // ShutdownCoordinator 是**唯一**的关停入口。
 //
 // 关停触发源不止一个：OS 信号、required worker 运行期异常、主 HTTP serve 异常。

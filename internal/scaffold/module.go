@@ -595,7 +595,45 @@ type pendingWrite struct {
 }
 
 // writeGeneratedFile 是提交阶段的写入缝，测试用它注入写入失败。
-var writeGeneratedFile = os.WriteFile
+var writeGeneratedFile = atomicWriteFile
+
+// tempFileWriter 是原子写入内部的临时文件写入缝，测试用它模拟部分写失败。
+var tempFileWriter = func(f *os.File, data []byte) (int, error) { return f.Write(data) }
+
+// atomicWriteFile 经同目录临时文件写入后重命名覆盖目标。
+//
+// 直接截断写（os.WriteFile 的 O_TRUNC）在磁盘错误时会把使用者的既有文件
+// 毁成半截，而该文件因"未写成功"不在已写清单里、不会被回滚恢复。
+// 临时文件 + rename 让目标在任意失败点上要么是完整新内容、要么原样不动；
+// 失败路径上清除本次的临时文件，不留 .tmp 残骸。
+func atomicWriteFile(path string, data []byte, perm os.FileMode) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file in %s: %w", dir, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+
+	if _, err = tempFileWriter(tmp, data); err != nil {
+		return fmt.Errorf("write temp file for %s: %w", path, err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file for %s: %w", path, err)
+	}
+	// CreateTemp 固定 0600，目标权限单独授予。
+	if err = os.Chmod(tmp.Name(), perm); err != nil {
+		return fmt.Errorf("chmod temp file for %s: %w", path, err)
+	}
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("rename temp file to %s: %w", path, err)
+	}
+	return nil
+}
 
 // commitWrites 统一落盘全部暂存写入；任一失败时逆序恢复本次已写入的文件与
 // 新建的目录，主错误在前、恢复错误聚合在后。
@@ -641,14 +679,17 @@ func firstMissingAncestor(dir string) string {
 }
 
 // rollbackWrites 逆序恢复已写文件（更新的写回原内容，新建的删除），
-// 再移除本次新建的目录树。新建目录下只可能有本次的产物——已存在文件的
-// 更新发生在既有目录里，因此 RemoveAll 不会波及任何既有内容。
+// 再移除本次新建目录树中已空的目录。
+//
+// 不用 RemoveAll：回滚窗口内并发出现在新建目录里的使用者文件不是本工具
+// 可以删除的东西——恢复工作区的义务止于清除本次产物。本次的文件在上一步
+// 已逐个移除，之后仍非空的目录只可能装着别人的东西，保留它不是回滚失败。
 func rollbackWrites(written []pendingWrite, createdDirs []string) error {
 	var errs []error
 	for i := len(written) - 1; i >= 0; i-- {
 		w := written[i]
 		if w.existed {
-			if err := os.WriteFile(w.path, w.original, 0o644); err != nil { //nolint:gosec // 恢复的是使用者可读的项目文件
+			if err := writeGeneratedFile(w.path, w.original, 0o644); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", w.path, err))
 			}
 			continue
@@ -658,11 +699,43 @@ func rollbackWrites(written []pendingWrite, createdDirs []string) error {
 		}
 	}
 	for i := len(createdDirs) - 1; i >= 0; i-- {
-		if err := os.RemoveAll(createdDirs[i]); err != nil {
+		if err := removeEmptyDirTree(createdDirs[i]); err != nil {
 			errs = append(errs, fmt.Errorf("remove created dir %s: %w", createdDirs[i], err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// removeEmptyDirTree 后序移除 root 下已空的目录；含内容的目录静默保留。
+func removeEmptyDirTree(root string) error {
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("walk %s: %w", root, err)
+	}
+
+	// WalkDir 前序产出，倒序即先子后父。
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Remove(dirs[i]); err == nil {
+			continue
+		} else if entries, readErr := os.ReadDir(dirs[i]); readErr == nil && len(entries) > 0 {
+			continue // 装着非本次产物：保留是义务，不是失败。
+		} else {
+			return fmt.Errorf("remove %s: %w", dirs[i], err)
+		}
+	}
+	return nil
 }
 
 func (g *ModuleGenerator) rel(path string) string {
@@ -1502,9 +1575,10 @@ type Deps struct {
 	// Authorize 按 ID 取授权中间件。
 	Authorize func(authorizerID string) gin.HandlerFunc
 	// RateLimit 按策略标识取限流中间件，并按作用域分成认证前、认证后两组。
+	// 首参是引用发生处的路由标识，装配失败时用于指认现场。
 	//
 	// 模块只声明受哪些策略约束，位置由策略自身的作用域决定。
-	RateLimit func(policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+	RateLimit func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 }
 
 // Register 在给定路由组上注册本模块的路由。
@@ -1521,12 +1595,13 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	g := r.Group("/{{.RoutePath}}")
 	g.Use(middleware.Timeout({{.ServiceVar}}Deadline, {{.ServiceVar}}WriteGrace))
 
-	// 限流策略在 config 的 ratelimit.policies 里定义。
+	// 限流策略在 config 的 ratelimit.policies 里定义；引用解析不到时装配失败，
+	// 不存在静默不限流的通道。
 	//
 	// 每条挂在访问策略的哪一侧由它自身的作用域决定，这里只声明受哪些策略约束：
 	// 不需要身份的作用域必须在访问策略之前（它挡的是尚未证明身份的流量），
 	// 需要身份的作用域必须在之后（否则取不到主体，每个请求都被判 429）。
-	preAuth, postAuth := stageRateLimits(deps.RateLimit, {{.RateLimitPolicies}})
+	preAuth, postAuth := stageRateLimits(deps.RateLimit, "/{{.RoutePath}}", {{.RateLimitPolicies}})
 
 	g.Use(preAuth...)
 	{{.AccessPolicyExpr}}
@@ -1538,15 +1613,15 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 // stageRateLimits 容错地调用装配层注入的分组函数。
 //
-// 未注入时返回两个空切片：限流策略集合由部署配置决定，一个只跑单机的开发环境
-// 完全可以不配，那时这条路由不限流是预期行为。
+// nil 容错只服务于单测手工构造 Deps 的场景；生产装配恒注入 stager，
+// 引用解析不到时由装配层在路由注册完成后统一失败，不存在静默不限流的通道。
 func stageRateLimits(
-	stager func(...string) ([]gin.HandlerFunc, []gin.HandlerFunc), ids ...string,
+	stager func(string, ...string) ([]gin.HandlerFunc, []gin.HandlerFunc), route string, ids ...string,
 ) (preAuth, postAuth []gin.HandlerFunc) {
 	if stager == nil {
 		return nil, nil
 	}
-	return stager(ids...)
+	return stager(route, ids...)
 }
 `
 
