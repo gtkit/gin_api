@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	logger "github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -121,7 +125,22 @@ func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 		// 几千个并发连接即可把内存吃光，且访问日志里什么都看不到，
 		// 因为这些请求根本没走到 handler。
 		MaxHeaderBytes: defaultMaxHeaderBytes,
+		ErrorLog:       httpServerErrorLog(),
 	}
+}
+
+// httpServerErrorLog 把 net/http 的内部错误输出桥接到结构化日志器。
+//
+// 这些错误（TLS 握手失败、请求解析错误、连接异常）发生在任何中间件之前，
+// 访问日志里没有它们的痕迹；不接管的话唯一的第一现场落在裸 stderr 上，
+// 采集、告警与脱敏对它全部失效。
+func httpServerErrorLog() *log.Logger {
+	std, err := zap.NewStdLogAt(logger.Default().Sugar().Desugar(), zapcore.ErrorLevel)
+	if err != nil {
+		// ErrorLevel 是合法级别，此路径实际不可达；防御性回退到 net/http 默认（stderr）。
+		return nil
+	}
+	return std
 }
 
 // defaultMaxHeaderBytes 是请求头（含请求行）的总上限。
@@ -138,9 +157,15 @@ func serveHTTPServer(server httpServer, cfg HTTPConfig, listener net.Listener) e
 	addr := listener.Addr().String()
 
 	if cfg.EnableTLS {
+		// 只用预绑定阶段已装载并校验的证书（经 TLSConfig.Certificates 注入）。
+		// 空路径调用杜绝二次装载与"校验-使用"之间的文件变更窗口；
+		// 证书缺失时报错而不是回退路径装载——回退会让校验形同虚设。
+		if cfg.TLSConfig == nil || len(cfg.TLSConfig.Certificates) == 0 {
+			return fmt.Errorf(
+				"tls enabled on %s but no certificate loaded: the validated certificate from prebind was not injected", addr)
+		}
 		logger.Infof("https server starting on %s", addr)
-		// 证书已在预绑定阶段校验过；这里再传一次路径由 net/http 完成实际装载。
-		return normalizeServeError(server.ServeTLS(listener, cfg.CertFile, cfg.KeyFile))
+		return normalizeServeError(server.ServeTLS(listener, "", ""))
 	}
 
 	logger.Infof("http server starting on %s", addr)

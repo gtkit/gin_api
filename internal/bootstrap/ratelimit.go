@@ -43,18 +43,24 @@ func buildRateLimits(
 	// N 份独立探测，对一个已经出问题的依赖形成探测风暴。
 	var redisBackend *ratelimit.RedisBackend
 
+	// 中途失败必须关闭已建执行体：本地策略的执行体各自持有后台清理 goroutine，
+	// 直接丢弃注册表引用会让它们存活到进程退出。
 	for _, raw := range cfg.RateLimit.Policies {
 		policy, convErr := toRateLimitPolicy(raw)
 		if convErr != nil {
-			return rateLimitAssembly{}, convErr
+			return rateLimitAssembly{}, errors.Join(convErr, registry.Close())
 		}
 
 		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.App.Name)
 		if buildErr != nil {
-			return rateLimitAssembly{}, buildErr
+			return rateLimitAssembly{}, errors.Join(buildErr, registry.Close())
 		}
 		if regErr := registry.Register(limiter); regErr != nil {
-			return rateLimitAssembly{}, fmt.Errorf("register rate limit policy: %w", regErr)
+			// 注册失败的执行体不在注册表内，必须在失败现场关闭——
+			// 除此之外没有任何路径能回收它的后台 goroutine。
+			limiter.Close()
+			return rateLimitAssembly{}, errors.Join(
+				fmt.Errorf("register rate limit policy: %w", regErr), registry.Close())
 		}
 	}
 

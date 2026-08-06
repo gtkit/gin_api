@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -158,6 +159,13 @@ func (a *App) Run(ctx context.Context) (err error) {
 			_ = bound.Close()
 		}
 	}()
+
+	// TLS：预绑定阶段已装载并校验的证书注入服务配置，服务期不再读文件。
+	// http.Server 与 a.httpConfig 持有同一个 *tls.Config，serve goroutine
+	// 启动之前的单线程窗口内注入，net/http 在 ServeTLS 时克隆该配置。
+	if bound.certificate != nil && a.httpConfig.TLSConfig != nil {
+		a.httpConfig.TLSConfig.Certificates = []tls.Certificate{*bound.certificate}
+	}
 
 	// ② worker 启动屏障。失败即启动失败：HTTP 从不开始服务。
 	if err := a.workers.Start(ctx); err != nil {
