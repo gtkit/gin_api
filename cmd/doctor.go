@@ -20,7 +20,7 @@ type configLoader func() (*config.Config, error)
 //
 // 参数化便于测试：deep 路径要建真实连接，测试里必须能换掉它，
 // 否则这条路径要么测不到、要么依赖一台真库。
-type probeBuilder func(ctx context.Context) (diagnostics.Probes, func(), error)
+type probeBuilder func(ctx context.Context) (diagnostics.Probes, func() error, error)
 
 func init() {
 	RegisterRootCommand(newDoctorCmd)
@@ -71,7 +71,13 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 					cmd.PrintErrf("deep probes unavailable: %v\n", probeErr)
 					opts.ProbesUnavailable = true
 				} else {
-					defer release()
+					// 关闭错误要可见但不翻转诊断结论：doctor 的退出码由报告推导，
+					// 探针连接自身的收尾失败打到 stderr 供操作者判断。
+					defer func() {
+						if cerr := release(); cerr != nil {
+							cmd.PrintErrf("release deep probes: %v\n", cerr)
+						}
+					}()
 					opts.Probes = probes
 				}
 			}
@@ -145,10 +151,10 @@ func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics
 // 复用 bootstrap 的资源装配，而不是在诊断代码里另写一份建连逻辑——
 // 另写一份就意味着 doctor 检查的连接与服务实际使用的连接可能采用不同的
 // 版本校验、会话语义与超时，于是"doctor 通过"不再说明服务能起来。
-func buildRuntimeProbes(ctx context.Context) (diagnostics.Probes, func(), error) {
+func buildRuntimeProbes(ctx context.Context) (diagnostics.Probes, func() error, error) {
 	rt, err := bootstrap.NewRuntime(ctx, bootstrap.Options{})
 	if err != nil {
-		return diagnostics.Probes{}, func() {}, err
+		return diagnostics.Probes{}, func() error { return nil }, err
 	}
 
 	resources := rt.Resources()

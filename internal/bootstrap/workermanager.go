@@ -54,6 +54,13 @@ func (b WorkerBudget) normalize() WorkerBudget {
 	return b
 }
 
+// ErrWorkerNotExited 表示任务未在停止预算内退出（Run 尚未返回）。
+//
+// 关停路径用它判别"存在存活任务"：兜底清理跳过这类任务，共享资源关闭被跳过，
+// 进程以非零退出——既然任务已无法在预算内停止，"干净关闭"已不可达成，
+// 唯一诚实的行为是显式报告非正常退出。
+var ErrWorkerNotExited = errors.New("worker did not exit within the shutdown budget")
+
 // preparedWorker 记录一个 Prepare 成功、尚未清理的 worker。
 type preparedWorker struct {
 	worker Worker
@@ -81,6 +88,10 @@ type WorkerManager struct {
 	runMu    sync.Mutex
 	running  map[WorkerKind][]*runningWorker
 	degraded map[string]error
+	// stuck 记录停止预算内未退出的任务。它们的 Cleanup 延迟到 Run 返回后
+	// 由 supervise 执行；兜底清理与共享资源关闭都必须跳过它们——
+	// 对仍在 Run 中的任务执行清理是数据竞争。
+	stuck []*runningWorker
 }
 
 // runningWorker 持有一个已启动 worker 的取消入口与退出信号。
@@ -374,11 +385,55 @@ func (m *WorkerManager) StopKind(ctx context.Context, kind WorkerKind) error {
 		select {
 		case <-rw.done:
 		case <-ctx.Done():
+			m.runMu.Lock()
+			m.stuck = append(m.stuck, rw)
+			m.runMu.Unlock()
 			errs = append(errs, fmt.Errorf(
-				"worker %q did not exit within the shutdown budget: %w", rw.entry.worker.Name(), ctx.Err()))
+				"worker %q: %w: %v", rw.entry.worker.Name(), ErrWorkerNotExited, ctx.Err()))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// LiveWorkers 返回 Run 仍未返回的任务名快照，并把已退出的条目移出追踪。
+//
+// 已退出条目的清理由 supervise 负责（rw.done 在 Cleanup 之后才关闭），
+// 这里只需把它们从"存活"集合中剔除。
+func (m *WorkerManager) LiveWorkers() []string {
+	if m == nil {
+		return nil
+	}
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	kept := m.stuck[:0]
+	var live []string
+	for _, rw := range m.stuck {
+		select {
+		case <-rw.done:
+		default:
+			kept = append(kept, rw)
+			live = append(live, rw.entry.worker.Name())
+		}
+	}
+	m.stuck = kept
+	return live
+}
+
+// liveEntries 返回 Run 仍未返回的任务条目集合，供兜底清理过滤。
+func (m *WorkerManager) liveEntries() map[*preparedWorker]struct{} {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	live := make(map[*preparedWorker]struct{})
+	for _, rw := range m.stuck {
+		select {
+		case <-rw.done:
+		default:
+			live[rw.entry] = struct{}{}
+		}
+	}
+	return live
 }
 
 // StopAll 依次停止 bootstrap（optional OneShot）与两类长期 worker。
@@ -412,9 +467,18 @@ func (m *WorkerManager) CleanupRemaining(ctx context.Context) error {
 // 单个失败不阻断其余，错误聚合返回——否则第一个失败就会让其后的全部泄漏。
 func (m *WorkerManager) cleanupPrepared(ctx context.Context) error {
 	entries := m.snapshotPrepared()
+	live := m.liveEntries()
 
 	var errs []error
 	for i := len(entries) - 1; i >= 0; i-- {
+		if _, running := live[entries[i]]; running {
+			// Run 未返回的任务不清理：与 Run 并发执行 Cleanup 是数据竞争，
+			// 且先行标记"已清理"会让任务真正退出后的正常清理被跳过。
+			// 它的清理由 supervise 在 Run 返回后执行，或随进程退出回收。
+			logger.Warnf("skipping cleanup of worker %q: its Run has not returned",
+				entries[i].worker.Name())
+			continue
+		}
 		if err := m.cleanupEntry(ctx, entries[i]); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup worker %q: %w", entries[i].worker.Name(), err))
 		}

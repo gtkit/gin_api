@@ -129,14 +129,25 @@ func (r *Runtime) TokenParser() jwtauth.TokenParser {
 	return r.jwt.Parser
 }
 
-// Close releases runtime resources exactly once.
-func (r *Runtime) Close() {
-	if r == nil || !r.closed.CompareAndSwap(false, true) {
-		return
+// Close releases runtime resources and reports failures to the caller.
+//
+// 关闭错误必须返回而不是只记日志：吞掉它会让进程在资源关闭失败时仍报告
+// "正常退出"，编排器与脚本据此做出错误判断。重复调用返回与首次相同的结果，
+// 幂等由 Resources 自身保证（其内部记录首次关闭结果）；日志刷写仅执行一次。
+func (r *Runtime) Close() error {
+	if r == nil {
+		return nil
 	}
 
-	if err := r.resources.Close(); err != nil {
-		logger.Errorf("close resources: %v", err)
+	var err error
+	if r.resources != nil {
+		err = r.resources.Close()
 	}
-	closeProcessRuntime()
+	if r.closed.CompareAndSwap(false, true) {
+		closeProcessRuntime()
+	}
+	if err != nil {
+		return fmt.Errorf("close resources: %w", err)
+	}
+	return nil
 }

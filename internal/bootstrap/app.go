@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,8 +70,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	//   那句话对 buildMiddlewares 成立，对限流不成立。）
 	providers, err := newProviders(ctx, runtime)
 	if err != nil {
-		runtime.Close()
-		return nil, err
+		return nil, errors.Join(err, runtime.Close())
 	}
 
 	return &App{
@@ -103,8 +103,11 @@ func drainWaitFrom(cfg *config.Config) time.Duration {
 // 启动顺序：worker 启动屏障（Prepare → required OneShot → 后台 worker）→ HTTP Serve。
 // required OneShot 必须先跑完：它们代表"对外服务之前必须做完的事"，
 // 放到 HTTP 之后就失去了全部意义。
-func (a *App) Run(ctx context.Context) error {
-	defer a.closeResources()
+func (a *App) Run(ctx context.Context) (err error) {
+	// 资源关闭错误必须进入返回值：只记日志会让关闭失败的进程仍报告"正常退出"。
+	defer func() {
+		err = errors.Join(err, a.closeResources())
+	}()
 
 	// pprof 绑定失败即启动失败：一个"配置说开了但实际没监听"的端点
 	// 会让排障的人对着一个不存在的地址反复尝试。
@@ -122,7 +125,12 @@ func (a *App) Run(ctx context.Context) error {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	go a.watchSignals(signals)
+
+	// watchDone 让两个监听协程随 Run 返回而退出：signal.Stop 只解除注册、
+	// 不关闭通道，没有独立退出信号的监听协程会在 Run 结束后永久阻塞。
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go a.watchSignals(signals, watchDone)
 
 	// 上层 ctx 取消同样是一次关停请求（cobra ExecuteContext / 测试驱动）。
 	go func() {
@@ -130,6 +138,7 @@ func (a *App) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			a.shutdown.RequestShutdown(nil)
 		case <-a.shutdown.Requested():
+		case <-watchDone:
 		}
 	}()
 
@@ -171,19 +180,25 @@ func (a *App) Run(ctx context.Context) error {
 	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
 }
 
-// watchSignals 把第一个信号翻译成优雅关停请求，第二个翻译成强制关停。
-func (a *App) watchSignals(signals <-chan os.Signal) {
+// watchSignals 把第一个信号翻译成优雅关停请求，第二个翻译成强制关停；
+// done 关闭（= Run 返回）时退出，不残留监听协程。
+func (a *App) watchSignals(signals <-chan os.Signal, done <-chan struct{}) {
 	first := true
-	for sig := range signals {
-		if first {
-			logger.Infof("received %s: starting graceful shutdown", sig)
-			a.shutdown.RequestShutdown(nil)
-			first = false
-			continue
+	for {
+		select {
+		case sig := <-signals:
+			if first {
+				logger.Infof("received %s: starting graceful shutdown", sig)
+				a.shutdown.RequestShutdown(nil)
+				first = false
+				continue
+			}
+			logger.Warnf("received %s again: forcing shutdown", sig)
+			a.shutdown.Force()
+			return
+		case <-done:
+			return
 		}
-		logger.Warnf("received %s again: forcing shutdown", sig)
-		a.shutdown.Force()
-		return
 	}
 }
 
@@ -285,9 +300,20 @@ func (a *App) gracefulShutdown(
 }
 
 // stopKindWithBudget 在独立预算内停止某一类 worker。
+//
+// 强制信号必须能取消这里的等待：三类 worker 的停止预算是串行叠加的，
+// 不接入强制信号，"再按一次 Ctrl+C 立刻退出"实际要等上数十秒。
+// 与 shutdownHTTP 同款模式；已处于强制状态时 ForcedCh 已关闭，等待立刻取消。
 func (a *App) stopKindWithBudget(base context.Context, kind WorkerKind) error {
 	stopCtx, cancel := context.WithTimeout(base, defaultWorkerShutdownTimeout)
 	defer cancel()
+	go func() {
+		select {
+		case <-a.shutdown.ForcedCh():
+			cancel()
+		case <-stopCtx.Done():
+		}
+	}()
 	return a.workers.StopKind(stopCtx, kind)
 }
 
@@ -350,8 +376,19 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 	return nil
 }
 
-func (a *App) closeResources() {
-	if a.runtime != nil {
-		a.runtime.Close()
+// closeResources 关闭进程级共享资源。
+//
+// 关闭前查询仍未退出的任务：存活任务手里的连接被并发关闭等价于使用中拔资源。
+// 此时跳过关闭、返回可判别错误，回收交给进程退出。判定放在这里而不是
+// gracefulShutdown：defer 路径在关闭那一刻查询实时状态，天然覆盖 Run 的
+// 全部提前返回分支。
+func (a *App) closeResources() error {
+	if live := a.workers.LiveWorkers(); len(live) > 0 {
+		return fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
+			len(live), strings.Join(live, ", "), ErrWorkerNotExited)
 	}
+	if a.runtime == nil {
+		return nil
+	}
+	return a.runtime.Close()
 }
