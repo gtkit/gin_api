@@ -9,6 +9,8 @@ import (
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
+
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 )
 
 const (
@@ -320,8 +322,12 @@ func (m *WorkerManager) supervise(ctx context.Context, rw *runningWorker) {
 		}
 	}
 
-	// ctx 已取消时的 ctx.Canceled 是正常关停，不算异常。
-	if err != nil && errors.Is(err, context.Canceled) && ctx.Err() != nil {
+	// ctx 已取消时的**纯取消**是正常关停，不算异常。
+	//
+	// 必须逐成员判定（errx.IsPureCancellation）：errors.Is 对聚合错误任一成员
+	// 命中即真，混入真实故障的 errors.Join(Canceled, realErr) 会被整体判成
+	// 正常关停，那个故障就此静默消失。
+	if err != nil && ctx.Err() != nil && errx.IsPureCancellation(err) {
 		err = nil
 	}
 

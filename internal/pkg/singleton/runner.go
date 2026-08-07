@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 )
 
 // Guarantee 声明任务在"两个实例同时运行"时靠什么保证正确。
@@ -243,10 +245,14 @@ func (r *Runner) runOnce(ctx context.Context) {
 	switch {
 	case taskErr == nil:
 		r.observer.TaskSucceeded(r.lease.name)
-	case errors.Is(taskErr, context.Canceled), errors.Is(taskErr, context.DeadlineExceeded):
-		// 被取消不算任务失败：原因要么是进程关停，要么是失去租约——
+	case errx.IsPureAbort(taskErr):
+		// **纯**被中止不算任务失败：原因要么是进程关停，要么是失去租约——
 		// 后者已经由 LeaseLost 报过了。在这里再报一次会让同一个事件
 		// 在指标上计两次，"失败率"因此虚高一倍。
+		//
+		// 必须逐成员判定（errx.IsPureAbort）：errors.Is 对聚合错误任一成员
+		// 命中即真，errors.Join(Canceled, realErr) 会被整体判成"被中止"，
+		// 那个真实故障就从指标与告警里消失了。
 	default:
 		r.observer.TaskFailed(r.lease.name, taskErr)
 	}
