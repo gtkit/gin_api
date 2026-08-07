@@ -114,7 +114,7 @@ go run . module staff --field nickname:string --field status:uint8
 
 1. 架构边界检查（`check-architecture`）。
 2. 依赖清单整洁（`check-tidy`）、包级变量重绑定认领（`check-package-vars`）。
-3. 镜像摘要固定（`check-image-digests`）、安全判定自检（`check-security-eval`）、发布接线（`check-release-wiring`）、应用身份零漂移（`check-appmeta`）。
+3. 镜像摘要固定（`check-image-digests`）、安全判定自检（`check-security-eval`）、发布接线（`check-release-wiring`）、应用身份零漂移（`check-appmeta`）、钩子安装语义（`check-hooks`）。
 4. `golangci-lint run ./...`（`tool`）与 `go vet ./...`。
 5. race 测试并生成聚合 coverage profile。
 6. 校验全仓覆盖率不低于当前门禁（**以 `Makefile` 的 `COVERAGE_MIN` 为准**，本文不重复该数字——写死会与实际门禁分叉，而分叉时读者无从判断哪个是真的）。
@@ -127,7 +127,23 @@ go run . module staff --field nickname:string --field status:uint8
 `--verify-scope` 证明导出范围恰好覆盖四类边界行为。
 
 **所有质量门禁都在本地执行**：`deployment.sh` 与 `.gitlab-ci.yml` 是外部冻结的专属部署方案，
-CI 中不含质量 job，提交前由开发者自行运行上述入口。
+CI 中不含质量 job。
+
+### 装上钩子（克隆后第一件事）
+
+```bash
+make hooks
+```
+
+它把 `scripts/git-hooks/pre-push` 装到 `.git/hooks/`，推送前自动跑 `make check-ci`。
+门禁存在不等于门禁被执行——CI 侧不承载质量 job，本地这一道就是代码进入共享历史前
+唯一的自动检查点。
+
+挂 pre-push 而不是 pre-commit：门禁是分钟级的，挂在每次提交上的结果必然是被
+`--no-verify` 长期绕过。确需跳过用 `SKIP_GATE=1 git push`，跳过时会在错误输出留痕。
+
+`make hooks` 幂等，改了钩子内容重跑一次即可；若 `.git/hooks/` 下已有**非本仓**的
+同名钩子，它报错中止而不覆盖——那是你自己的自动化，本仓不替你决定怎么合并。
 
 ## 部署
 

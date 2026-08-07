@@ -167,6 +167,10 @@ func rateLimitOutcome(outcome ratelimit.Outcome) metrics.RateLimitOutcome {
 		return metrics.RateLimitKeyLimit
 	case ratelimit.OutcomeBackendUnavailable:
 		return metrics.RateLimitFailure
+	case ratelimit.OutcomeUnspecified:
+		// 未赋值的判定不是放行，指标上也不能算成放行——否则一处漏赋值
+		// 在监控里看起来就是一段正常流量。
+		return metrics.RateLimitFailure
 	default:
 		// 上游新增了取值而这里没跟上。归到 failure 而不是 allowed：
 		// 把未知情况记成"放行"会让一类新的拒绝在监控上完全消失。

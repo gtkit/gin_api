@@ -271,6 +271,9 @@ func accountRateLimitOutcome(outcome ratelimit.Outcome) metrics.RateLimitOutcome
 		return metrics.RateLimitKeyLimit
 	case ratelimit.OutcomeBackendUnavailable:
 		return metrics.RateLimitFailure
+	case ratelimit.OutcomeUnspecified:
+		// 未赋值的判定不是放行，指标上也不能算成放行。
+		return metrics.RateLimitFailure
 	default:
 		return metrics.RateLimitFailure
 	}

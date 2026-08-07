@@ -9,8 +9,15 @@ import (
 type Outcome uint8
 
 const (
+	// OutcomeUnspecified 占住零值，使未经赋值构造的判定**不放行**。
+	//
+	// Go 的零值无处不在——结构体字面量漏填、切片扩容、map 取不到键都会产出
+	// 它。让 0 位是放行，意味着任何一次疏忽都朝不设防的方向失败，而这类疏忽
+	// 在编译期与测试里都不显形。它单独占一位而不是复用放行，还让日志里真的
+	// 出现过的未赋值判定能被查出来，不至于伪装成一次正常放行。
+	OutcomeUnspecified Outcome = iota
 	// OutcomeAllowed 放行。
-	OutcomeAllowed Outcome = iota
+	OutcomeAllowed
 	// OutcomeRateLimited 被限速。
 	OutcomeRateLimited
 	// OutcomeKeyBudgetExhausted 键基数达上限而被拒绝。
@@ -33,8 +40,12 @@ func (o Outcome) String() string {
 		return "key_budget_exhausted"
 	case OutcomeBackendUnavailable:
 		return "backend_unavailable"
+	case OutcomeUnspecified:
+		return "unspecified"
 	default:
-		return "allowed"
+		// 未知取值不回落到 allowed：那会把证据抹掉。日志里看到 unspecified
+		// 才能定位到"有人返回了未赋值或越界的判定"。
+		return "unspecified"
 	}
 }
 

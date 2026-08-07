@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci hooks check-hooks check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -113,6 +113,15 @@ check-coverage: test-coverage ## Enforce the aggregate statement coverage baseli
 check-architecture: ## 校验分层架构边界
 	@ ./scripts/check-architecture.sh
 
+hooks: ## 安装 git 钩子（pre-push 跑 make check-ci）
+	## 门禁存在不等于门禁被执行。CI 侧只部署、不承载质量 job（外部冻结契约），
+	## 所以本地这一道是代码进入共享历史前唯一的自动检查点。
+	## 幂等可重跑；已存在非本仓的同名钩子时报错中止，不覆盖。
+	@ bash ./scripts/install-hooks.sh
+
+check-hooks: ## 校验钩子安装语义（临时仓库实跑，不碰本机 .git/hooks）
+	@ bash ./scripts/check-hooks.sh
+
 check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模块并验证编译/传感器/goimports（含门禁自检）
 	@ bash ./scripts/check-generator.sh --self-test
 	@ bash ./scripts/check-generator.sh --verify-scope
@@ -206,7 +215,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 
