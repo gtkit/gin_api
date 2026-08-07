@@ -132,6 +132,9 @@ func (c *Config) Validate() error {
 	if err := validateJWTRotation(c.JWT, c.Env); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateAuthJWTCompatibility(c.Auth, c.JWT); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateProxyConfig(c.Proxy, c.Env); err != nil {
 		errs = append(errs, err)
 	}
@@ -510,4 +513,25 @@ func mustHostPort(field, value string) error {
 		return fmt.Errorf("%s %q has an empty host", field, value)
 	}
 	return mustPortRange(field+" port", port)
+}
+
+// validateAuthJWTCompatibility 拒绝运行期不可用的认证组合
+// （local-authentication spec）。
+//
+// Laravel 回退 + 本地认证：Laravel 存量令牌不携带 jti，而本地认证对每个
+// 请求强制查询撤销表（那是它能登出的前提）——拿不到 jti 就无法判定是否
+// 已撤销，唯一安全的处置是拒绝，于是每个 Laravel 令牌恒定失败。
+//
+// 在启动期拒绝而不是让它跑起来：这个组合的表现是"配置看起来两个都开了，
+// 而其中一条永远走不通"，只有在真实流量上才暴露，且日志里看不出根因。
+func validateAuthJWTCompatibility(auth AuthConfig, jwt JWTConfig) error {
+	if auth.Mode == AuthModeLocal && jwt.Laravel.Enabled {
+		return errors.New(
+			"jwt.laravel.enabled cannot be combined with auth.mode \"local\": Laravel legacy " +
+				"tokens carry no jti, while local auth checks the revocation list on every " +
+				"request (that is what makes logout work) — every Laravel token would be " +
+				"rejected. Either finish the Laravel migration and disable the fallback, " +
+				"or set auth.mode to \"external\" while the fallback is still needed")
+	}
+	return nil
 }

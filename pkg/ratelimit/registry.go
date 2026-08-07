@@ -91,10 +91,16 @@ func (r *Registry) IDs() []string {
 
 // Close 关闭全部执行体，错误聚合返回。
 func (r *Registry) Close() error {
+	// 锁内只取快照并清空，**Close 在锁外调用**（reusable-packages spec）：
+	// Limiter 是使用方或本包各后端提供的实现，持锁调用它的 Close 会把
+	// "使用者的 Close 必须又快又不重入注册表"变成没有编译器背书的隐式契约，
+	// 违反者的代价是死锁。清空同时让重复 Close 天然幂等。
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	limiters := r.limiters
+	r.limiters = nil
+	r.mu.Unlock()
 
-	for _, l := range r.limiters {
+	for _, l := range limiters {
 		l.Close()
 	}
 	return nil

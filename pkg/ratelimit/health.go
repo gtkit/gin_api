@@ -77,11 +77,10 @@ type HealthState struct {
 	// probeInFlight 是探测的单一所有权标记。
 	probeInFlight bool
 	// pending 是待通知的相位迁移事件（受 mu 保护，入队序 = 迁移发生序）。
+	//
+	// 由公开入口在解锁前取走、解锁后发出：通知全程不持锁，因此 Observer
+	// 重入不死锁、慢 Observer 不阻塞判定。
 	pending []phaseTransition
-
-	// notifyMu 串行化对 Observer 的通知：排空 pending 时按队列顺序逐条发出。
-	// 独立于 mu——回调在两把锁都不持有 mu 的状态下执行。
-	notifyMu sync.Mutex
 }
 
 // phaseTransition 是一次相位迁移的快照。
@@ -107,8 +106,10 @@ func (s *HealthState) forceDegraded() {
 	s.mu.Lock()
 	s.transitionLocked(PhaseDegraded)
 	s.nextProbeAt = s.now()
+	events := s.takePendingLocked()
 	s.mu.Unlock()
-	s.notifyPending()
+
+	s.notify(events)
 }
 
 // Phase 返回当前相位。
@@ -133,8 +134,10 @@ func (s *HealthState) AllowRequest(_ context.Context) bool {
 
 	s.mu.Lock()
 	allowed := s.allowRequestLocked()
+	events := s.takePendingLocked()
 	s.mu.Unlock()
-	s.notifyPending()
+
+	s.notify(events)
 	return allowed
 }
 
@@ -182,8 +185,10 @@ func (s *HealthState) Observe(err error) {
 	} else {
 		s.onSuccessLocked(wasProbing)
 	}
+	events := s.takePendingLocked()
 	s.mu.Unlock()
-	s.notifyPending()
+
+	s.notify(events)
 }
 
 func (s *HealthState) onSuccessLocked(wasProbing bool) {
@@ -242,34 +247,36 @@ func (s *HealthState) transitionLocked(next HealthPhase) {
 	previous := s.phase
 	s.phase = next
 	// 相位迁移是低基数事件，可以每次都发；它是故障排查的第一手线索。
-	// 只入队不回调：通知在主锁之外发出（见 notifyPending），Observer 阻塞
+	// 只入队不回调：通知在主锁之外发出（见 notify），Observer 阻塞
 	// 不得挡住限流判定，Observer 重入公开方法不得死锁。
 	s.pending = append(s.pending, phaseTransition{from: previous, to: next})
 }
 
-// notifyPending 在主锁之外按序排空待发事件并同步通知 Observer。
+// notifyPending 在**不持有任何锁**的状态下按序发出本次取出的事件
+// （reusable-packages spec）。
 //
-// notifyMu 串行化通知：队列 FIFO 保证通知顺序与迁移发生顺序一致；
-// 排空期间新入队的事件由当前持有者继续排空。TryLock 而不是 Lock——
-// Observer 回调内重入公开方法会再次走到这里，阻塞式加锁就是自死锁；
-// 拿不到锁说明持有者会把队列（含刚入队的事件）发完。持有者恰在收尾
-// 窗口时事件延迟到下一次状态活动才发出：通知语义是尽快而非即时。
-func (s *HealthState) notifyPending() {
-	if !s.notifyMu.TryLock() {
-		return
-	}
-	defer s.notifyMu.Unlock()
-
-	for {
-		s.mu.Lock()
-		if len(s.pending) == 0 {
-			s.mu.Unlock()
-			return
-		}
-		event := s.pending[0]
-		s.pending = s.pending[1:]
-		s.mu.Unlock()
-
+// 调用方在主锁内完成状态迁移，事件已按发生顺序入队；本函数由持锁方在
+// 解锁之后立即调用，把自己那批事件发完。
+//
+// 为什么不用"单一发出者 + TryLock 交接"：拿不到锁就返回会留下一个真实的
+// 滞留窗口——持有者恰在收尾时入队的事件，要等下一次状态活动才发出，
+// 而一个降级事件可能因此延迟到故障结束。改为各自发送自己取出的那批：
+// 每个事件都被立即发出一次，顺序在同一次迁移序列内仍与发生顺序一致。
+//
+// 通知期间不持任何锁，因此 Observer 重入公开方法不会死锁，慢 Observer
+// 也只拖住它自己的调用者，不阻塞并发的限流判定。
+func (s *HealthState) notify(events []phaseTransition) {
+	for _, event := range events {
 		s.observer.BackendPhaseChanged(event.from, event.to)
 	}
+}
+
+// takePending 在主锁内取走待发事件（调用方必须已持锁）。
+func (s *HealthState) takePendingLocked() []phaseTransition {
+	if len(s.pending) == 0 {
+		return nil
+	}
+	events := s.pending
+	s.pending = nil
+	return events
 }

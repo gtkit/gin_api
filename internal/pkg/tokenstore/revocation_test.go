@@ -21,7 +21,7 @@ func newTestRevocationList(t *testing.T) (*RevocationList, *miniredis.Miniredis)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	list, err := NewRevocationList(client, "test")
+	list, err := NewRevocationList(client, "test", 0)
 	if err != nil {
 		t.Fatalf("NewRevocationList: %v", err)
 	}
@@ -157,4 +157,64 @@ func TestStoreFailureIsNotSilentlyTreatedAsNotRevoked(t *testing.T) {
 	if errors.Is(err, ErrRefreshNotFound) {
 		t.Error("infrastructure failure was mapped to a domain error")
 	}
+}
+
+// TestRevocationOutlivesClockSkew 钉住撤销记录覆盖时钟偏移
+// （local-authentication spec）：验签用 leeway 接受"刚过期一点"的令牌，
+// 若记录只存到原始 exp，已登出的令牌会在偏移窗口内重新被接受——
+// 撤销在它最需要生效的时刻静默失效。
+func TestRevocationOutlivesClockSkew(t *testing.T) {
+	t.Parallel()
+
+	const skew = 30 * time.Second
+	client := &recordingRevocationClient{}
+	list, err := NewRevocationList(client, "test", skew)
+	if err != nil {
+		t.Fatalf("NewRevocationList: %v", err)
+	}
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	list.now = func() time.Time { return now }
+
+	// 令牌 60 秒后过期：记录应活 60s + 30s。
+	if err := list.Revoke(context.Background(), "jti-1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if want := time.Minute + skew; client.lastTTL != want {
+		t.Fatalf("record ttl = %s, want %s (exp + clock skew)", client.lastTTL, want)
+	}
+
+	// 令牌刚过期但仍在偏移窗口内：仍必须写记录，否则它会被验签重新接受。
+	client.lastTTL = 0
+	if err := list.Revoke(context.Background(), "jti-2", now.Add(-time.Second)); err != nil {
+		t.Fatalf("Revoke within the skew window: %v", err)
+	}
+	if client.lastTTL <= 0 {
+		t.Fatal("no record was written for a token still inside the skew window: " +
+			"verification would accept it again")
+	}
+
+	// 整个窗口都已过去：不必再写。
+	client.lastTTL = 0
+	if err := list.Revoke(context.Background(), "jti-3", now.Add(-2*skew)); err != nil {
+		t.Fatalf("Revoke past the skew window: %v", err)
+	}
+	if client.lastTTL != 0 {
+		t.Fatalf("a record was written past the whole window (ttl=%s)", client.lastTTL)
+	}
+}
+
+// recordingRevocationClient 记录最后一次写入的 TTL。
+type recordingRevocationClient struct {
+	lastTTL time.Duration
+}
+
+func (c *recordingRevocationClient) Set(
+	ctx context.Context, _ string, _ any, ttl time.Duration,
+) *redis.StatusCmd {
+	c.lastTTL = ttl
+	return redis.NewStatusResult("OK", nil)
+}
+
+func (c *recordingRevocationClient) Exists(ctx context.Context, _ ...string) *redis.IntCmd {
+	return redis.NewIntResult(0, nil)
 }

@@ -298,3 +298,95 @@ func TestUnavailableLimiterDefersToFailureMode(t *testing.T) {
 		}
 	}
 }
+
+// TestNotificationsAreNotStranded 钉住通知不滞留（reusable-packages spec）：
+// 每次相位迁移都被立即发出一次，不存在"等下一次状态活动才发"的窗口。
+//
+// 曾经用"单一发出者 + TryLock 交接"规避重入死锁：拿不到锁就返回，于是
+// 持有者恰在收尾时入队的事件要等下一次活动才发出——一个降级事件可能
+// 因此延迟到故障已经结束。
+func TestNotificationsAreNotStranded(t *testing.T) {
+	t.Parallel()
+
+	obs := &orderObserver{}
+	clock := &notifyClock{now: time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)}
+	s := NewHealthState(DefaultHealthPolicy(), obs)
+	s.now = clock.Now
+
+	// 迁移 1：Healthy→Degraded。发出后事件数必须立刻变成 1。
+	degrade(s)
+	if got := len(obs.snapshot()); got != 1 {
+		t.Fatalf("after the first transition the observer saw %d events, want 1 "+
+			"(a transition must not wait for the next state activity)", got)
+	}
+
+	// 迁移 2：Degraded→Probing，同样立即可见。
+	clock.advance(DefaultHealthPolicy().Cooldown + 1)
+	if !s.AllowRequest(context.Background()) {
+		t.Fatal("probe request was not allowed after cooldown")
+	}
+	if got := len(obs.snapshot()); got != 2 {
+		t.Fatalf("after the second transition the observer saw %d events, want 2", got)
+	}
+}
+
+// blockingLimiter 的 Close 阻塞到 release 关闭。
+type blockingLimiter struct {
+	policy  Policy
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (l *blockingLimiter) Policy() Policy { return l.policy }
+
+func (l *blockingLimiter) Check(context.Context, string) (Decision, error) {
+	return Decision{Outcome: OutcomeAllowed}, nil
+}
+
+func (l *blockingLimiter) Close() {
+	l.once.Do(func() { close(l.entered) })
+	<-l.release
+}
+
+// TestRegistryCloseDoesNotHoldTheLock 钉住关闭执行体时不持注册表锁
+// （reusable-packages spec）：Limiter 的 Close 是外部实现，持锁调用它会把
+// "Close 必须又快又不重入"变成没有编译器背书的隐式契约，违反者得到死锁。
+func TestRegistryCloseDoesNotHoldTheLock(t *testing.T) {
+	t.Parallel()
+
+	blocking := &blockingLimiter{
+		policy: Policy{
+			ID: "blocking", Rate: 1, Burst: 1, Scope: ScopeGlobal,
+			Store: StoreLocal, FailureMode: FailureClosed, MaxKeys: 1,
+		},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(blocking.release)
+
+	registry := NewRegistry()
+	if err := registry.Register(blocking); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	registry.Freeze()
+
+	closed := make(chan struct{})
+	go func() { _ = registry.Close(); close(closed) }()
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close never reached the limiter")
+	}
+
+	// Close 仍卡在外部实现里：注册表的读取路径必须照常可用。
+	done := make(chan struct{})
+	go func() { _ = registry.IDs(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the registry lock is held while an external Close is running: " +
+			"any Close that touches the registry would deadlock")
+	}
+}

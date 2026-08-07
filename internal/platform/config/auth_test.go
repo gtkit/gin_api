@@ -262,3 +262,39 @@ func TestLocalAuthRequiresReplaySecret(t *testing.T) {
 		})
 	}
 }
+
+// TestLaravelFallbackAndLocalAuthAreRejected 钉住运行期不可用的组合在启动期
+// 被拒绝（local-authentication spec）：Laravel 令牌无 jti，本地认证强制查
+// 撤销表，两者同开时每个 Laravel 令牌恒定失败。
+func TestLaravelFallbackAndLocalAuthAreRejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    AuthMode
+		laravel bool
+		wantErr bool
+	}{
+		{name: "local + laravel 被拒绝", mode: AuthModeLocal, laravel: true, wantErr: true},
+		{name: "local 不开 laravel 可用", mode: AuthModeLocal},
+		{name: "external + laravel 可用", mode: AuthModeExternal, laravel: true},
+		{name: "external 不开 laravel 可用", mode: AuthModeExternal},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateAuthJWTCompatibility(
+				AuthConfig{Mode: tt.mode},
+				JWTConfig{Laravel: LaravelJWTConfig{Enabled: tt.laravel}},
+			)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "jti") {
+				t.Errorf("error %q does not explain why the combination cannot work", err)
+			}
+		})
+	}
+}

@@ -522,7 +522,7 @@ func (c *fakeRevocationClient) Exists(_ context.Context, _ ...string) *redis.Int
 func TestNewRevocationListRequiresAClient(t *testing.T) {
 	t.Parallel()
 
-	if _, err := NewRevocationList(nil, "p"); err == nil {
+	if _, err := NewRevocationList(nil, "p", 0); err == nil {
 		t.Fatal("NewRevocationList accepted a nil client")
 	}
 }
@@ -532,7 +532,7 @@ func TestRevocationTTLTracksTheRemainingLifetime(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRevocationClient{}
-	list, err := NewRevocationList(client, "p")
+	list, err := NewRevocationList(client, "p", 0)
 	if err != nil {
 		t.Fatalf("NewRevocationList: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestRevokeRequiresATokenID(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRevocationClient{}
-	list, _ := NewRevocationList(client, "p")
+	list, _ := NewRevocationList(client, "p", 0)
 
 	if err := list.Revoke(context.Background(), "", time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("Revoke accepted an empty token id")
@@ -566,7 +566,7 @@ func TestRevokeRequiresATokenID(t *testing.T) {
 func TestRevokeReportsStorageFailure(t *testing.T) {
 	t.Parallel()
 
-	list, _ := NewRevocationList(&fakeRevocationClient{setErr: errors.New("down")}, "p")
+	list, _ := NewRevocationList(&fakeRevocationClient{setErr: errors.New("down")}, "p", 0)
 	if err := list.Revoke(context.Background(), "jti", time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("Revoke reported success although nothing was stored: logout would silently " +
 			"do nothing")
@@ -589,7 +589,7 @@ func TestIsRevokedReadsTheStore(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			list, _ := NewRevocationList(&fakeRevocationClient{exists: tt.exists}, "p")
+			list, _ := NewRevocationList(&fakeRevocationClient{exists: tt.exists}, "p", 0)
 			got, err := list.IsRevoked(context.Background(), "jti")
 			if err != nil {
 				t.Fatalf("IsRevoked: %v", err)

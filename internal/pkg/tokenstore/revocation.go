@@ -24,26 +24,45 @@ type RevocationList struct {
 	client RevocationClient
 	prefix string
 	now    func() time.Time
+	// clockSkew 是验签允许的时钟偏移（local-authentication spec）。
+	//
+	// 撤销记录必须活过 exp + clockSkew：验签接受 leeway 而记录只存到原始
+	// exp 时，已登出的令牌会在偏移窗口内重新被接受——撤销在它最需要生效的
+	// 时刻失效，且完全静默。
+	clockSkew time.Duration
 }
 
 // NewRevocationList 构造撤销表。
-func NewRevocationList(client RevocationClient, prefix string) (*RevocationList, error) {
+//
+// clockSkew 必须与**验签实际使用的 leeway** 同源（由 JWT 装配传入），
+// 否则两处取值一旦分叉，撤销记录会比验签窗口先消失。
+func NewRevocationList(
+	client RevocationClient, prefix string, clockSkew time.Duration,
+) (*RevocationList, error) {
 	if client == nil {
 		return nil, errors.New("tokenstore: redis client is required")
 	}
-	return &RevocationList{client: client, prefix: prefix, now: time.Now}, nil
+	if clockSkew < 0 {
+		return nil, fmt.Errorf("tokenstore: clock skew must not be negative, got %s", clockSkew)
+	}
+	return &RevocationList{
+		client: client, prefix: prefix, now: time.Now, clockSkew: clockSkew,
+	}, nil
 }
 
-// Revoke 撤销一个访问令牌，记录存活到该令牌自然过期为止。
+// Revoke 撤销一个访问令牌，记录存活到 **exp + 时钟偏移** 为止。
 //
-// expiresAt 已过去时直接返回：那个令牌本来就不会再被接受，为它写一条
+// 加上偏移是必需的：验签用 leeway 接受"刚过期一点"的令牌，若撤销记录只存到
+// 原始 exp，已登出的令牌会在那段偏移窗口内重新被接受。
+//
+// 整个窗口都已过去时直接返回：那个令牌本来就不会再被接受，为它写一条
 // 立即过期的记录只是白白多一次往返。
 func (l *RevocationList) Revoke(ctx context.Context, tokenID string, expiresAt time.Time) error {
 	if tokenID == "" {
 		return errors.New("tokenstore: token id is required")
 	}
 
-	ttl := expiresAt.Sub(l.now())
+	ttl := expiresAt.Add(l.clockSkew).Sub(l.now())
 	if ttl <= 0 {
 		return nil
 	}

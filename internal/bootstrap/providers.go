@@ -258,6 +258,8 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 			Config: inf.cfg.Auth,
 			// 访问令牌寿命的唯一来源是 JWT 配置：签发它的是 JWT 装配。
 			AccessTTL: inf.cfg.JWT.EffectiveTokenTTL(inf.cfg.Auth.Mode),
+			// 撤销记录必须活过 exp + 验签 leeway：同一个偏移的单一来源是配置。
+			ClockSkew: time.Duration(inf.cfg.JWT.ClockSkewSeconds) * time.Second,
 			KeyPrefix: inf.cfg.App.Name,
 			Metrics:   inf.recorder,
 			Accounts:  accounts,

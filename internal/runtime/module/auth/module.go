@@ -29,6 +29,12 @@ type Deps struct {
 	// 本模块若自己再存一份，客户端拿到的 expires_in 与令牌真实的 exp 迟早
 	// 会对不上。
 	AccessTTL time.Duration
+	// ClockSkew 是验签允许的时钟偏移，来自 jwt.clock_skew_seconds。
+	//
+	// 由调用方传入而不是本模块自己读配置：验签用的 leeway 是 JWT 装配的
+	// 事实，撤销记录必须活过 exp + 同一个偏移，两处取值分叉会让撤销记录
+	// 比验签窗口先消失（local-authentication spec）。
+	ClockSkew time.Duration
 	// KeyPrefix 隔离同一 Redis 上不同服务的键空间。
 	KeyPrefix string
 	// Metrics 记录认证事件；为 nil 时不记录。
@@ -81,7 +87,7 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: build refresh store: %w", err)
 	}
 
-	revocation, err := tokenstore.NewRevocationList(deps.Redis, deps.KeyPrefix)
+	revocation, err := tokenstore.NewRevocationList(deps.Redis, deps.KeyPrefix, deps.ClockSkew)
 	if err != nil {
 		return Assembly{}, fmt.Errorf("auth: build revocation list: %w", err)
 	}
