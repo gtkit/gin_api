@@ -226,3 +226,75 @@ func TestHealthNotificationsPreserveOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestProbeRejectsNonAllowedDecision 是**回归测试**（rate-limiting spec）：
+// 探针必须断言判定结果为放行，非放行即探测失败。
+//
+// 上一批给真实判定路径加了键基数准入，而探针共享那条路径——它用固定策略
+// 标识、MaxKeys=1、且只看 err 不看 Decision，于是进程重启后探针恒定拿到
+// "键基数拒绝"却报告成功：探针从此不验证任何东西，而它存在的全部理由
+// 就是验证端到端能力。
+func TestProbeRejectsNonAllowedDecision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  int64
+		wantErr bool
+	}{
+		{name: "放行即探测成功", status: statusAllowed},
+		{name: "限速判定即探测失败", status: statusRejected, wantErr: true},
+		{name: "键基数拒绝即探测失败", status: statusKeyBudgetDenied, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &fakeRedis{evalResults: []any{
+				[]any{tt.status, int64(1000000), int64(0)},
+			}}
+			_, err := NewRedisBackend(context.Background(), client)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("NewRedisBackend = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestUnavailableLimiterDefersToFailureMode 钉住恒不可用执行体的语义
+// （rate-limiting spec / resource-lifecycle spec）：它每次都报后端不可用，
+// 于是各策略自己的 FailureMode 决定放行还是拒绝——不静默改变任何限额。
+//
+// 用途：启动期后端不可达且无 fail_closed 策略时顶替真实后端，让可降级的
+// 部署能启动，而不是让一次可降级的故障变成起不来。
+func TestUnavailableLimiterDefersToFailureMode(t *testing.T) {
+	t.Parallel()
+
+	policy := Policy{
+		ID: "cfg.but.down", Rate: 5, Burst: 20, Scope: ScopeIP,
+		Store: StoreRedis, FailureMode: FailureOpen, MaxKeys: 100,
+	}
+	l := NewUnavailableLimiter(policy)
+	defer l.Close()
+
+	if got := l.Policy(); got.ID != policy.ID || got.Burst != policy.Burst {
+		t.Fatalf("Policy() = %+v, want the configured policy unchanged", got)
+	}
+
+	// 多次判定都必须是"后端不可用"，且不返回错误——调用方据 Outcome 走
+	// FailureMode，而不是据 error 判断。
+	for range 3 {
+		d, err := l.Check(context.Background(), "any-key")
+		if err != nil {
+			t.Fatalf("Check returned an error: %v (the outcome carries the verdict)", err)
+		}
+		if d.Outcome != OutcomeBackendUnavailable {
+			t.Fatalf("Outcome = %s, want backend_unavailable", d.Outcome)
+		}
+		if d.Limit != policy.Burst {
+			t.Fatalf("Limit = %d, want the configured burst %d (limits must not change silently)",
+				d.Limit, policy.Burst)
+		}
+	}
+}

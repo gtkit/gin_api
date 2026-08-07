@@ -36,7 +36,7 @@ func TestCleanupWorkerRequiresRedis(t *testing.T) {
 
 	cleanup := newTestCleanup(t)
 
-	_, err := newDeactivationCleanupWorker(cleanup, nil, "app", nil)
+	_, err := newDeactivationCleanupWorker(cleanup, nil, "app", nil, false /* redis 未配置 */)
 	if err == nil {
 		t.Fatal("the worker was built without redis: every replica would run the cleanup " +
 			"concurrently while the operator believes a lease protects it")
@@ -55,7 +55,7 @@ func TestCleanupWorkerRequiresRedis(t *testing.T) {
 func TestCleanupWorkerIsNotRegisteredWhenRetentionIsOff(t *testing.T) {
 	t.Parallel()
 
-	w, err := newDeactivationCleanupWorker(nil, stubLeaseClient{}, "app", nil)
+	w, err := newDeactivationCleanupWorker(nil, stubLeaseClient{}, "app", nil, true)
 	if err != nil {
 		t.Fatalf("building a disabled cleanup worker errored: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCleanupWorkerIsNotRegisteredWhenRetentionIsOff(t *testing.T) {
 func TestCleanupWorkerContract(t *testing.T) {
 	t.Parallel()
 
-	w, err := newDeactivationCleanupWorker(newTestCleanup(t), stubLeaseClient{}, "app", nil)
+	w, err := newDeactivationCleanupWorker(newTestCleanup(t), stubLeaseClient{}, "app", nil, true)
 	if err != nil {
 		t.Fatalf("newDeactivationCleanupWorker: %v", err)
 	}
@@ -170,4 +170,24 @@ func newTestRunner(t *testing.T) *singleton.Runner {
 		t.Fatalf("NewRunner: %v", err)
 	}
 	return runner
+}
+
+// TestCleanupWorkerDegradesWhenRedisUnreachable 钉住可选任务的契约
+// （runtime-state-machine spec）：redis **已配置但启动期不可达**时，
+// 任务不注册且进程照常启动——它声明 Required=false，一次 Redis 抖动
+// 不该让整个服务起不来。
+//
+// 与"未配置"区分开：那是配置矛盾（配了保留期却没给 Redis），仍然构造期失败。
+func TestCleanupWorkerDegradesWhenRedisUnreachable(t *testing.T) {
+	t.Parallel()
+
+	w, err := newDeactivationCleanupWorker(newTestCleanup(t), nil, "app", nil, true)
+	if err != nil {
+		t.Fatalf("a configured-but-unreachable redis blocked startup: %v "+
+			"(the worker declares Required=false)", err)
+	}
+	if w != nil {
+		t.Fatal("a worker was registered without a lease client: it could never establish " +
+			"the single-instance guarantee")
+	}
 }

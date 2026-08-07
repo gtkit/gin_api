@@ -23,6 +23,12 @@ import (
 //
 // 建连成功后再显式 HealthCheck 一次：连接池是惰性的，"NewClient 返回成功"
 // 不等于"这个地址上真的有一个可用的 Redis"。
+//
+// **拿不到可重连的客户端是库的约束**：redisx.NewClientContext 在构造期对每个 DB
+// 执行 Ping，且 DefaultDB 必须成功、否则它回收全部连接返回 nil。因此服务端整体
+// 不可达时本函数无法交出一个"稍后能自愈"的客户端，探测失败即关闭并返回 nil。
+// 消费方要区分"未配置"与"已配置但不可达"，用 Resources.RedisConfigured()
+// 而不是客户端指针的非空性——见那里的注释。
 func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
 	client, err := redisx.NewClientContext(ctx, buildRedisOptions(cfg)...)
 	if err != nil {

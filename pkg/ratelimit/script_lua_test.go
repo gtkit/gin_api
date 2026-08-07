@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,5 +178,33 @@ func TestLuaRefillsOverTime(t *testing.T) {
 	}
 	if decision.Outcome != OutcomeAllowed {
 		t.Fatalf("Outcome = %v, want %v：等待之后应当补出令牌", decision.Outcome, OutcomeAllowed)
+	}
+}
+
+// TestProbeIsRepeatableAndLeavesNothing 是**回归测试**（rate-limiting spec）：
+// 连续构造多个 backend（模拟进程反复重启）时，每次探测都真实放行，
+// 且不留下任何探测产物。
+//
+// 上一批的探针用固定策略标识，其键基数注册表因此在重启间共享；探测只删桶键、
+// 不删注册表成员，于是第二次探测就撞上 MaxKeys=1 被拒——而探针忽略判定结果，
+// 把"被拒"报告成"通过"。本测试的两个断言各盯一半：探测可重复、产物已清理。
+func TestProbeIsRepeatableAndLeavesNothing(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.SetTime(luaBase)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	// 时钟不推进：所有探测产物都在存活期内，最能暴露"跨重启共享注册表"。
+	for i := range 3 {
+		if _, err := NewRedisBackend(context.Background(), client, WithKeyPrefix("lua")); err != nil {
+			t.Fatalf("probe %d failed: %v (a restart within the artifact TTL must still verify)", i, err)
+		}
+	}
+
+	for _, key := range mr.Keys() {
+		if strings.Contains(key, "probe") || strings.Contains(key, "registry") {
+			t.Fatalf("probe left %q behind: its artifacts must be cleaned so the next "+
+				"process start verifies capability instead of colliding with them", key)
+		}
 	}
 }

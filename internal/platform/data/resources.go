@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	logger "github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 
@@ -83,6 +86,9 @@ type Resources struct {
 	mysql *ormx.Client
 	redis *redisx.Client
 
+	// redisConfigured 记录配置里是否给了 Redis 地址（见 RedisConfigured）。
+	redisConfigured bool
+
 	// redisState 永不为 nil：optional Redis 启动失败时是一个永久降级的跟踪器。
 	// 用状态对象而不是 nil 表达"没有这个能力"，消费方就不必在每个点判空
 	// （漏掉任何一处都是一次 panic）。
@@ -125,7 +131,7 @@ func NewResources(
 	totalCtx, cancelTotal := context.WithTimeout(ctx, budget.Total)
 	defer cancelTotal()
 
-	res := &Resources{}
+	res := &Resources{redisConfigured: strings.TrimSpace(cfg.Redis.Addr) != ""}
 
 	// MySQL 恒为 required：失败即启动失败。
 	mysqlCtx, cancelMySQL := budget.resourceContext(totalCtx)
@@ -137,7 +143,24 @@ func NewResources(
 	res.mysql = client
 	res.closers = append(res.closers, namedCloser{name: "mysql", close: client.Close})
 
-	// Redis：required 时失败即启动失败，optional 时进入永久降级。
+	// Redis：required 时失败即启动失败；optional 时区分两种失败
+	// （resource-lifecycle spec）：
+	//
+	//	**未配置**（addr 为空）→ 不建客户端，永久降级。依赖它的能力按配置
+	//	矛盾处理（"声明用 redis 却没给地址"是配置错误，不是运行期故障）。
+	//	**已配置但暂不可达** → 保留客户端并挂可探测的 tracker。客户端惰性
+	//	连接、自带重连，Redis 恢复后无需重启进程；限流的降级启动与 optional
+	//	worker 的降级都依赖它非空才可达。
+	if strings.TrimSpace(cfg.Redis.Addr) == "" {
+		res.redisState = NewPermanentlyDegradedTracker("redis")
+		if req.Redis {
+			return nil, errors.Join(
+				errors.New("open redis: redis.addr is empty but an enabled capability requires redis"),
+				res.Close())
+		}
+		return res, nil
+	}
+
 	redisCtx, cancelRedis := budget.resourceContext(totalCtx)
 	rdb, redisErr := openRedis(redisCtx, cfg.Redis)
 	cancelRedis()
@@ -160,9 +183,13 @@ func NewResources(
 		return nil, errors.Join(fmt.Errorf("open redis: %w", redisErr), res.Close())
 
 	default:
-		// optional 资源启动失败**保持降级到进程重启**：此时没有客户端可探测，
-		// 也不做 client 热替换（热替换要处理"旧 client 上还有在飞请求"的所有权，
-		// 收益只是省掉连接池自身的重连，不成比例）。
+		// optional 资源启动失败**保持降级到进程重启**：此时没有客户端可探测
+		//（redisx 在构造期就回收了它，见 openRedis），也不做 client 热替换。
+		//
+		// 消费方靠 RedisConfigured() 区分这里与"未配置"：前者是运行期故障，
+		// 可降级的能力应当降级；后者是配置矛盾，应当启动失败。
+		logger.Warnf("redis is configured but unreachable at startup; capabilities that can "+
+			"degrade will do so for this process lifetime (restart after redis recovers): %v", redisErr)
 		res.redisState = NewPermanentlyDegradedTracker("redis")
 	}
 
@@ -208,6 +235,21 @@ func (r *Resources) Rdb(db int) *redis.Client {
 		return nil
 	}
 	return client
+}
+
+// RedisConfigured 报告配置里是否给了 Redis 地址。
+//
+// 与"客户端是否可用"是两件事，消费方必须分开处置（resource-lifecycle spec）：
+//
+//	未配置        → 声明依赖 Redis 的能力属**配置矛盾**，应当启动失败；
+//	已配置但不可达 → 属运行期故障，可降级的能力应当降级而不是阻断启动。
+//
+// 两者合并成"客户端为空"会让所有降级路径在它们最该生效的场景里不可达。
+func (r *Resources) RedisConfigured() bool {
+	if r == nil {
+		return false
+	}
+	return r.redisConfigured
 }
 
 // RedisAvailability 返回 Redis 的可用性跟踪器。

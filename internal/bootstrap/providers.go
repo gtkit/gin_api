@@ -465,7 +465,8 @@ func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, 
 	if err != nil {
 		return nil, err
 	}
-	w, err := newDeactivationCleanupWorker(cleanup, inf.resources.Rdb(0), inf.cfg.App.Name, inf.recorder)
+	w, err := newDeactivationCleanupWorker(cleanup, inf.resources.Rdb(0), inf.cfg.App.Name,
+		inf.recorder, inf.resources.RedisConfigured())
 	if err != nil {
 		return nil, err
 	}

@@ -96,13 +96,30 @@ func buildLimiter(
 	}
 
 	if *redisBackend == nil {
-		// Redis **未配置**（而非不可用）对任何 redis 策略都是配置矛盾，
-		// 一律构造失败，降级启动不适用。
 		client := resources.Rdb(0)
 		if client == nil {
-			return nil, fmt.Errorf(
-				"rate limit policy %q uses the redis store but no redis client is available: "+
-					"either configure redis or switch the policy to the local store", policy.ID)
+			// 两种"拿不到客户端"必须分开处置（resource-lifecycle spec）。
+			//
+			// 未配置 = 配置矛盾（声明用 redis 却没给地址），一律启动失败。
+			if !resources.RedisConfigured() {
+				return nil, fmt.Errorf(
+					"rate limit policy %q uses the redis store but redis is not configured: "+
+						"either set redis.addr or switch the policy to the local store", policy.ID)
+			}
+			// 已配置但启动期不可达 = 运行期故障。存在 fail_closed 策略时仍失败
+			//（那种模式下不可达只能拒绝请求，实例不该被判为 ready）；
+			// 全是降级模式时用恒不可用执行体顶上——每次判定报后端不可用，
+			// 由各策略自己的 FailureMode 决定放行还是拒绝，不静默改变限额。
+			if !degradedStartAllowed {
+				return nil, fmt.Errorf(
+					"rate limit policy %q is fail_closed over the redis store but redis is "+
+						"unreachable at startup: that policy could only reject every request, "+
+						"so the instance must not come up", policy.ID)
+			}
+			logger.Warnf("redis is unreachable at startup; rate limit policies fall back to their "+
+				"failure modes for this process lifetime (restart after redis recovers): policy %q",
+				policy.ID)
+			return ratelimit.NewUnavailableLimiter(policy), nil
 		}
 		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),

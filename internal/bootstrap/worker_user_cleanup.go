@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	logger "github.com/gtkit/logger/v2"
+
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/singleton"
 
@@ -37,23 +39,40 @@ const cleanupLeaseTTL = 2 * time.Minute
 // 本来就不紧急，没有理由让 N 个副本同时做同一件事。
 //
 // cleanup 为 nil（未配置保留期）时返回 nil，调用方据此不注册。
-// client 为 nil 时返回错误：**没有 Redis 就没有单实例保证**，而静默退回到
-// "每个副本各跑各的"会让人以为有保护——那比明确报错更危险。
+//
+// 拿不到 Redis 客户端时**分两种情况**（runtime-state-machine spec：可选任务的
+// 失败不得阻断启动）：
+//
+//	redis 未配置        → 返回错误。这是配置矛盾（配了保留期却没给 Redis），
+//	                      而静默退回到"每个副本各跑各的"会让人以为有保护。
+//	redis 已配置但不可达 → 返回 (nil, nil)：本进程生命周期内不注册该任务并打
+//	                      Warn，进程照常启动。它声明 Required=false，一次
+//	                      Redis 抖动不该让整个服务起不来。租约需要客户端才能
+//	                      在 Prepare 里恢复，拿不到就不注册，而不是注册一个
+//	                      永远失败的任务。
 func newDeactivationCleanupWorker(
 	cleanup *userworker.DeactivationCleanup,
 	client singleton.LeaseClient,
 	prefix string,
 	recorder *metrics.Recorder,
+	redisConfigured bool,
 ) (Worker, error) {
 	if cleanup == nil {
 		return nil, nil
 	}
 	if client == nil {
-		return nil, fmt.Errorf(
-			"worker %q needs redis for its single-instance lease: without it every replica "+
-				"would run the cleanup concurrently. Either configure redis, or set "+
-				"modules.user.deactivation_retention_days to 0 and handle retention "+
-				"outside this service", cleanupTaskID)
+		if !redisConfigured {
+			return nil, fmt.Errorf(
+				"worker %q needs redis for its single-instance lease: without it every replica "+
+					"would run the cleanup concurrently. Either configure redis, or set "+
+					"modules.user.deactivation_retention_days to 0 and handle retention "+
+					"outside this service", cleanupTaskID)
+		}
+		logger.Warnf("worker %q is not registered for this process lifetime: redis is configured "+
+			"but unreachable at startup, so its single-instance lease cannot be established. "+
+			"Deactivation records are not purged until the process restarts after redis recovers",
+			cleanupTaskID)
+		return nil, nil
 	}
 
 	lease, err := singleton.NewLease(client, prefix, cleanupTaskID, cleanupLeaseTTL)

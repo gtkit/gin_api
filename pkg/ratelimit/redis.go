@@ -104,31 +104,50 @@ func NewRedisBackend(
 	return b, nil
 }
 
-// probe 用随机 probe key 执行一次真实的限流调用，验证端到端能力。
+// probe 用一次真实的限流调用验证端到端能力（rate-limiting spec）。
+//
+// 三条约束缺一不可，它们各自对应一个曾经的缺陷：
+//
+//	**策略标识每次进程唯一**：标识决定键基数注册表的键。固定标识会让注册表
+//	在重启之间共享，于是第二次探测撞上自己上次留下的成员被拒——探针给真实
+//	判定路径加的准入反过来打在它自己身上。
+//
+//	**断言判定为放行**：只看 err 不看 Decision 时，任何"能连通但被拒"的
+//	结果都被报告成能力正常，而探针存在的全部理由就是验证能力。
+//
+//	**清理桶键与注册表键**：只删桶键会留下注册表成员，正是上面那条共享的来源。
 func (b *RedisBackend) probe(ctx context.Context) error {
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
 		return fmt.Errorf("generate probe key: %w", err)
 	}
+	unique := hex.EncodeToString(suffix)
 	// 不在此处拼前缀：evaluate 会统一加。两处各拼一次会得到双重前缀。
-	key := "probe:" + hex.EncodeToString(suffix)
+	key := "probe:" + unique
 
 	probePolicy := Policy{
-		ID: "probe", Rate: 1, Burst: 1,
+		// 策略标识随进程唯一：它同时决定注册表键，固定值会跨重启共享。
+		ID: "probe:" + unique, Rate: 1, Burst: 1,
 		Scope: ScopeGlobal, Store: StoreRedis,
-		FailureMode: FailureClosed, MaxKeys: 1,
+		FailureMode: FailureClosed,
+		// 留并发余量：同一进程内的多次探测（重试、多后端）不应互相挤掉。
+		MaxKeys: probeMaxKeys,
 	}
 
-	if _, err := b.evaluate(ctx, probePolicy, key); err != nil {
+	decision, err := b.evaluate(ctx, probePolicy, key)
+	if err != nil {
 		return err
 	}
+	// 能连通不等于能用：被限速或被键基数拒绝都说明这条路径当下不可用。
+	if decision.Outcome != OutcomeAllowed {
+		return fmt.Errorf("probe was not allowed (outcome %s): the backend answered but "+
+			"cannot serve rate limit decisions", decision.Outcome)
+	}
 
-	// 探测键立即删除。删除失败不算探测失败——键带短 TTL 会自行回收，
-	// 但必须让调用方知道，否则"探测留了垃圾"永远不会被发现。
-	// 删除的必须是**限定后**的键：evaluate 统一拼前缀，裸键删不到任何东西
-	//（此前正是这个形态，探测垃圾一直靠 TTL 兜底）。
-	if err := b.client.Del(ctx, b.qualifiedKey(key)).Err(); err != nil {
-		return fmt.Errorf("probe succeeded but its key could not be removed (it expires in %s): %w",
+	// 探测产物立即删除：桶键**与**注册表键。删除失败不算探测失败——两者都带
+	// 短 TTL 会自行回收，但必须让调用方知道，否则"探测留了垃圾"永远不会被发现。
+	if err := b.client.Del(ctx, b.qualifiedKey(key), b.registryKey(probePolicy)).Err(); err != nil {
+		return fmt.Errorf("probe succeeded but its keys could not be removed (they expire in %s): %w",
 			probeKeyTTL, err)
 	}
 	return nil
@@ -167,9 +186,7 @@ func (b *RedisBackend) evaluate(
 	// 同名策略共享同一个桶，各自的限额都不是配置里写的那个值。
 	// 收口到一处之后，新增调用路径不会再漏。
 	key = b.qualifiedKey(key)
-	// 注册表按策略隔离：键基数是策略级配额（Policy.MaxKeys），
-	// 与桶键同前缀，多服务共用后端时互不干扰。
-	registryKey := b.qualifiedKey("registry:" + policy.ID)
+	registryKey := b.registryKey(policy)
 
 	args := []any{
 		policy.FixedPointRate(),
@@ -270,6 +287,20 @@ func toInt64(v any) (int64, error) {
 // 桶再大也不该让键活过一天：更长的 TTL 只是让一个早已无人访问的主体
 // 继续占内存，而它的配额早就补满了。
 const maxBucketTTL = 24 * time.Hour
+
+// registryKey 是策略的键基数注册表键。
+//
+// 按策略隔离：键基数是策略级配额（Policy.MaxKeys），与桶键同前缀，
+// 多服务共用同一后端时互不干扰。
+func (b *RedisBackend) registryKey(policy Policy) string {
+	return b.qualifiedKey("registry:" + policy.ID)
+}
+
+// probeMaxKeys 是探测策略的键基数上限。
+//
+// 大于 1：探针的注册表虽已随策略标识唯一化，但同一进程内仍可能有多次探测
+// （构造重试、多后端实例），上限为 1 会让它们互相挤掉。
+const probeMaxKeys = 8
 
 // bucketTTL 返回键的存活时长：补满一桶所需时间 + 余量。
 //
