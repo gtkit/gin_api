@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -377,5 +378,75 @@ func TestUndecryptableReplayMaterialIsAPlainRejection(t *testing.T) {
 	if errors.Is(err, ErrRefreshReused) {
 		t.Fatal("undecryptable material was judged a reuse: that would revoke the legitimate " +
 			"user's whole family over a key rotation")
+	}
+}
+
+// TestReuseRevokesFamilyAtomically 用真实 Lua 证明撤销与检测原子生效：
+// 重用判定返回时族撤销标记已在 Redis 里，后续任何消费（包括并发中的
+// 下一代令牌）都被族撤销挡住。
+func TestReuseRevokesFamilyAtomically(t *testing.T) {
+	t.Parallel()
+
+	store, srv := newTestStore(t, time.Hour)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, 9)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, next, err := store.Consume(ctx, token)
+	if err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+
+	// 越过重放窗口后再用旧令牌 —— 判为重用。
+	advanceBy(store, srv, defaultReplayWindow+time.Second)
+	if _, _, err := store.Consume(ctx, token); !errors.Is(err, ErrRefreshReused) {
+		t.Fatalf("Consume of a used token = %v, want ErrRefreshReused", err)
+	}
+
+	// 判定返回的那一刻族已死：下一代令牌（合法用户手里的那个）也用不了了。
+	if _, _, err := store.Consume(ctx, next); !errors.Is(err, ErrFamilyRevoked) {
+		t.Fatalf("Consume of the next generation = %v, want ErrFamilyRevoked "+
+			"(the reuse verdict must imply the family is already revoked)", err)
+	}
+}
+
+// TestConcurrentReuseHasASingleVerdictAndADeadFamily 钉住并发重用：
+// 多个 goroutine 同时消费同一个已用令牌时，重用判定与族撤销仍然原子，
+// 且返回后族一定已死。
+func TestConcurrentReuseHasASingleVerdictAndADeadFamily(t *testing.T) {
+	t.Parallel()
+
+	store, srv := newTestStore(t, time.Hour)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, 11)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, _, err := store.Consume(ctx, token); err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+	advanceBy(store, srv, defaultReplayWindow+time.Second)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, errs[i] = store.Consume(ctx, token)
+		}()
+	}
+	wg.Wait()
+
+	// 每个并发者都必须被拒绝，且只能是"重用"或"族已撤销"两种——
+	// 任何一次成功都意味着泄漏链在防线报警之后仍产出了可用凭据。
+	for i, err := range errs {
+		if !errors.Is(err, ErrRefreshReused) && !errors.Is(err, ErrFamilyRevoked) {
+			t.Fatalf("racer %d = %v, want a reuse or revoked-family rejection", i, err)
+		}
 	}
 }

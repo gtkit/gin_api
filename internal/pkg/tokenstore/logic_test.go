@@ -238,31 +238,47 @@ func TestReloadFailureIsReported(t *testing.T) {
 	}
 }
 
-// TestReuseWithFailedRevocationIsReported 钉住"检测到泄漏但没能拦住"必须上报。
-//
-// 这是最危险的一种半成功：重用已经发生，而防线没有生效。若此时只返回
-// ErrRefreshReused，日志与调用方都会以为整族已被撤销，泄漏的令牌链仍然活着。
-//
-// miniredis 版很难触发这条路径（那里的 Set 不会失败），手写替身可以。
-func TestReuseWithFailedRevocationIsReported(t *testing.T) {
+// TestReuseVerdictImpliesRevocationAlreadyHappened 钉住重用撤销的原子性
+// （local-authentication spec）：返回重用判定意味着族撤销标记**此刻已写入**，
+// 因此 Go 侧不再补一次撤销调用——那一次补调用正是"已判定重用而族尚未撤销"
+// 窗口的来源，窗口内并发请求可以消费下一代令牌并换出新的访问令牌。
+func TestReuseVerdictImpliesRevocationAlreadyHappened(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRefreshClient{
 		evalResults: []evalResult{{val: []any{int64(2), "7", ""}}}, // 2 = 重用
-		setErr:      errors.New("redis is down"),
+	}
+	store := newFakeStore(t, client)
+
+	_, _, err := store.Consume(context.Background(), "fam.secret")
+	if !errors.Is(err, ErrRefreshReused) {
+		t.Fatalf("Consume = %v, want ErrRefreshReused", err)
+	}
+	// 撤销在脚本内完成：不该再有独立的 Set 调用。
+	if len(client.setKeys) != 0 {
+		t.Fatalf("a separate revocation call was made (%v): the window it opens is exactly "+
+			"what moving revocation into the script removes", client.setKeys)
+	}
+}
+
+// TestScriptFailureOnReuseIsNotAReuseVerdict 钉住脚本执行失败的处置：
+// 撤销与检测同在脚本内，脚本失败意味着**两者都没发生**——必须如实报基础设施
+// 错误，不能返回重用判定（那会让调用方以为族已撤销）。
+func TestScriptFailureOnReuseIsNotAReuseVerdict(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeRefreshClient{
+		evalResults: []evalResult{{err: errors.New("connection refused")}},
 	}
 	store := newFakeStore(t, client)
 
 	_, _, err := store.Consume(context.Background(), "fam.secret")
 	if err == nil {
-		t.Fatal("a failed family revocation was reported as success")
+		t.Fatal("an unreachable Redis was reported as success")
 	}
 	if errors.Is(err, ErrRefreshReused) {
-		t.Fatal("the error claims the reuse was handled, but the family was never revoked: " +
-			"the leaked token chain is still live")
-	}
-	if !strings.Contains(err.Error(), "still live") {
-		t.Errorf("error %q does not say the chain is still live", err)
+		t.Fatal("a script failure was reported as a reuse verdict: the caller would believe " +
+			"the family was revoked while nothing happened")
 	}
 }
 

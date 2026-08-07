@@ -5,11 +5,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -26,6 +23,12 @@ type Options struct {
 	// 迁移凭据而改变自身连接身份。迁移凭据未配置时回退运行凭据并告警（不失败，
 	// 避免破坏尚未配置迁移凭据的存量部署）。
 	UseMigrationCredentials bool
+
+	// Shutdown 是进程级关停协调器，由**唯一的信号监督者**（cmd 层）构造并注入：
+	// 信号在 NewApp 之前就可能到达，协调器因此必须比 App 更早存在。
+	//
+	// 为 nil 时 App 自建一个（单测与不接信号的命令走这条路），行为不变。
+	Shutdown *ShutdownCoordinator
 }
 
 // defaultWorkerShutdownTimeout 是 worker drain 的独立预算。
@@ -75,7 +78,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	//
 	// （此处曾用 context.Background() 并注释成"装配阶段不做任何 I/O"。
 	//   那句话对 buildMiddlewares 成立，对限流不成立。）
-	providers, err := newProviders(ctx, runtime)
+	providers, err := newProviders(ctx, runtime, options.Shutdown)
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close())
 	}
@@ -143,23 +146,19 @@ func (a *App) Run(ctx context.Context) (err error) {
 	// 但就绪信息里要说清楚"这台机器上没有 pprof 了"。
 	a.status.attachPprof(pprofEndpoint)
 
-	// 第一个信号进入优雅关停，第二个信号进入强制路径。
-	// 用 signal.Notify 而不是 signal.NotifyContext：后者只能表达"收到过信号"，
-	// 无法区分第一个与第二个——而"再按一次 Ctrl+C 立刻退出"正是运维的普遍预期。
-	// 进程入口（cmd.Execute）另有一层 NotifyContext 覆盖 NewApp 装配期；
-	// 运行期两层并存：首个信号取消上层 ctx（经下方翻译协程汇聚为关停请求）
-	// 并同时被本监听读到，两条路径经协调器幂等汇聚。
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
-	// watchDone 让两个监听协程随 Run 返回而退出：signal.Stop 只解除注册、
-	// 不关闭通道，没有独立退出信号的监听协程会在 Run 结束后永久阻塞。
+	// **App 不监听 OS 信号**（runtime-state-machine spec：进程只有一个信号
+	// 监督者）。信号由进程入口（cmd 层）唯一监听并翻译成协调器动作：
+	// 第一次 → RequestShutdown + 取消本 ctx（覆盖装配期），第二次 → Force。
+	//
+	// 曾经这里也 signal.Notify 过一份，与入口的监听**同时收到同一个物理信号**，
+	// 于是任何"看对方是否已请求关停"的判定都成了竞态：调度顺序不同即可让
+	// 首次信号被判成第二次而直接强制关停，整段 drain 被跳过。
+	//
+	// watchDone 让翻译协程随 Run 返回而退出，不残留。
 	watchDone := make(chan struct{})
 	defer close(watchDone)
-	go a.watchSignals(signals, watchDone)
 
-	// 上层 ctx 取消同样是一次关停请求（cobra ExecuteContext / 测试驱动）。
+	// 上层 ctx 取消是一次关停请求（信号监督者、cobra ExecuteContext、测试驱动）。
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -299,39 +298,10 @@ func (a *App) shutdownRequested() bool {
 	}
 }
 
-// watchSignals 把第一个信号翻译成优雅关停请求，第二个翻译成强制关停；
-// done 关闭（= Run 返回）时退出，不残留监听协程。
-func (a *App) watchSignals(signals <-chan os.Signal, done <-chan struct{}) {
-	first := true
-	for {
-		select {
-		case sig := <-signals:
-			if first {
-				// 关停已经由别的途径请求（装配期信号经 NotifyContext→ctx 翻译、
-				// 上层取消）时，本条实际是操作者的**第二次**信号：按强制处理，
-				// 否则"再按一次 Ctrl+C 立刻退出"在信号落点跨窗口时少数一拍。
-				if a.shutdownRequested() {
-					logger.Warnf("received %s while shutdown was already requested: forcing shutdown", sig)
-					a.shutdown.Force()
-					return
-				}
-				logger.Infof("received %s: starting graceful shutdown", sig)
-				a.shutdown.RequestShutdown(nil)
-				first = false
-				continue
-			}
-			logger.Warnf("received %s again: forcing shutdown", sig)
-			a.shutdown.Force()
-			return
-		case <-done:
-			return
-		}
-	}
-}
-
 // awaitShutdown 阻塞直到出现任一关停触发源，返回 HTTP 是否已自行退出。
 //
-// 三类触发源全部经 RequestShutdown 进入同一个信号：OS 信号（watchSignals）、
+// 三类触发源全部经 RequestShutdown 进入同一个信号：OS 信号（由 cmd 层唯一的
+// 信号监督者翻译，App 自己不监听）、
 // required worker 运行期异常、主 HTTP serve 异常。各自直接执行关停动作时，
 // 并发到达会重复 close channel、重复关闭连接、重复清理，
 // 而这些重复中的任何一个都会把一次正常关停变成一次报错的关停。

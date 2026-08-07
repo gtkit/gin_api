@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"testing"
@@ -12,46 +13,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/testutil"
 )
-
-// TestWatchSignalsFirstSignalGracefulAndExitsOnDone 钉住单信号路径：
-// 第一个信号请求优雅关停（不强制），done 关闭后监听协程退出、不残留。
-func TestWatchSignalsFirstSignalGracefulAndExitsOnDone(t *testing.T) {
-	app := &App{shutdown: NewShutdownCoordinator()}
-	signals := make(chan os.Signal, 2)
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	go func() { app.watchSignals(signals, done); close(exited) }()
-
-	signals <- syscall.SIGINT
-	select {
-	case <-app.shutdown.Requested():
-	case <-time.After(2 * time.Second):
-		t.Fatal("first signal did not request a graceful shutdown")
-	}
-	if app.shutdown.Forced() {
-		t.Fatal("first signal must not force shutdown")
-	}
-
-	close(done)
-	waitClosed(t, exited, "watchSignals did not exit after done was closed")
-}
-
-// TestWatchSignalsSecondSignalForces 钉住双信号路径：
-// 第二个信号进入强制关停，监听协程自行返回。
-func TestWatchSignalsSecondSignalForces(t *testing.T) {
-	app := &App{shutdown: NewShutdownCoordinator()}
-	signals := make(chan os.Signal, 2)
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	go func() { app.watchSignals(signals, done); close(exited) }()
-
-	signals <- syscall.SIGINT
-	signals <- syscall.SIGTERM
-	waitClosed(t, exited, "watchSignals did not return after the second signal")
-	if !app.shutdown.Forced() {
-		t.Fatal("second signal did not force shutdown")
-	}
-}
 
 // TestAppRunFirstSignalCancelsStartupBarrier 钉住启动屏障对关停请求的响应：
 // 屏障内（required one-shot 执行中）收到首个关停请求时，屏障立即取消、
@@ -78,8 +39,8 @@ func TestAppRunFirstSignalCancelsStartupBarrier(t *testing.T) {
 	go func() { errCh <- app.Run(context.Background()) }()
 
 	waitClosed(t, entered, "required one-shot did not start")
-	// 等价于第一个 OS 信号：watchSignals 把信号翻译成 RequestShutdown(nil)，
-	// 该翻译已有专测（TestWatchSignalsFirstSignalGracefulAndExitsOnDone）。
+	// 等价于第一个 OS 信号：唯一的信号监督者（cmd 层）把首个信号翻译成
+	// RequestShutdown(nil)，该翻译在 cmd 包有专测。
 	app.shutdown.RequestShutdown(nil)
 
 	select {
@@ -256,28 +217,6 @@ func TestAppRunSkipsServeWhenShutdownRequestedDuringBarrier(t *testing.T) {
 	}
 }
 
-// TestWatchSignalsForcesWhenShutdownAlreadyRequested 钉住信号窗口
-// （runtime-state-machine spec）：首个关停请求经其他途径（装配期信号经
-// NotifyContext→ctx 翻译、上层取消）进入后，监听收到的下一个 OS 信号
-// 必须走强制路径——否则操作者的第二次 Ctrl+C 会被当成"第一次"而只是
-// 幂等地再请求一遍优雅关停。
-func TestWatchSignalsForcesWhenShutdownAlreadyRequested(t *testing.T) {
-	app := &App{shutdown: NewShutdownCoordinator()}
-	app.shutdown.RequestShutdown(nil) // 关停已经由别的途径请求
-
-	signals := make(chan os.Signal, 2)
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	go func() { app.watchSignals(signals, done); close(exited) }()
-	defer close(done)
-
-	signals <- syscall.SIGINT
-	waitClosed(t, exited, "watchSignals did not return after forcing")
-	if !app.shutdown.Forced() {
-		t.Fatal("a signal arriving after shutdown was requested must force shutdown")
-	}
-}
-
 // TestAppRunForcedShutdownCancelsWorkerStopWait 钉住强制路径对任务停止等待的取消：
 // 卡死的 consumer 让优雅关停停在 consumer 相位（停止预算 30 秒），
 // 强制关停必须立即结束等待——不取消的话本测试会在 3 秒超时上失败。
@@ -439,4 +378,90 @@ func TestRuntimeCloseIsNilSafeAndRepeatable(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+}
+
+// TestSingleSignalNeverForces 是**回归测试**（runtime-state-machine spec）：
+// 一次 OS 信号只能触发优雅关停。
+//
+// 上一版把"关停已请求时任何信号即升级为 Force"作为窗口修复，却漏了两处监听
+// 承载的是**同一个物理事件**：进程入口的 NotifyContext 与 App 内的
+// signal.Notify 同时收到首个 SIGTERM，若 ctx 翻译协程先跑到
+// RequestShutdown，App 的监听看到的就是"已请求"状态并直接 Force——
+// 首次信号因此跳过整段 drain。定稿是让**唯一一处**监听信号，本测试锁住
+// "App 自己不再监听信号"这一点：进程收到信号时 App 只会看到 ctx 取消。
+func TestSingleSignalNeverForces(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := newTestHTTPServer()
+	app := newTestApp(t, server)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- app.Run(ctx) }()
+	waitClosed(t, server.listenCalled, "server did not start")
+
+	// 模拟"进程入口收到首个信号"：唯一监督者的动作是请求优雅关停 + 取消 ctx。
+	app.shutdown.RequestShutdown(nil)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned %v; a single signal must stay on the graceful path", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after the graceful shutdown request")
+	}
+	if app.shutdown.Forced() {
+		t.Fatal("a single signal escalated to the forced path: the graceful drain was skipped")
+	}
+}
+
+// TestAppDoesNotRegisterSignalHandlers 钉住"进程只有一个信号监督者"：
+// App 不得自己注册信号处理——两处监听同一物理事件时，任何"看对方状态"
+// 的判定都是竞态。
+//
+// 判据用真实信号：向本进程发一个 SIGTERM，若 App 仍在监听，它会把这个信号
+// 翻译成关停请求；唯一监督者在 cmd 层，测试里没装，因此 App 必须毫无反应。
+func TestAppDoesNotRegisterSignalHandlers(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := newTestHTTPServer()
+	app := newTestApp(t, server)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- app.Run(ctx) }()
+	waitClosed(t, server.listenCalled, "server did not start")
+
+	// 屏蔽本测试进程对 SIGTERM 的默认处置（否则默认动作会杀掉测试进程），
+	// 再投递一个——App 若自己监听，就会看到它。
+	block := make(chan os.Signal, 1)
+	signal.Notify(block, syscall.SIGTERM)
+	defer signal.Stop(block)
+
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	waitClosed(t, func() <-chan struct{} { // 等信号确实已投递到本测试的监听
+		done := make(chan struct{})
+		go func() { <-block; close(done) }()
+		return done
+	}(), "SIGTERM was never delivered")
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run returned %v after a SIGTERM: App must not listen for signals itself", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if app.shutdown.Forced() {
+		t.Fatal("App reacted to the signal: it still registers its own handler")
+	}
+
+	cancel()
+	<-errCh
 }

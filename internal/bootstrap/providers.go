@@ -93,7 +93,9 @@ type middlewares struct {
 // newProviders 按「基础设施 → 指标 → service → 中间件 → 限流 → worker/协调器 →
 // 路由引擎」七个阶段编排装配，每个阶段收敛到一个单一职责的私有函数，
 // 本函数只做顺序拼接与错误透传（与函数体内的编号注释一一对应）。
-func newProviders(ctx context.Context, runtime *Runtime) (_ *providerSet, err error) {
+func newProviders(
+	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator,
+) (_ *providerSet, err error) {
 	// 失败回滚：装配已产生的进程级副作用（指标回调、限流注册表）逆序撤销。
 	// 只关 Runtime 是不够的——指标回调挂在进程级 MeterProvider 上持有已关闭
 	// 连接池的引用，限流执行体的后台 goroutine 仍在运行。
@@ -165,7 +167,12 @@ func newProviders(ctx context.Context, runtime *Runtime) (_ *providerSet, err er
 	for _, unregister := range inf.metricsCleanup[cleanupsBefore:] {
 		rb.push("worker metrics", unregister)
 	}
-	coordinator := NewShutdownCoordinator()
+	// 协调器优先用注入的那个：信号在 NewApp 之前就可能到达，唯一的信号监督者
+	// （cmd 层）因此比装配更早构造它。未注入时自建，行为不变。
+	coordinator := shutdown
+	if coordinator == nil {
+		coordinator = NewShutdownCoordinator()
+	}
 
 	// 7. 路由引擎：组装路由切片并初始化 Gin 引擎。
 	//    路由契约不合法属装配错误，在此透传为启动失败。

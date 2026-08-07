@@ -10,7 +10,7 @@ import (
 func TestNewRootCmdRegistersExpectedCommands(t *testing.T) {
 	t.Parallel()
 
-	rootCmd := NewRootCmd()
+	rootCmd := NewRootCmd(nil)
 	want := map[string]bool{
 		"server": true,
 		"jwt":    true,
@@ -33,7 +33,7 @@ func TestNewRootCmdRegistersExpectedCommands(t *testing.T) {
 func TestPrintGenerationSummaryDryRun(t *testing.T) {
 	t.Parallel()
 
-	rootCmd := NewRootCmd()
+	rootCmd := NewRootCmd(nil)
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)
 

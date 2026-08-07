@@ -122,8 +122,9 @@ return 1
 // 刷新请求会同时读到"未使用"，于是同一个令牌被消费两次——而重用检测的全部
 // 意义就是发现这种情况。分步实现会让检测本身成为它要检测的漏洞。
 //
-// 族撤销检查也在脚本内：放到 Go 侧会留出"消费成功但族刚被撤销"的窗口，
-// 那个窗口里签发的新令牌属于一个已被撤销的族。
+// 族撤销检查**与撤销动作**都在脚本内：检查放到 Go 侧会留出"消费成功但族刚被
+// 撤销"的窗口，那个窗口里签发的新令牌属于一个已被撤销的族；撤销动作放到 Go 侧
+// 则留出"已判定重用而族尚未撤销"的窗口，并发请求可在其中消费下一代令牌。
 //
 // # 重放窗口
 //
@@ -169,7 +170,12 @@ if used == '1' then
      and tonumber(ARGV[4]) < tonumber(replay_until) then
     return {4, uid, next_secret}
   end
-  -- 窗口外：这次重放说明令牌被复制了出去。
+  -- 窗口外：这次重放说明令牌被复制了出去。**就地撤销整族**。
+  --
+  -- 撤销必须与检测同在本脚本内：放到 Go 侧补一次调用，会留下
+  -- "已判定重用而族尚未撤销"的窗口，窗口内并发请求可以消费下一代令牌
+  -- 并换出新的访问令牌——泄漏链因此在防线已经报警之后仍然产出可用凭据。
+  redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
   return {2, uid, ''}
 end
 
@@ -326,11 +332,10 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 		// 一个已被消费的令牌再次出现，意味着它被复制到了别处。仅拒绝这一次
 		// 会让攻击者继续持有可用凭据；撤销整族会同时切断攻击者与合法用户，
 		// 迫使重新登录——这是 OAuth 2.0 Security BCP 对该信号的标准处置。
-		if revokeErr := s.RevokeFamily(ctx, family); revokeErr != nil {
-			// 撤销失败必须上报：此时重用已经发生，而防线没有生效。
-			return 0, "", fmt.Errorf("tokenstore: refresh token reuse detected but revoking "+
-				"the family failed, the leaked token chain is still live: %w", revokeErr)
-		}
+		//
+		// **撤销已由脚本就地完成**：返回码 2 意味着族撤销标记此刻已经写入，
+		// 因此这里不再补一次调用——那一次补调用正是"已判定重用而族尚未撤销"
+		// 窗口的来源。
 		return 0, "", ErrRefreshReused
 	case 3:
 		return 0, "", ErrFamilyRevoked

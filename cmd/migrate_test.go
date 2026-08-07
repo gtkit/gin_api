@@ -114,7 +114,7 @@ func TestMigrateSubtreeHelpDoesNotTouchDB(t *testing.T) {
 func TestRootRegistersMigrationCommands(t *testing.T) {
 	t.Parallel()
 
-	rootCmd := NewRootCmd()
+	rootCmd := NewRootCmd(nil)
 	want := map[string]bool{"migrate": true, "make": true}
 
 	got := make(map[string]bool)
