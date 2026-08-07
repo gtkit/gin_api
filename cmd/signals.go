@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
@@ -30,6 +31,8 @@ type signalSupervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	stop   func()
+	// once 保证 Close 幂等（stop 会 close 通道，重复关闭 panic）。
+	once sync.Once
 }
 
 // newSignalSupervisor 安装信号监听并返回监督者。
@@ -81,7 +84,12 @@ func (s *signalSupervisor) watch(signals <-chan os.Signal, done <-chan struct{})
 }
 
 // Close 解除信号注册并结束监听协程。
+//
+// 幂等：stop 关闭 done 通道，重复关闭会 panic。命令树上 defer 与显式收尾
+// 很容易重叠，让"多关一次"成为进程崩溃的原因不值得。
 func (s *signalSupervisor) Close() {
-	s.stop()
-	s.cancel()
+	s.once.Do(func() {
+		s.stop()
+		s.cancel()
+	})
 }

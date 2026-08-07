@@ -307,3 +307,65 @@ func TestBuildRateLimitsRejectsRedisPolicyWithoutClient(t *testing.T) {
 		t.Fatalf("error %q does not point at a way forward", err)
 	}
 }
+
+// TestUnreachableLimiterHonorsEachFailureMode 钉住"Redis 已配置但启动期
+// 不可达"时**按策略各自的降级模式**选执行体（resource-lifecycle spec）。
+//
+// 两种模式要的东西不同：fail_open 要的是放行（限额不变，只是当下无法执行），
+// local_fallback 要的是一个真实的本地桶。给 local_fallback 一个恒不可用执行体
+// 会落到保守方向，把一个要求可用性的策略变成全量拒绝。
+func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		mode        ratelimit.FailureMode
+		wantAllowed bool
+		// wantEnforced 表示执行体真的在算限额（本地桶会耗尽），
+		// 而不是恒定给同一个答案。
+		wantEnforced bool
+	}{
+		{name: "fail_open 放行", mode: ratelimit.FailureOpen, wantAllowed: true},
+		{name: "local_fallback 用本地桶执行", mode: ratelimit.FailureLocalFallback,
+			wantAllowed: true, wantEnforced: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := ratelimit.Policy{
+				ID: "cfg.but.down", Rate: 1, Burst: 2, Scope: ratelimit.ScopeIP,
+				Store: ratelimit.StoreRedis, FailureMode: tt.mode, MaxKeys: 100,
+			}
+			limiter, err := unreachableLimiter(policy)
+			if err != nil {
+				t.Fatalf("unreachableLimiter: %v", err)
+			}
+			defer limiter.Close()
+
+			decision, err := limiter.Check(context.Background(), "k")
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if decision.Allowed() != tt.wantAllowed {
+				t.Fatalf("first Check Allowed() = %v, want %v", decision.Allowed(), tt.wantAllowed)
+			}
+
+			// 打穿 burst：只有真的在算限额的执行体才会开始拒绝。
+			var rejected bool
+			for range policy.Burst + 2 {
+				d, checkErr := limiter.Check(context.Background(), "k")
+				if checkErr != nil {
+					t.Fatalf("Check: %v", checkErr)
+				}
+				if !d.Allowed() {
+					rejected = true
+				}
+			}
+			if rejected != tt.wantEnforced {
+				t.Fatalf("rejected after exhausting the burst = %v, want %v", rejected, tt.wantEnforced)
+			}
+		})
+	}
+}

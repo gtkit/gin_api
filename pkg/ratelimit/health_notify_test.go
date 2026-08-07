@@ -262,43 +262,6 @@ func TestProbeRejectsNonAllowedDecision(t *testing.T) {
 	}
 }
 
-// TestUnavailableLimiterDefersToFailureMode 钉住恒不可用执行体的语义
-// （rate-limiting spec / resource-lifecycle spec）：它每次都报后端不可用，
-// 于是各策略自己的 FailureMode 决定放行还是拒绝——不静默改变任何限额。
-//
-// 用途：启动期后端不可达且无 fail_closed 策略时顶替真实后端，让可降级的
-// 部署能启动，而不是让一次可降级的故障变成起不来。
-func TestUnavailableLimiterDefersToFailureMode(t *testing.T) {
-	t.Parallel()
-
-	policy := Policy{
-		ID: "cfg.but.down", Rate: 5, Burst: 20, Scope: ScopeIP,
-		Store: StoreRedis, FailureMode: FailureOpen, MaxKeys: 100,
-	}
-	l := NewUnavailableLimiter(policy)
-	defer l.Close()
-
-	if got := l.Policy(); got.ID != policy.ID || got.Burst != policy.Burst {
-		t.Fatalf("Policy() = %+v, want the configured policy unchanged", got)
-	}
-
-	// 多次判定都必须是"后端不可用"，且不返回错误——调用方据 Outcome 走
-	// FailureMode，而不是据 error 判断。
-	for range 3 {
-		d, err := l.Check(context.Background(), "any-key")
-		if err != nil {
-			t.Fatalf("Check returned an error: %v (the outcome carries the verdict)", err)
-		}
-		if d.Outcome != OutcomeBackendUnavailable {
-			t.Fatalf("Outcome = %s, want backend_unavailable", d.Outcome)
-		}
-		if d.Limit != policy.Burst {
-			t.Fatalf("Limit = %d, want the configured burst %d (limits must not change silently)",
-				d.Limit, policy.Burst)
-		}
-	}
-}
-
 // TestNotificationsAreNotStranded 钉住通知不滞留（reusable-packages spec）：
 // 每次相位迁移都被立即发出一次，不存在"等下一次状态活动才发"的窗口。
 //

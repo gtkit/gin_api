@@ -108,18 +108,14 @@ func buildLimiter(
 			}
 			// 已配置但启动期不可达 = 运行期故障。存在 fail_closed 策略时仍失败
 			//（那种模式下不可达只能拒绝请求，实例不该被判为 ready）；
-			// 全是降级模式时用恒不可用执行体顶上——每次判定报后端不可用，
-			// 由各策略自己的 FailureMode 决定放行还是拒绝，不静默改变限额。
+			// 全是降级模式时按各策略自己的 FailureMode 顶替真实后端。
 			if !degradedStartAllowed {
 				return nil, fmt.Errorf(
 					"rate limit policy %q is fail_closed over the redis store but redis is "+
 						"unreachable at startup: that policy could only reject every request, "+
 						"so the instance must not come up", policy.ID)
 			}
-			logger.Warnf("redis is unreachable at startup; rate limit policies fall back to their "+
-				"failure modes for this process lifetime (restart after redis recovers): policy %q",
-				policy.ID)
-			return ratelimit.NewUnavailableLimiter(policy), nil
+			return unreachableLimiter(policy)
 		}
 		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),
@@ -143,6 +139,33 @@ func buildLimiter(
 		return ratelimit.NewFallbackBackend(*redisBackend, policy)
 	}
 	return ratelimit.NewRedisLimiter(*redisBackend, policy)
+}
+
+// unreachableLimiter 为"Redis 已配置但启动期不可达"的策略选执行体。
+//
+// 两种降级模式要的东西不同，不能一视同仁：
+//
+//	fail_open      → 恒不可用执行体：它按 FailureMode 放行并置 Degraded，
+//	                 限额不变（只是当下无法执行）。
+//	local_fallback → 真实的本地桶：这个模式的语义就是"后端没了就用本地的"，
+//	                 给恒不可用执行体会落到保守方向（拒绝），把一个要求
+//	                 可用性的策略变成全量拒绝。
+//
+// 本地桶的代价是配额按副本各算一份（N 个副本 = N 倍总量）——这正是
+// local_fallback 已经接受的代价，与运行期回落到影子桶完全一致。
+//
+// 这条路径**不会自行恢复**：没有后端连接可探测，恢复靠进程重启。
+func unreachableLimiter(policy ratelimit.Policy) (ratelimit.Limiter, error) {
+	if policy.FailureMode == ratelimit.FailureLocalFallback {
+		logger.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
+			"bucket for this process lifetime (quota counts per replica; restart after redis recovers)",
+			policy.ID)
+		return ratelimit.NewLocalBackend(policy)
+	}
+
+	logger.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
+		"process lifetime (restart after redis recovers)", policy.ID, policy.FailureMode)
+	return ratelimit.NewUnavailableLimiter(policy), nil
 }
 
 // toRateLimitPolicy 把配置形态翻译成强类型策略。

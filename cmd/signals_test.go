@@ -107,12 +107,13 @@ func TestSupervisorCloseStopsWatching(t *testing.T) {
 	if sup.ctx.Err() == nil {
 		t.Fatal("Close did not cancel the context")
 	}
-	// 再次 Close 不得 panic：defer 与显式调用可能重叠。
+	// 再次 Close 不得 panic：defer 与显式收尾在命令树上很容易重叠，
+	// 而 stop 关闭 done 通道——不做幂等，多关一次就是进程崩溃。
+	// **这里不替换 sup.stop**：替换掉就等于把要验的那条路径绕开了。
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("second Close panicked: %v", r)
 		}
 	}()
-	sup.stop = func() {} // 第二次只演练 cancel 路径，避免重复 close(done)
 	sup.Close()
 }
