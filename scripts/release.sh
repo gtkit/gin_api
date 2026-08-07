@@ -25,6 +25,36 @@ RELEASE_TAG_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
 die() { echo "$*" >&2; exit 1; }
 
+# resolve_remote 推导推送目标：用仓库里**实际存在**的那个 remote。
+#
+# 不假设它叫 origin。母版会被派生到各种仓库里，那里的 remote 叫什么由使用者
+# 决定；写死一个名字的后果是发布跑完整个门禁、建好 release commit、打好 tag，
+# 最后一步才推送失败——留下"有 release commit、无 tag"的半发布状态，
+# 而那需要人工判断怎么回退。
+#
+# 优先级：
+#   ① 当前分支的 upstream——它是使用者已经明确表达过的推送意图；
+#   ② 仓库只有一个 remote 时用它——此时不存在歧义；
+#   ③ 多个 remote 且无 upstream：**报错中止**，不猜。猜错等于把版本推到
+#      另一个仓库，而那是不可撤销的外向操作。
+resolve_remote() {
+  local upstream remote
+  if upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then
+    remote="${upstream%%/*}"
+    # upstream 指向本地分支时 remote 部分是 "."，那不是可推送的目标。
+    if [ -n "$remote" ] && [ "$remote" != "." ] && [ "$remote" != "$upstream" ]; then
+      printf '%s\n' "$remote"
+      return 0
+    fi
+  fi
+
+  if [ "$(git remote | grep -c .)" = "1" ]; then
+    git remote
+    return 0
+  fi
+  return 1
+}
+
 # preflight 在**产生任何副作用之前**做完全部前置校验。
 #
 # 顺序是硬要求：若在改写版本文件之后才发现 tag 已存在，会留下
@@ -38,6 +68,10 @@ preflight() {
 
   branch="$(git symbolic-ref --short HEAD 2>/dev/null)" ||
     die "当前处于 detached HEAD，拒绝发布：无法确定要推送的分支"
+
+  remote="$(resolve_remote)" ||
+    die "无法确定推送目标：当前分支没有 upstream，且仓库有多个 remote：$(git remote | tr '\n' ' ')
+请先 git branch --set-upstream-to=<remote>/$branch 指定，再重跑发布。"
 
   current="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v')"
   [ -n "$current" ] || die "version.go 中未找到版本号"
@@ -55,10 +89,10 @@ preflight() {
 }
 
 run_release() {
-  local branch current new
+  local branch current new remote
   preflight
 
-  printf 'Bump: v%s -> %s (branch %s)\n' "$current" "$new" "$branch"
+  printf 'Bump: v%s -> %s (branch %s, remote %s)\n' "$current" "$new" "$branch" "$remote"
 
   # ① 先在本地生成 release commit——此时绝不推送、绝不打 tag。
   #    门禁必须跑在**最终 commit** 上，否则验证的是一份不会被发布的树。
@@ -82,7 +116,7 @@ run_release() {
   #    不依赖 push.default 或远端 HEAD 推导；服务端不支持 atomic 或分支非
   #    fast-forward 时整体失败，绝不退化成两次 push——那会留下
   #    「有 release commit、无 tag」的半发布状态。
-  git push --atomic origin "HEAD:refs/heads/$branch" "refs/tags/$new:refs/tags/$new"
+  git push --atomic "$remote" "HEAD:refs/heads/$branch" "refs/tags/$new:refs/tags/$new"
   printf 'Done: %s pushed to %s\n' "$new" "$branch"
 }
 
@@ -94,7 +128,7 @@ run_release() {
 # 那种缺陷会和只看退出码的自检一起通过。因此这里用 PATH 前置的 make stub
 # 把调用记录下来，再断言记录的内容。
 run_self_test() {
-  local sandbox script
+  local sandbox script upstream_branch
   script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
   sandbox="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -204,6 +238,49 @@ STUB
   setup_repo "$sandbox/badver" "v01.2.3"
   run_in "$sandbox/badver" 0 && status=0 || status=$?
   check "a non-canonical SemVer is rejected" "$status" "1"
+
+  # --- 用例 4：推送目标取自仓库实际配置，不假设叫 origin ---
+  #
+  # 这是必须钉住的：写死 origin 的失败发生在**最后一步**——门禁跑完、
+  # release commit 已建、tag 已打，然后推送失败，留下半发布状态。
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/named"
+  git -C "$sandbox/named" remote rename origin upstream
+  run_in "$sandbox/named" 0 && status=0 || status=$?
+  check "a remote not named origin still releases" "$status" "0"
+  check "the tag reaches a differently named remote" \
+    "$(git -C "$sandbox/named.remote.git" tag -l v1.2.4)" "v1.2.4"
+
+  # upstream 指定了目标时按它走，即使还有其他 remote。
+  #
+  # 必须先把分支推上去再设 upstream：远端是空的 bare 仓库，
+  # origin/<branch> 引用不存在时 --set-upstream-to 会失败，
+  # 那样这个用例验的就不是"upstream 决定目标"而是"没有 upstream"。
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/upstream"
+  upstream_branch="$(git -C "$sandbox/upstream" symbolic-ref --short HEAD)"
+  git init -q --bare "$sandbox/upstream.other.git"
+  git -C "$sandbox/upstream" remote add other "$sandbox/upstream.other.git"
+  git -C "$sandbox/upstream" push -q origin "HEAD:refs/heads/$upstream_branch"
+  git -C "$sandbox/upstream" branch --set-upstream-to="origin/$upstream_branch" >/dev/null
+  run_in "$sandbox/upstream" 0 && status=0 || status=$?
+  check "an explicit upstream decides the target" "$status" "0"
+  check "the upstream remote receives the tag" \
+    "$(git -C "$sandbox/upstream.remote.git" tag -l v1.2.4)" "v1.2.4"
+  check "the other remote is left untouched" \
+    "$(git -C "$sandbox/upstream.other.git" for-each-ref | wc -l | tr -d ' ')" "0"
+
+  # 多个 remote 且无 upstream：必须拒绝而不是猜。猜错等于把版本推到
+  # 另一个仓库，那是不可撤销的外向操作。
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/ambiguous"
+  git -C "$sandbox/ambiguous" remote add second "$sandbox/ambiguous.remote.git"
+  run_in "$sandbox/ambiguous" 0 && status=0 || status=$?
+  check "an ambiguous remote set is rejected" "$status" "1"
+  check "an ambiguous remote set never reaches the gate" \
+    "$(wc -l < "$sandbox/gate.log" | tr -d ' ')" "0"
+  check "an ambiguous remote set produces no commit" \
+    "$(git -C "$sandbox/ambiguous" log --oneline | wc -l | tr -d ' ')" "1"
 
   if [ "$failed" -ne 0 ]; then
     exit 1
