@@ -20,6 +20,7 @@ import (
 	"github.com/gtkit/gin-api/internal/router"
 	"go.opentelemetry.io/otel"
 
+	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
@@ -37,6 +38,8 @@ type providerSet struct {
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
 	rateLimits rateLimitAssembly
+	// outbound 是具名出站 HTTP 客户端工厂；未声明 clients 时为空工厂。
+	outbound *httpclient.Factory
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
 	// metricsCleanup 注销指标的异步回调，由 App 在关停时调用。
@@ -51,6 +54,8 @@ type infra struct {
 	httpConfig HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
+	// outbound 是具名出站 HTTP 客户端工厂，供各模块按下游名取用。
+	outbound *httpclient.Factory
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -138,6 +143,16 @@ func newProviders(
 	inf.rateLimits = rateLimits
 	rb.push("rate limits", func() error { return closeRateLimits(rateLimits) })
 
+	// 3b. 出站 HTTP 客户端。必须先于 service 装配：下游集合是启动期事实，
+	//     service 在构造时就按名字取用，名字没登记属装配错误。
+	//     不做 I/O（只建连接池），因此不需要启动 ctx。
+	outbound, err := httpclient.New(inf.cfg.Outbound)
+	if err != nil {
+		return nil, fmt.Errorf("build outbound http clients: %w", err)
+	}
+	inf.outbound = outbound
+	rb.push("outbound http clients", outbound.Close)
+
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)
 	if err != nil {
@@ -193,6 +208,7 @@ func newProviders(
 		workers:        workers,
 		shutdown:       coordinator,
 		rateLimits:     rateLimits,
+		outbound:       outbound,
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil

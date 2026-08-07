@@ -25,6 +25,8 @@ type Config struct {
 	Proxy ProxyConfig `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
+	// Outbound 是出站 HTTP 客户端的具名声明。clients 为空即不启用。
+	Outbound OutboundConfig `mapstructure:"outbound"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }

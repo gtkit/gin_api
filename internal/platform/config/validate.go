@@ -144,6 +144,9 @@ func (c *Config) Validate() error {
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateOutboundConfig(c.Outbound); err != nil {
+		errs = append(errs, err)
+	}
 
 	return errors.Join(errs...)
 }
