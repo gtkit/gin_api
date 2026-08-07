@@ -75,7 +75,8 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: access ttl must be positive, got %s", deps.AccessTTL)
 	}
 
-	refresh, err := tokenstore.NewRefreshStore(ctx, deps.Redis, deps.KeyPrefix, deps.Config.EffectiveRefreshTTL())
+	refresh, err := tokenstore.NewRefreshStore(ctx, deps.Redis, deps.KeyPrefix,
+		deps.Config.EffectiveRefreshTTL(), deps.Config.RefreshReplaySecret)
 	if err != nil {
 		return Assembly{}, fmt.Errorf("auth: build refresh store: %w", err)
 	}

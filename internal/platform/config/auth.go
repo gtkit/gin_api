@@ -4,8 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 )
+
+// minSecretLen 是配置里各专用密钥的最小字节数。
+//
+// 与 pkg/ratelimit 的键密钥下限同值：两者都是"泄漏即失效"的服务端密钥，
+// 对暴力枚举的抵抗力要求一致。
+const minSecretLen = 32
 
 // AuthMode 是认证模式。
 //
@@ -40,6 +47,16 @@ type AuthConfig struct {
 	// 母版给的默认值要么在小机器上打满内存，要么在大机器上形同虚设，
 	// 且两种情况都不会报错。bcrypt 只有一个参数，语义单一，调错的空间小。
 	BcryptCost int `mapstructure:"bcrypt_cost"`
+
+	// RefreshReplaySecret 是刷新令牌重放材料的加密密钥（本地认证模式必填）。
+	//
+	// **必须专用**，禁止复用 JWT、限流或任何其他业务密钥：它保护的是"轮换出的
+	// 下一代刷新令牌"——那是可直接使用的凭据，明文落库时一次存储快照泄漏即可
+	// 拼出当前有效的刷新令牌。经 SHA-256 归一到 32 字节做 AES-256-GCM 密钥。
+	//
+	// 轮换语义：换密钥 = 当时处于重放窗口（秒级）内的刷新失败一次，客户端
+	// 重新登录即可；不触发令牌族撤销。
+	RefreshReplaySecret string `mapstructure:"refresh_replay_secret"`
 
 	// BcryptMaxConcurrent 是口令哈希校验的进程级并发上限，留空按 CPU 核数。
 	//
@@ -157,6 +174,20 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 	//
 	// 错误里给两条出路而不是一条：使用者的真实意图可能是任何一种，
 	// 只说"请配置 redis"会让打算接外部 IdP 的人以为自己必须装一个 Redis。
+	// 重放材料的加密密钥：本地认证模式必填且有长度下限。
+	//
+	// 缺它就只能把轮换出的令牌明文写进 Redis——那与"存储里只有哈希"的契约
+	// 相反，且一次快照泄漏即可拼出当前有效的刷新令牌。
+	if c.Mode == AuthModeLocal {
+		if secret := strings.TrimSpace(c.RefreshReplaySecret); len(secret) < minSecretLen {
+			errs = append(errs, fmt.Errorf(
+				"auth.refresh_replay_secret must be at least %d bytes when auth.mode is \"local\": "+
+					"it encrypts the rotated refresh token kept for the replay window, and without "+
+					"it that token would have to be stored in plaintext. Use a dedicated secret — "+
+					"never reuse the JWT, rate limit or database secret", minSecretLen))
+		}
+	}
+
 	if c.Mode == AuthModeLocal && redis.Addr == "" {
 		errs = append(errs, errors.New(
 			"auth.mode is \"local\" but redis.addr is empty: local auth needs a revocation "+

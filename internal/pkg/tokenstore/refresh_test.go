@@ -29,7 +29,7 @@ func newTestStore(t *testing.T, ttl time.Duration) (*RefreshStore, *miniredis.Mi
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	store, err := NewRefreshStore(context.Background(), client, "test", ttl)
+	store, err := NewRefreshStore(context.Background(), client, "test", ttl, strings.Repeat("r", 32))
 	if err != nil {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}
@@ -301,5 +301,81 @@ func TestReplayWithinTheWindowReturnsTheSameToken(t *testing.T) {
 	// 族没有被撤销：那个令牌仍然可用。
 	if _, _, err := store.Consume(ctx, first); err != nil {
 		t.Fatalf("the rotated token stopped working after a replay: %v", err)
+	}
+}
+
+// TestStorageNeverHoldsAUsableSecret 钉住"存储里不出现可直接使用的秘密段"
+// （local-authentication spec）：族标识在键里明文可见，若轮换出的秘密段也
+// 明文落库，一次存储快照泄漏即可拼出当前有效的刷新令牌。
+func TestStorageNeverHoldsAUsableSecret(t *testing.T) {
+	t.Parallel()
+
+	store, srv := newTestStore(t, time.Hour)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, 7)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, rotated, err := store.Consume(ctx, token)
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+
+	_, rotatedSecret, err := splitToken(rotated)
+	if err != nil {
+		t.Fatalf("splitToken: %v", err)
+	}
+
+	// 遍历 Redis 全部键的全部字段，断言轮换出的秘密段不以明文存在于任何一处。
+	for _, key := range srv.Keys() {
+		if srv.Type(key) != "hash" {
+			continue
+		}
+		fields, err := srv.HKeys(key)
+		if err != nil {
+			t.Fatalf("HKeys(%s): %v", key, err)
+		}
+		for _, field := range fields {
+			if srv.HGet(key, field) == rotatedSecret {
+				t.Fatalf("field %q of key %q holds the rotated secret in plaintext: "+
+					"a storage snapshot would yield a live refresh token", field, key)
+			}
+		}
+	}
+}
+
+// TestUndecryptableReplayMaterialIsAPlainRejection 钉住解密失败的处置：
+// 判为普通拒绝（重新登录），**不**当成重用——解密失败无法区分"密钥轮换了"
+// 与"记录被篡改"，而误判重用会连带撤销合法用户的整族。
+func TestUndecryptableReplayMaterialIsAPlainRejection(t *testing.T) {
+	t.Parallel()
+
+	store, srv := newTestStore(t, time.Hour)
+	ctx := context.Background()
+
+	token, err := store.Issue(ctx, 7)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, _, err := store.Consume(ctx, token); err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+
+	// 模拟密钥轮换：把记录里的密文改成解不开的内容。
+	family, secret, err := splitToken(token)
+	if err != nil {
+		t.Fatalf("splitToken: %v", err)
+	}
+	srv.HSet(store.recordKey(family, secret), "next", "not-a-valid-ciphertext")
+
+	_, _, err = store.Consume(ctx, token)
+	if !errors.Is(err, ErrRefreshNotFound) {
+		t.Fatalf("Consume with undecryptable replay material = %v, want ErrRefreshNotFound "+
+			"(a plain rejection, not a reuse verdict)", err)
+	}
+	if errors.Is(err, ErrRefreshReused) {
+		t.Fatal("undecryptable material was judged a reuse: that would revoke the legitimate " +
+			"user's whole family over a key rotation")
 	}
 }

@@ -131,7 +131,7 @@ func TestRefreshStoreTranslatesEveryRejection(t *testing.T) {
 			// 三元组：脚本返回 {code, uid, replaySecret}，第三项是重放窗口内
 			// 要原样返回的秘密段（本用例的几种拒绝码都不带它）。
 			client := scriptedClient{evalVal: []any{tt.scriptCode, "7", ""}}
-			store, err := tokenstore.NewRefreshStore(context.Background(), client, "p", time.Hour)
+			store, err := tokenstore.NewRefreshStore(context.Background(), client, "p", time.Hour, strings.Repeat("r", 32))
 			if err != nil {
 				t.Fatalf("NewRefreshStore: %v", err)
 			}
@@ -149,7 +149,7 @@ func TestMalformedRefreshTokenIsARejection(t *testing.T) {
 	t.Parallel()
 
 	store, err := tokenstore.NewRefreshStore(context.Background(),
-		scriptedClient{}, "p", time.Hour)
+		scriptedClient{}, "p", time.Hour, strings.Repeat("r", 32))
 	if err != nil {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestInfrastructureFailureIsNotTranslated(t *testing.T) {
 	t.Parallel()
 
 	client := scriptedClient{evalErr: errors.New("connection refused")}
-	store, err := tokenstore.NewRefreshStore(context.Background(), client, "p", time.Hour)
+	store, err := tokenstore.NewRefreshStore(context.Background(), client, "p", time.Hour, strings.Repeat("r", 32))
 	if err != nil {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestLogoutToleratesAMalformedRefreshToken(t *testing.T) {
 	t.Parallel()
 
 	store, err := tokenstore.NewRefreshStore(context.Background(),
-		scriptedClient{}, "p", time.Hour)
+		scriptedClient{}, "p", time.Hour, strings.Repeat("r", 32))
 	if err != nil {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}

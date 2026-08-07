@@ -7,6 +7,8 @@ package tokenstore
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -52,6 +54,9 @@ type RefreshClient interface {
 // tokenSeparator 分隔令牌里的族标识与秘密段。
 const tokenSeparator = "."
 
+// minReplaySecretLen 是重放材料加密密钥的最小字节数（与配置校验同值）。
+const minReplaySecretLen = 32
+
 // RefreshStore 保管刷新令牌。
 //
 // # 令牌形状
@@ -74,6 +79,18 @@ type RefreshStore struct {
 	replayWindow time.Duration
 	// now 可注入，测试用它确定地驱动窗口边界。
 	now func() time.Time
+
+	// replay 加密重放窗口内保留的下一代令牌。
+	//
+	// **Redis 里不能出现可直接使用的秘密段**：族标识在键里明文可见，若下一代
+	// 秘密段也明文落库，一次存储快照泄漏即可拼出当前有效的刷新令牌，
+	// 而本包的契约是"存储里只有哈希"。
+	//
+	// 为什么不用确定性派生（HMAC(key, family||secret)）省掉加密：那会让**任何
+	// 泄漏的旧秘密段推导出整条未来链**——攻击者拿到一个已用过的 secret
+	// （客户端日志、崩溃转储）即可预计算后续每一代，全程不消费、不触发任何
+	// 重用信号。原缺陷要求 Redis 读权限，那个方案只要求一个旧 secret。
+	replay cipher.AEAD
 
 	// sha 是已加载脚本的摘要。
 	//
@@ -110,8 +127,10 @@ return 1
 //
 // # 重放窗口
 //
-// 消费成功后，把**轮换出的秘密段**记在原记录上并保留一小段时间。窗口内用
-// 同一个令牌再来一次，直接返回那个秘密段，不再轮换、不报重用。
+// 消费成功后，把**轮换出的秘密段的密文**记在原记录上并保留一小段时间。
+// 窗口内用同一个令牌再来一次，返回那段密文（Go 侧解密），不再轮换、不报重用。
+// 存密文而不是明文：族标识在键里明文可见，明文秘密段落库等于让一次存储
+// 快照泄漏就能拼出当前有效的刷新令牌。
 //
 // 没有这个窗口的话，一次丢失的响应会被判成令牌泄漏：客户端手里仍是旧令牌，
 // 重试是它唯一合理的动作，而服务端撤销整族——一次网络抖动因此升级成一次
@@ -127,10 +146,10 @@ return 1
 // 在秒级窗口上无关紧要。
 //
 // KEYS[1] 令牌记录；KEYS[2] 族撤销标记；KEYS[3] 轮换出的新记录
-// ARGV[1] 记录存活秒数；ARGV[2] 新秘密段；ARGV[3] 重放截止时刻（毫秒）
+// ARGV[1] 记录存活秒数；ARGV[2] 新秘密段的**密文**；ARGV[3] 重放截止时刻（毫秒）
 // ARGV[4] 当前时刻（毫秒）
 //
-// 返回 {code, uid, replaySecret}：
+// 返回 {code, uid, replayMaterial}（第三项是密文，解密在 Go 侧）：
 //
 //	0 正常消费  1 令牌不存在  2 重用  3 族已撤销  4 窗口内重放
 const consumeScript = `
@@ -145,7 +164,7 @@ if not uid then
   return {1, '', ''}
 end
 if used == '1' then
-  -- 窗口内：把首次轮换出的秘密段原样返回，等价于那次调用的重放。
+  -- 窗口内：把首次轮换出的密文原样返回，等价于那次调用的重放。
   if next_secret and next_secret ~= '' and replay_until
      and tonumber(ARGV[4]) < tonumber(replay_until) then
     return {4, uid, next_secret}
@@ -167,12 +186,19 @@ return {0, uid, ''}
 //
 // 预加载而不是首次使用时加载：Redis 不可达是本地认证的致命问题，
 // 在装配期暴露远好过在第一个用户登录时。
-func NewRefreshStore(ctx context.Context, client RefreshClient, prefix string, ttl time.Duration) (*RefreshStore, error) {
+func NewRefreshStore(
+	ctx context.Context, client RefreshClient, prefix string, ttl time.Duration, replaySecret string,
+) (*RefreshStore, error) {
 	if client == nil {
 		return nil, errors.New("tokenstore: redis client is required")
 	}
 	if ttl <= 0 {
 		return nil, fmt.Errorf("tokenstore: refresh ttl must be positive, got %s", ttl)
+	}
+
+	replay, err := newReplayCipher(replaySecret)
+	if err != nil {
+		return nil, err
 	}
 
 	sha, err := client.ScriptLoad(ctx, consumeScript).Result()
@@ -188,6 +214,7 @@ func NewRefreshStore(ctx context.Context, client RefreshClient, prefix string, t
 		client: client, prefix: prefix, ttl: ttl,
 		replayWindow: defaultReplayWindow,
 		now:          time.Now,
+		replay:       replay,
 	}
 	s.sha.Store(&sha)
 	s.issueSHA.Store(&issueSHA)
@@ -264,12 +291,17 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 		return 0, "", err
 	}
 
+	// 下一代秘密段仍是随机值（不可预测性不变）；写入存储前加密。
 	nextSecret, err := randomSegment()
 	if err != nil {
 		return 0, "", err
 	}
+	sealedNext, err := s.sealReplay(nextSecret)
+	if err != nil {
+		return 0, "", err
+	}
 
-	code, uid, replaySecret, err := s.runConsume(ctx, family, secret, nextSecret)
+	code, uid, replayMaterial, err := s.runConsume(ctx, family, secret, nextSecret, sealedNext)
 	if err != nil {
 		return 0, "", err
 	}
@@ -278,8 +310,15 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 	case 0:
 		return uid, family + tokenSeparator + nextSecret, nil
 	case 4:
-		// 窗口内重放：返回首次轮换出的那个令牌，与首次调用完全一致。
+		// 窗口内重放：解密出首次轮换的那个令牌，与首次调用返回完全一致。
 		// **不报重用**——这次重放几乎可以肯定是客户端在重试一个丢失的响应。
+		replaySecret, openErr := s.openReplay(replayMaterial)
+		if openErr != nil {
+			// 解密失败（密钥轮换、记录被篡改）判为**普通拒绝**：重新登录即可。
+			// 不当成重用——误判会连带撤销合法用户的整族，而这里根本无法区分
+			// 密钥换了与记录被动过。
+			return 0, "", fmt.Errorf("%w: %w", ErrRefreshNotFound, openErr)
+		}
 		return uid, family + tokenSeparator + replaySecret, nil
 	case 1:
 		return 0, "", ErrRefreshNotFound
@@ -302,8 +341,8 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 
 // runConsume 执行脚本，并在 NOSCRIPT 时重载后重试一次。
 func (s *RefreshStore) runConsume(
-	ctx context.Context, family, secret, nextSecret string,
-) (code, uid int64, replaySecret string, err error) {
+	ctx context.Context, family, secret, nextSecret, sealedNext string,
+) (code, uid int64, replayMaterial string, err error) {
 	keys := []string{
 		s.recordKey(family, secret),
 		s.familyKey(family),
@@ -312,7 +351,8 @@ func (s *RefreshStore) runConsume(
 	now := s.now()
 	args := []any{
 		strconv.FormatInt(int64(s.ttl.Seconds()), 10),
-		nextSecret,
+		// 存入的是**密文**：Redis 里不出现可直接使用的秘密段。
+		sealedNext,
 		strconv.FormatInt(now.Add(s.replayWindow).UnixMilli(), 10),
 		strconv.FormatInt(now.UnixMilli(), 10),
 	}
@@ -427,6 +467,59 @@ func randomSegment() (string, error) {
 //
 // 不加盐、不用慢哈希是刻意的：秘密段本身是 256 位的随机值，没有可猜测的结构，
 // 彩虹表与暴力破解都不适用；而刷新路径要求这次计算足够快。
+// newReplayCipher 由配置密钥构造 AES-256-GCM。
+//
+// 密钥经 SHA-256 归一到 32 字节：配置里的密钥是人可读的字符串，长度不定，
+// 而 AES-256 要求恰好 32 字节。归一化不降低强度（下限由配置校验保证）。
+func newReplayCipher(secret string) (cipher.AEAD, error) {
+	trimmed := strings.TrimSpace(secret)
+	if len(trimmed) < minReplaySecretLen {
+		return nil, fmt.Errorf("tokenstore: refresh replay secret must be at least %d bytes "+
+			"(it encrypts the rotated token kept for the replay window)", minReplaySecretLen)
+	}
+	key := sha256.Sum256([]byte(trimmed))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, fmt.Errorf("tokenstore: build replay cipher: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("tokenstore: build replay aead: %w", err)
+	}
+	return aead, nil
+}
+
+// sealReplay 加密重放材料；nonce 随机生成并前置。
+func (s *RefreshStore) sealReplay(plaintext string) (string, error) {
+	nonce := make([]byte, s.replay.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("tokenstore: generate replay nonce: %w", err)
+	}
+	sealed := s.replay.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+// openReplay 解密重放材料。
+//
+// 失败返回错误由调用方翻译成**普通拒绝**（重新登录），不触发族撤销：
+// 解密失败无法区分"密钥轮换了"与"记录被篡改"，而误判重用会连带
+// 撤销合法用户的整族。
+func (s *RefreshStore) openReplay(encoded string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("tokenstore: decode replay material: %w", err)
+	}
+	nonceSize := s.replay.NonceSize()
+	if len(raw) < nonceSize {
+		return "", errors.New("tokenstore: replay material is truncated")
+	}
+	plaintext, err := s.replay.Open(nil, raw[:nonceSize], raw[nonceSize:], nil)
+	if err != nil {
+		return "", fmt.Errorf("tokenstore: open replay material: %w", err)
+	}
+	return string(plaintext), nil
+}
+
 func hashSegment(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])

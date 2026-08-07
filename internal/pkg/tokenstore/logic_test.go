@@ -82,7 +82,7 @@ func (c *fakeRefreshClient) Set(_ context.Context, key string, _ any, _ time.Dur
 
 func newFakeStore(t *testing.T, client *fakeRefreshClient) *RefreshStore {
 	t.Helper()
-	store, err := NewRefreshStore(context.Background(), client, "test", time.Hour)
+	store, err := NewRefreshStore(context.Background(), client, "test", time.Hour, strings.Repeat("r", 32))
 	if err != nil {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestNewRefreshStoreValidatesItsInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := NewRefreshStore(context.Background(), tt.client, "p", tt.ttl); err == nil {
+			if _, err := NewRefreshStore(context.Background(), tt.client, "p", tt.ttl, strings.Repeat("r", 32)); err == nil {
 				t.Fatal("assembly succeeded with an invalid input")
 			}
 		})
@@ -122,7 +122,7 @@ func TestScriptIsPreloadedAtAssembly(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRefreshClient{scriptLoadErr: errors.New("redis unreachable")}
-	if _, err := NewRefreshStore(context.Background(), client, "p", time.Hour); err == nil {
+	if _, err := NewRefreshStore(context.Background(), client, "p", time.Hour, strings.Repeat("r", 32)); err == nil {
 		t.Fatal("assembly succeeded while the script could not be loaded")
 	}
 	if client.scriptLoads == 0 {

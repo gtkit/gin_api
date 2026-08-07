@@ -47,7 +47,10 @@ func TestAuthModeMustBeChosenExplicitly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateAuthConfig(AuthConfig{Mode: tt.mode}, RedisConfig{Addr: "127.0.0.1:6379"}, testAccessTTL)
+			err := validateAuthConfig(AuthConfig{
+				Mode:                tt.mode,
+				RefreshReplaySecret: testReplaySecret,
+			}, RedisConfig{Addr: "127.0.0.1:6379"}, testAccessTTL)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("mode %q passed validation, want it rejected", tt.mode)
@@ -136,8 +139,9 @@ func TestRefreshMustOutliveAccess(t *testing.T) {
 			t.Parallel()
 
 			err := validateAuthConfig(AuthConfig{
-				Mode:       tt.mode,
-				RefreshTTL: tt.refresh,
+				Mode:                tt.mode,
+				RefreshTTL:          tt.refresh,
+				RefreshReplaySecret: testReplaySecret,
 			}, RedisConfig{Addr: "127.0.0.1:6379"}, tt.access)
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Fatalf("access=%s refresh=%s: error = %v, wantErr = %v",
@@ -214,6 +218,46 @@ func TestBcryptCostFloor(t *testing.T) {
 			}
 			if got := cfg.EffectiveBcryptCost(); got != tt.wantEffective {
 				t.Errorf("effective cost = %d, want %d", got, tt.wantEffective)
+			}
+		})
+	}
+}
+
+// testReplaySecret 是测试用的重放材料密钥（长度满足下限）。
+var testReplaySecret = strings.Repeat("r", 32)
+
+// TestLocalAuthRequiresReplaySecret 钉住重放材料密钥的必需性
+// （local-authentication spec）：缺它就只能把轮换出的令牌明文写进 Redis，
+// 一次存储快照泄漏即可拼出当前有效的刷新令牌。
+func TestLocalAuthRequiresReplaySecret(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    AuthMode
+		secret  string
+		wantErr bool
+	}{
+		{name: "local 缺密钥被拒绝", mode: AuthModeLocal, secret: "", wantErr: true},
+		{name: "local 密钥过短被拒绝", mode: AuthModeLocal, secret: "too-short", wantErr: true},
+		{name: "local 合规密钥通过", mode: AuthModeLocal, secret: testReplaySecret},
+		// 外部身份模式不签发刷新令牌，不需要这个密钥。
+		{name: "external 无需密钥", mode: AuthModeExternal, secret: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateAuthConfig(AuthConfig{
+				Mode:                tt.mode,
+				RefreshReplaySecret: tt.secret,
+			}, RedisConfig{Addr: "127.0.0.1:6379"}, testAccessTTL)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "refresh_replay_secret") {
+				t.Errorf("error %q does not name the offending key", err)
 			}
 		})
 	}
