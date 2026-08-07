@@ -44,16 +44,24 @@ func TestNewRejectsUnboundedOrEternal(t *testing.T) {
 	}
 }
 
-// TestConcurrentLoadsAreCollapsed 钉住 singleflight：同一个键的并发加载只执行一次。
+// TestConcurrentLoadsAreCollapsed 钉住 singleflight：并发加载被合并。
 //
 // 这是缓存击穿的正解：热点键过期的瞬间，所有并发请求同时回源，
 // 一次 miss 会被放大成 N 次数据库查询——而那一刻正是流量最高的时候。
+//
+// **断言是"远少于并发数"而不是"恰好 1 次"**：singleflight 只合并**同时在飞**
+// 的调用，而"某个 goroutine 已经进入 singleflight"这件事从外部无法确定性地
+// 观测到。原先只等一个 load 开始就放行，于是在负载高的机器上（发布门禁并行
+// 跑几十个包时）第一个 load 可能在其余 goroutine 到达之前就完成、key 已释放，
+// 后到的调用于是又跑一次——测试随机变红，而被测代码完全正确。
+// 一个会随机失败的测试比没有测试更坏：它会训练人忽略红色。
 func TestConcurrentLoadsAreCollapsed(t *testing.T) {
 	t.Parallel()
 
 	c := newTestCache(t, 16, time.Minute)
 
 	var loads atomic.Int32
+	var entered atomic.Int32
 	release := make(chan struct{})
 	const concurrency = 32
 
@@ -64,24 +72,35 @@ func TestConcurrentLoadsAreCollapsed(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			entered.Add(1)
 			results[i], errs[i] = c.GetOrLoad(context.Background(), "hot", func(context.Context) (string, error) {
 				loads.Add(1)
-				// 挂住，确保全部调用方都进入等待再放行。
+				// 挂住，让后到的调用都落进同一次飞行。
 				<-release
 				return "value", nil
 			})
 		}()
 	}
 
-	// 等到有加载在执行再放行，否则可能第一个就跑完了。
+	// 等全部调用方都已进入 GetOrLoad，再放行第一个 load。
+	// 这不能保证它们都已抵达 singleflight 内部（那一点无法从外部观测），
+	// 但把窗口从"一个 load 开始"扩到"32 个都已进入函数"，合并必然发生在
+	// 绝大多数调用上——因此下面断言的是"合并确实发生"，不是精确次数。
+	for entered.Load() < concurrency {
+		time.Sleep(time.Millisecond)
+	}
 	for loads.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}
 	close(release)
 	wg.Wait()
 
-	if got := loads.Load(); got != 1 {
-		t.Fatalf("load 被执行 %d 次，want 1：并发加载没有被合并", got)
+	got := loads.Load()
+	if got == 0 {
+		t.Fatal("load 一次都没执行")
+	}
+	if got >= concurrency {
+		t.Fatalf("load 被执行 %d 次（并发 %d）：并发加载完全没有被合并", got, concurrency)
 	}
 	for i := range concurrency {
 		if errs[i] != nil {
@@ -90,6 +109,69 @@ func TestConcurrentLoadsAreCollapsed(t *testing.T) {
 		if results[i] != "value" {
 			t.Fatalf("调用 %d 得到 %q，want %q", i, results[i], "value")
 		}
+	}
+}
+
+// TestInFlightLoadAbsorbsLaterCaller 钉住"在飞期间到达的调用一定被合并"。
+//
+// 这一条是确定性的，补上上面那个测试放弃的精度：只要第一个 load 还没返回，
+// singleflight 的 key 就仍被占用，此后到达的同键调用**必然**共享它，
+// 不可能启动第二次加载。
+func TestInFlightLoadAbsorbsLaterCaller(t *testing.T) {
+	t.Parallel()
+
+	c := newTestCache(t, 16, time.Minute)
+
+	var loads atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	load := func(context.Context) (string, error) {
+		if loads.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return "value", nil
+	}
+
+	first := make(chan string, 1)
+	go func() {
+		value, err := c.GetOrLoad(context.Background(), "hot", load)
+		if err != nil {
+			t.Errorf("first GetOrLoad: %v", err)
+		}
+		first <- value
+	}()
+
+	// 第一次加载确定已在飞：load 已被调用且尚未返回（release 未关闭）。
+	<-started
+
+	second := make(chan string, 1)
+	go func() {
+		value, err := c.GetOrLoad(context.Background(), "hot", load)
+		if err != nil {
+			t.Errorf("second GetOrLoad: %v", err)
+		}
+		second <- value
+	}()
+
+	// 让第二个调用有机会抵达 singleflight，再放行。key 在此期间一直被占用，
+	// 因此它要么已被合并、要么尚未到达——两种情况都不会产生第二次加载。
+	//
+	// 取 200ms 而不是几十毫秒：发布门禁并行跑几十个测试包，机器负载高时一个
+	// 已启动的 goroutine 被调度到需要的时间会拉长。窗口给足，这条断言才不会
+	// 变成又一个随机失败——而随机失败的测试会训练人忽略红色。
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+
+	if got := <-first; got != "value" {
+		t.Fatalf("first = %q, want %q", got, "value")
+	}
+	if got := <-second; got != "value" {
+		t.Fatalf("second = %q, want %q", got, "value")
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("load 被执行 %d 次，want 1：在飞期间到达的调用没有被合并", got)
 	}
 }
 
