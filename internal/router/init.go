@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
@@ -44,6 +45,13 @@ type Options struct {
 	RateLimitKeys *ratelimit.KeyBuilder
 	// Metrics 记录请求量、时延与状态码；为 nil 时不记录。
 	Metrics *metrics.Recorder
+	// TracingEnabled 决定是否挂 OTel 的 HTTP 埋点中间件。
+	//
+	// 与 Metrics 的判空不同，这里必须显式开关：otelgin 即便在 no-op provider 下
+	// 也会为每个请求建 span 对象并做属性拼装，那是白花的开销。
+	TracingEnabled bool
+	// ServiceName 是 trace 里的服务名，仅在 TracingEnabled 时使用。
+	ServiceName string
 	// RegisterModules 在 /api/v1 组上注册各业务模块的路由。
 	//
 	// 由 bootstrap 提供：模块的依赖（service、认证中间件）是进程级装配的
@@ -195,6 +203,13 @@ func useGlobalMiddleware(engine *gin.Engine, opt Options) error {
 
 	engine.Use(middleware.GinRecovery(true))
 	engine.Use(middleware.RequestID(generator))
+	if opt.TracingEnabled {
+		// 尽量靠前：span 要覆盖后续全部处理，挂在日志/指标之后会让它们
+		// 的耗时落在 span 之外，而那部分正是排查时最先被怀疑的。
+		// 放在 Recovery/RequestID 之后是有意的——panic 必须先被兜住，
+		// 且 span 属性里要能带上已生成的请求 ID。
+		engine.Use(otelgin.Middleware(opt.ServiceName))
+	}
 	engine.Use(middleware.GinLogger(middleware.AccessLogOptions{
 		LogRequestBody:  opt.LogRequestBody,
 		LogResponseBody: opt.LogResponseBody,

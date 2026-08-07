@@ -12,6 +12,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/platform/telemetry"
 
 	logger "github.com/gtkit/logger/v2"
 )
@@ -55,6 +56,8 @@ type App struct {
 	outbound *httpclient.Factory
 	// cache 持有响应缓存的本地 store；关停时释放它的后台 goroutine。
 	cache *httpcache.Stager
+	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
+	telemetry *telemetry.Provider
 	// metricsCleanup 注销指标的异步回调。
 	//
 	// 不注销的话，回调会继续持有已停掉的 worker 与已关闭的连接池——
@@ -99,6 +102,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		rateLimits:     providers.rateLimits,
 		outbound:       providers.outbound,
 		cache:          providers.cache,
+		telemetry:      providers.telemetry,
 		metricsCleanup: providers.metricsCleanup,
 		drainWait:      drainWaitFrom(runtime.Config()),
 		status:         providers.status,
@@ -140,7 +144,9 @@ func (a *App) Run(ctx context.Context) (err error) {
 	// 排空告警队列，之后入队的消息被静默丢弃。资源关闭阶段自身的错误因此
 	// 物理上无法再经告警通道送出，它们只进返回值与日志。
 	defer func() {
-		err = errors.Join(err, a.closeExtensions())
+		// 用 WithoutCancel：这条 defer 也覆盖 ctx 已被取消的提前返回，
+		// 而遥测 flush 与限流回收此时仍要执行（各自带独立预算）。
+		err = errors.Join(err, a.closeExtensions(context.WithoutCancel(ctx)))
 		alertExitError(err)
 		err = errors.Join(err, a.closeResources())
 	}()
@@ -274,11 +280,14 @@ func (a *App) Run(ctx context.Context) (err error) {
 //
 // 幂等（CAS 保证恰好一次）：gracefulShutdown 在正常序列的正确位置调用它，
 // Run 的 defer 兜住全部提前返回——两处共用，不存在只被一条路径覆盖的释放。
-func (a *App) closeExtensions() error {
+func (a *App) closeExtensions(ctx context.Context) error {
 	if !a.extClosed.CompareAndSwap(false, true) {
 		return nil
 	}
 	errs := []error{closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close()}
+	// 遥测放在最后 flush：前面几步可能还会产出指标（关闭计数、错误），
+	// 先 flush 就把它们留在了本地。它自带独立预算，不会拖住关停。
+	errs = append(errs, a.telemetry.Shutdown(ctx))
 	for _, unregister := range a.metricsCleanup {
 		errs = append(errs, unregister())
 	}
@@ -390,7 +399,7 @@ func (a *App) gracefulShutdown(
 	//    与指标注销回调。排在 HTTP 与 worker 之后：在飞请求可能仍要做限流
 	//    判定，worker 停掉之前采集到的指标仍是有效状态。
 	//    与 Run 的 defer 共用同一个幂等入口，启动失败的提前返回同样被兜住。
-	collect(a.closeExtensions())
+	collect(a.closeExtensions(base))
 
 	// 8. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
 	collect(a.shutdownPprof(base, pprofEndpoint))

@@ -23,6 +23,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/platform/telemetry"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -43,6 +44,8 @@ type providerSet struct {
 	outbound *httpclient.Factory
 	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
 	cache *httpcache.Stager
+	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
+	telemetry *telemetry.Provider
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
 	// metricsCleanup 注销指标的异步回调，由 App 在关停时调用。
@@ -61,6 +64,8 @@ type infra struct {
 	outbound *httpclient.Factory
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache *httpcache.Stager
+	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
+	telemetry *telemetry.Provider
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -123,8 +128,24 @@ func newProviders(
 		return nil, err
 	}
 
-	// 2. 指标仪表。必须先于中间件与路由：两者都要在装配期拿到它。
-	//    默认 no-op，接导出只需在进程启动前 otel.SetMeterProvider(...)。
+	// 2a. 遥测导出侧。**必须先于指标仪表**：Recorder 在构造时就从全局
+	//     MeterProvider 取 Meter，之后再换 provider，那些仪表仍挂在旧的上——
+	//     表现为"接了 OTLP 但一条指标也没出去"，而且没有任何报错。
+	//     关闭时它不改动任何全局 provider，进程与没有这一步完全等价。
+	telemetryProvider, err := telemetry.New(
+		ctx, inf.cfg.Telemetry, inf.cfg.App.Name)
+	if err != nil {
+		return nil, fmt.Errorf("build telemetry: %w", err)
+	}
+	inf.telemetry = telemetryProvider
+	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(ctx) })
+	if telemetryProvider.Enabled() {
+		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
+			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
+	}
+
+	// 2b. 指标仪表。必须先于中间件与路由：两者都要在装配期拿到它。
+	//     未接导出时全局是 no-op，每次记录都是空操作。
 	recorder, err := metrics.New(otel.GetMeterProvider().Meter(metricsScope))
 	if err != nil {
 		return nil, fmt.Errorf("build metrics: %w", err)
@@ -229,6 +250,7 @@ func newProviders(
 		rateLimits:     rateLimits,
 		outbound:       outbound,
 		cache:          responseCache,
+		telemetry:      telemetryProvider,
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil
@@ -412,6 +434,8 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 
 	opt := router.Options{
 		AllowedOrigins:  cfg.CORS.AllowedOrigins,
+		TracingEnabled:  cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
+		ServiceName:     cfg.App.Name,
 		LogRequestBody:  cfg.Log.AccessRequestBody,
 		LogResponseBody: cfg.Log.AccessResponseBody,
 		MaxBodyBytes:    cfg.App.MaxBodyBytes,
