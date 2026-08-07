@@ -14,6 +14,8 @@ import (
 
 	logger "github.com/gtkit/logger/v2"
 
+	"golang.org/x/sync/semaphore"
+
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/credential"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
@@ -54,11 +56,14 @@ func (r credentialRepo) Create(ctx context.Context, phone, passwordHash, nicknam
 //
 // gate 是进程级并发上限（local-authentication spec）：bcrypt 是刻意昂贵的
 // 计算，限流约束的是单来源/单账号速率，约束不了聚合并发——一批分布式
-// 登录请求就能把全部 CPU 吃光。超限的调用在此排队；排队没有取消入口
-// （端口无 ctx），请求整体时长仍由路由超时中间件封顶。
+// 登录请求就能把全部 CPU 吃光。
+//
+// 用带权信号量而不是缓冲 channel：**排队必须可取消**。channel 收发没有
+// 取消入口，请求被客户端放弃或被路由超时中止后仍占着名额，排队者会随
+// 攻击持续累积（每个都挂着一个 goroutine 与一份请求上下文）。
 type passwordHasher struct {
 	hasher *credential.Hasher
-	gate   chan struct{}
+	gate   *semaphore.Weighted
 }
 
 // newPasswordHasher 构造带并发闸门的适配器；maxConcurrent <= 0 时取 1。
@@ -66,17 +71,23 @@ func newPasswordHasher(hasher *credential.Hasher, maxConcurrent int) passwordHas
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
-	return passwordHasher{hasher: hasher, gate: make(chan struct{}, maxConcurrent)}
+	return passwordHasher{hasher: hasher, gate: semaphore.NewWeighted(int64(maxConcurrent))}
 }
 
-// acquire 占用一个校验名额，返回释放函数。
-func (h passwordHasher) acquire() func() {
-	h.gate <- struct{}{}
-	return func() { <-h.gate }
+// acquire 占用一个校验名额；ctx 取消即离队。
+func (h passwordHasher) acquire(ctx context.Context) (release func(), err error) {
+	if err := h.gate.Acquire(ctx, 1); err != nil {
+		// 取消/超时在这里如实返回：调用方据此知道"没算，不是算错了"。
+		return nil, fmt.Errorf("auth: wait for a password hashing slot: %w", err)
+	}
+	return func() { h.gate.Release(1) }, nil
 }
 
-func (h passwordHasher) Hash(password string) (string, error) {
-	release := h.acquire()
+func (h passwordHasher) Hash(ctx context.Context, password string) (string, error) {
+	release, err := h.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
 	defer release()
 
 	hashed, err := h.hasher.Hash(password)
@@ -86,23 +97,29 @@ func (h passwordHasher) Hash(password string) (string, error) {
 	return hashed, err
 }
 
-func (h passwordHasher) Compare(hashed, password string) error {
-	release := h.acquire()
+func (h passwordHasher) Compare(ctx context.Context, hashed, password string) error {
+	release, err := h.acquire(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	err := h.hasher.Compare(hashed, password)
+	err = h.hasher.Compare(hashed, password)
 	if errors.Is(err, credential.ErrMismatch) {
 		return authapp.ErrInvalidCredentials
 	}
 	return err
 }
 
-func (h passwordHasher) CompareWithDummy(password string) error {
+func (h passwordHasher) CompareWithDummy(ctx context.Context, password string) error {
 	// 时间掩护同样是 bcrypt 计算，同受闸门约束。
-	release := h.acquire()
+	release, err := h.acquire(ctx)
+	if err != nil {
+		return err
+	}
 	defer release()
 
-	err := h.hasher.CompareWithDummy(password)
+	err = h.hasher.CompareWithDummy(password)
 	if !errors.Is(err, credential.ErrMismatch) {
 		// 契约要求它恒为不匹配。真冒出别的错误说明底层实现变了——
 		// 如实返回而不是掩盖：这条路径上的静默会让防账号枚举的时间掩护

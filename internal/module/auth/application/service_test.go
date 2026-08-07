@@ -64,14 +64,14 @@ type fakeHasher struct {
 	compareErr error
 }
 
-func (h *fakeHasher) Hash(password string) (string, error) {
+func (h *fakeHasher) Hash(_ context.Context, password string) (string, error) {
 	if h.hashErr != nil {
 		return "", h.hashErr
 	}
 	return "hashed:" + password, nil
 }
 
-func (h *fakeHasher) Compare(hashed, password string) error {
+func (h *fakeHasher) Compare(_ context.Context, hashed, password string) error {
 	if h.compareErr != nil {
 		return h.compareErr
 	}
@@ -81,7 +81,7 @@ func (h *fakeHasher) Compare(hashed, password string) error {
 	return nil
 }
 
-func (h *fakeHasher) CompareWithDummy(string) error {
+func (h *fakeHasher) CompareWithDummy(context.Context, string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.dummyCalls++

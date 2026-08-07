@@ -131,7 +131,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 		return TokenPair{}, err
 	}
 
-	hashed, err := s.hasher.Hash(password)
+	hashed, err := s.hasher.Hash(ctx, password)
 	if err != nil {
 		if errors.Is(err, ErrPasswordTooLong) {
 			return TokenPair{}, ErrPasswordTooLong
@@ -168,13 +168,13 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		// bcrypt 比对要几百毫秒，直接返回只需几微秒。这个差值稳定、可测量，
 		// 攻击者据此可以枚举出哪些手机号已注册——一个不需要任何口令
 		// 就能拿到的用户名单。
-		_ = s.hasher.CompareWithDummy(password)
+		_ = s.hasher.CompareWithDummy(ctx, password)
 		s.fail("login rejected: no account for the supplied phone")
 		s.event(ctx, EventLoginFailed)
 		return TokenPair{}, ErrInvalidCredentials
 	}
 
-	if err := s.hasher.Compare(cred.PasswordHash, password); err != nil {
+	if err := s.hasher.Compare(ctx, cred.PasswordHash, password); err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
 			s.fail("login rejected: wrong password for uid=%d", cred.UserID)
 			s.event(ctx, EventLoginFailed)

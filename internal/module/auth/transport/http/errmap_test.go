@@ -42,16 +42,18 @@ func (s stubCreds) Create(context.Context, string, string, string) (int64, error
 // stubHasher 把 "ok" 当作唯一正确的口令。
 type stubHasher struct{}
 
-func (stubHasher) Hash(string) (string, error) { return "hashed", nil }
+func (stubHasher) Hash(context.Context, string) (string, error) { return "hashed", nil }
 
-func (stubHasher) Compare(_, password string) error {
+func (stubHasher) Compare(_ context.Context, _, password string) error {
 	if password == "ok" {
 		return nil
 	}
 	return application.ErrInvalidCredentials
 }
 
-func (stubHasher) CompareWithDummy(string) error { return application.ErrInvalidCredentials }
+func (stubHasher) CompareWithDummy(context.Context, string) error {
+	return application.ErrInvalidCredentials
+}
 
 type stubIssuer struct{}
 

@@ -32,16 +32,16 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 	// cost 用 bcrypt 的最低值：本测试关心翻译，不关心哈希强度。
 	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
 
-	hashed, err := h.Hash("correct")
+	hashed, err := h.Hash(context.Background(), "correct")
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
 	}
 
-	if err := h.Compare(hashed, "correct"); err != nil {
+	if err := h.Compare(context.Background(), hashed, "correct"); err != nil {
 		t.Fatalf("Compare with the right password: %v", err)
 	}
 
-	err = h.Compare(hashed, "wrong")
+	err = h.Compare(context.Background(), hashed, "wrong")
 	if !errors.Is(err, authapp.ErrInvalidCredentials) {
 		t.Fatalf("Compare with a wrong password = %v, want authapp.ErrInvalidCredentials", err)
 	}
@@ -61,7 +61,7 @@ func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 		long[i] = 'a'
 	}
 
-	_, err := h.Hash(string(long))
+	_, err := h.Hash(context.Background(), string(long))
 	if !errors.Is(err, authapp.ErrPasswordTooLong) {
 		t.Fatalf("Hash of an over-long password = %v, want authapp.ErrPasswordTooLong", err)
 	}
@@ -72,7 +72,7 @@ func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 	t.Parallel()
 
 	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
-	if err := h.CompareWithDummy("anything"); !errors.Is(err, authapp.ErrInvalidCredentials) {
+	if err := h.CompareWithDummy(context.Background(), "anything"); !errors.Is(err, authapp.ErrInvalidCredentials) {
 		t.Fatalf("CompareWithDummy = %v, want authapp.ErrInvalidCredentials "+
 			"(it must be indistinguishable from a wrong password)", err)
 	}
@@ -293,33 +293,64 @@ func mustCredentialHasher(t *testing.T, cost int) *credential.Hasher {
 	return h
 }
 
-// TestPasswordHasherGateBoundsConcurrency 钉住口令校验的并发上限
-// （local-authentication spec）：超限的校验排队等待空位，聚合并发不越界——
-// 限流约束单来源/单账号速率，约束不了一批分布式登录的聚合并发。
-func TestPasswordHasherGateBoundsConcurrency(t *testing.T) {
+// TestPasswordHasherGateIsCancellable 钉住口令校验闸门的两条契约
+// （local-authentication spec）：并发受上限约束，且**排队可取消**。
+//
+// 可取消是关键：缓冲 channel 收发没有取消入口，请求被客户端放弃或被路由
+// 超时中止后仍占着名额，排队者会随攻击持续累积（每个都挂着一个 goroutine
+// 与一份请求上下文）。
+func TestPasswordHasherGateIsCancellable(t *testing.T) {
 	t.Parallel()
 
 	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
 
-	release := h.acquire()
-	second := make(chan struct{})
-	go func() {
-		r := h.acquire()
-		r()
-		close(second)
-	}()
-
-	select {
-	case <-second:
-		t.Fatal("the second acquisition proceeded while the gate was full")
-	case <-time.After(50 * time.Millisecond):
+	// 占满唯一名额。
+	release, err := h.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
 	}
 
+	// 闸门已满：取消的请求必须立刻离队并如实报错。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := h.acquire(ctx); err == nil {
+		t.Fatal("a canceled request acquired a slot: queueing must be cancellable")
+	} else if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire error = %v, want it to carry context.Canceled", err)
+	}
+
+	// 名额未被取消者占用：释放后仍可正常获取。
 	release()
-	select {
-	case <-second:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the queued acquisition never got the freed slot")
+	release2, err := h.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire after release: %v (a canceled waiter must not hold the slot)", err)
+	}
+	release2()
+}
+
+// TestPasswordHasherCancellationPropagatesThroughPorts 钉住 ctx 一路到端口：
+// 闸门已满时，被取消的请求在 Compare/Hash/CompareWithDummy 三个入口都立即返回。
+func TestPasswordHasherCancellationPropagatesThroughPorts(t *testing.T) {
+	t.Parallel()
+
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+	release, err := h.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := h.Hash(ctx, "pw"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Hash = %v, want context.Canceled", err)
+	}
+	if err := h.Compare(ctx, "hashed", "pw"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Compare = %v, want context.Canceled", err)
+	}
+	if err := h.CompareWithDummy(ctx, "pw"); !errors.Is(err, context.Canceled) {
+		t.Errorf("CompareWithDummy = %v, want context.Canceled", err)
 	}
 }
 

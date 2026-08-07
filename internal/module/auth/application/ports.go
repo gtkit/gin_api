@@ -29,11 +29,15 @@ type Credential struct {
 }
 
 // PasswordHasher 生成与校验密码哈希。
+//
+// 三个方法都收 ctx（local-authentication spec）：口令哈希是刻意昂贵的计算，
+// 适配层用并发上限保护 CPU，而排队必须可取消——请求已经被客户端放弃或被
+// 路由超时中止时还占着名额，会让排队者随攻击持续累积。
 type PasswordHasher interface {
-	Hash(password string) (string, error)
-	Compare(hashed, password string) error
+	Hash(ctx context.Context, password string) (string, error)
+	Compare(ctx context.Context, hashed, password string) error
 	// CompareWithDummy 在账号不存在时消耗等量的时间，恒返回不匹配错误。
-	CompareWithDummy(password string) error
+	CompareWithDummy(ctx context.Context, password string) error
 }
 
 // AccessIssuer 签发访问令牌。

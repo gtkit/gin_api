@@ -14,6 +14,12 @@ import (
 // 对暴力枚举的抵抗力要求一致。
 const minSecretLen = 32
 
+// maxBcryptConcurrency 是口令校验并发上限的上限。
+//
+// 取 CPU 核数的 8 倍：bcrypt 是刻意的 CPU 密集计算，远超核数的并发只是让
+// 每个请求都变慢，同时把"有上限"这件事变成形式。
+var maxBcryptConcurrency = runtime.GOMAXPROCS(0) * 8
+
 // AuthMode 是认证模式。
 //
 // 用字符串而不是 bool：`local: false` 无法表达"外部身份"与"还没想好"的区别，
@@ -151,6 +157,20 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 		}
 	}
 
+	// 并发上限非法时报错而不是静默取默认：一个手误的负值会让"我配了上限"
+	// 与"上限按 CPU 核数"变成同一个观察结果，而两者的容量规划完全不同。
+	if c.BcryptMaxConcurrent < 0 {
+		errs = append(errs, fmt.Errorf(
+			"auth.bcrypt_max_concurrent must not be negative, got %d (leave it empty to take "+
+				"the CPU count)", c.BcryptMaxConcurrent))
+	}
+	if c.BcryptMaxConcurrent > maxBcryptConcurrency {
+		errs = append(errs, fmt.Errorf(
+			"auth.bcrypt_max_concurrent %d exceeds %d: bcrypt is deliberately CPU-bound, and a "+
+				"limit far above the core count defeats the point of having one",
+			c.BcryptMaxConcurrent, maxBcryptConcurrency))
+	}
+
 	if c.RefreshTTL < 0 {
 		errs = append(errs, errors.New("auth.refresh_ttl must not be negative"))
 	}
@@ -166,14 +186,6 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 			c.EffectiveRefreshTTL(), accessTTL))
 	}
 
-	// 本地认证要求可用的撤销存储，缺失时 fail-closed。
-	//
-	// 没有它，登出与刷新令牌撤销都无法实现。而"能登录但登不出"比完全没有认证
-	// 更危险：系统看起来是完整的，使用者不会再去补这一块，直到需要回收某个
-	// 泄漏的令牌时才发现无从下手。
-	//
-	// 错误里给两条出路而不是一条：使用者的真实意图可能是任何一种，
-	// 只说"请配置 redis"会让打算接外部 IdP 的人以为自己必须装一个 Redis。
 	// 重放材料的加密密钥：本地认证模式必填且有长度下限。
 	//
 	// 缺它就只能把轮换出的令牌明文写进 Redis——那与"存储里只有哈希"的契约
@@ -188,6 +200,14 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 		}
 	}
 
+	// 本地认证要求可用的撤销存储，缺失时 fail-closed。
+	//
+	// 没有它，登出与刷新令牌撤销都无法实现。而"能登录但登不出"比完全没有认证
+	// 更危险：系统看起来是完整的，使用者不会再去补这一块，直到需要回收某个
+	// 泄漏的令牌时才发现无从下手。
+	//
+	// 错误里给两条出路而不是一条：使用者的真实意图可能是任何一种，
+	// 只说"请配置 redis"会让打算接外部 IdP 的人以为自己必须装一个 Redis。
 	if c.Mode == AuthModeLocal && redis.Addr == "" {
 		errs = append(errs, errors.New(
 			"auth.mode is \"local\" but redis.addr is empty: local auth needs a revocation "+
