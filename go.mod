@@ -17,6 +17,7 @@ require (
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/gofrs/flock v0.13.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/json v1.0.0
@@ -34,6 +35,7 @@ require (
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d
+	github.com/sony/gobreaker/v2 v2.4.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/metric v1.45.0
 	go.opentelemetry.io/otel/sdk/metric v1.45.0

@@ -95,13 +95,72 @@ func TestNewRateLimitStagerAssemblyResolution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stager, unresolved := NewRateLimitStager(tt.options(t))
+			stager, _, unresolved := NewRateLimitStager(tt.options(t))
 
 			for i, call := range tt.calls {
 				pre, post := stager(call.route, call.ids...)
 				if len(pre) != tt.wantPre[i] || len(post) != tt.wantPost[i] {
 					t.Fatalf("call %d (%s %v): got %d pre / %d post, want %d / %d",
 						i, call.route, call.ids, len(pre), len(post), tt.wantPre[i], tt.wantPost[i])
+				}
+			}
+
+			err := unresolved()
+			if (len(tt.wantErrContains) > 0) != (err != nil) {
+				t.Fatalf("unresolved() = %v, wantErr = %v", err, len(tt.wantErrContains) > 0)
+			}
+			for _, want := range tt.wantErrContains {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("unresolved() = %q, missing %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestPreIdentityRateLimiterRejectsIdentityScope 钉住 pre-identity 路由的装配契约
+// （rate-limiting spec：用户作用域的策略不得用于不保证身份的路由）：
+// 身份作用域的引用即使解析成功也不得静默丢弃——那会让凭据端点看着配了限流、
+// 实际裸奔；必须记入装配错误并让启动失败。
+func TestPreIdentityRateLimiterRejectsIdentityScope(t *testing.T) {
+	tests := []struct {
+		name            string
+		options         func(t *testing.T) Options
+		calls           []stagerCall
+		wantMws         []int // 每次调用返回的中间件数量
+		wantErrContains []string
+	}{
+		{
+			name:    "来源作用域正常挂载且判定通过",
+			options: newRateLimitTestOptions,
+			calls:   []stagerCall{{route: "/auth", ids: []string{"default.ip"}}},
+			wantMws: []int{1},
+		},
+		{
+			name:            "身份作用域引用导致装配失败并指明原因",
+			options:         newRateLimitTestOptions,
+			calls:           []stagerCall{{route: "/auth", ids: []string{"default.ip", "default.user"}}},
+			wantMws:         []int{1},
+			wantErrContains: []string{"/auth", "default.user", "identity-scoped"},
+		},
+		{
+			name:            "未注册标识同样进入装配错误",
+			options:         newRateLimitTestOptions,
+			calls:           []stagerCall{{route: "/auth", ids: []string{"no.such.policy"}}},
+			wantMws:         []int{0},
+			wantErrContains: []string{"/auth", "no.such.policy", "not registered"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, preIdentity, unresolved := NewRateLimitStager(tt.options(t))
+
+			for i, call := range tt.calls {
+				mws := preIdentity(call.route, call.ids...)
+				if len(mws) != tt.wantMws[i] {
+					t.Fatalf("call %d (%s %v): got %d middlewares, want %d",
+						i, call.route, call.ids, len(mws), tt.wantMws[i])
 				}
 			}
 

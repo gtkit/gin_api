@@ -1,16 +1,18 @@
 package bootstrap
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-// TestNewWorkerManagerOwningCleanupsRollsBackOnFailure 钉住装配副作用的所有权
+// TestRollbackWorkerMetricCleanups 钉住装配副作用的所有权
 // （bootstrap-module-assembly spec）：buildWorkers 窗口内注册的指标回调在
-// WorkerManager 构造失败时由本函数自身逆序撤销并截断——调用方按"成功后
-// 登记回滚"工作，这个窗口只有构造者自己兜得住。
-func TestNewWorkerManagerOwningCleanupsRollsBackOnFailure(t *testing.T) {
-	t.Run("构造失败时逆序撤销本段新增回调并截断", func(t *testing.T) {
+// 任意错误出口上由本函数逆序撤销并截断——调用方按"成功后登记回滚"工作，
+// 这个窗口只有构造者自己兜得住。
+func TestRollbackWorkerMetricCleanups(t *testing.T) {
+	t.Run("逆序撤销本段新增回调并截断", func(t *testing.T) {
 		var calls []string
 		inf := &infra{metricsCleanup: []func() error{
 			func() error { calls = append(calls, "pre-existing"); return nil },
@@ -21,10 +23,8 @@ func TestNewWorkerManagerOwningCleanupsRollsBackOnFailure(t *testing.T) {
 			func() error { calls = append(calls, "added-2"); return nil },
 		)
 
-		// 零值声明非法（类别/生命周期未声明），构造必然失败。
-		manager, err := newWorkerManagerOwningCleanups(inf, cleanupsBefore, &funcWorker{name: "invalid"})
-		if err == nil || manager != nil {
-			t.Fatalf("got (%v, %v), want construction failure", manager, err)
+		if err := rollbackWorkerMetricCleanups(inf, cleanupsBefore); err != nil {
+			t.Fatalf("rollback returned %v, want nil", err)
 		}
 
 		if want := []string{"added-2", "added-1"}; !reflect.DeepEqual(calls, want) {
@@ -35,27 +35,18 @@ func TestNewWorkerManagerOwningCleanupsRollsBackOnFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("构造成功时不触碰任何回调", func(t *testing.T) {
-		var calls []string
-		inf := &infra{metricsCleanup: []func() error{
-			func() error { calls = append(calls, "pre-existing"); return nil },
-		}}
-		cleanupsBefore := len(inf.metricsCleanup)
+	t.Run("撤销失败聚合上报且仍截断", func(t *testing.T) {
+		inf := &infra{}
 		inf.metricsCleanup = append(inf.metricsCleanup,
-			func() error { calls = append(calls, "added-1"); return nil },
+			func() error { return errors.New("unregister boom") },
 		)
 
-		manager, err := newWorkerManagerOwningCleanups(inf, cleanupsBefore, &funcWorker{
-			name: "valid", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: false,
-		})
-		if err != nil || manager == nil {
-			t.Fatalf("got (%v, %v), want success", manager, err)
+		err := rollbackWorkerMetricCleanups(inf, 0)
+		if err == nil || !strings.Contains(err.Error(), "unregister boom") {
+			t.Fatalf("rollback error = %v, want it to carry the unregister failure", err)
 		}
-		if len(calls) != 0 {
-			t.Fatalf("cleanups were invoked on success: %v", calls)
-		}
-		if len(inf.metricsCleanup) != cleanupsBefore+1 {
-			t.Fatalf("metricsCleanup len = %d, want %d (成功路径保留新增回调)", len(inf.metricsCleanup), cleanupsBefore+1)
+		if len(inf.metricsCleanup) != 0 {
+			t.Fatalf("metricsCleanup len = %d, want 0", len(inf.metricsCleanup))
 		}
 	})
 }

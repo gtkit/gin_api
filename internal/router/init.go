@@ -236,7 +236,14 @@ func allowedMethodsOf(engine *gin.Engine) middleware.AllowedMethodsFunc {
 // 模块只声明"这条路由受哪些策略约束"，不决定每条挂在认证之前还是之后。
 type RateLimitStager func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
 
-// NewRateLimitStager 构造分组函数与未解析引用的判定函数。
+// PreIdentityRateLimiter 供**不保证身份**的路由（凭据/令牌端点、公开接口）
+// 取限流中间件。身份作用域的策略在这类路由上无处可挂——请求发生在拿到身份
+// 之前，静默丢弃会让一条看起来配了限流的路由实际裸奔，因此该引用按装配
+// 错误收集并让启动失败（rate-limiting spec：用户作用域的策略不得用于
+// 不保证身份的路由）。
+type PreIdentityRateLimiter func(route string, policyIDs ...string) []gin.HandlerFunc
+
+// NewRateLimitStager 构造两种取用函数与装配错误的判定函数。
 //
 // 阶段由 Policy.Scope 推导，模块不参与：不需要身份的作用域（IP/全局）必须排在
 // 认证**之前**——它挡的是"还没证明自己是谁"的流量，排在认证之后等于让每个被限流
@@ -248,25 +255,37 @@ type RateLimitStager func(route string, policyIDs ...string) (preAuth, postAuth 
 // 为准没有好答案。更糟的是这段推导若在每个模块各存一份，每份都能独立写错，
 // 而代码生成器会把其中一份复制给所有新模块——一次写错因此会扩散。
 //
-// 解析不到的引用（含注册表缺失时的一切引用）**不跳过**：记入收集器，由装配方
-// 在全部路由注册完成后调用判定函数统一失败。引用一个未登记的策略若不拦住，
-// 那条路由会完全没有限流，而描述符里明明写着一个标识，配置漏项或拼写错误
-// 就此静默失效。没有任何路由引用策略时，空注册表可正常启动——下游删掉
-// 限流引用的项目不被强制配置策略。
+// 非法引用**不跳过**：解析不到的标识（含注册表缺失时的一切引用）、以及
+// pre-identity 路由上的身份作用域策略，都记入收集器，由装配方在全部路由
+// 注册完成后调用判定函数统一失败。任一情形若只告警，那条路由会完全没有
+// 限流，而描述符里明明写着一个标识，配置漏项、拼写错误或作用域误配就此
+// 静默失效。没有任何路由引用策略时，空注册表可正常启动——下游删掉限流
+// 引用的项目不被强制配置策略。
 //
-// 收集器不加锁：stager 只在 New 的单线程装配窗口内被各模块调用。
-func NewRateLimitStager(opt Options) (RateLimitStager, func() error) {
-	var unresolved []string // "route -> id"，保持引用出现顺序
+// 收集器不加锁：取用函数只在 New 的单线程装配窗口内被各模块调用。
+func NewRateLimitStager(opt Options) (RateLimitStager, PreIdentityRateLimiter, func() error) {
+	var invalid []string // "route -> id [reason]"，保持引用出现顺序
+
+	record := func(route, id, reason string) {
+		invalid = append(invalid, route+" -> "+id+" ["+reason+"]")
+	}
+	resolve := func(route, id string) (ratelimit.Limiter, bool) {
+		if opt.RateLimits == nil || opt.RateLimitKeys == nil {
+			record(route, id, "not registered")
+			return nil, false
+		}
+		limiter, ok := opt.RateLimits.Lookup(id)
+		if !ok {
+			record(route, id, "not registered")
+			return nil, false
+		}
+		return limiter, true
+	}
 
 	stager := func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc) {
 		for _, id := range policyIDs {
-			if opt.RateLimits == nil || opt.RateLimitKeys == nil {
-				unresolved = append(unresolved, route+" -> "+id)
-				continue
-			}
-			limiter, ok := opt.RateLimits.Lookup(id)
+			limiter, ok := resolve(route, id)
 			if !ok {
-				unresolved = append(unresolved, route+" -> "+id)
 				continue
 			}
 			mw := middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics)
@@ -279,21 +298,38 @@ func NewRateLimitStager(opt Options) (RateLimitStager, func() error) {
 		return preAuth, postAuth
 	}
 
+	preIdentity := func(route string, policyIDs ...string) []gin.HandlerFunc {
+		var mws []gin.HandlerFunc
+		for _, id := range policyIDs {
+			limiter, ok := resolve(route, id)
+			if !ok {
+				continue
+			}
+			if limiter.Policy().Scope == ratelimit.ScopeUser {
+				record(route, id, "identity-scoped policy on a route that cannot guarantee an identity")
+				continue
+			}
+			mws = append(mws, middleware.RateLimit(limiter, opt.RateLimitKeys, opt.Metrics))
+		}
+		return mws
+	}
+
 	verify := func() error {
-		if len(unresolved) == 0 {
+		if len(invalid) == 0 {
 			return nil
 		}
 		var registered []string
 		if opt.RateLimits != nil {
 			registered = opt.RateLimits.IDs()
 		}
-		return fmt.Errorf("unresolvable rate limit policy references (route -> policy): %s; "+
+		return fmt.Errorf("invalid rate limit policy references (route -> policy [reason]): %s; "+
 			"registered policies: %v; define the missing policies under ratelimit.policies "+
-			"(see config/env.yml.example) or remove the references from the route registrations",
-			strings.Join(unresolved, ", "), registered)
+			"(see config/env.yml.example), fix the policy scope, or remove the references "+
+			"from the route registrations",
+			strings.Join(invalid, ", "), registered)
 	}
 
-	return stager, verify
+	return stager, preIdentity, verify
 }
 
 // joinMethods 把方法列表拼成 Allow 头的值，顺序稳定。

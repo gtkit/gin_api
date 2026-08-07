@@ -35,20 +35,16 @@ func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 	}
 }
 
-// TestServerWriteTimeoutIsAlwaysZero 钉住"服务器层不施加隐式写上限"。
-//
-// 这条断言与 routespec 的注册期门禁（任何路由缺 TimeoutPolicy 即启动失败）
-// 是一对：单独看它像是关掉了保护，实际是把保护从"所有路由共享一个值"
-// 挪到了"每条路由各自声明"。两者必须同进同退——门禁一旦被放宽，
-// 这里的 0 就变成纯粹的保护缺失。
-//
-// 旧实现按 LLM 配置抬高全局值：流式因此能跑，代价是所有非流式路由
-// 同时失去写超时保护，而这个副作用在配置里完全看不出来。
-func TestServerWriteTimeoutIsAlwaysZero(t *testing.T) {
+// TestServerWriteTimeoutHasConservativeDefault 钉住服务级写超时兜底
+// （http-lifecycle spec）：写超时保护不依赖任何注册期门禁的存在——
+// 曾经的 0 依赖 routespec"每条路由必须声明 TimeoutPolicy"的门禁，
+// 门禁随路由 DSL 移除后，0 就是纯粹的保护缺失：新增路由忘挂超时中间件
+// 就永久没有写超时。流式路由经每响应 SetWriteDeadline 覆盖兜底值。
+func TestServerWriteTimeoutHasConservativeDefault(t *testing.T) {
 	cfg := &config.Config{
 		App: config.AppConfig{Host: "127.0.0.1", Port: "8008"},
 	}
-	if got := newHTTPConfig(cfg).WriteTimeout; got != 0 {
-		t.Fatalf("WriteTimeout = %s, want 0: the server must not impose an implicit ceiling", got)
+	if got := newHTTPConfig(cfg).WriteTimeout; got != serverWriteTimeout || got <= 0 {
+		t.Fatalf("WriteTimeout = %s, want the conservative fallback %s", got, serverWriteTimeout)
 	}
 }

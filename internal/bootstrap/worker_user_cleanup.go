@@ -40,7 +40,6 @@ const cleanupLeaseTTL = 2 * time.Minute
 // client 为 nil 时返回错误：**没有 Redis 就没有单实例保证**，而静默退回到
 // "每个副本各跑各的"会让人以为有保护——那比明确报错更危险。
 func newDeactivationCleanupWorker(
-	ctx context.Context,
 	cleanup *userworker.DeactivationCleanup,
 	client singleton.LeaseClient,
 	prefix string,
@@ -57,7 +56,7 @@ func newDeactivationCleanupWorker(
 				"outside this service", cleanupTaskID)
 	}
 
-	lease, err := singleton.NewLease(ctx, client, prefix, cleanupTaskID, cleanupLeaseTTL)
+	lease, err := singleton.NewLease(client, prefix, cleanupTaskID, cleanupLeaseTTL)
 	if err != nil {
 		return nil, fmt.Errorf("build lease for worker %q: %w", cleanupTaskID, err)
 	}

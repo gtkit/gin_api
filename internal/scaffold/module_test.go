@@ -72,7 +72,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 
 	// runtime 层读配置并翻译成 application 选项；application 不 import platform/config。
 	runtimePath := filepath.Join(root, "internal", "runtime", "module", "admin", "module.go")
-	assertFileContains(t, runtimePath, "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) *adminapp.Service")
+	assertFileContains(t, runtimePath, "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) (*adminapp.Service, error)")
 	assertFileContains(t, runtimePath, "adminapp.WithPageSize(cfg.EffectivePageSize())")
 	// 判据针对 **import 行**而不是文本出现：注释里必须能自由解释
 	// "application 为什么不 import platform/config"，否则这条规则会因为
@@ -85,7 +85,9 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, providersPath, "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\"")
 	assertFileContains(t, providersPath, "adminhttp \"github.com/gtkit/gin-api/internal/module/admin/transport/http\"")
 	assertFileContains(t, providersPath, "adminService *adminapp.Service")
-	assertFileContains(t, providersPath, "svc.adminService = adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
+	assertFileContains(t, providersPath, "adminSvc, err := adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
+	assertFileContains(t, providersPath, `return services{}, fmt.Errorf("assemble admin service: %w", err)`)
+	assertFileContains(t, providersPath, "svc.adminService = adminSvc")
 	assertFileContains(t, providersPath, "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService")
 
 	// 生成的代码必须符合架构边界（与 scripts/check-architecture.sh 一致）。
@@ -97,7 +99,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileNotContains(t, handlerPath, "gorm.io/gorm")
 	modelPath := filepath.Join(root, "internal", "models", "admin.go")
 	assertFileNotContains(t, modelPath, "*gorm.DB")
-	assertFileContains(t, filepath.Join(root, "internal", "runtime", "module", "admin", "module.go"), "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) *adminapp.Service")
+	assertFileContains(t, filepath.Join(root, "internal", "runtime", "module", "admin", "module.go"), "func NewService(db *gorm.DB, cfg config.AdminModuleConfig) (*adminapp.Service, error)")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository.go"), "dbtx.DB(ctx, r.db)")
 }
 

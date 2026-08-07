@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"os/signal"
+	"syscall"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
 
@@ -14,8 +17,16 @@ type rootOptions struct{}
 
 // Execute 是 CLI 的顶层入口：构造 root 命令树并执行，供 main 调用。
 // 返回的 error 交由 main 决定退出码；命令自身已 SilenceErrors，不重复打印。
+//
+// 信号上下文在**这里**建立而不是等到 App.Run：装配阶段（数据库、Redis、
+// 限流探针）同样做 I/O，若信号监听迟到，SIGTERM 会按默认处置直接终止进程，
+// 装配回滚一行都不会执行。App.Run 自己的 signal.Notify 与本层并存——
+// 首个信号取消本 ctx（经 Run 内的翻译协程汇聚为关停请求）、同时被 Run 的
+// 监听读到，两条路径幂等汇聚；第二个信号的强制语义仍由 Run 的监听独立判定。
 func Execute() error {
-	return NewRootCmd().Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return NewRootCmd().ExecuteContext(ctx)
 }
 
 // NewRootCmd 构造 root cobra 命令，并把所有经 RegisterRootCommand 注册的子命令

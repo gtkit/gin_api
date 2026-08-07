@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,36 @@ func (p ProcessPhase) String() string {
 
 // ErrForcedShutdown 表示进程走了强制关停路径（第二个信号）。
 var ErrForcedShutdown = errors.New("shutdown forced by a second signal")
+
+// IsPureCancellation 报告非 nil 错误树的**全部**分支是否都归结为 context.Canceled。
+//
+// 用于把"因关停请求而中止"归一化为信号语义（零退出码）：errors.Is 对聚合
+// 错误的任一成员命中即真，用它整体判定会把"取消 + 回滚失败"当成正常退出，
+// 回滚失败随退出码 0 静默消失。deadline 类错误不算取消——预算耗尽是失败，
+// 不是关停请求。
+func IsPureCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		members := joined.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !IsPureCancellation(member) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if inner := wrapped.Unwrap(); inner != nil {
+			return IsPureCancellation(inner)
+		}
+	}
+	return errors.Is(err, context.Canceled)
+}
 
 // ErrLifecycleReused 表示生命周期入口（App.Run / WorkerManager.Start）被第二次调用。
 //

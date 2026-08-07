@@ -76,6 +76,17 @@ type HealthState struct {
 	nextProbeAt time.Time
 	// probeInFlight 是探测的单一所有权标记。
 	probeInFlight bool
+	// pending 是待通知的相位迁移事件（受 mu 保护，入队序 = 迁移发生序）。
+	pending []phaseTransition
+
+	// notifyMu 串行化对 Observer 的通知：排空 pending 时按队列顺序逐条发出。
+	// 独立于 mu——回调在两把锁都不持有 mu 的状态下执行。
+	notifyMu sync.Mutex
+}
+
+// phaseTransition 是一次相位迁移的快照。
+type phaseTransition struct {
+	from, to HealthPhase
 }
 
 // NewHealthState 创建一个初始为 Healthy 的状态机。
@@ -86,6 +97,18 @@ func NewHealthState(policy HealthPolicy, observer Observer) *HealthState {
 		observer = nopObserver{}
 	}
 	return &HealthState{policy: policy, now: time.Now, phase: PhaseHealthy, observer: observer}
+}
+
+// forceDegraded 把状态机直接置为 Degraded（构造期降级启动用）。
+//
+// nextProbeAt 取当前时刻而不是冷却之后：后端可能在进程启动的下一秒
+// 就恢复了，首个请求即可探测；探测失败后由既有冷却节奏接管。
+func (s *HealthState) forceDegraded() {
+	s.mu.Lock()
+	s.transitionLocked(PhaseDegraded)
+	s.nextProbeAt = s.now()
+	s.mu.Unlock()
+	s.notifyPending()
 }
 
 // Phase 返回当前相位。
@@ -109,8 +132,13 @@ func (s *HealthState) AllowRequest(_ context.Context) bool {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	allowed := s.allowRequestLocked()
+	s.mu.Unlock()
+	s.notifyPending()
+	return allowed
+}
 
+func (s *HealthState) allowRequestLocked() bool {
 	switch s.phase {
 	case PhaseHealthy:
 		return true
@@ -145,18 +173,17 @@ func (s *HealthState) Observe(err error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	wasProbing := s.phase == PhaseProbing
 	if wasProbing {
 		s.probeInFlight = false
 	}
-
 	if err != nil {
 		s.onFailureLocked(wasProbing)
-		return
+	} else {
+		s.onSuccessLocked(wasProbing)
 	}
-	s.onSuccessLocked(wasProbing)
+	s.mu.Unlock()
+	s.notifyPending()
 }
 
 func (s *HealthState) onSuccessLocked(wasProbing bool) {
@@ -215,8 +242,34 @@ func (s *HealthState) transitionLocked(next HealthPhase) {
 	previous := s.phase
 	s.phase = next
 	// 相位迁移是低基数事件，可以每次都发；它是故障排查的第一手线索。
-	//
-	// 持锁同步发出：观察者若在这里阻塞，会挡住所有限流判定。这是刻意的取舍——
-	// 异步发送要引入队列，而队列满时要么丢事件要么仍然阻塞，复杂度换不来改善。
-	s.observer.BackendPhaseChanged(previous, next)
+	// 只入队不回调：通知在主锁之外发出（见 notifyPending），Observer 阻塞
+	// 不得挡住限流判定，Observer 重入公开方法不得死锁。
+	s.pending = append(s.pending, phaseTransition{from: previous, to: next})
+}
+
+// notifyPending 在主锁之外按序排空待发事件并同步通知 Observer。
+//
+// notifyMu 串行化通知：队列 FIFO 保证通知顺序与迁移发生顺序一致；
+// 排空期间新入队的事件由当前持有者继续排空。TryLock 而不是 Lock——
+// Observer 回调内重入公开方法会再次走到这里，阻塞式加锁就是自死锁；
+// 拿不到锁说明持有者会把队列（含刚入队的事件）发完。持有者恰在收尾
+// 窗口时事件延迟到下一次状态活动才发出：通知语义是尽快而非即时。
+func (s *HealthState) notifyPending() {
+	if !s.notifyMu.TryLock() {
+		return
+	}
+	defer s.notifyMu.Unlock()
+
+	for {
+		s.mu.Lock()
+		if len(s.pending) == 0 {
+			s.mu.Unlock()
+			return
+		}
+		event := s.pending[0]
+		s.pending = s.pending[1:]
+		s.mu.Unlock()
+
+		s.observer.BackendPhaseChanged(event.from, event.to)
+	}
 }

@@ -27,7 +27,6 @@ func TestRegisterRejectsUnsafeEntries(t *testing.T) {
 		name    string
 		id      string
 		auth    Authorizer
-		freeze  bool
 		wantErr string
 	}{
 		{name: "a valid id is accepted", id: "entitlement.vip", auth: okAuthorizer()},
@@ -51,10 +50,6 @@ func TestRegisterRejectsUnsafeEntries(t *testing.T) {
 			name: "an id with spaces is rejected", id: "role admin", auth: okAuthorizer(),
 			wantErr: "must match",
 		},
-		{
-			name: "registering after freeze is rejected", id: "role.late", auth: okAuthorizer(),
-			freeze: true, wantErr: "frozen",
-		},
 	}
 
 	for _, tt := range tests {
@@ -62,9 +57,6 @@ func TestRegisterRejectsUnsafeEntries(t *testing.T) {
 			t.Parallel()
 
 			registry := NewAuthorizerRegistry()
-			if tt.freeze {
-				registry.Freeze()
-			}
 
 			err := registry.Register(tt.id, tt.auth)
 			if tt.wantErr == "" {
@@ -114,54 +106,6 @@ func TestRegisterRejectsDuplicates(t *testing.T) {
 	}
 }
 
-// TestFrozenRegistryStaysReadable 验证冻结只挡写入，不影响读取。
-//
-// 冻结若把读也挡住，运行期每次授权判定都会失败——那是把"防止运行期注册"
-// 做成了"运行期不能授权"。
-func TestFrozenRegistryStaysReadable(t *testing.T) {
-	t.Parallel()
-
-	registry := NewAuthorizerRegistry()
-	if err := registry.Register("entitlement.vip", okAuthorizer()); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	registry.Freeze()
-
-	if _, ok := registry.Lookup("entitlement.vip"); !ok {
-		t.Fatal("a frozen registry must still resolve what was registered before freezing")
-	}
-	if err := registry.ResolveAll([]string{"entitlement.vip"}); err != nil {
-		t.Fatalf("ResolveAll on a frozen registry: %v", err)
-	}
-}
-
-// TestResolveAllReportsEveryMissingID 钉住启动期一次性校验。
-//
-// 只报第一个缺失的话，装配错误要修一次跑一次才能全部发现；而这些校验
-// 发生在启动路径上，每轮往返都是一次完整的启动。
-func TestResolveAllReportsEveryMissingID(t *testing.T) {
-	t.Parallel()
-
-	registry := NewAuthorizerRegistry()
-	if err := registry.Register("role.admin", okAuthorizer()); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	err := registry.ResolveAll([]string{"role.admin", "missing.one", "missing.two"})
-	if err == nil {
-		t.Fatal("ResolveAll accepted unregistered ids")
-	}
-	for _, want := range []string{"missing.one", "missing.two"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err, want)
-		}
-	}
-	// 错误信息里要列出已登记的 ID，否则排查时无从判断是拼错还是漏注册。
-	if !strings.Contains(err.Error(), "role.admin") {
-		t.Fatalf("error %q does not list the registered ids", err)
-	}
-}
-
 // TestIDsAreSorted 钉住 ID 顺序稳定。
 //
 // 错误信息里的顺序若随 map 遍历抖动，同一个装配错误每次报出的文本都不同，
@@ -198,9 +142,6 @@ func TestNilRegistryIsSafeToRead(t *testing.T) {
 	}
 	if ids := registry.IDs(); ids != nil {
 		t.Fatalf("IDs() = %v, want nil", ids)
-	}
-	if err := registry.ResolveAll([]string{"anything"}); err == nil {
-		t.Fatal("a nil registry must not accept authorizer references")
 	}
 }
 

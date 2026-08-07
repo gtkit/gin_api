@@ -42,12 +42,52 @@ func advanceStore(mr *miniredis.Miniredis, d time.Duration) {
 	mr.SetTime(luaBase.Add(d))
 }
 
+// TestLuaMaxKeysAdmission 钉住 redis 存储的键基数硬上限（rate-limiting spec）：
+// 达上限拒绝新建、活跃桶不受影响、闲置过期释放名额——与 local 后端同契约。
+// 缺这段准入，攻击者轮换主体可让 Redis 键无界增长。
+func TestLuaMaxKeysAdmission(t *testing.T) {
+	backend, mr := newLuaBackend(t)
+	policy := luaTestPolicy()
+	policy.MaxKeys = 2
+
+	// 占满名额：两个主体各建一个桶。
+	for _, key := range []string{"subject-a", "subject-b"} {
+		d, err := backend.check(context.Background(), policy, key)
+		if err != nil || d.Outcome != OutcomeAllowed {
+			t.Fatalf("check(%s) = (%v, %v), want allowed", key, d.Outcome, err)
+		}
+	}
+
+	// 第三个主体：达上限拒绝新建，且判定语义是键基数而不是限速。
+	d, err := backend.check(context.Background(), policy, "subject-c")
+	if err != nil {
+		t.Fatalf("check(subject-c): %v", err)
+	}
+	if d.Outcome != OutcomeKeyBudgetExhausted {
+		t.Fatalf("Outcome = %s, want key_budget_exhausted", d.Outcome)
+	}
+
+	// 活跃桶不受影响：已登记主体继续按令牌桶判定（Burst=2，第二次仍放行）。
+	d, err = backend.check(context.Background(), policy, "subject-a")
+	if err != nil || d.Outcome != OutcomeAllowed {
+		t.Fatalf("existing subject = (%v, %v), want allowed (活跃桶不得被新键挤掉)", d.Outcome, err)
+	}
+
+	// 闲置过期释放名额：推过桶 TTL 后新主体可入场。
+	advanceStore(mr, bucketTTL(policy)+time.Second)
+	d, err = backend.check(context.Background(), policy, "subject-d")
+	if err != nil || d.Outcome != OutcomeAllowed {
+		t.Fatalf("after idle expiry = (%v, %v), want allowed (名额应随闲置成员释放)", d.Outcome, err)
+	}
+}
+
 func luaTestPolicy() Policy {
 	return Policy{
-		ID:    "lua.test",
-		Scope: ScopeIP,
-		Rate:  10,
-		Burst: 2,
+		ID:      "lua.test",
+		Scope:   ScopeIP,
+		Rate:    10,
+		Burst:   2,
+		MaxKeys: 100, // 生产上 Validate 强制 > 0；准入段对 0 会拒绝一切新键
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	logger "github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/middleware"
+	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	userapp "github.com/gtkit/gin-api/internal/module/user/application"
 	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
@@ -89,8 +90,9 @@ type middlewares struct {
 	authorizeByID func(string) gin.HandlerFunc
 }
 
-// newProviders 按「基础设施 → service → 中间件 → 路由引擎 → worker」五个阶段编排装配，
-// 每个阶段收敛到一个单一职责的私有函数，本函数只做顺序拼接与错误透传。
+// newProviders 按「基础设施 → 指标 → service → 中间件 → 限流 → worker/协调器 →
+// 路由引擎」七个阶段编排装配，每个阶段收敛到一个单一职责的私有函数，
+// 本函数只做顺序拼接与错误透传（与函数体内的编号注释一一对应）。
 func newProviders(ctx context.Context, runtime *Runtime) (_ *providerSet, err error) {
 	// 失败回滚：装配已产生的进程级副作用（指标回调、限流注册表）逆序撤销。
 	// 只关 Runtime 是不够的——指标回调挂在进程级 MeterProvider 上持有已关闭
@@ -124,13 +126,23 @@ func newProviders(ctx context.Context, runtime *Runtime) (_ *providerSet, err er
 		rb.push("db pool metrics", unregister)
 	}
 
-	// 3. Service：各模块的业务逻辑。
+	// 3. 限流。必须先于 service 与路由装配：认证模块的账号维度限流要从
+	//    注册表取策略，路由 registrar 要按 ID 解析策略——策略非法属装配错误，
+	//    应在两者之前就失败。
+	rateLimits, err := buildRateLimits(ctx, inf.cfg, inf.resources)
+	if err != nil {
+		return nil, fmt.Errorf("build rate limits: %w", err)
+	}
+	inf.rateLimits = rateLimits
+	rb.push("rate limits", func() error { return closeRateLimits(rateLimits) })
+
+	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. 中间件：鉴权、日志、限流、缓存等。
+	// 5. 中间件：鉴权、日志、限流、缓存等。
 	// 豁免理由：contextcheck 跟进的是 Authenticate **返回的闭包**——那段代码在
 	// 每个请求上执行、用请求自身的 ctx，与装配期无关。装配这一步本身不做 I/O。
 	//
@@ -140,15 +152,6 @@ func newProviders(ctx context.Context, runtime *Runtime) (_ *providerSet, err er
 	if err != nil {
 		return nil, err
 	}
-
-	// 5. 限流。必须先于路由装配：registrar 要按 ID 解析策略，
-	//    而策略非法属装配错误，应在任何路由注册之前就失败。
-	rateLimits, err := buildRateLimits(ctx, inf.cfg, inf.resources)
-	if err != nil {
-		return nil, fmt.Errorf("build rate limits: %w", err)
-	}
-	inf.rateLimits = rateLimits
-	rb.push("rate limits", func() error { return closeRateLimits(rateLimits) })
 
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
@@ -227,15 +230,30 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 	// 外部身份模式下整个模块不存在——那种部署里令牌由外部签发，
 	// 这些端点没有任何意义，留着只是多一组无人看管的凭据入口。
 	if inf.cfg.Auth.LocalEnabled() {
+		// 账号维度限流按策略存在性注入（预置能力门控：策略缺席即维度关闭）。
+		// 缺席时打一条 Warn——本地认证启用而该维度关闭是有意决策才对，
+		// 不该是漏配而无人知晓。
+		var accounts authapp.AccountLimiter
+		if inf.rateLimits.registry != nil {
+			if limiter, ok := inf.rateLimits.registry.Lookup(authruntime.AccountRateLimitPolicyID); ok {
+				accounts = authruntime.NewAccountLimiter(limiter, inf.rateLimits.keys, inf.recorder)
+			}
+		}
+		if accounts == nil {
+			logger.Warnf("account-dimension credential rate limiting is off: define ratelimit "+
+				"policy %q to guard against distributed password spraying", authruntime.AccountRateLimitPolicyID)
+		}
+
 		assembly, authErr := authruntime.New(ctx, authruntime.Deps{
 			DB:     inf.mysqlDB,
 			Redis:  inf.resources.Rdb(0),
 			Issuer: runtime.TokenIssuer(),
 			Config: inf.cfg.Auth,
 			// 访问令牌寿命的唯一来源是 JWT 配置：签发它的是 JWT 装配。
-			AccessTTL: inf.cfg.JWT.EffectiveTokenTTL(),
+			AccessTTL: inf.cfg.JWT.EffectiveTokenTTL(inf.cfg.Auth.Mode),
 			KeyPrefix: inf.cfg.App.Name,
 			Metrics:   inf.recorder,
+			Accounts:  accounts,
 		})
 		if authErr != nil {
 			return services{}, fmt.Errorf("build auth module: %w", authErr)
@@ -364,9 +382,10 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		ProcessStatus: status,
 	}
 	// 限流引用的解析结果在全部路由注册完成后统一判定（fail-closed）：
-	// 引用了未注册策略的路由若被静默跳过，配置漏项或拼写错误会让保护
+	// 引用了未注册策略、或在不保证身份的路由上引用身份作用域策略，
+	// 若被静默跳过/丢弃，配置漏项、拼写错误或作用域误配都会让保护
 	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
-	rateLimitStager, unresolvedRateLimits := router.NewRateLimitStager(opt)
+	rateLimitStager, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -380,9 +399,11 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		// 而不是注册一组永远报错的路由。
 		if svc.auth.Service != nil {
 			authhttp.Register(v1, authhttp.Deps{
-				Service:   svc.auth.Service,
-				Auth:      mw.auth,
-				RateLimit: rateLimitStager,
+				Service: svc.auth.Service,
+				Auth:    mw.auth,
+				// 认证端点不保证身份（请求发生在拿到身份之前），
+				// 注入 pre-identity 取用函数：身份作用域引用即装配错误。
+				RateLimit: preIdentityRateLimits,
 			})
 		}
 		// scaffold:modules
@@ -413,10 +434,19 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, error) {
-	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任，
-	// 见 newWorkerManagerOwningCleanups。
+// 形参 ctx 与 services 保持在位（当前未消费）：使追加「需要装配期 ctx 或
+// application service 的 worker」是纯追加式改动，无需改签名。
+func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, err error) {
+	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任：
+	// defer 覆盖**全部**错误出口，而不只是末尾的构造校验——scaffold:module-workers
+	// 扩展段加入多个"构造 + 注册指标"块之后，任何中途 return 都不得让此前
+	// 已注册的回调逃逸回滚（bootstrap-module-assembly spec）。
 	cleanupsBefore := len(inf.metricsCleanup)
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, rollbackWorkerMetricCleanups(inf, cleanupsBefore))
+		}
+	}()
 	var workers []Worker
 
 	// 注销档案清理：未配置保留期时不注册。
@@ -428,8 +458,7 @@ func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, 
 	if err != nil {
 		return nil, err
 	}
-	w, err := newDeactivationCleanupWorker(
-		ctx, cleanup, inf.resources.Rdb(0), inf.cfg.App.Name, inf.recorder)
+	w, err := newDeactivationCleanupWorker(cleanup, inf.resources.Rdb(0), inf.cfg.App.Name, inf.recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -456,31 +485,26 @@ func buildWorkers(ctx context.Context, inf *infra, _ services) (*WorkerManager, 
 
 	// scaffold:module-workers
 
-	return newWorkerManagerOwningCleanups(inf, cleanupsBefore, workers...)
+	return NewWorkerManager(DefaultWorkerBudget(), workers...)
 }
 
-// newWorkerManagerOwningCleanups 构造 WorkerManager，并对本装配段新增的
-// 指标注销回调承担失败回滚责任。
+// rollbackWorkerMetricCleanups 逆序执行 cleanupsBefore 之后追加的指标注销
+// 回调并截断切片，让失败后的 infra 状态与进入 buildWorkers 之前一致。
 //
 // 副作用产生点与错误返回点之间的窗口只有构造者自己看得见：调用方按
-// "成功后登记回滚"的模式工作，凡在 buildWorkers 内部注册、又在构造校验
-// 上失败的回调必然逃逸调用方的回滚栈——那是机制上的系统性缺口，
+// "成功后登记回滚"的模式工作，凡在 buildWorkers 内部注册、又在同函数内
+// 失败的回调必然逃逸调用方的回滚栈——那是机制上的系统性缺口，
 // 不是某一处的偶然遗漏（bootstrap-module-assembly spec）。
-func newWorkerManagerOwningCleanups(inf *infra, cleanupsBefore int, workers ...Worker) (*WorkerManager, error) {
-	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
-	if err == nil {
-		return manager, nil
-	}
-
-	// 逆序撤销本段新增的注销回调并截断切片，让失败后的 infra 状态与进入前一致。
+func rollbackWorkerMetricCleanups(inf *infra, cleanupsBefore int) error {
 	added := inf.metricsCleanup[cleanupsBefore:]
+	var errs []error
 	for i := len(added) - 1; i >= 0; i-- {
 		if cerr := added[i](); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("unregister worker metrics during rollback: %w", cerr))
+			errs = append(errs, fmt.Errorf("unregister worker metrics during rollback: %w", cerr))
 		}
 	}
 	inf.metricsCleanup = inf.metricsCleanup[:cleanupsBefore]
-	return nil, err
+	return errors.Join(errs...)
 }
 
 // newTokenParser 按配置装配注入 Auth 中间件的 token parser：

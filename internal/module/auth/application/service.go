@@ -15,6 +15,12 @@ var (
 	// 就能枚举已注册账号的接口。调用方也必须对两者返回完全相同的响应。
 	ErrInvalidCredentials = errors.New("auth: invalid credentials")
 
+	// ErrAccountRateLimited 表示该账号的凭据尝试频率超限（账号维度限流）。
+	//
+	// 与来源维度互补：换 IP 即可绕过来源限流，账号维度让"同一账号的
+	// 尝试频率"独立受限，挡住分布式口令喷洒。
+	ErrAccountRateLimited = errors.New("auth: too many attempts for this account")
+
 	// ErrAccountInactive 表示账号存在但当前不可登录。
 	ErrAccountInactive = errors.New("auth: account is not active")
 
@@ -53,6 +59,8 @@ type Service struct {
 	auditor   Auditor
 	events    EventRecorder
 	accessTTL time.Duration
+	// accounts 是账号维度限流；nil 表示该维度未配置（策略缺席即关闭）。
+	accounts AccountLimiter
 
 	// now 可注入，测试用它确定性地驱动撤销记录的存活时间。
 	now func() time.Time
@@ -69,6 +77,8 @@ type Options struct {
 	// Events 记录指标；为 nil 时不记录。
 	Events    EventRecorder
 	AccessTTL time.Duration
+	// Accounts 是账号维度限流；nil 表示该维度未配置（策略缺席即关闭）。
+	Accounts AccountLimiter
 }
 
 // NewService 构造认证服务。
@@ -99,6 +109,7 @@ func NewService(opts Options) (*Service, error) {
 		auditor:   opts.Auditor,
 		events:    opts.Events,
 		accessTTL: opts.AccessTTL,
+		accounts:  opts.Accounts,
 		now:       time.Now,
 	}, nil
 }
@@ -116,6 +127,10 @@ type TokenPair struct {
 // 注册后立即登录而不是要求再调一次登录：客户端刚提交过正确的口令，
 // 再要一次除了多一个往返没有任何安全收益。
 func (s *Service) Register(ctx context.Context, phone, password, nickname string) (TokenPair, error) {
+	if err := s.gateAccount(ctx, phone, "register"); err != nil {
+		return TokenPair{}, err
+	}
+
 	hashed, err := s.hasher.Hash(password)
 	if err != nil {
 		if errors.Is(err, ErrPasswordTooLong) {
@@ -138,6 +153,10 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 
 // Login 校验凭据并签发令牌。
 func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair, error) {
+	if err := s.gateAccount(ctx, phone, "login"); err != nil {
+		return TokenPair{}, err
+	}
+
 	cred, found, err := s.creds.FindByPhone(ctx, phone)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: look up credentials: %w", err)
@@ -214,8 +233,26 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 // tokenID 是访问令牌的 jti，expiresAt 是它的过期时刻。refreshToken 可以为空
 // ——客户端只带了访问令牌时仍然应当能登出，只是那条刷新链要等自然过期。
 func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Time, refreshToken string) error {
-	// 先撤访问令牌：它是当前正在被使用的那个，撤销它才立即产生效果。
+	// **先撤刷新族、后撤访问令牌**（local-authentication spec）。
+	//
+	// 部分成功的残留必须取危害更小的一侧：反过来先撤访问令牌，族撤销一旦
+	// 失败，同一个 access token 已进不了登出端点（401），重试被自己撤掉的
+	// 令牌挡死，而长寿命的刷新链还活着、仍可换发新令牌；本序的残留只是
+	// 一个短 TTL 的访问令牌——无法续期，且重试登出自然可行。
+	if refreshToken != "" {
+		if err := s.refresh.RevokeFamilyOfToken(ctx, refreshToken); err != nil {
+			return fmt.Errorf("auth: revoke refresh family: %w (the access token is still "+
+				"valid, retry logout)", err)
+		}
+	}
+
 	if err := s.revoked.Revoke(ctx, tokenID, expiresAt); err != nil {
+		// 刷新链已死，残留的访问令牌在自身 TTL 内到期且无法续期——
+		// 仍然报错：登出没有完整生效，不能表现成成功。
+		if refreshToken != "" {
+			return fmt.Errorf("auth: the refresh family was revoked but the access token is "+
+				"still live until it expires: %w", err)
+		}
 		return fmt.Errorf("auth: revoke access token: %w", err)
 	}
 
@@ -224,14 +261,7 @@ func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Tim
 		return nil
 	}
 
-	if err := s.refresh.RevokeFamilyOfToken(ctx, refreshToken); err != nil {
-		// 访问令牌已经撤销了，但刷新链还活着——那意味着对方仍可以换取新的
-		// 访问令牌，登出实际上没有完成。必须报错而不是当作成功。
-		return fmt.Errorf("auth: the access token was revoked but the refresh chain is "+
-			"still live, so logout did not take effect: %w", err)
-	}
-
-	s.audit("logout: access token and refresh family revoked")
+	s.audit("logout: refresh family and access token revoked")
 	s.event(ctx, EventLogout)
 	return nil
 }
@@ -272,4 +302,20 @@ func (s *Service) event(ctx context.Context, name string) {
 	if s.events != nil {
 		s.events.RecordAuthEvent(ctx, name)
 	}
+}
+
+// gateAccount 执行账号维度限流（rate-limiting spec）：在任何凭据查找与
+// bcrypt 计算之前拦截——被限的尝试不该再消耗昂贵资源，也不该获得
+// 时间信道信息。维度未配置（accounts 为 nil）时零判定。
+func (s *Service) gateAccount(ctx context.Context, account, action string) error {
+	if s.accounts == nil {
+		return nil
+	}
+	if s.accounts.Allow(ctx, account) {
+		return nil
+	}
+	// 审计不落账号明文：账号维度键已经过 HMAC，日志同样不能把明文漏出去。
+	s.fail("%s rejected: account dimension rate limited", action)
+	s.event(ctx, EventLoginFailed)
+	return ErrAccountRateLimited
 }

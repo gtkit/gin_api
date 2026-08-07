@@ -46,8 +46,6 @@ var (
 type RefreshClient interface {
 	ScriptLoad(ctx context.Context, script string) *redis.StringCmd
 	EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *redis.Cmd
-	HSet(ctx context.Context, key string, values ...any) *redis.IntCmd
-	Expire(ctx context.Context, key string, ttl time.Duration) *redis.BoolCmd
 	Set(ctx context.Context, key string, value any, ttl time.Duration) *redis.StatusCmd
 }
 
@@ -82,7 +80,24 @@ type RefreshStore struct {
 	// 用原子指针：它在每次刷新时被读，并在 Redis 重启后的 NOSCRIPT 上被重写。
 	// 普通字段在这两条路径并发时是数据竞争——限流包踩过一次，这里不重蹈。
 	sha atomic.Pointer[string]
+	// issueSHA 是签发脚本的缓存（与 sha 同款 NOSCRIPT 重载策略）。
+	issueSHA atomic.Pointer[string]
 }
+
+// issueScript 原子写入一条刷新令牌记录并设置 TTL（local-authentication spec）。
+//
+// HSET 与 PEXPIRE 分开执行时，后者失败会留下一条**永不过期**的记录——
+// 它对应的令牌客户端从未收到、不构成可用凭据，但每次这样的失败都在
+// Redis 里永久漏一条垃圾。原子化后不存在中间态。
+//
+// KEYS[1] = 记录键
+// ARGV[1] = uid
+// ARGV[2] = TTL（毫秒）
+const issueScript = `
+redis.call('HSET', KEYS[1], 'uid', ARGV[1], 'used', '0')
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`
 
 // consumeScript 原子地消费一个刷新令牌。
 //
@@ -164,6 +179,10 @@ func NewRefreshStore(ctx context.Context, client RefreshClient, prefix string, t
 	if err != nil {
 		return nil, fmt.Errorf("tokenstore: load refresh script: %w", err)
 	}
+	issueSHA, err := client.ScriptLoad(ctx, issueScript).Result()
+	if err != nil {
+		return nil, fmt.Errorf("tokenstore: load issue script: %w", err)
+	}
 
 	s := &RefreshStore{
 		client: client, prefix: prefix, ttl: ttl,
@@ -171,6 +190,7 @@ func NewRefreshStore(ctx context.Context, client RefreshClient, prefix string, t
 		now:          time.Now,
 	}
 	s.sha.Store(&sha)
+	s.issueSHA.Store(&issueSHA)
 	return s, nil
 }
 
@@ -207,17 +227,32 @@ func (s *RefreshStore) issueInFamily(ctx context.Context, uid int64, family stri
 		return "", err
 	}
 
-	// 先 HSet 后 Expire：中途失败最坏留下一条永不过期的记录，而它对应的令牌
-	// 客户端从未收到，不构成可用凭据。反过来才是错的——那会产生一条
-	// 没有过期时间的**可用**记录。
-	key := s.recordKey(family, secret)
-	if err := s.client.HSet(ctx, key, "uid", uid, "used", "0").Err(); err != nil {
-		return "", fmt.Errorf("tokenstore: store refresh token: %w", err)
-	}
-	if err := s.client.Expire(ctx, key, s.ttl).Err(); err != nil {
-		return "", fmt.Errorf("tokenstore: set refresh token ttl: %w", err)
+	// 写入与 TTL 原子生效（issueScript）：分步执行时 Expire 失败会留下
+	// 一条永不过期的垃圾记录。
+	if err := s.runIssue(ctx, s.recordKey(family, secret), uid); err != nil {
+		return "", err
 	}
 	return family + tokenSeparator + secret, nil
+}
+
+// runIssue 执行签发脚本，并在 NOSCRIPT 时重载后重试一次。
+func (s *RefreshStore) runIssue(ctx context.Context, key string, uid int64) error {
+	args := []any{uid, s.ttl.Milliseconds()}
+
+	_, err := s.client.EvalSha(ctx, *s.issueSHA.Load(), []string{key}, args...).Result()
+	if err != nil && isNoScript(err) {
+		// Redis 重启会清空脚本缓存。重载后重试，而不是让这次签发失败。
+		sha, loadErr := s.client.ScriptLoad(ctx, issueScript).Result()
+		if loadErr != nil {
+			return fmt.Errorf("tokenstore: reload issue script: %w", loadErr)
+		}
+		s.issueSHA.Store(&sha)
+		_, err = s.client.EvalSha(ctx, sha, []string{key}, args...).Result()
+	}
+	if err != nil {
+		return fmt.Errorf("tokenstore: store refresh token: %w", err)
+	}
+	return nil
 }
 
 // Consume 消费一个刷新令牌并轮换出新的。

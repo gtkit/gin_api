@@ -151,11 +151,15 @@ type Held struct {
 	Fence int64
 }
 
-// NewLease 构造租约并预加载脚本。
+// NewLease 构造租约。**不做任何 I/O**（runtime-state-machine spec 的
+// optional 语义前提）：构造期触网会让一次 Redis 抖动阻断整个进程启动，
+// 而本包消费者（optional worker）的语义恰恰是"失败降级、不拖垮进程"。
+// 脚本经运行期的 NOSCRIPT 自愈路径惰性装载（见 eval）；启动期的端到端
+// 能力验证由 Probe 在 worker 的 Prepare 里承担。
 //
 // ttl 是租期：它决定了"实例崩溃后多久另一个实例能接手"，也决定了
 // 续租的频率。太短会让一次网络抖动就丢锁，太长会让崩溃后的空窗期变长。
-func NewLease(ctx context.Context, client LeaseClient, prefix, name string, ttl time.Duration) (*Lease, error) {
+func NewLease(client LeaseClient, prefix, name string, ttl time.Duration) (*Lease, error) {
 	if client == nil {
 		return nil, errors.New("singleton: redis client is required")
 	}
@@ -167,30 +171,12 @@ func NewLease(ctx context.Context, client LeaseClient, prefix, name string, ttl 
 	}
 
 	l := &Lease{client: client, name: name, prefix: prefix, ttl: ttl}
-	if err := l.loadScripts(ctx); err != nil {
-		return nil, err
+	// sha 指针初始化为空串：首次 EVALSHA 必然 NOSCRIPT，自愈路径就地装载。
+	for _, target := range []*atomic.Pointer[string]{&l.acquireSHA, &l.renewSHA, &l.releaseSHA} {
+		empty := ""
+		target.Store(&empty)
 	}
 	return l, nil
-}
-
-// loadScripts 加载三个脚本。
-func (l *Lease) loadScripts(ctx context.Context) error {
-	for _, s := range []struct {
-		script string
-		target *atomic.Pointer[string]
-		label  string
-	}{
-		{acquireScript, &l.acquireSHA, "acquire"},
-		{renewScript, &l.renewSHA, "renew"},
-		{releaseScript, &l.releaseSHA, "release"},
-	} {
-		sha, err := l.client.ScriptLoad(ctx, s.script).Result()
-		if err != nil {
-			return fmt.Errorf("singleton: load %s script: %w", s.label, err)
-		}
-		s.target.Store(&sha)
-	}
-	return nil
 }
 
 // lockKey 与 fenceKey 共用 hash tag。

@@ -201,7 +201,7 @@ func TestLosingTheLeaseCancelsTheTask(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	// 短租期让续租周期落在几十毫秒量级，测试因此不必等太久。
-	lease, err := NewLease(context.Background(), client, "test", "job", 150*time.Millisecond)
+	lease, err := NewLease(client, "test", "job", 150*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestSecondInstanceSkipsInsteadOfRunning(t *testing.T) {
 	// 两个 Runner 共用一个 Redis，模拟两个副本。
 	makeRunner := func(t *testing.T, obs Observer, task TaskFunc) *Runner {
 		t.Helper()
-		lease, err := NewLease(context.Background(), client, "test", "job", time.Minute)
+		lease, err := NewLease(client, "test", "job", time.Minute)
 		if err != nil {
 			t.Fatalf("NewLease: %v", err)
 		}

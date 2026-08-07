@@ -2,6 +2,8 @@
 package http
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
 
@@ -66,6 +68,11 @@ func (h *Handler) Register(c *gin.Context) {
 
 	pair, err := h.service.Register(c.Request.Context(), req.Phone, req.Password, req.Nickname)
 	if err != nil {
+		// 与 Login 同款：账号维度限流走 429（见 Login 的注释）。
+		if errors.Is(err, application.ErrAccountRateLimited) {
+			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
+			return
+		}
 		resp.MapErr(c, err, errMapper)
 		return
 	}
@@ -83,6 +90,12 @@ func (h *Handler) Login(c *gin.Context) {
 
 	pair, err := h.service.Login(c.Request.Context(), req.Phone, req.Password)
 	if err != nil {
+		// 账号维度限流必须是 429 而不是 401/403：客户端与网关对
+		// "退避后重试"与"凭据错误"的处置完全不同。
+		if errors.Is(err, application.ErrAccountRateLimited) {
+			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
+			return
+		}
 		resp.MapErr(c, err, errMapper)
 		return
 	}

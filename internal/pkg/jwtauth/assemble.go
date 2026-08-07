@@ -9,12 +9,6 @@ import (
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 )
 
-// defaultTokenTTL 与历史硬编码一致（30 天）。
-//
-// **刻意不改**：TTL 会直接影响存量客户端的重登频率，而本批次的目标是
-// 让轮换不再造成批量失效，不是调整令牌寿命。
-const defaultTokenTTL = 30 * 24 * time.Hour
-
 // Assembly 是一次装配出的签发器与验签器。
 type Assembly struct {
 	Issuer *Issuer
@@ -52,10 +46,10 @@ func Assemble(cfg *config.Config) (*Assembly, error) {
 		return nil, fmt.Errorf("build jwt parser: %w", err)
 	}
 
-	ttl := defaultTokenTTL
-	if cfg.JWT.TokenTTLHours > 0 {
-		ttl = time.Duration(cfg.JWT.TokenTTLHours) * time.Hour
-	}
+	// 寿命的唯一来源在 config（分认证模式的兜底也在那边）：
+	// 此前这里各存一份兜底，数值一旦分叉，客户端拿到的 expires_in
+	// 就会与令牌真实的 exp 对不上。
+	ttl := cfg.JWT.EffectiveTokenTTL(cfg.Auth.Mode)
 
 	issuer, err := NewIssuer(keys, parser, IssuerOptions{
 		Issuer:    cfg.JWT.Issuer,

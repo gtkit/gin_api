@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
@@ -26,7 +27,38 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
 	}
 
-	return decode(k)
+	cfg, err := decode(k)
+	if err != nil {
+		return nil, err
+	}
+	// 环境写在文件里，只能读完才知道是不是生产——校验因此后置：
+	// 发现问题时文件确实已被读过一次，但启动失败仍然把问题拦在服务对外之前。
+	if cfg.Env == EnvProd {
+		if err := checkConfigFileSafety(configPath); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
+}
+
+// checkConfigFileSafety 校验生产配置文件的形态（config-validation spec）：
+// 拒绝组/其他用户可写的权限位（任何本机进程都能改写安全开关与密钥引用），
+// 拒绝符号链接（文件可在校验与读取之间被替换指向）。
+func checkConfigFileSafety(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect config file %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("config file %s is a symlink; in production the config must be "+
+			"a regular file so its target cannot be swapped underneath the process", path)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("config file %s is writable by group or others (mode %04o); "+
+			"in production tighten it (e.g. chmod 0600) so no other local process can "+
+			"rewrite credentials or security switches", path, perm)
+	}
+	return nil
 }
 
 // loadFromReader 从内存字节流加载配置，供测试以内联 YAML 驱动（不依赖磁盘文件）。

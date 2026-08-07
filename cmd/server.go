@@ -35,6 +35,12 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 
 			app, err := bootstrap.NewApp(ctx, bootstrap.Options{})
 			if err != nil {
+				// 装配期收到信号：**纯取消**的错误树是中止的现象而非故障，
+				// 按信号语义静默退出（与启动屏障的取消语义一致）；混入
+				// 回滚/关闭失败的错误必须保留上报，不得随退出码 0 消失。
+				if ctx.Err() != nil && bootstrap.IsPureCancellation(err) {
+					return nil
+				}
 				return commandError("bootstrap app", err)
 			}
 			fmt.Printf("\x1b[32m%s\x1b[0m", _UI)

@@ -27,7 +27,7 @@ func newTestLease(t *testing.T, ttl time.Duration) (*Lease, *miniredis.Miniredis
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	lease, err := NewLease(context.Background(), client, "test", "job", ttl)
+	lease, err := NewLease(client, "test", "job", ttl)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestNewLeaseValidatesItsInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := NewLease(context.Background(), tt.client, "p", tt.lease, tt.ttl); err == nil {
+			if _, err := NewLease(tt.client, "p", tt.lease, tt.ttl); err == nil {
 				t.Fatal("NewLease accepted an invalid input")
 			}
 		})

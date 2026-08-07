@@ -70,21 +70,35 @@ func NewRedisBackend(
 	}
 	resolved := newOptions(opts)
 
-	sha, err := client.ScriptLoad(ctx, tokenBucketScript).Result()
-	if err != nil {
-		return nil, fmt.Errorf("load rate limit script: %w", err)
-	}
-
 	b := &RedisBackend{
 		client:    client,
 		health:    NewHealthState(DefaultHealthPolicy(), resolved.observer),
 		keyPrefix: resolved.keyPrefix,
 		observer:  resolved.observer,
 	}
+
+	// degradedStart 只吸收**后端不可用**，不吸收调用方的取消：
+	// 启动被信号中止时构造必须中止，而不是留下一个降级的半成品。
+	sha, err := client.ScriptLoad(ctx, tokenBucketScript).Result()
+	if err != nil {
+		if !resolved.degradedStart || ctx.Err() != nil {
+			return nil, fmt.Errorf("load rate limit script: %w", err)
+		}
+		// 空 sha 是自愈的：首次判定的 EVALSHA 报 NOSCRIPT，evaluate
+		// 的重载路径会装载脚本——与主从切换后缓存丢失同一条恢复通道。
+		empty := ""
+		b.sha.Store(&empty)
+		b.health.forceDegraded()
+		return b, nil
+	}
 	b.sha.Store(&sha)
 
 	if err := b.probe(ctx); err != nil {
-		return nil, fmt.Errorf("verify rate limit capability: %w", err)
+		if !resolved.degradedStart || ctx.Err() != nil {
+			return nil, fmt.Errorf("verify rate limit capability: %w", err)
+		}
+		b.health.forceDegraded()
+		return b, nil
 	}
 
 	return b, nil
@@ -111,7 +125,9 @@ func (b *RedisBackend) probe(ctx context.Context) error {
 
 	// 探测键立即删除。删除失败不算探测失败——键带短 TTL 会自行回收，
 	// 但必须让调用方知道，否则"探测留了垃圾"永远不会被发现。
-	if err := b.client.Del(ctx, key).Err(); err != nil {
+	// 删除的必须是**限定后**的键：evaluate 统一拼前缀，裸键删不到任何东西
+	//（此前正是这个形态，探测垃圾一直靠 TTL 兜底）。
+	if err := b.client.Del(ctx, b.qualifiedKey(key)).Err(); err != nil {
 		return fmt.Errorf("probe succeeded but its key could not be removed (it expires in %s): %w",
 			probeKeyTTL, err)
 	}
@@ -151,14 +167,18 @@ func (b *RedisBackend) evaluate(
 	// 同名策略共享同一个桶，各自的限额都不是配置里写的那个值。
 	// 收口到一处之后，新增调用路径不会再漏。
 	key = b.qualifiedKey(key)
+	// 注册表按策略隔离：键基数是策略级配额（Policy.MaxKeys），
+	// 与桶键同前缀，多服务共用后端时互不干扰。
+	registryKey := b.qualifiedKey("registry:" + policy.ID)
 
 	args := []any{
 		policy.FixedPointRate(),
 		policy.FixedPointBurst(),
 		bucketTTL(policy).Milliseconds(),
+		policy.MaxKeys,
 	}
 
-	raw, err := b.client.EvalSha(ctx, *b.sha.Load(), []string{key}, args...).Result()
+	raw, err := b.client.EvalSha(ctx, *b.sha.Load(), []string{key, registryKey}, args...).Result()
 	if err != nil && isNoScript(err) {
 		// 主从切换或 SCRIPT FLUSH 之后脚本缓存会丢。**重载并重试一次**。
 		// 缺这一条，一次故障切换会让整片限流持续报错，而根因只是缓存没了。
@@ -169,7 +189,7 @@ func (b *RedisBackend) evaluate(
 		// 并发重载时多个 goroutine 会各自 Store 一次。这没有问题——
 		// 它们加载的是同一段脚本，因此得到的 sha 必然相同；重复存入等价。
 		b.sha.Store(&sha)
-		raw, err = b.client.EvalSha(ctx, sha, []string{key}, args...).Result()
+		raw, err = b.client.EvalSha(ctx, sha, []string{key, registryKey}, args...).Result()
 	}
 	if err != nil {
 		return Decision{}, fmt.Errorf("evaluate rate limit script: %w", err)
@@ -220,6 +240,10 @@ func parseScriptResult(raw any, policy Policy) (Decision, error) {
 	case statusRejected:
 		decision.Outcome = OutcomeRateLimited
 		decision.RetryAfter = time.Duration(retryAfterMS) * time.Millisecond
+	case statusKeyBudgetDenied:
+		// 与 local 后端同语义：键基数达上限拒绝新建，不是限速——
+		// 混在一起会让键轮换攻击长期被当成正常限速噪音。
+		decision.Outcome = OutcomeKeyBudgetExhausted
 	default:
 		return Decision{}, fmt.Errorf("unknown rate limit script status %d", status)
 	}

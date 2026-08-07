@@ -11,13 +11,21 @@ package ratelimit
 // IEEE-754 double，整数在 2^53 以内精确，策略校验保证不越界。
 //
 // KEYS[1] = 桶的键
+// KEYS[2] = 策略的键注册表（ZSET，member = 桶键，score = 最后活跃毫秒时间戳）
 // ARGV[1] = 每秒补充的 microtokens（整数，> 0）
 // ARGV[2] = 桶容量 microtokens（整数，> 0）
 // ARGV[3] = 键的 TTL（毫秒，整数）
+// ARGV[4] = 该策略的键基数硬上限 MaxKeys（整数，> 0）
 //
 // 返回 {status, remaining_micro, retry_after_ms}
 //
-//	status: 1 = 放行, 0 = 限速
+//	status: 1 = 放行, 0 = 限速, 2 = 键基数达上限拒绝新建
+//
+// **键基数准入与令牌桶判定同脚本原子执行**：Policy.MaxKeys 承诺的是与
+// 存储无关的硬上限——达上限拒绝新建、绝不淘汰活跃桶（LRU 淘汰意味着
+// 攻击者轮换超过 MaxKeys 个主体就能反复把旧桶挤掉、回来即拿满 Burst）。
+// 注册表按最后活跃时间摊销清理：闲置超过桶 TTL 的成员出注册表，名额
+// 随之释放；注册表内存上界 = MaxKeys 个成员/策略。
 //
 // **时间基准取自 Redis 自己**（`redis.call('TIME')`），调用方不提供时间戳。
 //
@@ -44,11 +52,24 @@ const tokenBucketScript = `
 local rate_micro   = tonumber(ARGV[1])
 local capacity     = tonumber(ARGV[2])
 local ttl_ms       = tonumber(ARGV[3])
+local max_keys     = tonumber(ARGV[4])
 local cost         = 1000000
 
 -- 时间基准取自 Redis 自己：调用方不供时，因此无法把虚拟时间往前推。
 local t = redis.call('TIME')
 local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+
+-- 键基数准入：已登记的键刷新活跃时间放行；新键先摊销清理过期成员，
+-- 再检查名额——达上限拒绝新建，绝不淘汰活跃桶。
+local registry = KEYS[2]
+if redis.call('ZSCORE', registry, KEYS[1]) == false then
+  redis.call('ZREMRANGEBYSCORE', registry, '-inf', now_ms - ttl_ms)
+  if redis.call('ZCARD', registry) >= max_keys then
+    return {2, 0, 0}
+  end
+end
+redis.call('ZADD', registry, now_ms, KEYS[1])
+redis.call('PEXPIRE', registry, ttl_ms)
 
 local state = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
 local tokens = tonumber(state[1])
@@ -96,6 +117,7 @@ return {status, tokens, retry_after_ms}
 
 // Lua 脚本的返回状态。
 const (
-	statusRejected = 0
-	statusAllowed  = 1
+	statusRejected        = 0
+	statusAllowed         = 1
+	statusKeyBudgetDenied = 2
 )

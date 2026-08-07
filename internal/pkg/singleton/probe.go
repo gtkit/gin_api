@@ -34,10 +34,11 @@ func Probe(ctx context.Context, client LeaseClient, prefix string) error {
 
 	// 探测租约的名字带随机段：多个实例同时启动时不会互相干扰，
 	// 而"探测失败"必须只反映 Redis 的能力，不反映其它实例的时序。
-	lease, err := newProbeLease(ctx, client, prefix, "probe-"+name)
+	// 构造零 I/O；脚本能力（含 ACL 是否允许 EVAL/SCRIPT LOAD）由下面的
+	// 真实操作经 NOSCRIPT 自愈路径实测。
+	lease, err := newProbeLease(client, prefix, "probe-"+name)
 	if err != nil {
-		return fmt.Errorf("singleton: probe cannot load its scripts (check the Redis ACL "+
-			"allows EVAL and SCRIPT LOAD): %w", err)
+		return fmt.Errorf("singleton: probe lease construction failed: %w", err)
 	}
 
 	// 1. 抢锁 + fence 生成。
@@ -103,8 +104,8 @@ func Probe(ctx context.Context, client LeaseClient, prefix string) error {
 // 运行的旧实例可能持有更大的序号，fencing 会反过来起反作用）。探测租约没有
 // 这个顾虑：它的名字是随机的、用完即弃、永远不会有下游写入引用它的序号。
 // 若也不过期，每次进程启动都会在 Redis 里留下一个永不消失的计数器键。
-func newProbeLease(ctx context.Context, client LeaseClient, prefix, name string) (*Lease, error) {
-	lease, err := NewLease(ctx, client, prefix, name, probeTTL)
+func newProbeLease(client LeaseClient, prefix, name string) (*Lease, error) {
+	lease, err := NewLease(client, prefix, name, probeTTL)
 	if err != nil {
 		return nil, err
 	}

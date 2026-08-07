@@ -41,6 +41,16 @@ type AccessIssuer interface {
 	Issue(ctx context.Context, uid int64, roles ...string) (string, error)
 }
 
+// AccountLimiter 按账号维度限流凭据尝试（rate-limiting spec）。
+//
+// 与来源维度互补：换 IP 即可绕过来源限流，账号维度让"同一账号的尝试
+// 频率"独立受限。账号标识由适配层经带密钥的 HMAC 派生进键，明文不进
+// 键与日志。后端故障的处置由策略的 FailureMode 在适配层内定局，
+// 本端口只回答"放行与否"。
+type AccountLimiter interface {
+	Allow(ctx context.Context, account string) bool
+}
+
 // RefreshStore 保管刷新令牌。
 type RefreshStore interface {
 	Issue(ctx context.Context, uid int64) (string, error)

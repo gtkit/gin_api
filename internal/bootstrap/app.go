@@ -58,6 +58,9 @@ type App struct {
 	status *processStatus
 	// started 保证 Run 至多执行一次（见 ErrLifecycleReused）。
 	started atomic.Bool
+	// extClosed 保证扩展产物（限流注册表、指标回调）恰好释放一次，
+	// 正常关停序列与启动失败的提前返回共用（见 closeExtensions）。
+	extClosed atomic.Bool
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
@@ -116,10 +119,16 @@ func (a *App) Run(ctx context.Context) (err error) {
 
 	// 资源关闭错误必须进入返回值：只记日志会让关闭失败的进程仍报告"正常退出"。
 	//
+	// closeExtensions 兜住全部提前返回：NewApp 成功后限流注册表与指标回调的
+	// 所有权已在 App，启动失败路径若只关连接资源，本地限流器的清理 goroutine
+	// 与 OTel 回调就地泄漏。正常路径它已在 gracefulShutdown 内执行过，
+	// 这里的幂等调用是空操作。
+	//
 	// 退出告警必须先于 closeResources：runtime.Close 内的日志刷写会关闭并
 	// 排空告警队列，之后入队的消息被静默丢弃。资源关闭阶段自身的错误因此
 	// 物理上无法再经告警通道送出，它们只进返回值与日志。
 	defer func() {
+		err = errors.Join(err, a.closeExtensions())
 		alertExitError(err)
 		err = errors.Join(err, a.closeResources())
 	}()
@@ -137,6 +146,9 @@ func (a *App) Run(ctx context.Context) (err error) {
 	// 第一个信号进入优雅关停，第二个信号进入强制路径。
 	// 用 signal.Notify 而不是 signal.NotifyContext：后者只能表达"收到过信号"，
 	// 无法区分第一个与第二个——而"再按一次 Ctrl+C 立刻退出"正是运维的普遍预期。
+	// 进程入口（cmd.Execute）另有一层 NotifyContext 覆盖 NewApp 装配期；
+	// 运行期两层并存：首个信号取消上层 ctx（经下方翻译协程汇聚为关停请求）
+	// 并同时被本监听读到，两条路径经协调器幂等汇聚。
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -162,9 +174,11 @@ func (a *App) Run(ctx context.Context) (err error) {
 	//    放到屏障之后失败，required one-shot 的不可逆副作用就已经发生了。
 	bound, prebindErr := prebindHTTP(a.httpConfig)
 	if prebindErr != nil {
-		// 启动回滚：pprof 已经开了采样，必须在这里清零。
-		_ = pprofEndpoint.Shutdown(context.WithoutCancel(ctx))
-		return fmt.Errorf("prebind http: %w", prebindErr)
+		// 启动回滚：pprof 已经开了采样，必须在这里清零。走 shutdownPprof
+		// 而不是裸 Shutdown——后者没有预算，一个长时间 profile 请求会把
+		// 启动失败路径无限拖住；关闭错误进返回值，与正常关停同款语义。
+		return errors.Join(fmt.Errorf("prebind http: %w", prebindErr),
+			a.shutdownPprof(context.WithoutCancel(ctx), pprofEndpoint))
 	}
 	// 屏障失败时关闭已绑定的监听器，不把端口一直占着。
 	prebindClosed := false
@@ -199,7 +213,9 @@ func (a *App) Run(ctx context.Context) (err error) {
 	startErr := a.workers.Start(startCtx)
 	cancelStart()
 	if startErr != nil {
-		_ = pprofEndpoint.Shutdown(context.WithoutCancel(ctx))
+		// 启动回滚：带预算关闭 pprof（理由见 prebind 失败分支），
+		// 关闭错误 Join 进各返回分支。
+		pprofErr := a.shutdownPprof(context.WithoutCancel(ctx), pprofEndpoint)
 		// 上层 ctx 取消同样是一次关停请求；把它幂等登记进协调器，
 		// 使"因关停而中止"的判定不依赖 ctx 翻译协程的调度时序。
 		if ctx.Err() != nil {
@@ -208,16 +224,17 @@ func (a *App) Run(ctx context.Context) (err error) {
 		if a.shutdownRequested() {
 			// 屏障因关停请求而中止：按关停语义退出（纯信号为 nil、强制为
 			// ErrForcedShutdown），不是一次启动失败。已 Prepare 的任务
-			// 已由 Start 内部逆序清理。取消衍生的错误（context.Canceled 链）
-			// 是中止的现象而不是原因，不进入返回值；非取消形状的错误则是
-			// 与关停并发的真实故障，必须保留上报。
-			if errors.Is(startErr, context.Canceled) {
+			// 已由 Start 内部逆序清理。**纯取消**（全部分支归结为
+			// context.Canceled）是中止的现象而不是原因，不进入返回值；
+			// 混入清理/回滚失败或其他故障的错误树必须保留上报——
+			// errors.Is 对 Join 任一成员命中即真，不能用它整体判定。
+			if IsPureCancellation(startErr) {
 				logger.Infof("startup barrier canceled by a shutdown request: %v", startErr)
-				return a.shutdown.Cause()
+				return errors.Join(a.shutdown.Cause(), pprofErr)
 			}
-			return errors.Join(a.shutdown.Cause(), fmt.Errorf("start workers: %w", startErr))
+			return errors.Join(a.shutdown.Cause(), fmt.Errorf("start workers: %w", startErr), pprofErr)
 		}
-		return fmt.Errorf("start workers: %w", startErr)
+		return errors.Join(fmt.Errorf("start workers: %w", startErr), pprofErr)
 	}
 
 	// 屏障成功但关停已被请求：HTTP 不再开始服务，消除"先 serve 再立即关停"
@@ -243,6 +260,21 @@ func (a *App) Run(ctx context.Context) (err error) {
 
 	// ⑤ 分相关停。
 	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
+}
+
+// closeExtensions 释放所有权在 App 的扩展产物：限流注册表与指标注销回调。
+//
+// 幂等（CAS 保证恰好一次）：gracefulShutdown 在正常序列的正确位置调用它，
+// Run 的 defer 兜住全部提前返回——两处共用，不存在只被一条路径覆盖的释放。
+func (a *App) closeExtensions() error {
+	if !a.extClosed.CompareAndSwap(false, true) {
+		return nil
+	}
+	errs := []error{closeRateLimits(a.rateLimits)}
+	for _, unregister := range a.metricsCleanup {
+		errs = append(errs, unregister())
+	}
+	return errors.Join(errs...)
 }
 
 // alertExitError 对非 nil 的退出错误发出一次进程级告警。
@@ -275,6 +307,14 @@ func (a *App) watchSignals(signals <-chan os.Signal, done <-chan struct{}) {
 		select {
 		case sig := <-signals:
 			if first {
+				// 关停已经由别的途径请求（装配期信号经 NotifyContext→ctx 翻译、
+				// 上层取消）时，本条实际是操作者的**第二次**信号：按强制处理，
+				// 否则"再按一次 Ctrl+C 立刻退出"在信号落点跨窗口时少数一拍。
+				if a.shutdownRequested() {
+					logger.Warnf("received %s while shutdown was already requested: forcing shutdown", sig)
+					a.shutdown.Force()
+					return
+				}
 				logger.Infof("received %s: starting graceful shutdown", sig)
 				a.shutdown.RequestShutdown(nil)
 				first = false
@@ -367,20 +407,16 @@ func (a *App) gracefulShutdown(
 	//     失败以零退出码结束。必须在全部 StopKind 与兜底清理之后执行。
 	collect(a.workers.TerminationErrors())
 
-	// 7. 关限流：每条本地策略都有一个后台清理 goroutine。
-	//    排在 HTTP 之后：在飞请求可能仍要做限流判定。
-	collect(closeRateLimits(a.rateLimits))
+	// 7. 释放扩展产物：限流注册表（每条本地策略一个后台清理 goroutine）
+	//    与指标注销回调。排在 HTTP 与 worker 之后：在飞请求可能仍要做限流
+	//    判定，worker 停掉之前采集到的指标仍是有效状态。
+	//    与 Run 的 defer 共用同一个幂等入口，启动失败的提前返回同样被兜住。
+	collect(a.closeExtensions())
 
-	// 8. 注销指标回调。排在 worker 与限流之后：它们停掉之前，采集到的
-	//    仍是有效状态；之后再采就是陈旧值了。
-	for _, unregister := range a.metricsCleanup {
-		collect(unregister())
-	}
-
-	// 9. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
+	// 8. 关 auxiliary handle（pprof）。它是 optional 能力，错误只聚合不升级。
 	collect(a.shutdownPprof(base, pprofEndpoint))
 
-	// 10. 资源由 closeResources（defer）按建立逆序关闭。
+	// 9. 资源由 closeResources（defer）按建立逆序关闭。
 
 	collect(a.shutdown.Cause())
 

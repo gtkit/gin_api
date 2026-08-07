@@ -262,6 +262,92 @@ func TestGenerateRollbackKeepsForeignFilesInCreatedDirs(t *testing.T) {
 	}
 }
 
+// TestVerifyPlanUnchangedRejectsDrift 钉住提交前的乐观并发校验
+// （module-scaffold-wiring spec）：规划与提交之间被并发改动的目标让提交
+// 零写入中止——否则本进程会用陈旧内容覆盖另一个生成进程的产物。
+func TestVerifyPlanUnchangedRejectsDrift(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, dir string) pendingWrite
+		wantErr string
+	}{
+		{
+			name: "更新目标内容漂移",
+			prepare: func(t *testing.T, dir string) pendingWrite {
+				t.Helper()
+				path := filepath.Join(dir, "target.go")
+				if err := os.WriteFile(path, []byte("drifted"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return pendingWrite{path: path, content: []byte("new"), existed: true, original: []byte("planned")}
+			},
+			wantErr: "changed since it was read",
+		},
+		{
+			name: "新建目标被并发创建",
+			prepare: func(t *testing.T, dir string) pendingWrite {
+				t.Helper()
+				path := filepath.Join(dir, "created.go")
+				if err := os.WriteFile(path, []byte("someone else"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return pendingWrite{path: path, content: []byte("new"), existed: false}
+			},
+			wantErr: "was created since planning",
+		},
+		{
+			name: "无漂移通过",
+			prepare: func(t *testing.T, dir string) pendingWrite {
+				t.Helper()
+				path := filepath.Join(dir, "stable.go")
+				if err := os.WriteFile(path, []byte("planned"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				return pendingWrite{path: path, content: []byte("new"), existed: true, original: []byte("planned")}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := tt.prepare(t, t.TempDir())
+			err := verifyPlanUnchanged([]pendingWrite{w})
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("verifyPlanUnchanged: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestGenerationLockRejectsConcurrentRun 钉住项目级建议锁：
+// 锁被持有时第二次生成立即报错，不等待、不写入。
+func TestGenerationLockRejectsConcurrentRun(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	release, err := acquireGenerationLock(root)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	defer release()
+
+	if _, err := acquireGenerationLock(root); err == nil {
+		t.Fatal("a second generation acquired the lock while the first still holds it")
+	} else if !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("err = %v, want the concurrent-run explanation", err)
+	}
+}
+
 // TestGeneratedModuleConfigHasNoUnconsumedToggle 钉住"生成的配置不携带无消费者字段"：
 // 模块配置不含模块级启用开关，配置示例注入块也没有对应条目。
 func TestGeneratedModuleConfigHasNoUnconsumedToggle(t *testing.T) {

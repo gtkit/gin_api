@@ -41,7 +41,14 @@ func buildRateLimits(
 	// Redis backend 按需**惰性**建立且全进程共享：
 	// 所有引用它的策略共享一份健康状态，否则同一次 Redis 故障会触发
 	// N 份独立探测，对一个已经出问题的依赖形成探测风暴。
+	//
+	// 启动期 Redis 不可用时的行为由**最严格的策略**决定：存在任一
+	// fail_closed 的 redis 策略即构造失败（那种模式下后端不可用只能拒绝
+	// 请求，启动失败更诚实）；全部是降级模式（fail_open / local_fallback）
+	// 时以 Degraded 相位启动，恢复探测把后端带回来——降级模式的意义
+	// 就是可用性优先，后端故障期间连滚动重启都做不了与语义自相矛盾。
 	var redisBackend *ratelimit.RedisBackend
+	degradedStartAllowed := !redisRequiredForRateLimit(cfg)
 
 	// 中途失败必须关闭已建执行体：本地策略的执行体各自持有后台清理 goroutine，
 	// 直接丢弃注册表引用会让它们存活到进程退出。
@@ -51,7 +58,7 @@ func buildRateLimits(
 			return rateLimitAssembly{}, errors.Join(convErr, registry.Close())
 		}
 
-		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.App.Name)
+		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.App.Name, degradedStartAllowed)
 		if buildErr != nil {
 			return rateLimitAssembly{}, errors.Join(buildErr, registry.Close())
 		}
@@ -73,29 +80,44 @@ func buildRateLimits(
 }
 
 // buildLimiter 按 Store 与 FailureMode 构造执行体。
+//
+// degradedStartAllowed 由策略集合整体推导（无任何 fail_closed redis 策略）：
+// backend 全进程共享，行为只能取最严格的那档。
 func buildLimiter(
 	ctx context.Context,
 	policy ratelimit.Policy,
 	resources *data.Resources,
 	redisBackend **ratelimit.RedisBackend,
 	keyPrefix string,
+	degradedStartAllowed bool,
 ) (ratelimit.Limiter, error) {
 	if policy.Store == ratelimit.StoreLocal {
 		return ratelimit.NewLocalBackend(policy)
 	}
 
 	if *redisBackend == nil {
+		// Redis **未配置**（而非不可用）对任何 redis 策略都是配置矛盾，
+		// 一律构造失败，降级启动不适用。
 		client := resources.Rdb(0)
 		if client == nil {
 			return nil, fmt.Errorf(
 				"rate limit policy %q uses the redis store but no redis client is available: "+
 					"either configure redis or switch the policy to the local store", policy.ID)
 		}
-		backend, err := ratelimit.NewRedisBackend(ctx, client,
+		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),
-			ratelimit.WithObserver(rateLimitObserver{}))
+			ratelimit.WithObserver(rateLimitObserver{}),
+		}
+		if degradedStartAllowed {
+			backendOpts = append(backendOpts, ratelimit.WithDegradedStart())
+		}
+		backend, err := ratelimit.NewRedisBackend(ctx, client, backendOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
+		}
+		if backend.Health().Phase() == ratelimit.PhaseDegraded {
+			logger.Warnf("redis rate limit backend started degraded (redis unavailable at startup); " +
+				"degraded-mode policies apply their failure modes until the recovery probe succeeds")
 		}
 		*redisBackend = backend
 	}

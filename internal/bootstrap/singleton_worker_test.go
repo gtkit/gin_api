@@ -36,7 +36,7 @@ func TestCleanupWorkerRequiresRedis(t *testing.T) {
 
 	cleanup := newTestCleanup(t)
 
-	_, err := newDeactivationCleanupWorker(context.Background(), cleanup, nil, "app", nil)
+	_, err := newDeactivationCleanupWorker(cleanup, nil, "app", nil)
 	if err == nil {
 		t.Fatal("the worker was built without redis: every replica would run the cleanup " +
 			"concurrently while the operator believes a lease protects it")
@@ -55,7 +55,7 @@ func TestCleanupWorkerRequiresRedis(t *testing.T) {
 func TestCleanupWorkerIsNotRegisteredWhenRetentionIsOff(t *testing.T) {
 	t.Parallel()
 
-	w, err := newDeactivationCleanupWorker(context.Background(), nil, stubLeaseClient{}, "app", nil)
+	w, err := newDeactivationCleanupWorker(nil, stubLeaseClient{}, "app", nil)
 	if err != nil {
 		t.Fatalf("building a disabled cleanup worker errored: %v", err)
 	}
@@ -72,8 +72,7 @@ func TestCleanupWorkerIsNotRegisteredWhenRetentionIsOff(t *testing.T) {
 func TestCleanupWorkerContract(t *testing.T) {
 	t.Parallel()
 
-	w, err := newDeactivationCleanupWorker(
-		context.Background(), newTestCleanup(t), stubLeaseClient{}, "app", nil)
+	w, err := newDeactivationCleanupWorker(newTestCleanup(t), stubLeaseClient{}, "app", nil)
 	if err != nil {
 		t.Fatalf("newDeactivationCleanupWorker: %v", err)
 	}
@@ -160,8 +159,7 @@ func (noopPurger) DeleteOlderThan(context.Context, time.Time, int) (int64, error
 func newTestRunner(t *testing.T) *singleton.Runner {
 	t.Helper()
 
-	lease, err := singleton.NewLease(
-		context.Background(), stubLeaseClient{}, "app", "task", time.Minute)
+	lease, err := singleton.NewLease(stubLeaseClient{}, "app", "task", time.Minute)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}

@@ -104,9 +104,12 @@ func (n *Notifier) Warn(url string, args ...string) {
 	callArgs = append(callArgs, title)
 	callArgs = append(callArgs, args...)
 	// 与邮件/短信通道同值同语义的独立超时（outbound-notification spec：
-	// 每次通道发送必须有独立超时）。
+	// 每次通道发送必须有独立超时）；失败与其他通道一样记录，不静默丢弃。
 	ctx, cancel := context.WithTimeout(context.Background(), alertSendTimeout)
-	_ = n.webhookSender(ctx, url, callArgs...)
+	if err := n.webhookSender(ctx, url, callArgs...); err != nil {
+		// errorLogger 走 Error 级别，不触发 Messager，无递归。
+		n.errorLogger("alert webhook send failed: " + err.Error())
+	}
 	cancel()
 
 	// 扇出到其余已启用通道：单通道失败只记录，不阻断其余、不影响进程。

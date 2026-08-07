@@ -463,6 +463,65 @@ func TestAppRunReturnsWorkerCleanupErrors(t *testing.T) {
 	}
 }
 
+// TestAppReleasesExtensionsOnEveryExitPath 钉住 App 扩展产物的释放
+// （bootstrap-module-assembly spec）：NewApp 成功后所有权移交 App 的限流注册表
+// 与指标注销回调，必须在 Run 的任意返回路径上恰好释放一次——启动失败的
+// 提前返回若只关连接资源，限流器的清理 goroutine 与 OTel 回调就地泄漏。
+func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
+	testutil.RequireLoopback(t)
+
+	tests := []struct {
+		name    string
+		workers []Worker
+		// driveShutdown 非 nil 时表示正常路径：等服务起来后触发关停。
+		driveShutdown bool
+	}{
+		{
+			name: "启动失败路径释放扩展产物",
+			workers: []Worker{&funcWorker{
+				name: "bad-prepare", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: true,
+				prepare: func(context.Context) error { return errors.New("prepare failed") },
+			}},
+		},
+		{
+			name:          "正常关停路径恰好释放一次",
+			driveShutdown: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestHTTPServer()
+			app := newTestApp(t, server, tt.workers...)
+
+			var unregisterCalls atomic.Int32
+			app.metricsCleanup = []func() error{
+				func() error { unregisterCalls.Add(1); return nil },
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			go func() { errCh <- app.Run(ctx) }()
+
+			if tt.driveShutdown {
+				waitClosed(t, server.listenCalled, "server did not start")
+				cancel()
+			}
+
+			select {
+			case <-errCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("Run did not return")
+			}
+
+			if got := unregisterCalls.Load(); got != 1 {
+				t.Fatalf("metrics unregister calls = %d, want exactly 1", got)
+			}
+		})
+	}
+}
+
 // TestAppRunDoesNotDuplicateShutdownCause 钉住终止错误收割的去重：
 // 触发关停的那个错误已作为 cause 记录，末端收割不得再次计入。
 func TestAppRunDoesNotDuplicateShutdownCause(t *testing.T) {

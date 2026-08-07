@@ -80,7 +80,7 @@ func (c *fakeLeaseClient) loadCount() int {
 
 func newFakeLease(t *testing.T, client *fakeLeaseClient) *Lease {
 	t.Helper()
-	lease, err := NewLease(context.Background(), client, "test", "job", time.Minute)
+	lease, err := NewLease(client, "test", "job", time.Minute)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}
@@ -97,21 +97,30 @@ func TestScriptsArePreloadedAtConstruction(t *testing.T) {
 	client := &fakeLeaseClient{}
 	newFakeLease(t, client)
 
-	// acquire / renew / release 三个脚本。
-	if got := client.loadCount(); got != 3 {
-		t.Fatalf("scripts loaded at construction = %d, want 3", got)
+	// 构造零 I/O（runtime-state-machine spec 的 optional 语义前提）：
+	// 构造期触网会让一次 Redis 抖动阻断整个进程启动。脚本经 NOSCRIPT
+	// 自愈路径惰性装载，启动期能力验证由 Probe 在 Prepare 里承担。
+	if got := client.loadCount(); got != 0 {
+		t.Fatalf("scripts loaded at construction = %d, want 0 (construction must not touch the network)", got)
 	}
 }
 
-// TestScriptLoadFailureFailsConstruction 钉住加载失败即构造失败。
-func TestScriptLoadFailureFailsConstruction(t *testing.T) {
+// TestScriptLoadFailureSurfacesAtFirstUse 钉住装载失败的暴露点：
+// 构造零 I/O 后，ACL 拒绝 SCRIPT LOAD 在首次真实操作（NOSCRIPT 自愈
+// 重载）时如实报错——启动期由 Probe 的真实操作把它带到 Prepare。
+func TestScriptLoadFailureSurfacesAtFirstUse(t *testing.T) {
 	t.Parallel()
 
-	client := &fakeLeaseClient{loadErr: errors.New("NOPERM this user has no permissions")}
-	_, err := NewLease(context.Background(), client, "test", "job", time.Minute)
-	if err == nil {
-		t.Fatal("NewLease succeeded although the scripts could not be loaded: the lock " +
-			"would fail at the first acquisition instead of at startup")
+	client := &fakeLeaseClient{
+		loadErr:     errors.New("NOPERM this user has no permissions"),
+		evalResults: []leaseEvalResult{{err: errors.New("NOSCRIPT No matching script")}},
+	}
+	lease, err := NewLease(client, "test", "job", time.Minute)
+	if err != nil {
+		t.Fatalf("NewLease: %v", err)
+	}
+	if _, err := lease.Acquire(context.Background()); err == nil {
+		t.Fatal("Acquire succeeded although the scripts can never be loaded")
 	}
 }
 
@@ -402,7 +411,7 @@ func TestRenewIntervalIsAThirdOfTheLease(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeLeaseClient{}
-	lease, err := NewLease(context.Background(), client, "test", "job", 90*time.Second)
+	lease, err := NewLease(client, "test", "job", 90*time.Second)
 	if err != nil {
 		t.Fatalf("NewLease: %v", err)
 	}

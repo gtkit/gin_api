@@ -18,10 +18,6 @@ type accessChoice struct {
 	Expr string
 	// Note 出现在生成结果的提示里，说明该选择的后果与后续动作。
 	Note string
-	// NeedsAuth 表示该策略用到 deps.Auth。
-	NeedsAuth bool
-	// NeedsOptionalAuth 表示该策略用到 deps.OptionalAuth。
-	NeedsOptionalAuth bool
 	// AuthorizerID 非空时表示该策略用到 deps.Authorize(AuthorizerID)。
 	AuthorizerID string
 	// OwnsAuthorizer 为真时，该 AuthorizerID 是模块专属的，需要在 runtime 层
@@ -90,7 +86,6 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 		return accessChoice{
 			Expr:              "g.Use(deps.Auth)",
 			Note:              "模块要求已认证身份：生成的 Register 里已挂 deps.Auth。",
-			NeedsAuth:         true,
 			RateLimitPolicies: rateLimitPoliciesWithUser,
 		}, nil
 	case AccessOptionOptional:
@@ -98,13 +93,11 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 			Expr: "g.Use(deps.OptionalAuth)",
 			Note: "模块允许匿名访问；一旦提供 token 则必须合法。" +
 				"限流只按来源：匿名请求没有 user 维度，身份作用域的策略在这里取不到主体。",
-			NeedsOptionalAuth: true,
 			RateLimitPolicies: rateLimitPoliciesSourceOnly,
 		}, nil
 	case AccessOptionAdmin:
 		return accessChoice{
 			Expr:              `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
-			NeedsAuth:         true,
 			AuthorizerID:      "role.admin",
 			RateLimitPolicies: rateLimitPoliciesWithUser,
 			Note: "模块要求 role.admin 授权。**当前没有权威角色源**，" +
@@ -116,7 +109,6 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 		id := customAuthorizerID(moduleName)
 		return accessChoice{
 			Expr:              fmt.Sprintf("g.Use(deps.Auth, deps.Authorize(%q))", id),
-			NeedsAuth:         true,
 			AuthorizerID:      id,
 			OwnsAuthorizer:    true,
 			RateLimitPolicies: rateLimitPoliciesWithUser,

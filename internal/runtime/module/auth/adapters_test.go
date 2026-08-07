@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/credential"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 // 适配器的全部职责是错误翻译，而翻译错了没有任何编译期迹象：
@@ -28,7 +30,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 	t.Parallel()
 
 	// cost 用 bcrypt 的最低值：本测试关心翻译，不关心哈希强度。
-	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
 
 	hashed, err := h.Hash("correct")
 	if err != nil {
@@ -52,7 +54,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 	t.Parallel()
 
-	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
 
 	long := make([]byte, 100)
 	for i := range long {
@@ -69,7 +71,7 @@ func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 	t.Parallel()
 
-	h := passwordHasher{hasher: mustCredentialHasher(t, 4)}
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
 	if err := h.CompareWithDummy("anything"); !errors.Is(err, authapp.ErrInvalidCredentials) {
 		t.Fatalf("CompareWithDummy = %v, want authapp.ErrInvalidCredentials "+
 			"(it must be indistinguishable from a wrong password)", err)
@@ -289,4 +291,72 @@ func mustCredentialHasher(t *testing.T, cost int) *credential.Hasher {
 		t.Fatalf("credential.NewHasher(%d): %v", cost, err)
 	}
 	return h
+}
+
+// TestPasswordHasherGateBoundsConcurrency 钉住口令校验的并发上限
+// （local-authentication spec）：超限的校验排队等待空位，聚合并发不越界——
+// 限流约束单来源/单账号速率，约束不了一批分布式登录的聚合并发。
+func TestPasswordHasherGateBoundsConcurrency(t *testing.T) {
+	t.Parallel()
+
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+
+	release := h.acquire()
+	second := make(chan struct{})
+	go func() {
+		r := h.acquire()
+		r()
+		close(second)
+	}()
+
+	select {
+	case <-second:
+		t.Fatal("the second acquisition proceeded while the gate was full")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-second:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued acquisition never got the freed slot")
+	}
+}
+
+// TestAccountLimiterEnforcesPerAccountBudget 钉住账号维度限流适配
+// （rate-limiting spec）：同一账号的聚合频率独立受限、账号之间互不影响，
+// 键经 KeyBuilder 的 HMAC 派生——账号明文不进键。
+func TestAccountLimiterEnforcesPerAccountBudget(t *testing.T) {
+	t.Parallel()
+
+	policy := ratelimit.Policy{
+		ID: "auth.credential.account", Rate: 1, Burst: 1,
+		Scope: ratelimit.ScopeUser, Store: ratelimit.StoreLocal,
+		FailureMode: ratelimit.FailureClosed, MaxKeys: 100,
+	}
+	backend, err := ratelimit.NewLocalBackend(policy)
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	t.Cleanup(backend.Close)
+
+	keys, err := ratelimit.NewKeyBuilder(strings.Repeat("k", 32), "test-app")
+	if err != nil {
+		t.Fatalf("NewKeyBuilder: %v", err)
+	}
+
+	limiter := NewAccountLimiter(backend, keys, nil)
+	ctx := context.Background()
+
+	if !limiter.Allow(ctx, "13800000000") {
+		t.Fatal("first attempt for the account was denied")
+	}
+	if limiter.Allow(ctx, "13800000000") {
+		t.Fatal("second attempt within the budget window was allowed: the account " +
+			"dimension is not limiting aggregate frequency")
+	}
+	// 换账号不受影响：维度按账号隔离。
+	if !limiter.Allow(ctx, "13900000000") {
+		t.Fatal("a different account was denied by the first account's budget")
+	}
 }

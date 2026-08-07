@@ -15,6 +15,7 @@ package log
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	loggerv2 "github.com/gtkit/logger/v2"
 
@@ -27,10 +28,19 @@ const (
 	// defaultLogPath 仅作零配置兜底（config.Validate 已强制 log.path 必填）。
 	defaultLogPath       = "./logs/app_client"
 	defaultAccessLogPath = "./logs/access"
+
+	// alertQueueLimit 是异步告警队列的深度上限（库默认 1024，此处收紧）。
+	// 告警只承载进程级事件，积压几十条就已经是告警风暴——继续排队的每一条
+	// 都在拉长关停时的排空时间（每条最坏 = 各通道超时之和），丢弃并计数
+	//（库内 DroppedMessages 可观测）比无界排队诚实。
+	alertQueueLimit = 64
 )
 
-// newLogger 为测试注入点，默认走 loggerv2.MustNew。
-var newLogger = loggerv2.MustNew
+// newLogger 为测试注入点，默认走 loggerv2.New。
+//
+// New 而不是 MustNew：日志配置错误是启动失败，不是 panic——
+// panic 会绕过装配层的错误聚合与回滚链。
+var newLogger = loggerv2.New
 
 func Init() {
 	// 空配置不启用任何告警通道，构造不可能失败。
@@ -64,6 +74,7 @@ func InitWithConfig(cfg *config.Config) error {
 		loggerv2.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
 		loggerv2.WithCompress(cfg.Log.Compress != 0),
 		loggerv2.WithMessager(&News{notifier: notifier}),
+		loggerv2.WithMessagerQueueSize(alertQueueLimit),
 	}
 	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
 	// 未配置时不透传，保留库默认的保留策略。
@@ -74,7 +85,11 @@ func InitWithConfig(cfg *config.Config) error {
 		opts = append(opts, loggerv2.WithMaxBackups(cfg.Log.MaxBackups))
 	}
 
-	loggerv2.SetDefault(newLogger(opts...))
+	inst, err := newLogger(opts...)
+	if err != nil {
+		return fmt.Errorf("build logger: %w", err)
+	}
+	loggerv2.SetDefault(inst)
 	return nil
 }
 
@@ -97,10 +112,10 @@ func (n *News) Send(msg string)        { n.notifier.Warn("", msg) }
 func (n *News) SendTo(url, msg string) { n.notifier.Warn(url, msg) }
 
 func resetLogHooksForTest() {
-	newLogger = loggerv2.MustNew
+	newLogger = loggerv2.New
 }
 
-func setNewLoggerForTest(fn func(opts ...loggerv2.Option) *loggerv2.Logger) {
+func setNewLoggerForTest(fn func(opts ...loggerv2.Option) (*loggerv2.Logger, error)) {
 	newLogger = fn
 }
 
@@ -111,7 +126,9 @@ func setNewLoggerForTest(fn func(opts ...loggerv2.Option) *loggerv2.Logger) {
 var accessLog *loggerv2.Logger
 
 // InitAccessLog 初始化 access logger（BufferedWriteSyncer 模式）。
-func InitAccessLog(cfg *config.Config) {
+//
+// 返回 error 让启动失败：日志配置错误 panic 会绕过装配层的错误聚合与回滚链。
+func InitAccessLog(cfg *config.Config) error {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -121,7 +138,7 @@ func InitAccessLog(cfg *config.Config) {
 		path = p + "_access"
 	}
 
-	accessLog = loggerv2.MustNew(
+	inst, err := loggerv2.New(
 		loggerv2.WithPath(path),
 		loggerv2.WithBasePath(resource.WriteRoot()),
 		loggerv2.WithLevel(strings.TrimSpace(cfg.Log.Level)),
@@ -132,18 +149,29 @@ func InitAccessLog(cfg *config.Config) {
 		// 辅助实例不抢占 zap 全局（主实例经 SetDefault 持有默认地位）。
 		loggerv2.WithReplaceGlobals(false),
 	)
+	if err != nil {
+		return fmt.Errorf("build access logger: %w", err)
+	}
+	accessLog = inst
+	return nil
 }
 
+// fallbackAccessLog 缓存兜底实例：每次调用都新建会让每个请求泄漏一个
+// 带内部状态的实例。纯控制台配置不可能构造失败，MustNew 在此安全。
+var fallbackAccessLog = sync.OnceValue(func() *loggerv2.Logger {
+	return loggerv2.MustNew(
+		loggerv2.WithConsole(true),
+		loggerv2.WithFile(false),
+		loggerv2.WithReplaceGlobals(false),
+	)
+})
+
 // AccessLog 返回 access logger 实例。
-// 如果未初始化，返回一个纯控制台、不落盘的默认实例以保证安全——
+// 如果未初始化，返回缓存的纯控制台、不落盘兜底实例以保证安全——
 // 兜底实例若允许写文件，会以进程 cwd 为锚在任意目录刷出 logs/（曾污染 internal/router）。
 func AccessLog() *loggerv2.Logger {
 	if accessLog == nil {
-		return loggerv2.MustNew(
-			loggerv2.WithConsole(true),
-			loggerv2.WithFile(false),
-			loggerv2.WithReplaceGlobals(false),
-		)
+		return fallbackAccessLog()
 	}
 	return accessLog
 }

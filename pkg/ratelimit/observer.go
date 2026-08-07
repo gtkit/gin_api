@@ -65,6 +65,9 @@ type Option func(*options)
 type options struct {
 	keyPrefix string
 	observer  Observer
+	// degradedStart 允许后端在启动期不可用时以 Degraded 相位构造成功，
+	// 由恢复探测把它带回 Healthy（见 WithDegradedStart）。
+	degradedStart bool
 }
 
 // newOptions 应用调用方给出的选项，并在此集中给出默认值。
@@ -90,6 +93,18 @@ func newOptions(opts []Option) options {
 // 共享同一个桶，于是各自的限额都不是配置里写的那个值。
 func WithKeyPrefix(prefix string) Option {
 	return func(o *options) { o.keyPrefix = prefix }
+}
+
+// WithDegradedStart 允许后端在启动期不可用时以 Degraded 相位构造成功。
+//
+// 供降级失败模式（fail_open / local_fallback）的调用方使用：那些模式的
+// 全部意义是可用性优先，后端故障期间连进程都起不来与其语义自相矛盾。
+// 构造期的失败（脚本装载、能力探测）转为 Degraded 初始相位，由既有的
+// 恢复探测把后端带回 Healthy；期间的判定按调用方的失败模式处理。
+// fail_closed 的调用方不应使用本选项——那种模式下后端不可用即拒绝服务，
+// 启动失败是更诚实的表达。
+func WithDegradedStart() Option {
+	return func(o *options) { o.degradedStart = true }
 }
 
 // WithObserver 注入运行期事件的接收者。不注入时事件被丢弃，包不产生任何输出。

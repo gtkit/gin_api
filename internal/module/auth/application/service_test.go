@@ -504,6 +504,10 @@ func TestLogoutWithoutRefreshTokenStillRevokesAccess(t *testing.T) {
 //
 // 访问令牌撤销了但刷新链还活着，意味着对方仍能换取新的访问令牌——
 // 登出实际上没有完成。返回成功会让用户以为自己已经登出。
+//
+// 顺序契约（local-authentication spec）：先撤刷新族、后撤访问令牌。
+// 族撤销失败时访问令牌必须仍然有效——否则同一个 access token 已进不了
+// 登出端点（401），而刷新链还活着，重试路径被自己撤掉的令牌挡死。
 func TestPartialLogoutIsAnError(t *testing.T) {
 	t.Parallel()
 
@@ -514,5 +518,80 @@ func TestPartialLogoutIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("logout reported success while the refresh chain stayed live: the user " +
 			"would believe they are logged out")
+	}
+	if _, revoked := h.revoke.revoked["jti-1"]; revoked {
+		t.Fatal("the access token was revoked before the refresh family: " +
+			"a retry with the same token is now impossible while the family stays live")
+	}
+}
+
+// TestLogoutAccessRevokeFailureLeavesBoundedResidue 钉住失败残留的边界：
+// 刷新族已死、访问令牌撤销失败时报错——残留只是一个短 TTL 的访问令牌，
+// 无法续期，且重试登出自然可行（令牌仍有效）。
+func TestLogoutAccessRevokeFailureLeavesBoundedResidue(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.revoke.err = errors.New("redis is down")
+
+	err := h.svc.Logout(context.Background(), "jti-1", time.Now().Add(time.Minute), "refresh")
+	if err == nil {
+		t.Fatal("logout reported success while the access token stayed live")
+	}
+	if len(h.refresh.revoked) != 1 {
+		t.Fatal("the refresh family was not revoked first")
+	}
+}
+
+// denyAllAccounts 是恒拒绝的账号维度限流替身。
+type denyAllAccounts struct{}
+
+func (denyAllAccounts) Allow(context.Context, string) bool { return false }
+
+// TestAccountRateLimitGatesCredentialAttempts 钉住账号维度限流（rate-limiting spec）：
+// 换源攻击仍被账号维度拦截；拦截发生在凭据查找与 bcrypt 计算**之前**——
+// 被限的尝试不该再消耗昂贵资源，也不该获得时间信道信息。
+func TestAccountRateLimitGatesCredentialAttempts(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	svc, err := NewService(Options{
+		Credentials:    h.creds,
+		Hasher:         h.hasher,
+		AccessIssuer:   h.issuer,
+		RefreshStore:   h.refresh,
+		RevocationList: h.revoke,
+		Auditor:        h.auditor,
+		AccessTTL:      15 * time.Minute,
+		Accounts:       denyAllAccounts{},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// 毒化下游：门禁一旦泄漏，错误会是毒化值而不是限流哨兵，
+	// errors.Is 断言自身就能指认泄漏点。
+	h.creds.findErr = errors.New("credential lookup must not be reached behind the gate")
+	h.hasher.hashErr = errors.New("bcrypt must not be reached behind the gate")
+
+	if _, err := svc.Login(context.Background(), "13800000000", "pw"); !errors.Is(err, ErrAccountRateLimited) {
+		t.Fatalf("Login = %v, want ErrAccountRateLimited", err)
+	}
+	if _, err := svc.Register(context.Background(), "13800000000", "pw", "nick"); !errors.Is(err, ErrAccountRateLimited) {
+		t.Fatalf("Register = %v, want ErrAccountRateLimited", err)
+	}
+	if got := h.hasher.dummyCallCount(); got != 0 {
+		t.Fatalf("dummy compare ran %d time(s) behind the gate, want 0", got)
+	}
+}
+
+// TestAccountLimiterNilMeansDimensionOff 钉住门控语义：未注入即维度关闭，
+// 行为与既有部署完全一致。
+func TestAccountLimiterNilMeansDimensionOff(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t) // 默认不注入 Accounts
+	if _, err := h.svc.Login(context.Background(), "13800000000", "pw"); errors.Is(err, ErrAccountRateLimited) {
+		t.Fatal("a nil account limiter must not rate limit anything")
 	}
 }

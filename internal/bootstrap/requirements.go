@@ -22,19 +22,21 @@ func resourceRequirements(cfg *config.Config) data.Requirements {
 
 // redisRequired 报告当前配置下是否存在必须依赖 Redis 的已启用能力。
 //
-// 当前母版没有任何这样的能力：user 模块只落库，认证走 JWT 自校验，
-// 没有分布式限流、没有分布式锁、没有 cron。因此默认 Redis 为 optional——
-// 连不上时进程仍然启动，只是该能力永久降级。
-//
-// 这不是"Redis 无用"：派生项目引入依赖它的能力时，把判据加到这里，
-// 它就自动成为 required，无需改动 Resources 或启动流程。
+// 判据只能来自"谁真的要用它"：下面的能力表每行一个依赖 Redis 的已启用能力，
+// 派生项目引入新依赖时在表里加一行，它就自动成为 required，
+// 无需改动 Resources 或启动流程。
 func redisRequired(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
 
-	// 能力表（每行一个依赖 Redis 的已启用能力）。
-	//
+	// 本地认证：刷新令牌存储、访问令牌撤销表与清理任务的单实例租约
+	// 全部以 Redis 为载体，Redis 不可用即认证不可用——此时实例不该被
+	// 判为 ready，否则 readiness 在对认证故障撒谎。
+	if cfg.Auth.LocalEnabled() {
+		return true
+	}
+
 	// 限流：只有 `store: redis` **且** `failure_mode: fail_closed` 的策略
 	// 才让 Redis 成为 required——那种组合下 Redis 挂掉时该策略只能拒绝请求，
 	// 实例不该被判为 ready。其余组合本来就有降级路径，把 Redis 抬成 required

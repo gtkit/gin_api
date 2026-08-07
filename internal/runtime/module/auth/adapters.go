@@ -19,6 +19,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
 	"github.com/gtkit/gin-api/internal/repository/authcredential"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 // credentialRepo 把仓储适配到 application 的端口。
@@ -50,11 +51,34 @@ func (r credentialRepo) Create(ctx context.Context, phone, passwordHash, nicknam
 }
 
 // passwordHasher 把密码包适配到 application 的端口。
+//
+// gate 是进程级并发上限（local-authentication spec）：bcrypt 是刻意昂贵的
+// 计算，限流约束的是单来源/单账号速率，约束不了聚合并发——一批分布式
+// 登录请求就能把全部 CPU 吃光。超限的调用在此排队；排队没有取消入口
+// （端口无 ctx），请求整体时长仍由路由超时中间件封顶。
 type passwordHasher struct {
 	hasher *credential.Hasher
+	gate   chan struct{}
+}
+
+// newPasswordHasher 构造带并发闸门的适配器；maxConcurrent <= 0 时取 1。
+func newPasswordHasher(hasher *credential.Hasher, maxConcurrent int) passwordHasher {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	return passwordHasher{hasher: hasher, gate: make(chan struct{}, maxConcurrent)}
+}
+
+// acquire 占用一个校验名额，返回释放函数。
+func (h passwordHasher) acquire() func() {
+	h.gate <- struct{}{}
+	return func() { <-h.gate }
 }
 
 func (h passwordHasher) Hash(password string) (string, error) {
+	release := h.acquire()
+	defer release()
+
 	hashed, err := h.hasher.Hash(password)
 	if errors.Is(err, credential.ErrPasswordTooLong) {
 		return "", authapp.ErrPasswordTooLong
@@ -63,6 +87,9 @@ func (h passwordHasher) Hash(password string) (string, error) {
 }
 
 func (h passwordHasher) Compare(hashed, password string) error {
+	release := h.acquire()
+	defer release()
+
 	err := h.hasher.Compare(hashed, password)
 	if errors.Is(err, credential.ErrMismatch) {
 		return authapp.ErrInvalidCredentials
@@ -71,6 +98,10 @@ func (h passwordHasher) Compare(hashed, password string) error {
 }
 
 func (h passwordHasher) CompareWithDummy(password string) error {
+	// 时间掩护同样是 bcrypt 计算，同受闸门约束。
+	release := h.acquire()
+	defer release()
+
 	err := h.hasher.CompareWithDummy(password)
 	if !errors.Is(err, credential.ErrMismatch) {
 		// 契约要求它恒为不匹配。真冒出别的错误说明底层实现变了——
@@ -169,3 +200,61 @@ var (
 // 依赖"别处一定校验过"——那个前提一旦被改动打破，这里会静默地构造出一个
 // 无法撤销令牌的认证服务。
 var errMissingRedis = fmt.Errorf("auth: local authentication requires redis for token revocation")
+
+// AccountRateLimitPolicyID 是账号维度限流的策略标识（rate-limiting spec）。
+//
+// 策略缺席即该维度关闭：这是预置能力的配置门控语义，装配层据此决定
+// 是否注入 accountLimiter。
+const AccountRateLimitPolicyID = "auth.credential.account"
+
+// NewAccountLimiter 把注册表里的账号维度策略适配到 application 端口。
+func NewAccountLimiter(
+	limiter ratelimit.Limiter, keys *ratelimit.KeyBuilder, recorder *metrics.Recorder,
+) authapp.AccountLimiter {
+	return accountLimiter{limiter: limiter, keys: keys, recorder: recorder}
+}
+
+// accountLimiter 见 AccountLimiter 端口的契约。
+//
+// 键经 KeyBuilder 的 HMAC 派生：账号明文不进键。method/route 用固定标签
+// ——该维度不挂路由，标签把它的键空间与任何真实路由隔离。
+// 后端故障由执行体按策略的 FailureMode 定局（与路由限流中间件同一事实），
+// 这里只把判定记进指标。
+type accountLimiter struct {
+	limiter  ratelimit.Limiter
+	keys     *ratelimit.KeyBuilder
+	recorder *metrics.Recorder
+}
+
+func (l accountLimiter) Allow(ctx context.Context, account string) bool {
+	policy := l.limiter.Policy()
+	key := l.keys.Build(policy, "POST", "auth:credential-account",
+		ratelimit.Subject{Scope: policy.Scope, Value: account})
+
+	decision, err := l.limiter.Check(ctx, key)
+	if err != nil {
+		// 与路由限流中间件同款留痕：不留的话，一次长时间的降级不会有任何记录。
+		logger.Warnf("account rate limit backend error; the policy's failure mode decided "+
+			"the outcome (policy=%s outcome=%s): %v", policy.ID, decision.Outcome, err)
+	}
+	if l.recorder != nil {
+		l.recorder.RecordRateLimitDecision(ctx, policy.ID, accountRateLimitOutcome(decision.Outcome))
+	}
+	return decision.Allowed()
+}
+
+// accountRateLimitOutcome 把判定映射到指标枚举（与中间件的映射同语义）。
+func accountRateLimitOutcome(outcome ratelimit.Outcome) metrics.RateLimitOutcome {
+	switch outcome {
+	case ratelimit.OutcomeAllowed:
+		return metrics.RateLimitAllowed
+	case ratelimit.OutcomeRateLimited:
+		return metrics.RateLimitThrottled
+	case ratelimit.OutcomeKeyBudgetExhausted:
+		return metrics.RateLimitKeyLimit
+	case ratelimit.OutcomeBackendUnavailable:
+		return metrics.RateLimitFailure
+	default:
+		return metrics.RateLimitFailure
+	}
+}

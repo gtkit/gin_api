@@ -2,6 +2,7 @@ package news
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,6 +68,22 @@ func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	}
 	if !strings.Contains(gotArgs[0], "TEST-ENV") || !strings.Contains(gotArgs[0], "2026-03-22 22:00:00") {
 		t.Fatalf("unexpected title %q", gotArgs[0])
+	}
+}
+
+// TestWarnLogsWebhookFailure 钉住 webhook 失败的可观测性
+// （outbound-notification spec）：发送失败与邮件/短信通道一样进入错误日志，
+// 不静默丢弃返回值。
+func TestWarnLogsWebhookFailure(t *testing.T) {
+	var logged []string
+	n := newTestNotifier("https://example.invalid/hook", "TEST-ENV", "2026-03-22 22:00:00",
+		func(context.Context, string, ...string) error { return errors.New("hook down") },
+		func(msg string) { logged = append(logged, msg) })
+
+	n.Warn("", "body")
+
+	if len(logged) != 1 || !strings.Contains(logged[0], "hook down") {
+		t.Fatalf("webhook failure was not logged, got %v", logged)
 	}
 }
 

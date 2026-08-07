@@ -33,6 +33,9 @@ type Deps struct {
 	KeyPrefix string
 	// Metrics 记录认证事件；为 nil 时不记录。
 	Metrics *metrics.Recorder
+	// Accounts 是账号维度限流（rate-limiting spec）；nil 表示该维度未配置
+	//（策略 AccountRateLimitPolicyID 缺席即关闭），由装配层按注册表决定注入。
+	Accounts authapp.AccountLimiter
 }
 
 // Assembly 是装配产物。
@@ -91,13 +94,14 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 
 	service, err := authapp.NewService(authapp.Options{
 		Credentials:    credentialRepo{repo: authcredential.New(deps.DB)},
-		Hasher:         passwordHasher{hasher: hasher},
+		Hasher:         newPasswordHasher(hasher, deps.Config.EffectiveBcryptConcurrency()),
 		AccessIssuer:   deps.Issuer,
 		RefreshStore:   refreshStore{store: refresh},
 		RevocationList: revocationList{list: revocation},
 		Auditor:        authAuditor{},
 		Events:         eventRecorder{recorder: deps.Metrics},
 		AccessTTL:      deps.AccessTTL,
+		Accounts:       deps.Accounts,
 	})
 	if err != nil {
 		return Assembly{}, fmt.Errorf("auth: build service: %w", err)

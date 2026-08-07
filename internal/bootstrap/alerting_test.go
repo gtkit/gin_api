@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gtkit/gin-api/internal/testutil"
 
@@ -89,6 +90,53 @@ func TestReportRunFailureAlertsWorkerEvents(t *testing.T) {
 	}
 	if got := countContaining(msgs, "opt-alert-worker"); got != 1 {
 		t.Fatalf("optional worker degradation produced %d alert(s), want exactly 1; msgs=%q", got, msgs)
+	}
+}
+
+// blockingMessager 的 Send 阻塞到 release 关闭，模拟被外部端点拖死的告警通道。
+type blockingMessager struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingMessager) Send(string) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+}
+
+func (b *blockingMessager) SendTo(_, msg string) { b.Send(msg) }
+
+// TestSyncLoggerWithBudgetAbandonsStuckDrain 钉住告警排空的总预算
+// （outbound-notification spec）：单条消息卡死通道时，进程结束的日志
+// 收尾必须在预算内返回，不得被排空无界阻塞。
+//
+// SetDefault 是进程级状态：本测试不并行。
+func TestSyncLoggerWithBudgetAbandonsStuckDrain(t *testing.T) {
+	block := &blockingMessager{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	inst := loggerv2.MustNew(
+		loggerv2.WithConsole(true),
+		loggerv2.WithFile(false),
+		loggerv2.WithMessager(block),
+		loggerv2.WithReplaceGlobals(false),
+	)
+	prev := loggerv2.Default()
+	loggerv2.SetDefault(inst)
+	t.Cleanup(func() {
+		loggerv2.SetDefault(prev)
+		close(block.release) // 放行被放弃的排空协程，不在测试进程里残留阻塞
+	})
+
+	loggerv2.HErrorf("stuck alert")
+	waitClosed(t, block.entered, "messager did not receive the alert")
+
+	start := time.Now()
+	syncLoggerWithBudget(100 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("syncLoggerWithBudget took %v; the drain budget did not bound a stuck channel", elapsed)
 	}
 }
 

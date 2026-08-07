@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -42,7 +43,9 @@ func initProcessRuntime(cfg *config.Config) error {
 	}
 	checkJSONRuntime()
 
-	applog.InitAccessLog(cfg)
+	if err := applog.InitAccessLog(cfg); err != nil {
+		return fmt.Errorf("init access logger: %w", err)
+	}
 
 	// 个人信息无保留期：配置注释承诺过会提示一次，此前只是承诺。
 	for _, w := range cfg.RetentionWarnings() {
@@ -117,10 +120,39 @@ func applyRuntimeTimezone(cfg *config.Config) {
 	time.Local = loc //nolint:gosmopolitan // Process-wide timezone is set once before any worker goroutine starts.
 }
 
+// loggerDrainBudget 是进程结束时主 logger 刷写与告警队列排空的总预算。
+//
+// 单次发送的超时只约束一条消息；队列内多条消息乘以多通道串行发送，
+// 无总预算的最坏排空时间以十分钟计——关停被告警通道拖住，本身就成了
+// 下一个告警级故障。主实例不缓冲文件写（错误日志不因缓冲丢失），
+// 预算截断牺牲的只是尚未送出的告警通知。
+const loggerDrainBudget = 30 * time.Second
+
 // closeProcessRuntime 收尾进程级设施（刷日志缓冲）。
 //
 // 它**不关闭任何连接**：连接由 Resources.Close 按建立的逆序释放。
 func closeProcessRuntime() {
 	applog.SyncAccessLog()
-	logger.Sync()
+	syncLoggerWithBudget(loggerDrainBudget)
+}
+
+// syncLoggerWithBudget 在预算内等待主 logger 的 Sync 完成；超时放弃剩余排空。
+//
+// 被放弃的排空协程随进程退出回收。说明只能走 stderr：此刻日志设施
+// 自身正在关闭，它已经不是可用的输出通道。
+func syncLoggerWithBudget(budget time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		logger.Sync()
+		close(done)
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		fmt.Fprintf(os.Stderr,
+			"logger drain exceeded its %s budget; abandoning the remaining alert notifications\n", budget)
+	}
 }

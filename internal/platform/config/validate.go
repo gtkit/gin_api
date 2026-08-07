@@ -123,7 +123,7 @@ func (c *Config) Validate() error {
 	if err := validatePprofConfig(c.Env, c.Pprof); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateAuthConfig(c.Auth, c.Redis, c.JWT.EffectiveTokenTTL()); err != nil {
+	if err := validateAuthConfig(c.Auth, c.Redis, c.JWT.EffectiveTokenTTL(c.Auth.Mode)); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateJWTConfig(c.JWT); err != nil {

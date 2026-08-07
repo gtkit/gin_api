@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 )
 
@@ -39,6 +40,12 @@ type AuthConfig struct {
 	// 母版给的默认值要么在小机器上打满内存，要么在大机器上形同虚设，
 	// 且两种情况都不会报错。bcrypt 只有一个参数，语义单一，调错的空间小。
 	BcryptCost int `mapstructure:"bcrypt_cost"`
+
+	// BcryptMaxConcurrent 是口令哈希校验的进程级并发上限，留空按 CPU 核数。
+	//
+	// bcrypt 是刻意昂贵的计算：限流约束的是单来源/单账号的速率，约束不了
+	// **聚合并发**——一批分布式登录请求就能把全部 CPU 吃光。超限的校验排队。
+	BcryptMaxConcurrent int `mapstructure:"bcrypt_max_concurrent"`
 
 	// RefreshTTL 是刷新令牌寿命，留空按 defaultRefreshTTL。
 	//
@@ -77,6 +84,14 @@ func (c AuthConfig) EffectiveBcryptCost() int {
 		return c.BcryptCost
 	}
 	return defaultBcryptCost
+}
+
+// EffectiveBcryptConcurrency 返回生效的口令校验并发上限。
+func (c AuthConfig) EffectiveBcryptConcurrency() int {
+	if c.BcryptMaxConcurrent > 0 {
+		return c.BcryptMaxConcurrent
+	}
+	return runtime.GOMAXPROCS(0)
 }
 
 // EffectiveRefreshTTL 返回生效的刷新令牌寿命。
@@ -154,20 +169,26 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 	return errors.Join(errs...)
 }
 
-// defaultTokenTTLHours 是 jwt.token_ttl_hours 留空时的兜底值。
+// jwt.token_ttl_hours 留空时的兜底值**分认证模式**（local-authentication spec）：
 //
-// 与 jwtauth 装配里的兜底保持一致。两处各写一份是当前的实际情况：
-// 那边不能 import 本包（配置结构由本包定义）。数值一旦分叉，客户端拿到的
-// expires_in 就会与令牌真实的 exp 对不上，因此这里明确指出对应关系。
-const defaultTokenTTLHours = 720
+//	本地模式默认 1 小时——续期由刷新令牌承担，长寿命访问令牌只放大泄露窗口；
+//	外部身份模式默认 720 小时——该配置在那种部署里描述的是"本服务接受的
+//	外部令牌"，实际寿命由外部签发方决定，兜底保持宽松以兼容存量。
+const (
+	defaultLocalTokenTTL         = time.Hour
+	defaultExternalTokenTTLHours = 720
+)
 
 // EffectiveTokenTTL 返回访问令牌的生效寿命。
 //
-// 它是访问令牌寿命的唯一来源：认证模块的 expires_in 与撤销记录的存活时间
-// 都从它推导。
-func (c JWTConfig) EffectiveTokenTTL() time.Duration {
+// 它是访问令牌寿命的**唯一**来源：JWT 签发（jwtauth.Assemble）、认证模块的
+// expires_in 与撤销记录的存活时间都从它推导，不存在第二份兜底。
+func (c JWTConfig) EffectiveTokenTTL(mode AuthMode) time.Duration {
 	if c.TokenTTLHours > 0 {
 		return time.Duration(c.TokenTTLHours) * time.Hour
 	}
-	return defaultTokenTTLHours * time.Hour
+	if mode == AuthModeLocal {
+		return defaultLocalTokenTTL
+	}
+	return defaultExternalTokenTTLHours * time.Hour
 }

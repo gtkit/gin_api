@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -100,6 +101,76 @@ func TestAppRunFirstSignalCancelsStartupBarrier(t *testing.T) {
 	}
 }
 
+// TestIsPureCancellation 钉住取消归一化的判定（runtime-state-machine spec）：
+// 只有全部分支归结为 context.Canceled 的错误树才算纯取消——errors.Is 对
+// 聚合错误任一成员命中即真，整体判定会把"取消 + 回滚失败"当成正常退出。
+func TestIsPureCancellation(t *testing.T) {
+	t.Parallel()
+
+	cleanupErr := errors.New("cleanup boom")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil 不是取消", err: nil, want: false},
+		{name: "裸 Canceled", err: context.Canceled, want: true},
+		{name: "包装链内的 Canceled", err: fmt.Errorf("run: %w", context.Canceled), want: true},
+		{name: "全取消的 Join", err: errors.Join(context.Canceled, fmt.Errorf("x: %w", context.Canceled)), want: true},
+		{name: "取消混入清理错误", err: errors.Join(context.Canceled, cleanupErr), want: false},
+		{name: "外层包装的混合 Join", err: fmt.Errorf("start: %w", errors.Join(context.Canceled, cleanupErr)), want: false},
+		{name: "deadline 不是取消", err: context.DeadlineExceeded, want: false},
+		{name: "普通错误", err: cleanupErr, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsPureCancellation(tt.err); got != tt.want {
+				t.Fatalf("IsPureCancellation(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAppRunSignalCancelKeepsCleanupErrors 钉住取消归一化不吞清理错误：
+// 启动屏障被信号取消、且回滚清理失败时，Run 必须以非零结果结束并携带
+// 清理错误——资源回滚失败不得随退出码 0 静默消失。
+func TestAppRunSignalCancelKeepsCleanupErrors(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := newTestHTTPServer()
+
+	entered := make(chan struct{})
+	oneShot := &funcWorker{
+		name: "cancel-cleanup-fail", kind: KindBootstrap, lifecycle: LifecycleOneShot, required: true,
+		run: func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		cleanup: func(context.Context) error { return errors.New("cleanup boom") },
+	}
+	app := newTestApp(t, server, oneShot)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- app.Run(context.Background()) }()
+
+	waitClosed(t, entered, "required one-shot did not start")
+	app.shutdown.RequestShutdown(nil)
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Run returned nil although rollback cleanup failed during a signal-canceled startup")
+		}
+		if !strings.Contains(err.Error(), "cleanup boom") {
+			t.Fatalf("error %q does not carry the cleanup failure", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
 // TestAppRunForcedShutdownDuringStartupReturnsNonZero 钉住启动期的强制路径：
 // 屏障期间先后到达优雅与强制两次关停请求时，屏障取消且 Run 以
 // ErrForcedShutdown 非零结束——进程是被迫结束的，不能表现成一次正常关停。
@@ -182,6 +253,28 @@ func TestAppRunSkipsServeWhenShutdownRequestedDuringBarrier(t *testing.T) {
 	}
 	if got := oneShot.cleanupCalls.Load(); got != 1 {
 		t.Fatalf("one-shot cleanup calls = %d, want exactly 1", got)
+	}
+}
+
+// TestWatchSignalsForcesWhenShutdownAlreadyRequested 钉住信号窗口
+// （runtime-state-machine spec）：首个关停请求经其他途径（装配期信号经
+// NotifyContext→ctx 翻译、上层取消）进入后，监听收到的下一个 OS 信号
+// 必须走强制路径——否则操作者的第二次 Ctrl+C 会被当成"第一次"而只是
+// 幂等地再请求一遍优雅关停。
+func TestWatchSignalsForcesWhenShutdownAlreadyRequested(t *testing.T) {
+	app := &App{shutdown: NewShutdownCoordinator()}
+	app.shutdown.RequestShutdown(nil) // 关停已经由别的途径请求
+
+	signals := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() { app.watchSignals(signals, done); close(exited) }()
+	defer close(done)
+
+	signals <- syscall.SIGINT
+	waitClosed(t, exited, "watchSignals did not return after forcing")
+	if !app.shutdown.Forced() {
+		t.Fatal("a signal arriving after shutdown was requested must force shutdown")
 	}
 }
 

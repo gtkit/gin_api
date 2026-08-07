@@ -17,13 +17,18 @@ import (
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
-// tokenHeaderName 是本项目唯一接受的 token 载体。
+// token 只经请求头承载，`Authorization: Bearer` 为主要形态（标准形态，
+// 网关/代理/工具链的默认支持面最大），App-Token 为存量客户端兼容保留。
 //
 // 刻意不接受 query 参数：query 会进访问日志、Referer 与浏览器历史，是长期泄漏面。
 // 此前为 WebSocket 升级请求开的 query 旁路已删除——仓库里没有任何 WebSocket 端点，
 // 那是一个零消费者的安全敞口。将来引入 WS 时须单独设计（如一次性票据换取连接），
 // 不复活 query token。
-const tokenHeaderName = "App-Token"
+const (
+	tokenHeaderName         = "App-Token"
+	authorizationHeaderName = "Authorization"
+	bearerScheme            = "Bearer"
+)
 
 // maxTokenBytes 是 token 的长度上限。
 //
@@ -215,19 +220,58 @@ func abortWith(c *gin.Context, err error) {
 // 后者若也放行，攻击者发一个坏 token 就能绕过校验。
 var errTokenAbsent = errors.New("token is absent")
 
+// tokenFromHeader 提取认证令牌（local-authentication spec）：
+// Bearer 为主、App-Token 兼容；两头同时出现且值不一致即拒绝——
+// 静默取其一会让代理注入的头悄悄改变认证身份。
 func tokenFromHeader(c *gin.Context) (string, error) {
-	raw := c.Request.Header.Get(tokenHeaderName)
-	if raw == "" {
-		return "", fmt.Errorf("%w: %s header is empty", errTokenAbsent, tokenHeaderName)
+	bearer, err := bearerToken(c)
+	if err != nil {
+		return "", err
 	}
+	legacy := c.Request.Header.Get(tokenHeaderName)
+
+	switch {
+	case bearer != "" && legacy != "" && bearer != legacy:
+		return "", fmt.Errorf("authorization bearer token and %s header disagree", tokenHeaderName)
+	case bearer != "":
+		return validateRawToken(bearer, "authorization bearer token")
+	case legacy != "":
+		return validateRawToken(legacy, tokenHeaderName+" header")
+	default:
+		return "", fmt.Errorf("%w: neither an authorization bearer token nor the %s header is present",
+			errTokenAbsent, tokenHeaderName)
+	}
+}
+
+// bearerToken 从 Authorization 头提取 Bearer 令牌。
+//
+// 头缺失或使用其他 scheme（如 Basic）→ 空串无错误：那不是本中间件的载体。
+// scheme 匹配（大小写不敏感，RFC 7235）但令牌为空 → 报错：形态非法不是缺席。
+func bearerToken(c *gin.Context) (string, error) {
+	raw := c.Request.Header.Get(authorizationHeaderName)
+	if raw == "" {
+		return "", nil
+	}
+	scheme, token, found := strings.Cut(raw, " ")
+	if !found || !strings.EqualFold(scheme, bearerScheme) {
+		return "", nil
+	}
+	if token == "" {
+		return "", errors.New("authorization header carries an empty bearer token")
+	}
+	return token, nil
+}
+
+// validateRawToken 对提取出的令牌做长度与空白校验，source 用于错误指认载体。
+func validateRawToken(raw, source string) (string, error) {
 	// 长度检查放在最前：先于任何解析与缓存，避免超长输入迫使下游做无谓的工作。
 	if len(raw) > maxTokenBytes {
-		return "", fmt.Errorf("%s header exceeds %d bytes", tokenHeaderName, maxTokenBytes)
+		return "", fmt.Errorf("%s exceeds %d bytes", source, maxTokenBytes)
 	}
 	// 首尾空白一律拒绝而不是修剪：修剪会让 " abc" 与 "abc" 成为同一个 token，
 	// 从而在缓存键、审计与限流键上产生歧义。
 	if strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, " \t\r\n") {
-		return "", fmt.Errorf("%s header contains whitespace", tokenHeaderName)
+		return "", fmt.Errorf("%s contains whitespace", source)
 	}
 	return raw, nil
 }

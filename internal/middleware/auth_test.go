@@ -48,6 +48,83 @@ func TestAuthAllowsValidToken(t *testing.T) {
 	}
 }
 
+// TestAuthBearerHeader 钉住令牌载体契约（local-authentication spec）：
+// Bearer 为主、App-Token 兼容；两头同时出现且值不一致即拒绝——
+// 静默取其一会让代理注入的头悄悄改变认证身份。
+func TestAuthBearerHeader(t *testing.T) {
+	jwt := newTestJWT(t)
+	token, err := jwt.Issuer.Issue(context.Background(), 42, "user")
+	if err != nil {
+		t.Fatalf("Issue returned error: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		headers    map[string]string
+		wantStatus int
+	}{
+		{
+			name:       "Bearer 单独有效",
+			headers:    map[string]string{"Authorization": "Bearer " + token},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "scheme 大小写不敏感",
+			headers:    map[string]string{"Authorization": "bearer " + token},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "双头一致放行",
+			headers: map[string]string{
+				"Authorization": "Bearer " + token,
+				"App-Token":     token,
+			},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "双头不一致拒绝",
+			headers: map[string]string{
+				"Authorization": "Bearer " + token,
+				"App-Token":     "some-other-token",
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "空 Bearer 令牌拒绝",
+			headers:    map[string]string{"Authorization": "Bearer"},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "其他 scheme 不抢占 App-Token",
+			headers: map[string]string{
+				"Authorization": "Basic dXNlcjpwYXNz",
+				"App-Token":     token,
+			},
+			wantStatus: http.StatusNoContent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			engine := gin.New()
+			engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
+			engine.GET("/protected", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
 func TestAuthRejectsUnknownUser(t *testing.T) {
 	jwt := newTestJWT(t)
 	issuer := jwt.Issuer

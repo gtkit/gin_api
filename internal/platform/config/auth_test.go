@@ -157,19 +157,24 @@ func TestAccessTTLHasASingleSource(t *testing.T) {
 	tests := []struct {
 		name  string
 		hours int
+		mode  AuthMode
 		want  time.Duration
 	}{
-		{name: "explicit value wins", hours: 2, want: 2 * time.Hour},
-		{name: "zero falls back", hours: 0, want: defaultTokenTTLHours * time.Hour},
-		{name: "negative falls back", hours: -1, want: defaultTokenTTLHours * time.Hour},
+		{name: "explicit value wins (local)", hours: 2, mode: AuthModeLocal, want: 2 * time.Hour},
+		{name: "explicit value wins (external)", hours: 2, mode: AuthModeExternal, want: 2 * time.Hour},
+		// 分模式兜底（local-authentication spec）：本地模式有刷新令牌承担续期，
+		// 访问令牌默认短寿命；外部模式描述"接受的外部令牌"，兜底保持宽松。
+		{name: "local zero falls back to short ttl", hours: 0, mode: AuthModeLocal, want: defaultLocalTokenTTL},
+		{name: "local negative falls back", hours: -1, mode: AuthModeLocal, want: defaultLocalTokenTTL},
+		{name: "external zero keeps legacy ttl", hours: 0, mode: AuthModeExternal, want: defaultExternalTokenTTLHours * time.Hour},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := (JWTConfig{TokenTTLHours: tt.hours}).EffectiveTokenTTL(); got != tt.want {
-				t.Fatalf("EffectiveTokenTTL() = %s, want %s", got, tt.want)
+			if got := (JWTConfig{TokenTTLHours: tt.hours}).EffectiveTokenTTL(tt.mode); got != tt.want {
+				t.Fatalf("EffectiveTokenTTL(%s) = %s, want %s", tt.mode, got, tt.want)
 			}
 		})
 	}

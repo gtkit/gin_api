@@ -36,9 +36,7 @@ type fakeRefreshClient struct {
 	// evalKeys 记录每次调用收到的 keys，用于验证键的构造。
 	evalKeys [][]string
 
-	hsetErr   error
-	expireErr error
-	setErr    error
+	setErr error
 	// setKeys 记录撤销标记写到了哪个键。
 	setKeys []string
 }
@@ -73,14 +71,6 @@ func (c *fakeRefreshClient) EvalSha(_ context.Context, _ string, keys []string, 
 	}
 	r := c.evalResults[idx]
 	return redis.NewCmdResult(r.val, r.err)
-}
-
-func (c *fakeRefreshClient) HSet(_ context.Context, _ string, _ ...any) *redis.IntCmd {
-	return redis.NewIntResult(1, c.hsetErr)
-}
-
-func (c *fakeRefreshClient) Expire(_ context.Context, _ string, _ time.Duration) *redis.BoolCmd {
-	return redis.NewBoolResult(true, c.expireErr)
 }
 
 func (c *fakeRefreshClient) Set(_ context.Context, key string, _ any, _ time.Duration) *redis.StatusCmd {
@@ -332,28 +322,42 @@ func TestMalformedScriptResultIsAnError(t *testing.T) {
 	}
 }
 
-// TestIssueReportsStorageFailures 覆盖签发路径的两处写入失败。
+// TestIssueReportsStorageFailures 覆盖签发路径的写入失败与 NOSCRIPT 自愈。
+//
+// 写入与 TTL 已合并为单个脚本原子执行（issueScript）：失败点只剩脚本
+// 调用本身；Redis 重启清空脚本缓存时按 NOSCRIPT 重载后重试。
 func TestIssueReportsStorageFailures(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name   string
-		client *fakeRefreshClient
-	}{
-		{name: "hset fails", client: &fakeRefreshClient{hsetErr: errors.New("write failed")}},
-		{name: "expire fails", client: &fakeRefreshClient{expireErr: errors.New("expire failed")}},
-	}
+	t.Run("script eval fails", func(t *testing.T) {
+		t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			store := newFakeStore(t, tt.client)
-			if _, err := store.Issue(context.Background(), 1); err == nil {
-				t.Fatal("Issue reported success although the record was not stored")
-			}
+		store := newFakeStore(t, &fakeRefreshClient{
+			evalResults: []evalResult{{err: errors.New("write failed")}},
 		})
-	}
+		if _, err := store.Issue(context.Background(), 1); err == nil {
+			t.Fatal("Issue reported success although the record was not stored")
+		}
+	})
+
+	t.Run("noscript reloads and retries", func(t *testing.T) {
+		t.Parallel()
+
+		client := &fakeRefreshClient{
+			evalResults: []evalResult{
+				{err: errors.New("NOSCRIPT No matching script")},
+				{val: int64(1)},
+			},
+		}
+		store := newFakeStore(t, client)
+		loadsBefore := client.scriptLoads
+		if _, err := store.Issue(context.Background(), 1); err != nil {
+			t.Fatalf("Issue after NOSCRIPT: %v", err)
+		}
+		if client.scriptLoads <= loadsBefore {
+			t.Fatal("the issue script was not reloaded after NOSCRIPT")
+		}
+	})
 }
 
 // TestRevokeFamilyRequiresAFamily 覆盖入参校验。
@@ -464,7 +468,9 @@ func TestSplitToken(t *testing.T) {
 func TestIssuedTokensAreUnpredictable(t *testing.T) {
 	t.Parallel()
 
-	store := newFakeStore(t, &fakeRefreshClient{})
+	store := newFakeStore(t, &fakeRefreshClient{
+		evalResults: []evalResult{{val: int64(1)}}, // 签发脚本恒成功；fake 重复最后一个结果
+	})
 	seen := make(map[string]struct{}, 64)
 	for range 64 {
 		token, err := store.Issue(context.Background(), 1)

@@ -28,21 +28,21 @@ const (
 	defaultShutdownTimeout = 10 * time.Second
 )
 
-// serverWriteTimeout 恒为 0：**服务器层不施加隐式的绝对写上限**。
+// serverWriteTimeout 是服务级写超时**兜底**（http-lifecycle spec）。
 //
-// 它不是"关掉保护"，而是把保护从进程级挪到路由级：
+// 曾经恒为 0，安全性依赖"每条路由必须声明 TimeoutPolicy"的 routespec
+// 注册期门禁——那条门禁已随路由 DSL 移除，0 就成了纯粹的保护缺失：
+// 新增路由忘挂超时中间件就永久没有写超时，且没有任何机制会发现。
 //
-//	http.Server.WriteTimeout 是所有路由共享的一个值，而流式路由需要它足够长、
-//	普通路由需要它足够短——两者不可能同时满足。旧实现的做法是：配了 LLM provider
-//	就把**全局** WriteTimeout 抬到 `LLM timeout + 5s`，于是流式能跑了，
-//	代价是所有非流式路由同时失去写超时保护，而这个副作用在配置里完全看不出来。
+// 现行契约是"保守兜底 + 路由覆盖"：
 //
-// 定稿是 `WriteTimeout = 0` + 每条路由经 TimeoutPolicy 显式设置连接级写 deadline
-// （ResponseController.SetWriteDeadline 是**覆盖**，不受全局值压制）。
+//	普通路由受本值保护（遗忘的代价从"无界挂起"降为"保守截断"）；
+//	需要长时间写出的流式路由在 handler 内经
+//	http.ResponseController.SetWriteDeadline 显式延长——每响应 deadline
+//	**覆盖**服务器全局值，"我需要长写"因此是一次显式决策而不是默认状态。
 //
-// **它的安全性完全依赖 routespec 的注册期门禁**：任何路由缺 TimeoutPolicy 即启动失败。
-// 那条门禁一旦被放宽，这里的 0 就是纯粹的保护缺失，两者必须同进同退。
-const serverWriteTimeout = 0
+// 取值与 ReadTimeout 同量级：兜底要宽到不误伤慢速大响应，紧到能回收死连接。
+const serverWriteTimeout = 60 * time.Second
 
 type httpServer interface {
 	// Serve 在**已绑定**的监听器上提供服务。
@@ -109,8 +109,9 @@ func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 		// **不设 TLSNextProto**：留空让标准库按默认启用 HTTP/2 协商。
 		//
 		// 此前这里被设成空 map，显式关闭了协商，且没有记录任何理由。
-		// 历史上确有 WriteTimeout 与 HTTP/2 交互不良的情形，但本服务器层
-		// WriteTimeout 恒为 0（每条路由自己设连接级写 deadline），那个理由不成立。
+		// 历史上确有 WriteTimeout 与 HTTP/2 交互不良的情形（Go 1.8 时代的
+		// 已修缺陷）；当前标准库对 HTTP/2 正常尊重 WriteTimeout，
+		// 服务级兜底 + 流式路由每响应覆盖的契约在两个协议版本下一致。
 		//
 		// 禁用协商的影响是全局且不可见的：所有客户端退回到较旧的协议版本，
 		// 而没人会收到任何提示。要重新禁用，必须在此写明具体理由。

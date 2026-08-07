@@ -81,8 +81,9 @@
 //
 // bootstrap 提供 Worker 接口（Name / Kind / Required / Lifecycle / Prepare / Run / Cleanup）
 // 与 WorkerManager（注册期校验声明、分阶段启动、Cleanup 恰好一次、按类别分相关停）。
-// buildWorkers 是装配的一个阶段，母版默认返回空集合，只留 scaffold:module-workers
-// 标记作为注册位——按业务需要在标记前追加一行 Worker 构造即可，无需改动函数签名。
+// buildWorkers 是装配的一个阶段：母版内置的业务实例只有注销档案清理（按配置
+// 条件注册，未配置保留期时不存在），其余经 scaffold:module-workers 标记接入——
+// 按业务需要在标记前追加一行 Worker 构造即可，无需改动函数签名。
 //
 // 新增 worker 遵守两条边界：放在 module/<m>/worker/ 下；只依赖 application，
 // 不直连 repository / gorm（scripts/check-architecture.sh 检查该规则）。
@@ -108,6 +109,6 @@
 //
 //	runtime/module/user.NewService(db) 负责把上述装配起来：
 //	  userrepo.New(db) + userdeactivation.New(db) + dbtx.NewManager(db) → application.NewService。
-//	bootstrap/providers.go 再把 Service 接到 userhttp.NewModule（HTTP 路由）上；
+//	bootstrap/providers.go 再经 userhttp.Register(v1, userhttp.Deps{...}) 注册 HTTP 路由；
 //	  后台任务经 buildWorkers 的 scaffold:module-workers 标记按需接入。
 package user
