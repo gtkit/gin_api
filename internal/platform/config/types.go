@@ -27,6 +27,9 @@ type Config struct {
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// Outbound 是出站 HTTP 客户端的具名声明。clients 为空即不启用。
 	Outbound OutboundConfig `mapstructure:"outbound"`
+	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
+	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
+	Cache CacheConfig `mapstructure:"cache"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }

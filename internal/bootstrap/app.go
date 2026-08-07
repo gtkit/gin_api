@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/platform/config"
 
@@ -52,6 +53,8 @@ type App struct {
 	// outbound 持有出站 HTTP 客户端；关停时释放空闲连接，否则它们会一直
 	// 挂到对端超时——滚动重启时旧实例仍占着下游的连接配额。
 	outbound *httpclient.Factory
+	// cache 持有响应缓存的本地 store；关停时释放它的后台 goroutine。
+	cache *httpcache.Stager
 	// metricsCleanup 注销指标的异步回调。
 	//
 	// 不注销的话，回调会继续持有已停掉的 worker 与已关闭的连接池——
@@ -95,6 +98,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		shutdown:       providers.shutdown,
 		rateLimits:     providers.rateLimits,
 		outbound:       providers.outbound,
+		cache:          providers.cache,
 		metricsCleanup: providers.metricsCleanup,
 		drainWait:      drainWaitFrom(runtime.Config()),
 		status:         providers.status,
@@ -274,7 +278,7 @@ func (a *App) closeExtensions() error {
 	if !a.extClosed.CompareAndSwap(false, true) {
 		return nil
 	}
-	errs := []error{closeRateLimits(a.rateLimits), a.outbound.Close()}
+	errs := []error{closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close()}
 	for _, unregister := range a.metricsCleanup {
 		errs = append(errs, unregister())
 	}

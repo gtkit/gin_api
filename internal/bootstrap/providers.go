@@ -20,6 +20,7 @@ import (
 	"github.com/gtkit/gin-api/internal/router"
 	"go.opentelemetry.io/otel"
 
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
@@ -40,6 +41,8 @@ type providerSet struct {
 	rateLimits rateLimitAssembly
 	// outbound 是具名出站 HTTP 客户端工厂；未声明 clients 时为空工厂。
 	outbound *httpclient.Factory
+	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
+	cache *httpcache.Stager
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
 	// metricsCleanup 注销指标的异步回调，由 App 在关停时调用。
@@ -56,6 +59,8 @@ type infra struct {
 	rateLimits rateLimitAssembly
 	// outbound 是具名出站 HTTP 客户端工厂，供各模块按下游名取用。
 	outbound *httpclient.Factory
+	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
+	cache *httpcache.Stager
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -153,6 +158,20 @@ func newProviders(
 	inf.outbound = outbound
 	rb.push("outbound http clients", outbound.Close)
 
+	// 3c. 响应缓存。默认关闭；关闭时产出透传中间件，调用方不必判空。
+	//     必须先于路由装配：模块在注册只读路由时就要挂上它。
+	responseCache, err := httpcache.New(inf.cfg.Cache, inf.resources.Rdb(0), inf.cfg.App.Name)
+	if err != nil {
+		return nil, fmt.Errorf("build response cache: %w", err)
+	}
+	inf.cache = responseCache
+	rb.push("response cache", responseCache.Close)
+	if responseCache.Enabled() {
+		logger.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
+			"explicitly mount the middleware, and requests carrying identity always bypass it",
+			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
+	}
+
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)
 	if err != nil {
@@ -209,6 +228,7 @@ func newProviders(
 		shutdown:       coordinator,
 		rateLimits:     rateLimits,
 		outbound:       outbound,
+		cache:          responseCache,
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil

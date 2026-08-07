@@ -17,8 +17,11 @@ require (
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gofrs/flock v0.13.0
+	github.com/gtkit/gincache v1.1.0
+	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/httpc v1.4.0
@@ -70,6 +73,7 @@ require (
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.7 // indirect
 	github.com/aliyun/credentials-go v1.4.5 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
