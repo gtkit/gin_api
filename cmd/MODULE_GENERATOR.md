@@ -93,4 +93,4 @@ SQL 文件是可执行草稿，但必须人工检查索引、唯一约束、默�
 make check
 ```
 
-该命令检查架构边界、OpenAPI 契约、lint、vet 和 race test。
+该命令检查架构边界、依赖整洁、包级变量认领、镜像摘要、发布接线、应用身份、lint、vet 与 race test（权威清单见 Makefile 的 check 目标）。

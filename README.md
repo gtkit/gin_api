@@ -112,12 +112,14 @@ go run . module staff --field nickname:string --field status:uint8
 
 `make check` 依次执行：
 
-1. 架构边界检查。
-2. OpenAPI 文档结构和真实 Gin 路由一致性检查。
-3. `golangci-lint run ./...`。
-4. `go vet ./...`。
+1. 架构边界检查（`check-architecture`）。
+2. 依赖清单整洁（`check-tidy`）、包级变量重绑定认领（`check-package-vars`）。
+3. 镜像摘要固定（`check-image-digests`）、安全判定自检（`check-security-eval`）、发布接线（`check-release-wiring`）、应用身份零漂移（`check-appmeta`）。
+4. `golangci-lint run ./...`（`tool`）与 `go vet ./...`。
 5. race 测试并生成聚合 coverage profile。
 6. 校验全仓覆盖率不低于当前门禁（**以 `Makefile` 的 `COVERAGE_MIN` 为准**，本文不重复该数字——写死会与实际门禁分叉，而分叉时读者无从判断哪个是真的）。
+
+各步骤的**权威清单是 `Makefile` 的 `check` 目标**：本文只做导读，改动门禁时以 Makefile 为准。
 
 `make check-ci` 在 `make check` 基础上额外执行脚手架防腐冒烟 `check-generator`：把发布候选工作树
 （已跟踪文件 + 新增未跟踪且非 ignored 文件，排除 ignored）导出到临时目录跑生成器，验证产物编译 /

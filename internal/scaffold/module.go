@@ -202,6 +202,24 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 		if err := g.updateProviders(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
+		if err := g.updateMigrateModels(data, opts.DryRun, result, &plan); err != nil {
+			return nil, err
+		}
+	}
+
+	// --force 覆盖其余层却保留既有模型时，模型可能与生成的 DTO/迁移 SQL 分裂
+	// （module-scaffold-wiring spec）。**告警而不阻断**：模型是使用者拥有并
+	// 手写演进的那一层，而"改过模型后用 --force 刷新生成层"正是 --force 的
+	// 主要用途——拒绝执行会让它在自己的主场景里没法用。产物是待评审的代码
+	// （迁移 SQL 是草稿），让分裂可见即可，不必替使用者做决定。
+	if opts.Force {
+		note, err := g.modelDriftNote(data)
+		if err != nil {
+			return nil, err
+		}
+		if note != "" {
+			result.Notes = append(result.Notes, note)
+		}
 	}
 
 	if opts.DryRun {
@@ -263,6 +281,46 @@ func (g *ModuleGenerator) updateModuleConfigs(data moduleTemplateData, dryRun bo
 	return nil
 }
 
+// migrateModelsMarker 是迁移命令里 DDL 模型集合的注入锚点。
+const migrateModelsMarker = "\t\t\t// scaffold:migrate-models\n"
+
+// updateMigrateModels 把新模型接进迁移命令的 DDL 模型集合。
+//
+// 不接的话 `--from-model` 看不到新模块的模型：使用者以为生成器把迁移这层
+// 也接好了，而实际上漏了——那种漏法只有在真正需要按模型生成迁移时才暴露。
+func (g *ModuleGenerator) updateMigrateModels(
+	data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite,
+) error {
+	path := filepath.Join(g.root, "cmd", "migrate.go")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", g.rel(path), err)
+	}
+
+	line := fmt.Sprintf("\t\t\t&models.%s{},\n", data.StructName)
+	updated, changed, err := ensureLineBefore(string(content), line, migrateModelsMarker)
+	if err != nil {
+		return fmt.Errorf("update migrate ddl models: %w", err)
+	}
+	if !changed {
+		result.Skipped = append(result.Skipped, g.rel(path))
+		return nil
+	}
+	if dryRun {
+		result.Updated = append(result.Updated, g.rel(path))
+		return nil
+	}
+
+	formatted, err := formatWithImports(path, g.modulePath, []byte(updated))
+	if err != nil {
+		return fmt.Errorf("format %s: %w", g.rel(path), err)
+	}
+	*plan = append(*plan, pendingWrite{path: path, content: formatted, existed: true, original: content})
+
+	result.Updated = append(result.Updated, g.rel(path))
+	return nil
+}
+
 // moduleConfigMarkers 返回 platform/config 中的两个注入锚点。
 func moduleConfigMarkers() (fields, validators string) {
 	return "\t// scaffold:module-config-fields\n",
@@ -303,6 +361,35 @@ func (g *ModuleGenerator) updateConfigExample(data moduleTemplateData, dryRun bo
 
 	result.Updated = append(result.Updated, g.rel(path))
 	return nil
+}
+
+// modelDriftNote 在 --force 时报告"模型被保留、其余层被覆盖"的分裂风险。
+//
+// 返回空串表示没有风险。判据是**内容不一致**而不是"文件存在"：内容与模板
+// 一致时覆盖与保留等价，那不构成分裂。
+func (g *ModuleGenerator) modelDriftNote(data moduleTemplateData) (string, error) {
+	path := filepath.Join(g.root, "internal", "models", data.PackageName+".go")
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil // 模型不存在：本次会新建，不存在分裂
+		}
+		return "", fmt.Errorf("read %s: %w", g.rel(path), err)
+	}
+
+	rendered, err := renderTemplate(modelTemplate, data, true)
+	if err != nil {
+		return "", fmt.Errorf("render model template: %w", err)
+	}
+	if bytes.Equal(existing, rendered) {
+		return "", nil
+	}
+
+	return fmt.Sprintf(
+		"注意：%s 与本次模板产出不一致，而它**不会**被 --force 覆盖（模型由你手写演进）。"+
+			"本次重新生成的 DTO 与迁移 SQL 依据的是模板字段（--fields），"+
+			"请核对三者是否一致；需要让模型也回到模板形状时，先删除 %s 再生成。",
+		g.rel(path), g.rel(path)), nil
 }
 
 func (g *ModuleGenerator) generatedFiles(data moduleTemplateData) []generatedFile {
@@ -597,6 +684,14 @@ func findProjectRoot(startDir string) (string, error) {
 	current, err := filepath.Abs(startDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve project root from %q: %w", startDir, err)
+	}
+	// 解析符号链接后再向上找（module-scaffold-wiring spec）：项目根路径同时
+	// 决定并发锁的路径，两条指向同一项目的等价路径（一条经符号链接）
+	// 会算出两把不同的锁——并发防护就此被绕过，而两个进程都以为自己独占。
+	//
+	// 路径不存在时保持原样：那种情况由下面的向上查找报出更准确的错误。
+	if resolved, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+		current = resolved
 	}
 
 	for {

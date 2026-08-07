@@ -45,10 +45,14 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func(), err
 		// 硬编码母版路径会让派生项目静默生成 import 母版的代码。
 		migrate.WithProjectName(modulePath),
 		migrate.WithMigrationDir("database/migrations"),
+		// 生成器经 scaffold:migrate-models 标记把新模型注入这里
+		// （module-scaffold-wiring spec）：不注入的话，`--from-model` 看不到
+		// 新模块的模型，使用者以为生成器把迁移接好了，实际漏了这一层。
 		migrate.WithDDLModels(
 			&models.User{},
 			&models.UserProfile{},
 			&models.UserDeactivation{},
+			// scaffold:migrate-models
 		),
 		migrate.WithTimeout(5*time.Minute),
 	)

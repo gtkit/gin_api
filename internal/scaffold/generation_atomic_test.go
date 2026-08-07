@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // assertNoModuleArtifacts 断言一次失败的生成没有留下任何模块产物。
@@ -371,4 +372,96 @@ func TestGeneratedModuleConfigHasNoUnconsumedToggle(t *testing.T) {
 	// 有消费者的字段仍在。
 	assertFileContains(t, cfgPath, "PageSize")
 	assertFileContains(t, examplePath, "page_size:")
+}
+
+// TestGeneratorKeepsProjectBaselineConsistent 钉住生成物与项目基线一致
+// （module-scaffold-wiring spec）：新模型进入迁移命令的 DDL 集合、
+// 生成 SQL 的排序规则与项目基线一致。
+func TestGeneratorKeepsProjectBaselineConsistent(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	generator, err := NewModuleGenerator(root)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator: %v", err)
+	}
+	generator.now = func() time.Time { return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC) }
+
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Bootstrap: true, Public: true}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// 新模型必须能被 --from-model 发现：不注入的话使用者以为迁移这层也接好了。
+	assertFileContains(t, filepath.Join(root, "cmd", "migrate.go"), "&models.Admin{},")
+
+	// 排序规则对齐 database.collation 的项目基线：同一份 SQL 在不同默认
+	// collation 的实例上，比较与排序结果会不同。
+	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	assertFileContains(t, upSQL, "COLLATE=utf8mb4_unicode_ci")
+	assertFileNotContains(t, upSQL, "utf8mb4_0900_ai_ci")
+}
+
+// TestForceReportsModelDrift 钉住 --force 的分裂风险可见：
+// 模型不被覆盖，其余层被重新生成，结果里必须有提示。
+func TestForceReportsModelDrift(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	modelPath := filepath.Join(root, "internal", "models", "admin.go")
+	if err := os.MkdirAll(filepath.Dir(modelPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// 使用者手写演进过的模型。
+	if err := os.WriteFile(modelPath, []byte("package models\n\ntype Admin struct{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	generator, err := NewModuleGenerator(root)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator: %v", err)
+	}
+	result, err := generator.GenerateWithOptions("admin", GenerateOptions{
+		Force: true, Bootstrap: true, Public: true,
+	})
+	if err != nil {
+		t.Fatalf("Generate with --force: %v (refreshing generated layers is what --force is for)", err)
+	}
+
+	var noted bool
+	for _, note := range result.Notes {
+		if strings.Contains(note, "admin.go") && strings.Contains(note, "不会") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("no drift note was reported; notes = %v", result.Notes)
+	}
+}
+
+// TestProjectRootResolvesSymlinks 钉住项目根经符号链接归一化
+// （module-scaffold-wiring spec）：根路径同时决定并发锁的路径，两条指向
+// 同一项目的等价路径若算出两把不同的锁，并发防护就被绕过了。
+func TestProjectRootResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	link := filepath.Join(t.TempDir(), "linked-project")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	direct, err := NewModuleGenerator(root)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator(root): %v", err)
+	}
+	viaLink, err := NewModuleGenerator(link)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator(symlink): %v", err)
+	}
+
+	if direct.root != viaLink.root {
+		t.Fatalf("root via symlink = %q, want the same as direct %q: two different roots mean "+
+			"two different generation locks, and the concurrency guard is bypassed",
+			viaLink.root, direct.root)
+	}
 }

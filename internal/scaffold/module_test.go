@@ -603,6 +603,24 @@ func validateModuleConfigs(m ModuleConfigs) error {
 `,
 		// 配置模板锚点：示例必须与字段同批产出。
 		"config/env.yml.example": "modules:\n  # scaffold:module-config-example\n",
+		// 迁移命令的 DDL 模型集合也是注入目标：新模型必须能被 --from-model 发现。
+		// 迁移命令的 DDL 模型集合也是注入目标：新模型必须能被 --from-model 发现。
+		// **缩进必须镜像真实文件的嵌套层级**（函数体 → 调用 → 调用参数 = 3 层）：
+		// 注入锚点按含缩进的字面量匹配，而生成器会用 gofmt 归一化被注入的文件——
+		// 固件缩进不同的话，第二次生成就找不到锚点了。
+		"cmd/migrate.go": `package cmd
+
+import "github.com/gtkit/gin-api/internal/models"
+
+func newMigrateCommands() {
+	register(
+		withDDLModels(
+			&models.User{},
+			// scaffold:migrate-models
+		),
+	)
+}
+`,
 	}
 
 	for name, content := range files {

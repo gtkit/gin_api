@@ -150,9 +150,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
-| 契约破坏性门禁 | `scripts/check-openapi-breaking.sh` | 与上一个稳定 SemVer tag 比对；按数据流向判定（请求侧收窄 / 响应侧放宽）；覆盖 endpoint / 参数 / security / 状态码 / 媒体类型 / body 字段与约束；22 条规则各有负向与反向自检 |
-| 破坏性变更豁免 | `api/breaking-waivers.yml` | 逐项声明，无全局开关；字段不全或过期即门禁失败；操作与规则须同时命中 |
-| 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层 `WriteTimeout=0` |
+| 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层有保守写超时兜底，流式路由经 `ResponseController` 覆盖 |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
@@ -327,7 +325,7 @@ defer provider.Shutdown(context.Background())
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
 | 指标（OTel） | 默认 **no-op**：不接导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。接线见下方「接指标导出」 |
-| pprof + API 文档 | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败。同一端点的 `/docs` 提供契约查看器（编译期嵌入 openapi.json，自包含无外网依赖）；文档入口刻意不进业务路由与 OpenAPI 契约——dev 工具不该出现在对外契约里 |
+| pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `useRateLimit(g, deps.RateLimit, "策略ID")` 引用它 |
 
 ### 【示例 — 可按需删除】
