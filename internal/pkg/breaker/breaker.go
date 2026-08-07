@@ -11,12 +11,33 @@ package breaker
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
 	"github.com/sony/gobreaker/v2"
 )
+
+// defaultConsecutiveFailures 与 gobreaker 自身的默认判据一致（连续失败 > 5）。
+const defaultConsecutiveFailures = 5
+
+// boundedCount 把配置的计数翻译成库要的 uint32。
+//
+// 显式校验范围而不是裸转换：int 在 64 位平台上装得下远超 uint32 的值，
+// 裸转换会把一个"很大的阈值"回绕成一个很小的值——熔断因此在远低于
+// 配置意图的失败数上跳闸，而配置文件看起来完全正常。
+// 非正值取 fallback（0 表示交给库的默认）。
+func boundedCount(v int, fallback uint32) uint32 {
+	switch {
+	case v <= 0:
+		return fallback
+	case v > math.MaxUint32:
+		return math.MaxUint32
+	default:
+		return uint32(v)
+	}
+}
 
 // Config 是单个熔断实例的阈值。零值字段取保守默认。
 type Config struct {
@@ -84,21 +105,16 @@ func (r *Registry) instance(name string) *gobreaker.CircuitBreaker[struct{}] {
 	}
 
 	cfg := r.defaults
-	threshold := uint32(5)
-	if cfg.ConsecutiveFailures > 0 {
-		threshold = uint32(cfg.ConsecutiveFailures)
-	}
 	settings := gobreaker.Settings{
 		Name:    name,
 		Timeout: cfg.OpenTimeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			return counts.ConsecutiveFailures >= threshold
+			return counts.ConsecutiveFailures >= boundedCount(cfg.ConsecutiveFailures, defaultConsecutiveFailures)
 		},
 		OnStateChange: r.onStateChange,
 	}
-	if cfg.HalfOpenMaxRequests > 0 {
-		settings.MaxRequests = uint32(cfg.HalfOpenMaxRequests)
-	}
+	// 0 交给库取它自己的默认（半开期放行 1 个探测请求）。
+	settings.MaxRequests = boundedCount(cfg.HalfOpenMaxRequests, 0)
 
 	cb := gobreaker.NewCircuitBreaker[struct{}](settings)
 	r.breakers[name] = cb
