@@ -11,6 +11,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
+	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 
@@ -58,6 +59,8 @@ type App struct {
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
 	telemetry *telemetry.Provider
+	// tasksProducer 是异步任务入队端；关停时释放它的连接。
+	tasksProducer *tasks.Producer
 	// metricsCleanup 注销指标的异步回调。
 	//
 	// 不注销的话，回调会继续持有已停掉的 worker 与已关闭的连接池——
@@ -103,6 +106,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		outbound:       providers.outbound,
 		cache:          providers.cache,
 		telemetry:      providers.telemetry,
+		tasksProducer:  providers.tasksProducer,
 		metricsCleanup: providers.metricsCleanup,
 		drainWait:      drainWaitFrom(runtime.Config()),
 		status:         providers.status,
@@ -284,7 +288,12 @@ func (a *App) closeExtensions(ctx context.Context) error {
 	if !a.extClosed.CompareAndSwap(false, true) {
 		return nil
 	}
-	errs := []error{closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close()}
+	errs := []error{
+		closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close(),
+		// 入队端排在消费者停掉之后（worker 关停在前）：反过来会让正在收尾的
+		// 处理器无法再入队后续任务。
+		a.tasksProducer.Close(),
+	}
 	// 遥测放在最后 flush：前面几步可能还会产出指标（关闭计数、错误），
 	// 先 flush 就把它们留在了本地。它自带独立预算，不会拖住关停。
 	errs = append(errs, a.telemetry.Shutdown(ctx))

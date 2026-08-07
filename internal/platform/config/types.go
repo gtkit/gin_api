@@ -32,6 +32,8 @@ type Config struct {
 	Cache CacheConfig `mapstructure:"cache"`
 	// Telemetry 是 OpenTelemetry 导出配置。默认关闭，此时埋点仍在但走 no-op。
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
+	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。
+	Tasks TasksConfig `mapstructure:"tasks"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }

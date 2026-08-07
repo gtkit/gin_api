@@ -20,6 +20,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gofrs/flock v0.13.0
+	github.com/gtkit/asynqx v1.5.0
 	github.com/gtkit/gincache v1.1.0
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/gojwt v1.0.5
@@ -85,12 +86,15 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/gtkit/json/v2 v2.0.7 // indirect
 	github.com/gtkit/logrotate v1.1.3 // indirect
+	github.com/hibiken/asynq v0.26.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
+	github.com/spf13/cast v1.10.0 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/wneessen/go-mail v0.8.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect

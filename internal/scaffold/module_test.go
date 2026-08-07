@@ -417,13 +417,21 @@ func TestModuleGeneratorDoesNotRegisterWorker(t *testing.T) {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 
-	// buildWorkers 函数体除标记外仍为空：标记前后不得出现任何注册行。
+	// 标记必须原样保留，且生成器不得在 buildWorkers 里留下任何模块 worker 痕迹。
+	//
+	// 这里不断言"函数体除标记外为空"：母版自带的装配（如队列消费者）就在
+	// 这个函数里，那种形状断言会把母版新增能力误判成生成器注入。要钉的是
+	// **生成器没有注入**，判据是模块相关的符号一个都不出现。
 	got := string(content)
-	if !strings.Contains(got, "func buildWorkers(_ services) {\n\t// scaffold:module-workers\n}") {
-		t.Fatalf("buildWorkers 被意外注入内容:\n%s", got)
+	if !strings.Contains(got, "\t// scaffold:module-workers\n") {
+		t.Fatalf("scaffold:module-workers 标记不见了:\n%s", got)
 	}
 	if strings.Contains(got, "adminworker") || strings.Contains(got, "NewFuncWorker") {
 		t.Fatal("生成器不应向 buildWorkers 注入 worker 注册行")
+	}
+	if strings.Contains(got, "admin") && strings.Contains(got, "Worker") &&
+		strings.Contains(got, "adminWorker") {
+		t.Fatal("生成器在 buildWorkers 留下了模块 worker 引用")
 	}
 
 	// 不产出任何 worker 源码文件。
@@ -534,8 +542,11 @@ func createProjectFixture(t *testing.T) string {
 	root := t.TempDir()
 	files := map[string]string{
 		"go.mod": "module github.com/gtkit/gin-api\n\ngo 1.26.1\n",
-		// fixture 镜像真实 providers.go 的分阶段结构与五个脚手架标记
-		// （四个注入型 + 两个校验型：scaffold:module-workers、scaffold:module-authorizers）。
+		// fixture 镜像真实 providers.go 的分阶段结构与全部脚手架标记
+		// （四个注入型 + 三个校验型：scaffold:module-workers、
+		//  scaffold:module-authorizers、scaffold:task-handlers）。
+		// scaffold:task-handlers 的缩进必须与真实文件一致（在调用参数表里，
+		// 比语句层深一级）：校验按含缩进的字面量匹配。
 		"internal/bootstrap/providers.go": `package bootstrap
 
 import (
@@ -577,6 +588,13 @@ func buildEngine(svc services, mw middlewares) {
 }
 
 func buildWorkers(_ services) {
+	if consumer := newAsynqConsumerWorker(tasks.NewConsumer(
+		cfg, client, "asynq-consumer",
+		// scaffold:task-handlers
+	)); consumer != nil {
+		_ = consumer
+	}
+
 	// scaffold:module-workers
 }
 

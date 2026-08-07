@@ -647,6 +647,13 @@ func providersValidateOnlyMarkers() []string {
 		// 但它必须被认领并校验。此前它既不在注入集也不在校验集里——是一个看起来
 		// 是接线点、实际不参与任何流程的裸注释，而依赖它的功能会静默不生效。
 		"\t// scaffold:module-authorizers\n",
+		// scaffold:task-handlers 位于 buildWorkers 内的消费者构造参数表里，是
+		// tasks.Registrar 的追加锚点。它不参与注入：生成器不产出任务处理器，
+		// 而没有处理器时消费者根本不注册（不是注册一个空转的 worker），
+		// 因此"未追加处理器也能正常启动"无需注入任何东西即成立。
+		//
+		// 缩进比其他标记深一级：它在函数调用的参数列表里，而不是语句层。
+		"\t\t// scaffold:task-handlers\n",
 	}
 }
 

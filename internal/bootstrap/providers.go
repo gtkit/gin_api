@@ -23,6 +23,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
@@ -46,6 +47,8 @@ type providerSet struct {
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
 	telemetry *telemetry.Provider
+	// tasksProducer 是异步任务入队端，供各模块注入。
+	tasksProducer *tasks.Producer
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
 	// metricsCleanup 注销指标的异步回调，由 App 在关停时调用。
@@ -66,6 +69,8 @@ type infra struct {
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
 	telemetry *telemetry.Provider
+	// tasksProducer 是异步任务入队端；未启用时 Enqueue 报 ErrDisabled。
+	tasksProducer *tasks.Producer
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -193,6 +198,16 @@ func newProviders(
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
 	}
 
+	// 3d. 异步任务入队端。必须先于 service：service 要注入它才能入队。
+	//     未启用时它是一个空壳，Enqueue 报 ErrDisabled 而不是静默丢弃——
+	//     "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
+	tasksProducer, err := tasks.NewProducer(inf.cfg.Tasks, inf.resources.Rdb(0))
+	if err != nil {
+		return nil, fmt.Errorf("build task producer: %w", err)
+	}
+	inf.tasksProducer = tasksProducer
+	rb.push("task producer", tasksProducer.Close)
+
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)
 	if err != nil {
@@ -251,6 +266,7 @@ func newProviders(
 		outbound:       outbound,
 		cache:          responseCache,
 		telemetry:      telemetryProvider,
+		tasksProducer:  tasksProducer,
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil
@@ -551,6 +567,18 @@ func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, 
 			return nil, fmt.Errorf("register cleanup worker metrics: %w", regErr)
 		}
 		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
+	}
+
+	// 队列消费者：未启用队列或未注册任何处理器时不注册。
+	//
+	// 处理器由使用者在下方标记处按 tasks.Registrar 追加。没有处理器就不注册
+	// 消费者——一个空转的 worker 只会让关停多等一轮、让监控里多一个永远
+	// 空闲的实例，而不会处理任何东西。
+	if consumer := newAsynqConsumerWorker(tasks.NewConsumer(
+		inf.cfg.Tasks, inf.resources.Rdb(0), "asynq-consumer",
+		// scaffold:task-handlers
+	)); consumer != nil {
+		workers = append(workers, consumer)
 	}
 
 	// scaffold:module-workers
