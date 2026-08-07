@@ -22,6 +22,8 @@ var luaBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // newLuaBackend 造一个跑真实 Lua 的 backend，并把存储时钟钉在 luaBase。
 func newLuaBackend(t *testing.T) (*RedisBackend, *miniredis.Miniredis) {
 	t.Helper()
+	// miniredis 起真实 TCP 监听：受限环境必须跳过，否则 check-restricted 变红。
+	requireLoopback(t)
 
 	mr := miniredis.RunT(t)
 	mr.SetTime(luaBase)
@@ -189,6 +191,8 @@ func TestLuaRefillsOverTime(t *testing.T) {
 // 不删注册表成员，于是第二次探测就撞上 MaxKeys=1 被拒——而探针忽略判定结果，
 // 把"被拒"报告成"通过"。本测试的两个断言各盯一半：探测可重复、产物已清理。
 func TestProbeIsRepeatableAndLeavesNothing(t *testing.T) {
+	requireLoopback(t)
+
 	mr := miniredis.RunT(t)
 	mr.SetTime(luaBase)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
