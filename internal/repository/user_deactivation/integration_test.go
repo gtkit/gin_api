@@ -82,6 +82,22 @@ func TestIntegrationDeleteOlderThanAgainstRealSchema(t *testing.T) {
 
 		tx, _ := dbtx.From(ctx)
 
+		cutoff := now.Add(-30 * 24 * time.Hour)
+
+		// **先把基线清零**：真实库里可能已存在早于 cutoff 的历史档案，而下面
+		// 第二批删除不带 LIMIT，会把它们一并算进删除数，使计数断言失真——
+		// 本测试此前只在空库上成立，一旦库里有一条旧记录就会红。
+		// 清理发生在事务内，最终随 rollback 一并撤销，真实数据不受影响。
+		for {
+			purged, e := repo.DeleteOlderThan(ctx, cutoff, 1000)
+			if e != nil {
+				return e
+			}
+			if purged == 0 {
+				break
+			}
+		}
+
 		// 造 5 条旧档案 + 2 条新档案。
 		//
 		// created_at 由 GORM 在 Create 时自动填当前时刻，因此"旧记录"要显式
@@ -108,8 +124,6 @@ func TestIntegrationDeleteOlderThanAgainstRealSchema(t *testing.T) {
 				return e
 			}
 		}
-
-		cutoff := now.Add(-30 * 24 * time.Hour)
 
 		// 第一批限 2 行：**必须恰好删 2 行**。
 		// LIMIT 被忽略时这里会返回 5，分批循环因此失去意义。
