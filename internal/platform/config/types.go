@@ -34,6 +34,8 @@ type Config struct {
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。
 	Tasks TasksConfig `mapstructure:"tasks"`
+	// AlertBot 是群机器人告警通道。默认关闭，启用时与 news 通道并存。
+	AlertBot AlertBotConfig `mapstructure:"alertbot"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }

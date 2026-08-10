@@ -29,6 +29,7 @@ require (
 	github.com/gtkit/json v1.0.0
 	github.com/gtkit/logger/v2 v2.3.0
 	github.com/gtkit/migratex v0.4.0
+	github.com/gtkit/msgbot v1.2.0
 	github.com/gtkit/news v1.1.10
 	github.com/gtkit/ormx v1.5.0
 	github.com/gtkit/redisx v1.3.0

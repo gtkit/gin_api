@@ -179,6 +179,8 @@ github.com/gtkit/logrotate v1.1.3 h1:sYvlbj6DJnwpQSGdIRX8HXpeY4JoOiNEkg0+dyTEFsg
 github.com/gtkit/logrotate v1.1.3/go.mod h1:jMy+ZV00qYDutmOvzAQJlxiNP8g4xVg8yRvdGezp12s=
 github.com/gtkit/migratex v0.4.0 h1:y1pjq909AChge9n3jF64Z7GKnKkomEcExwBOJtZ2NJU=
 github.com/gtkit/migratex v0.4.0/go.mod h1:KE38KUN5C5H3K3VIdW5CDpB5KajNwdKj5PHrZyeC9pA=
+github.com/gtkit/msgbot v1.2.0 h1:hZzfZZBYBV9dw+u1qFn7D4Baaqgei3J3l2/sQ/C25A0=
+github.com/gtkit/msgbot v1.2.0/go.mod h1:JP+7G5/STEjqJhPbzHrpPqwTNlFicKhXfJEMgOKyRYA=
 github.com/gtkit/news v1.1.10 h1:g5JIRMdLsH6qtB2xQYT8pAj8wsn0Az4hzgFUwJdmsNc=
 github.com/gtkit/news v1.1.10/go.mod h1:3dof2px5RmzSmQAtlJljKI9s0wIUY/5a2jQHJnV3ANs=
 github.com/gtkit/ormx v1.5.0 h1:e8ipbYo3WoDTCLdKEL1BN7hDMIAMPaqGcL+ASqbIqrQ=
