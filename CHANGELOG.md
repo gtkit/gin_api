@@ -5,6 +5,44 @@
 
 破坏性变更一律用 ⚠ 标注，并附具体的迁移动作。
 
+## v0.1.2
+
+无破坏性变更：新增配置项留空即等于原行为，从 v0.1.1 升级无需改动 env.yml。
+
+### 安全
+
+- **body 绑定不再受 query 污染**。gin 的 `ShouldBind` 在 Content-Type 为 form 时会
+  同时从 query string 与 body 取值填充结构体（字段无 `form` tag 时回退用字段名匹配），
+  攻击者改一下 Content-Type 就能用 query 注入本该只来自 body 的字段。已实测确认这条
+  路是通的。母版自带端点的 DTO 字段本就是用户可控的，注入拿不到额外收益——但任何
+  一个 DTO 将来加了不该由用户控制的字段（`Role`/`TenantID`/`IsAdmin`）就会变成真实
+  漏洞，且加字段的人不会收到提示。
+  绑定统一改用 `gtkit/ginx` 的 `BindBody`（绑定前临时清空 RawQuery），并新增架构
+  传感器：`transport/http` 出现 `c.ShouldBind`/`BindJSON` 即门禁失败。
+  `ShouldBindQuery` 与 `ShouldBindUri` 不在此列——它们的数据来源本就是 query 与路径。
+
+### 变更
+
+- **告警 webhook 底层从 `gtkit/news/fs` 换成 `gtkit/msgbot`**，多出加签、失败重试与
+  钉钉 / 企业微信支持。`news.platform` 留空按飞书处理，与本字段引入之前一致。
+  新增可选配置：
+
+  ```yaml
+  news:
+    platform: ""     # feishu（留空即此值）/ dingtalk / wecom
+    secret: ""       # 平台侧开启加签时必填
+  ```
+
+### 文档
+
+- SSE 与 WebSocket 的写超时分层写进 guide：SSE 直接用 `gtkit/ssex`（它自己管连接级
+  写 deadline——起流时解除全局 `WriteTimeout`，每次写出前后临时设置与恢复），
+  **不要再挂 `StreamTimeout`**，两套机制会互相覆盖。`StreamTimeout` 保留给直接往
+  `c.Writer` 写的长响应（大文件下载、自研分块推送）。
+- 补记一条容易致命的约束：SSE 后台写入的 goroutine 必须在 handler 返回前退出。
+  gin 的 `c.Writer` 是 Context 内部字段，handler 返回后归还对象池，晚退出一步
+  写的就是别人的响应——跨请求数据泄漏，且不报错。
+
 ## v0.1.1
 
 ### ⚠ 配置契约的破坏性变更
