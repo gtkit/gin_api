@@ -156,9 +156,6 @@ func (c *Config) Validate() error {
 	if err := validateTasksConfig(c.Tasks, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateAlertBotConfig(c.AlertBot); err != nil {
-		errs = append(errs, err)
-	}
 
 	return errors.Join(errs...)
 }

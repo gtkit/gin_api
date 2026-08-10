@@ -34,8 +34,6 @@ type Config struct {
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。
 	Tasks TasksConfig `mapstructure:"tasks"`
-	// AlertBot 是群机器人告警通道。默认关闭，启用时与 news 通道并存。
-	AlertBot AlertBotConfig `mapstructure:"alertbot"`
 	// Modules 是各业务模块的强类型配置子树，由生成器逐模块注入字段。
 	Modules ModuleConfigs `mapstructure:"modules"`
 }
@@ -335,8 +333,18 @@ type SSLConfig struct {
 	PEM string `mapstructure:"pem"`
 }
 
+// NewsConfig 是告警通道配置。
+//
+// webhook 底层用 gtkit/msgbot，因此支持飞书 / 钉钉 / 企业微信三家；
+// Platform 留空按飞书处理，与本字段引入之前的行为一致。
 type NewsConfig struct {
-	FSURL     string `mapstructure:"fsurl"`
+	// FSURL 是机器人 webhook 地址。字段名沿用历史（最初只支持飞书），
+	// 语义已是"告警 webhook"，各平台通用。
+	FSURL string `mapstructure:"fsurl"`
+	// Platform 是机器人平台：feishu（默认）、dingtalk 或 wecom。
+	Platform string `mapstructure:"platform"`
+	// Secret 是加签密钥，平台侧开启"加签"时必填。
+	Secret    string `mapstructure:"secret"`
 	AppID     string `mapstructure:"appid"`
 	AppSecret string `mapstructure:"appsecret"`
 }

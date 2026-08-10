@@ -19,7 +19,6 @@ import (
 
 	loggerv2 "github.com/gtkit/logger/v2"
 
-	"github.com/gtkit/gin-api/internal/pkg/alertbot"
 	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/runtime/resource"
@@ -74,7 +73,7 @@ func InitWithConfig(cfg *config.Config) error {
 		loggerv2.WithDivision("daily"),
 		loggerv2.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
 		loggerv2.WithCompress(cfg.Log.Compress != 0),
-		loggerv2.WithMessager(buildMessager(cfg, notifier)),
+		loggerv2.WithMessager(&News{notifier: notifier}),
 		loggerv2.WithMessagerQueueSize(alertQueueLimit),
 	}
 	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
@@ -102,46 +101,6 @@ func resolvePath(path, fallback string) string {
 	}
 
 	return path
-}
-
-// buildMessager 组装告警通道。
-//
-// 群机器人未启用时只有 news 一条通道，形态与从前完全一致。启用时两条**并存**
-// 而不是替代：静默改变"告警发到哪里"，会让某个值班群在毫无察觉的情况下
-// 不再收到消息——那种失效只能靠"怎么一直没人反馈"来发现。
-//
-// 机器人构造失败时**不让启动失败**，只降级为不接这条通道：它是既有告警之外
-// 的增量，为它把整个进程挡在门外，代价与收益不成比例。news 通道构造失败
-// 仍然是启动失败（见 InitWithConfig），因为那是原有的唯一通道。
-func buildMessager(cfg *config.Config, notifier *news.Notifier) loggerv2.Messager {
-	base := &News{notifier: notifier}
-
-	bot, err := alertbot.New(cfg.AlertBot)
-	if err != nil || bot == nil {
-		return base
-	}
-	return &fanoutMessager{channels: []loggerv2.Messager{base, bot}}
-}
-
-// fanoutMessager 把一条告警发往全部通道。
-//
-// 逐个同步发送：Messager 没有返回值，无法上报"某条通道失败"，因此并发发送
-// 换不来任何可观测性，只会让告警队列里多出一批无人回收的 goroutine。
-// 每条通道自己带超时，总耗时因此有界。
-type fanoutMessager struct {
-	channels []loggerv2.Messager
-}
-
-func (f *fanoutMessager) Send(msg string) {
-	for _, ch := range f.channels {
-		ch.Send(msg)
-	}
-}
-
-func (f *fanoutMessager) SendTo(url, msg string) {
-	for _, ch := range f.channels {
-		ch.SendTo(url, msg)
-	}
 }
 
 // News 把 news.Notifier 适配成 loggerv2 的 Messager。

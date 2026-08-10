@@ -7,8 +7,11 @@ import (
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
+	"github.com/gtkit/msgbot"
+	"github.com/gtkit/msgbot/dingtalk"
+	"github.com/gtkit/msgbot/feishu"
+	"github.com/gtkit/msgbot/wecom"
 	newslib "github.com/gtkit/news"
-	"github.com/gtkit/news/fs"
 	"github.com/gtkit/stringx"
 
 	"github.com/gtkit/gin-api/internal/pkg/mail"
@@ -51,16 +54,15 @@ type Notifier struct {
 // 构造失败返回 error 让启动失败：配置了却静默没有通道是禁止形态。
 func NewWithConfig(cfg *config.Config) (*Notifier, error) {
 	n := &Notifier{
-		now: func() string { return time.Now().Format(time.DateTime) },
-		// WebHookSendCtx 而不是 WebHookSend：告警发生在日志调用路径上，且
-		// logger.Sync 关停时会逐条排空异步队列——无超时的 webhook 会让
-		// 优雅关闭被一个外部端点无限拖住。
-		webhookSender: fs.WebHookSendCtx,
-		errorLogger:   func(msg string) { logger.Error(msg) },
+		now:         func() string { return time.Now().Format(time.DateTime) },
+		errorLogger: func(msg string) { logger.Error(msg) },
 	}
 	if cfg == nil {
+		// 无配置时按飞书兜底，与本字段引入之前的行为一致。
+		n.webhookSender = webhookSenderFor("", "")
 		return n, nil
 	}
+	n.webhookSender = webhookSenderFor(cfg.News.Platform, cfg.News.Secret)
 	n.defaultURL = cfg.News.FSURL
 	n.envName = string(cfg.Env)
 
@@ -86,6 +88,59 @@ func NewWithConfig(cfg *config.Config) (*Notifier, error) {
 	}
 
 	return n, nil
+}
+
+// 支持的机器人平台。留空按飞书处理——该字段是后加的，历史配置里没有它。
+const (
+	platformFeishu   = "feishu"
+	platformDingTalk = "dingtalk"
+	platformWeCom    = "wecom"
+)
+
+// webhookSenderFor 返回一个按 url 发送告警的函数。
+//
+// 底层是 gtkit/msgbot：相比原先的 gtkit/news/fs，它多出加签、失败重试与
+// 钉钉/企业微信支持，而三家平台的报文差异全部由它承担。
+//
+// **每次调用现建 provider 是廉价的**：msgbot 在未注入 HTTPClient 时用包级
+// 共享的 client（internal.DefaultClient），因此这里不会产生新的连接池。
+// 保留"运行期传 url"的能力是为了不改 Warn 的既有语义——调用方仍可把告警
+// 发到默认之外的机器人。
+func webhookSenderFor(platform, secret string) func(context.Context, string, ...string) error {
+	return func(ctx context.Context, url string, args ...string) error {
+		if strings.TrimSpace(url) == "" {
+			return fmt.Errorf("news: webhook url is empty")
+		}
+
+		cfg := msgbot.Config{
+			WebhookURL: url,
+			Secret:     secret,
+			// 与其他通道同值同语义的独立超时：告警发生在日志调用路径上，
+			// 通道故障不能把日志调用方拖住。
+			Timeout: alertSendTimeout,
+		}
+
+		var (
+			provider msgbot.Provider
+			err      error
+		)
+		switch strings.TrimSpace(platform) {
+		case platformDingTalk:
+			provider, err = dingtalk.New(cfg)
+		case platformWeCom:
+			provider, err = wecom.New(cfg)
+		case platformFeishu, "":
+			provider, err = feishu.New(cfg)
+		default:
+			return fmt.Errorf("news: unknown alert platform %q (want %q, %q or %q)",
+				platform, platformFeishu, platformDingTalk, platformWeCom)
+		}
+		if err != nil {
+			return fmt.Errorf("news: build %s webhook: %w", platform, err)
+		}
+
+		return provider.SendText(ctx, strings.Join(args, " "))
+	}
 }
 
 func (n *Notifier) Warn(url string, args ...string) {
