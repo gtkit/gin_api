@@ -213,3 +213,73 @@ func TestNilStagerIsSafe(t *testing.T) {
 		t.Fatal("nil Stager 的 Middleware 返回了 nil，调用方会 panic")
 	}
 }
+
+// TestAppTokenBypassesCache 钉住本项目自有的认证头也被当作身份。
+//
+// 漏掉它的后果不是少挡一次，而是那条路径完全没有防护——而 App-Token 恰恰是
+// 最容易被忘的一类：不是标准头，写判据时脑子里只有 Authorization。
+func TestAppTokenBypassesCache(t *testing.T) {
+	t.Parallel()
+
+	stager := newTestStager(t)
+	got := serve(t, stager, func(r *http.Request) {
+		r.Header.Set("App-Token", "some-token")
+	}, http.StatusOK)
+
+	if got != 2 {
+		t.Fatalf("handler 被调用 %d 次，want 2：带 App-Token 的请求被缓存了", got)
+	}
+}
+
+// TestIdentityHeadersCoverEveryAuthHeader 钉住判据表与认证实现同步。
+//
+// 判据表与 internal/middleware 的认证头是两处各写一份（不 import 传输层），
+// 因此必须有一条测试盯着"新增认证头时这里也改了"。表为空或漏掉任一项，
+// 对应路径就完全没有防护。
+func TestIdentityHeadersCoverEveryAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]bool{"Authorization": false, "App-Token": false}
+	for _, h := range identityHeaders {
+		if _, ok := want[h]; ok {
+			want[h] = true
+		}
+	}
+	for header, covered := range want {
+		if !covered {
+			t.Fatalf("identityHeaders 缺少认证头 %q：该路径完全没有缓存防护", header)
+		}
+	}
+}
+
+// TestAuditFlagsUncacheableResponses 钉住响应期审计能识别三类误用。
+//
+// 审计**挡不住泄漏**（gincache 的判据在请求期，缓存写入发生在 handler 返回后），
+// 它的作用是把已经发生的误用变成日志里可见的信号。判据本身必须是对的，
+// 否则连这点作用也没有。
+func TestAuditFlagsUncacheableResponses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "private", value: "private", want: true},
+		{name: "no-store", value: "no-store", want: true},
+		{name: "组合指令中含 private", value: "max-age=60, private", want: true},
+		{name: "大小写与空格", value: "  No-Store  ", want: true},
+		{name: "public 不算", value: "public, max-age=60", want: false},
+		{name: "no-cache 不算（它允许存储，只要求校验）", value: "no-cache", want: false},
+		{name: "空值", value: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := containsNoStoreOrPrivate(tt.value); got != tt.want {
+				t.Fatalf("containsNoStoreOrPrivate(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
