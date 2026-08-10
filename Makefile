@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci hooks check-hooks check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -122,6 +122,12 @@ hooks: ## 安装 git 钩子（pre-push 跑 make check-ci）
 check-hooks: ## 校验钩子安装语义（临时仓库实跑，不碰本机 .git/hooks）
 	@ bash ./scripts/check-hooks.sh
 
+check-build-context: ## 校验主二进制依赖的源码目录都被 .dockerignore 放行
+	## 零成本静态检查，因此进日常门禁：漏放行的后果是镜像构建编译失败，
+	## 而那一步只在 security-release 里跑——只在发版时才告诉你的问题，
+	## 等于让每次发版都变成一次排雷（pkg/ 就这么潜伏到了发版当天）。
+	@ bash ./scripts/check-build-context.sh
+
 check-generator: ## 脚手架防腐冒烟：导出发布候选工作树生成模块并验证编译/传感器/goimports（含门禁自检）
 	@ bash ./scripts/check-generator.sh --self-test
 	@ bash ./scripts/check-generator.sh --verify-scope
@@ -215,7 +221,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

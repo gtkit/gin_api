@@ -19,6 +19,10 @@
 !cmd
 !internal
 !doc
+# pkg：对外发布的包，被 internal 引用（如 internal/middleware 依赖 pkg/ratelimit）。
+# 漏放行它的后果不是上下文变大，而是**镜像构建直接编译失败**——而这一步只在
+# security-release 里跑，问题会一路潜伏到发版当天。
+!pkg
 
 # stage 2 需要从 builder 复制的配置示例（非真实配置）
 !config/env.yml.example
@@ -32,6 +36,9 @@
 !database/migrations
 !database/migrations/**
 
+# **新增顶层源码目录必须在此显式放行**：allowlist 对本地产物默认安全，
+# 但对源码目录默认**不**安全——漏一个就是构建失败，且失败点在发布门禁最末端。
+#
 # 源码目录按整目录放行，会顺带把目录内的 Markdown 与 OS 产物一并带进上下文
 # （实测 doc/ 下的本地过程文档与 internal/.DS_Store 都进了上下文）。
 # 本项目无 go:embed（全仓零命中），编译只需要 .go 文件，因此显式排除这两类；
