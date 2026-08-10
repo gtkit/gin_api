@@ -73,12 +73,22 @@ start_mysql() {
 }
 
 # write_config 生成一份指向测试库的临时配置，放在项目根之外。
+#
+# **必须把密钥与身份类必填项也填上**：config/env.yml.example 里它们刻意留空
+# （示例填了真值就会被 cp 到生产后原封不动地用下去），而配置校验 fail-fast，
+# 所以只替换 database 段的话，migrate 命令连启动都做不到。这些值与 DB 密码
+# 同性质——一次性的验证用值，随 workdir 一起销毁。
 write_config() {
   workdir="$(mktemp -d)"
   mkdir -p "$workdir/config/env" "$workdir/config/pem" "$workdir/logs"
-  python3 - "$workdir/config/env/env.yml" "$DB_HOST" "$DB_PORT" "$DB_NAME" "$DB_USER" "$DB_PASS" <<'PY'
+
+  # JWT 密钥用项目自己的命令生成：它不加载配置（纯粹写文件），因此不存在
+  # "要先有配置才能生成配置所需的密钥"这个死循环。
+  ( cd "$PWD" && GOWORK=off go run . jwt generate --kid verify --out-dir "$workdir/config/pem" ) >/dev/null
+
+  python3 - "$workdir/config/env/env.yml" "$DB_HOST" "$DB_PORT" "$DB_NAME" "$DB_USER" "$DB_PASS" "$workdir" <<'PY'
 import pathlib, re, sys
-out, host, port, name, user, password = sys.argv[1:7]
+out, host, port, name, user, password, workdir = sys.argv[1:8]
 src = pathlib.Path("config/env.yml.example").read_text(encoding="utf-8")
 def setkv(block, key, value):
     global src
@@ -89,6 +99,19 @@ setkv("database", "port", f'"{port}"')
 setkv("database", "name", name)
 setkv("database", "username", user)
 setkv("database", "password", f'"{password}"')
+
+# 以下都是 fail-fast 校验要求的必填项，示例里刻意留空。
+# 值只用于本次验证，随 workdir 一起销毁；32 字节下限来自各自的校验器。
+verify_secret = "migrate-verify-only-not-a-real-secret-0123456789"
+setkv("jwt", "kid", '"verify"')
+setkv("jwt", "private_key_path", f'"{workdir}/config/pem/verify.private.pem"')
+setkv("jwt", "public_key_path", f'"{workdir}/config/pem/verify.public.pem"')
+setkv("jwt", "issuer", '"migrate-verify"')
+setkv("jwt", "audiences", '["migrate-verify"]')
+setkv("auth", "mode", '"local"')
+setkv("auth", "refresh_replay_secret", f'"{verify_secret}"')
+setkv("ratelimit", "key_hmac_secret", f'"{verify_secret}"')
+
 pathlib.Path(out).write_text(src, encoding="utf-8")
 PY
 }
