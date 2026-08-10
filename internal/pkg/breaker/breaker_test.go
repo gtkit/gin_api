@@ -120,3 +120,88 @@ func TestUnknownDownstreamIsRejected(t *testing.T) {
 		t.Fatalf("registry grew from %d to %d: the downstream set must be fixed at assembly", before, got)
 	}
 }
+
+// TestExcludedErrorsDoNotResetFailureCount 钉住排除项不清零连续失败计数。
+//
+// 这是 IsExcluded 与 IsSuccessful 的实质差别，也是熔断能否真正生效的关键：
+// 用 IsSuccessful 表达"不计入"会把该次调用**计为成功**从而清零计数，于是
+// 下游连续失败 4 次（阈值 5）后夹进一次客户端取消，计数归零、永远到不了阈值
+// ——保护看起来在，实际不在。
+func TestExcludedErrorsDoNotResetFailureCount(t *testing.T) {
+	t.Parallel()
+
+	downstream := errors.New("downstream is down")
+	r := NewRegistry(Config{ConsecutiveFailures: 3}, "svc")
+
+	fail := func() error { return downstream }
+	canceledFn := func() error { return context.Canceled }
+
+	// 两次真实失败 + 一次取消（应被排除，不清零）+ 一次真实失败 = 触发熔断。
+	if err := r.Do("svc", fail); !errors.Is(err, downstream) {
+		t.Fatalf("first failure: %v", err)
+	}
+	if err := r.Do("svc", fail); !errors.Is(err, downstream) {
+		t.Fatalf("second failure: %v", err)
+	}
+	if err := r.Do("svc", canceledFn); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation should pass through: %v", err)
+	}
+	if err := r.Do("svc", fail); !errors.Is(err, downstream) {
+		t.Fatalf("third failure: %v", err)
+	}
+
+	// 第三次真实失败已达阈值：熔断必须已跳闸。
+	err := r.Do("svc", fail)
+	if !IsOpen(err) {
+		t.Fatalf("熔断未跳闸（err=%v）：取消被当成成功清零了连续失败计数", err)
+	}
+}
+
+// TestSuccessStillResetsFailureCount 钉住排除判据没有把成功也排除掉。
+//
+// 库在 isSuccessful 之前调用 isExcluded，且 nil error 也会走它。排除判据漏掉
+// err != nil 的话，成功调用会被一并排除——连续失败计数从此永不清零，
+// 一个早已恢复的下游会在下次失败时立刻跳闸。
+func TestSuccessStillResetsFailureCount(t *testing.T) {
+	t.Parallel()
+
+	downstream := errors.New("downstream is down")
+	r := NewRegistry(Config{ConsecutiveFailures: 3}, "svc")
+
+	fail := func() error { return downstream }
+	ok := func() error { return nil }
+
+	_ = r.Do("svc", fail)
+	_ = r.Do("svc", fail)
+	// 一次成功必须清零：否则下一次失败就是第三次，会误跳闸。
+	if err := r.Do("svc", ok); err != nil {
+		t.Fatalf("success returned an error: %v", err)
+	}
+	if err := r.Do("svc", fail); !errors.Is(err, downstream) {
+		t.Fatalf("failure after success: %v", err)
+	}
+	// 计数已被成功清零，此时只累积了 1 次失败，不该跳闸。
+	if err := r.Do("svc", fail); IsOpen(err) {
+		t.Fatal("成功调用没有清零计数：熔断在远低于阈值的失败数上跳闸了")
+	}
+}
+
+// TestJoinedErrorWithRealFailureIsNotExcluded 钉住聚合错误不被整体排除。
+//
+// errors.Is 对聚合错误的任一成员命中即真，于是
+// errors.Join(context.Canceled, realFailure) 会被判成"只是取消"，
+// 真实的下游故障从熔断统计里彻底消失——下游一直在坏，熔断器永远不跳。
+func TestJoinedErrorWithRealFailureIsNotExcluded(t *testing.T) {
+	t.Parallel()
+
+	downstream := errors.New("downstream is down")
+	mixed := errors.Join(context.Canceled, downstream)
+
+	if !DefaultIsFailure(mixed) {
+		t.Fatal("取消与真实故障的聚合错误被整体排除了：下游故障会从熔断统计里消失")
+	}
+	// 纯取消仍须排除。
+	if DefaultIsFailure(errors.Join(context.Canceled, context.DeadlineExceeded)) {
+		t.Fatal("纯取消/超时的聚合错误被计入了熔断")
+	}
+}

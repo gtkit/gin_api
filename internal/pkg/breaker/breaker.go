@@ -10,11 +10,12 @@
 package breaker
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 
 	logger "github.com/gtkit/logger/v2"
 	"github.com/sony/gobreaker/v2"
@@ -47,15 +48,21 @@ type Config struct {
 	IsFailure func(error) bool
 }
 
-// DefaultIsFailure 是默认失败判据：调用方取消与超时**不**计入熔断。
+// DefaultIsFailure 是默认失败判据：**纯粹**的调用方取消与超时不计入熔断。
 //
 // 取消来自上游（客户端断开、请求超时、进程关停），它不说明下游有任何问题；
 // 计进去会让一次流量抖动把健康的下游熔断掉。
+//
+// 用 errx.IsPureAbort 而不是 errors.Is：errors.Is 对聚合错误的**任一**成员
+// 命中即真，于是 errors.Join(context.Canceled, realFailure) 会被整体判成
+// "只是取消"，真实的下游故障因此从熔断统计里彻底消失——下游一直在坏，
+// 熔断器却永远不跳。这个陷阱本仓已在 errx 里解决过一次，这里必须复用同一份
+// 判定，而不是再写一遍 errors.Is。
 func DefaultIsFailure(err error) bool {
 	if err == nil {
 		return false
 	}
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	return !errx.IsPureAbort(err)
 }
 
 // Registry 持有装配期登记的具名熔断实例，构造后不可变。
@@ -130,9 +137,21 @@ func (r *Registry) settings(cfg Config, name string) gobreaker.Settings {
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures >= threshold
 		},
-		// IsSuccessful 是库对"这次算成功吗"的提问：不计入熔断的错误
-		// （取消、业务错误）在这里报告为成功，于是既不跳闸也不清零计数。
-		IsSuccessful: func(err error) bool { return !r.isFailure(err) },
+		// **必须用 IsExcluded 而不是 IsSuccessful 表达"不计入统计"。**
+		//
+		// IsSuccessful 返回 true 的语义是"这次算成功"，它会**清零**
+		// ConsecutiveFailures。用它表达排除的后果是熔断实际失效：下游连续
+		// 失败 4 次（阈值 5）之后夹进一次客户端取消，计数即归零，于是永远
+		// 到不了阈值——保护看起来在，实际不在。已实测复现（见 breaker_test）。
+		//
+		// IsExcluded 才是"这次调用不进任何计数"：库内 onExclusion 只递增
+		// TotalExclusions，不动连续失败数。IsSuccessful 留空用库默认
+		// （err == nil 即成功），正是所需语义。
+		//
+		// err != nil 这一条不能省：库在 isSuccessful **之前**调用 isExcluded，
+		// 且 nil error 也会走它。漏掉判断会把成功调用一并排除——连续失败
+		// 计数从此永不清零，一个早已恢复的下游会在下次失败时立刻跳闸。
+		IsExcluded: func(err error) bool { return err != nil && !r.isFailure(err) },
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			// 状态变更是低基数事件，每次都记：它是"下游为什么突然全部快速失败/
 			// 恢复"的第一手线索。

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -90,8 +91,16 @@ func validateTasksConfig(cfg TasksConfig, redis RedisConfig) error {
 		errs = append(errs, errors.New(
 			"tasks are enabled but redis.addr is empty: the queue has no backing store"))
 	}
+	// redis_db 必须真的在 redis.dbs 里：不校验的话资源层取不到该库的客户端，
+	// 装配拿到 nil 后按"redis 未配置"处理——表现为"配了队列却说没有 redis"，
+	// 而配置文件看起来完全正常。
 	if cfg.RedisDB < 0 {
 		errs = append(errs, fmt.Errorf("tasks.redis_db %d must not be negative", cfg.RedisDB))
+	} else if !slices.Contains(redis.DBs, cfg.RedisDB) {
+		errs = append(errs, fmt.Errorf(
+			"tasks.redis_db %d is not listed in redis.dbs %v: the resource layer only opens the "+
+				"declared databases, so the queue would get no client at all",
+			cfg.RedisDB, redis.DBs))
 	}
 	for name, weight := range cfg.Queues {
 		if strings.TrimSpace(name) == "" {

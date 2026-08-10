@@ -201,7 +201,7 @@ func newProviders(
 	// 3d. 异步任务入队端。必须先于 service：service 要注入它才能入队。
 	//     未启用时它是一个空壳，Enqueue 报 ErrDisabled 而不是静默丢弃——
 	//     "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
-	tasksProducer, err := tasks.NewProducer(inf.cfg.Tasks, inf.resources.Rdb(0))
+	tasksProducer, err := tasks.NewProducer(inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB))
 	if err != nil {
 		return nil, fmt.Errorf("build task producer: %w", err)
 	}
@@ -575,7 +575,7 @@ func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, 
 	// 消费者——一个空转的 worker 只会让关停多等一轮、让监控里多一个永远
 	// 空闲的实例，而不会处理任何东西。
 	if consumer := newAsynqConsumerWorker(tasks.NewConsumer(
-		inf.cfg.Tasks, inf.resources.Rdb(0), "asynq-consumer",
+		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-consumer",
 		// scaffold:task-handlers
 	)); consumer != nil {
 		workers = append(workers, consumer)

@@ -13,7 +13,7 @@ import (
 func TestValidateTasksConfig(t *testing.T) {
 	t.Parallel()
 
-	redis := RedisConfig{Addr: "127.0.0.1:6379"}
+	redis := RedisConfig{Addr: "127.0.0.1:6379", DBs: []int{0, 1}}
 
 	tests := []struct {
 		name    string
@@ -45,6 +45,19 @@ func TestValidateTasksConfig(t *testing.T) {
 			cfg:     TasksConfig{Enabled: true, RedisDB: -1},
 			redis:   redis,
 			wantErr: "must not be negative",
+		},
+		{
+			// 未在 redis.dbs 里声明的库拿不到客户端，装配会按"redis 未配置"
+			// 处理——表现为"配了队列却说没有 redis"，而配置看起来完全正常。
+			name:    "redis_db 未在 dbs 中声明",
+			cfg:     TasksConfig{Enabled: true, RedisDB: 7},
+			redis:   redis,
+			wantErr: "not listed in redis.dbs",
+		},
+		{
+			name:  "使用已声明的非默认库",
+			cfg:   TasksConfig{Enabled: true, RedisDB: 1},
+			redis: redis,
 		},
 		{
 			name:    "关停预算超上限",
