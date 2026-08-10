@@ -35,6 +35,7 @@ require (
 	github.com/gtkit/restyx v1.1.0
 	github.com/gtkit/smsx v1.4.3
 	github.com/gtkit/smsx/providers/aliyun v0.0.0-20260418190407-648277873486
+	github.com/gtkit/ssex v0.2.2
 	github.com/gtkit/stringx v1.1.6
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
 	github.com/knadh/koanf/parsers/yaml v1.1.0
