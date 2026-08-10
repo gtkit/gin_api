@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/ginx"
 	"github.com/gtkit/goerr"
 
 	"github.com/gtkit/gin-api/internal/module/auth/application"
@@ -61,7 +62,7 @@ func NewHandler(service *application.Service) *Handler {
 // Register 建号并直接签发令牌。
 func (h *Handler) Register(c *gin.Context) {
 	var req dto.RegisterRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}
@@ -83,7 +84,7 @@ func (h *Handler) Register(c *gin.Context) {
 // Login 校验凭据并签发令牌。
 func (h *Handler) Login(c *gin.Context) {
 	var req dto.LoginRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}
@@ -106,7 +107,7 @@ func (h *Handler) Login(c *gin.Context) {
 // Refresh 用刷新令牌换取新的令牌对。
 func (h *Handler) Refresh(c *gin.Context) {
 	var req dto.RefreshRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}
@@ -126,7 +127,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 // 认证中间件能提供。
 func (h *Handler) Logout(c *gin.Context) {
 	var req dto.LogoutRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}

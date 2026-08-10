@@ -647,8 +647,13 @@ func NewHandler(service *application.Service) *Handler {
 	return &Handler{service: service}
 }
 
+// 添加写操作（Create / Update）时，body 绑定用 ginx.BindBody 而**不是**
+// c.ShouldBind：后者在 Content-Type 为 form 时会把 query 参数一并并入绑定结果，
+// 于是本该只来自 body 的字段可以被 query 注入。架构传感器会拦下 c.ShouldBind，
+// 但先知道原因比撞上门禁更省事。
 func (h *Handler) List(c *gin.Context) {
 	var req dto.{{.StructName}}ListRequest
+	// 这里用 ShouldBindQuery 是对的：列表参数的来源本就是 query。
 	if err := c.ShouldBindQuery(&req); err != nil {
 		resp.BindStructErr(c, err)
 		return

@@ -7,6 +7,7 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/ginx"
 	"github.com/gtkit/goerr"
 )
 
@@ -42,7 +43,7 @@ func (h *Handler) Get(c *gin.Context) {
 
 func (h *Handler) Update(c *gin.Context) {
 	var req dto.UserUpdateRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}
@@ -82,7 +83,7 @@ func (h *Handler) Update(c *gin.Context) {
 // 而不是放宽全局认证让已注销账号继续通过——那会让注销失去意义。
 func (h *Handler) Deactivate(c *gin.Context) {
 	var req dto.UserDeactivateRequest
-	if err := c.ShouldBind(&req); err != nil {
+	if err := ginx.BindBody(c, &req); err != nil {
 		resp.BindStructErr(c, err)
 		return
 	}

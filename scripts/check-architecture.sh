@@ -60,6 +60,23 @@ check_no_match \
   "${MOD}/internal/repository/|gorm\.io/gorm" \
   internal/module/*/transport/http
 
+# body 绑定必须只信 body、不信 query。
+#
+# gin 的 ShouldBind 在 Content-Type 为 form 时会**同时**从 query string 与 body
+# 取值填充结构体；字段没有 form tag 时它回退用字段名匹配。于是攻击者只要把
+# Content-Type 改成 form，就能用 query 注入本该只来自 body 的字段。
+#
+# 当前 DTO 的字段本就是用户可控的，注入拿不到额外收益——但这是结构性缺口：
+# 任何一个 DTO 将来加了不该由用户控制的字段（Role / TenantID / IsAdmin 这类），
+# 它立刻变成真实漏洞，而加字段的人不会收到任何提示。本规则就是那个提示。
+#
+# 只禁 ShouldBind / ShouldBindJSON / ShouldBindWith：ShouldBindQuery 与
+# ShouldBindUri 的数据来源本就是 query 与路径，语义明确，不在此列。
+check_no_match \
+  "transport/http uses gin body binding (use ginx.BindBody: query must not pollute body)" \
+  "c\.(ShouldBind|ShouldBindJSON|ShouldBindWith|Bind|BindJSON)\(" \
+  internal/module/*/transport/http
+
 check_no_match \
   "repository imports gin / module" \
   "github\.com/gin-gonic/gin|${MOD}/internal/module/" \

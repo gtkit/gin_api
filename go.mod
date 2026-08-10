@@ -23,6 +23,7 @@ require (
 	github.com/gtkit/asynqx v1.5.0
 	github.com/gtkit/gincache v1.1.0
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
+	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/httpc v1.4.0
