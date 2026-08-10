@@ -158,3 +158,105 @@ func TestSSEStreamHeartbeatRejectsNonPositiveInterval(t *testing.T) {
 		t.Fatal("非正的心跳间隔被接受了")
 	}
 }
+
+// TestNilSSEStreamIsSafe 钉住 nil 流不 panic。
+//
+// SSE handler 常在循环里写，一次 panic 会连带 recover 中间件把整条连接终止，
+// 而调用方本可以据错误正常收尾。Context() 返回已取消的 ctx，让调用方的
+// select 循环立即退出，而不是永久阻塞在一个永远不会就绪的 channel 上。
+func TestNilSSEStreamIsSafe(t *testing.T) {
+	t.Parallel()
+
+	var s *SSEStream
+
+	if err := s.Data("x"); !errors.Is(err, ErrNoStream) {
+		t.Fatalf("Data on nil = %v, want ErrNoStream", err)
+	}
+	if err := s.Start(); !errors.Is(err, ErrNoStream) {
+		t.Fatalf("Start on nil = %v, want ErrNoStream", err)
+	}
+	if s.Started() {
+		t.Fatal("nil 流报告已开始")
+	}
+
+	ctx := s.Context()
+	if ctx == nil {
+		t.Fatal("nil 流的 Context() 返回 nil，调用方会 panic")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("nil 流的 ctx 未取消：调用方的 select 会永久阻塞")
+	}
+
+	// 心跳在 nil 流上必须立即返回，而不是空转 ticker。
+	done := make(chan error, 1)
+	go func() { done <- s.Heartbeat(context.Background(), 10*time.Millisecond) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nil 流的 Heartbeat 没有退出")
+	}
+}
+
+// TestSSEStreamRejectsWritesAfterClose 钉住 Close 之后拒绝写入，且错误可判别。
+//
+// EventSource 在服务端结束流后会自动重连，约定前端收到 close 事件后主动关闭。
+// Close 之后若还能写，那些帧会发给一个正在关闭的消费者——而调用方需要能
+// 用 errors.Is 区分"流已终止"与真实的写失败。
+func TestSSEStreamRejectsWritesAfterClose(t *testing.T) {
+	t.Parallel()
+
+	var afterClose error
+	engine := gin.New()
+	engine.GET("/stream", func(c *gin.Context) {
+		c.Set(streamRenewKey, func() error { return nil })
+		s := NewSSEStream(c)
+		if err := s.Close("bye"); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		afterClose = s.Data("late")
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if afterClose == nil {
+		t.Fatal("Close 之后仍然接受写入")
+	}
+	if !errors.Is(afterClose, ssex.ErrStreamClosed) {
+		t.Fatalf("error = %v, want it to wrap ssex.ErrStreamClosed（调用方需要能区分流已终止与真实写失败）", afterClose)
+	}
+}
+
+// TestSSEStreamHeartbeatStopsWhenClientGone 钉住客户端断开即停止心跳。
+//
+// 不停的话会继续打到某一拍写失败为止，那期间的每一拍都是白做的——
+// 而且它占着 handler goroutine 不返回。
+func TestSSEStreamHeartbeatStopsWhenClientGone(t *testing.T) {
+	t.Parallel()
+
+	engine := gin.New()
+	done := make(chan error, 1)
+	engine.GET("/stream", func(c *gin.Context) {
+		c.Set(streamRenewKey, func() error { return nil })
+		s := NewSSEStream(c)
+
+		// 模拟客户端断开：换掉请求的 ctx 并立即取消。
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		c.Request = c.Request.WithContext(ctx)
+		streamOnCancelledCtx := NewSSEStream(c)
+		cancel()
+
+		go func() { done <- streamOnCancelledCtx.Heartbeat(context.Background(), time.Hour) }()
+		_ = s
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("客户端断开后 Heartbeat 返回错误 %v，want nil（这是预期的收尾）", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("客户端断开后 Heartbeat 没有退出：它会一直占着 handler goroutine")
+	}
+}

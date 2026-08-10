@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,8 +26,17 @@ import (
 // 写方法逐个显式转发而**不内嵌** *ssex.Stream：内嵌会让未覆盖的方法绕过续期，
 // 而"绕过"在这里是静默的——正是这一层要消灭的失效形态。
 //
-// 并发约定与 ssex.Stream 一致：它内部用互斥锁串行化写方法，因此可从多个
-// goroutine 写入同一连接。
+// 并发与生命周期约定（两条都来自 ssex.Stream，缺一条就会出事）：
+//
+//	并发——内部用互斥锁串行化写方法，可从多个 goroutine 并发调用。
+//	生命周期——**后台写入的 goroutine 必须在 handler 返回前退出**。
+//	  底层 http.ResponseWriter 只在 handler 执行期间有效：gin 的 c.Writer 是
+//	  Context 的内部字段，handler 返回后归还对象池，下个请求会把它重置到
+//	  另一个响应上。晚退出一步，写的就是**别人的响应**——一次跨请求的数据
+//	  泄漏，而且不会报错。
+//
+// 因此心跳要么在 handler goroutine 里同步调用 Heartbeat（它阻塞到 ctx 结束），
+// 要么起 goroutine 但用 errgroup/WaitGroup 保证 handler 返回前它已经退出。
 type SSEStream struct {
 	inner *ssex.Stream
 	c     *gin.Context
@@ -40,14 +50,40 @@ func NewSSEStream(c *gin.Context, opts ...ssex.Option) *SSEStream {
 	return &SSEStream{inner: ssex.NewStream(c.Writer, c.Request, opts...), c: c}
 }
 
+// ErrNoStream 表示在 nil 流上写入。
+//
+// 返回错误而不是 panic：SSE handler 常在循环里写，一次 panic 会连带
+// recover 中间件把整条连接终止，而调用方本可以据错误正常收尾。
+var ErrNoStream = errors.New("middleware: SSE stream is nil")
+
 // Start 发出响应头。
-func (s *SSEStream) Start() error { return s.write("start", s.inner.Start) }
+//
+// 用闭包而不是方法值 s.inner.Start：方法值在**传参时**就解引用 s.inner，
+// 早于 write 里的 nil 检查——nil 流会在这里 panic 而不是拿到 ErrNoStream。
+func (s *SSEStream) Start() error {
+	return s.write("start", func() error { return s.inner.Start() })
+}
 
 // Started 报告响应头是否已发出。
-func (s *SSEStream) Started() bool { return s.inner.Started() }
+func (s *SSEStream) Started() bool { return s != nil && s.inner.Started() }
 
 // Context 返回该流的上下文，客户端断开时它被取消。
-func (s *SSEStream) Context() context.Context { return s.inner.Context() }
+//
+// nil 流返回一个已取消的 ctx：调用方的 select 循环因此立即退出，
+// 而不是永久阻塞在一个永远不会就绪的 channel 上。
+func (s *SSEStream) Context() context.Context {
+	if s == nil {
+		return canceledContext()
+	}
+	return s.inner.Context()
+}
+
+// canceledContext 返回一个已取消的 context。
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
 
 // Data 写出一个 data-only 事件。
 func (s *SSEStream) Data(payload any) error {
@@ -94,10 +130,20 @@ func (s *SSEStream) Close(payload any) error {
 	return s.write("close", func() error { return s.inner.Close(payload) })
 }
 
-// Heartbeat 按固定间隔自动心跳直到 ctx 取消。
+// Heartbeat 按固定间隔自动心跳，直到 ctx 取消或客户端断开。
 //
-// 它在 ssex 内部循环写出，每一拍都要续期——否则空闲预算会在两拍之间耗尽，
-// 而心跳的全部意义就是维持这条连接。
+// 每一拍都续期——否则空闲预算会在两拍之间耗尽，而心跳的全部意义就是维持
+// 这条连接。ssex 自己的 Heartbeat 做不到这一点：它的内部循环插不进续期。
+//
+// 与 ssex 的两处差异：
+//
+//	正常收尾返回 nil 而不是 ctx.Err()——ctx 到期是**预期**的结束方式，
+//	  返回错误会让每次正常收尾都在调用方那里记一条错误日志。
+//	额外监听客户端断开（stream 自身的 ctx），断开即退出；否则会继续打到
+//	  某一拍写失败为止，那期间的每一拍都是白做的。
+//
+// **它阻塞到结束**：这正是安全的用法——在 handler goroutine 里同步调用，
+// 天然满足"后台写入必须在 handler 返回前退出"。
 func (s *SSEStream) Heartbeat(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("middleware: SSE heartbeat interval must be positive")
@@ -127,6 +173,9 @@ func (s *SSEStream) Heartbeat(ctx context.Context, interval time.Duration) error
 // 顺序不能反：续期是为"下一次写"争取空闲预算，而本次写出必须先真的发生。
 // 反过来做会在写出阻塞时用掉刚续的那份预算。
 func (s *SSEStream) write(op string, fn func() error) error {
+	if s == nil {
+		return fmt.Errorf("%w: %s", ErrNoStream, op)
+	}
 	if err := fn(); err != nil {
 		return fmt.Errorf("middleware: SSE %s: %w", op, err)
 	}
