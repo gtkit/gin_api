@@ -41,8 +41,8 @@ type providerSet struct {
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
 	rateLimits rateLimitAssembly
-	// outbound 是具名出站 HTTP 客户端工厂；未声明 clients 时为空工厂。
-	outbound *httpclient.Factory
+	// outbound 是具名出站执行入口（客户端 + 熔断）；未声明 clients 时为空入口。
+	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
@@ -63,8 +63,8 @@ type infra struct {
 	httpConfig HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
-	// outbound 是具名出站 HTTP 客户端工厂，供各模块按下游名取用。
-	outbound *httpclient.Factory
+	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
+	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
@@ -174,15 +174,19 @@ func newProviders(
 	inf.rateLimits = rateLimits
 	rb.push("rate limits", func() error { return closeRateLimits(rateLimits) })
 
-	// 3b. 出站 HTTP 客户端。必须先于 service 装配：下游集合是启动期事实，
-	//     service 在构造时就按名字取用，名字没登记属装配错误。
+	// 3b. 出站执行入口：具名客户端 + 按同一批下游名登记的熔断实例
+	//     （outbound-http-resilience spec）。必须先于 service 装配：下游集合
+	//     是启动期事实，service 在构造时就按名字取用，名字没登记属装配错误。
 	//     不做 I/O（只建连接池），因此不需要启动 ctx。
-	outbound, err := httpclient.New(inf.cfg.Outbound)
+	outbound, err := httpclient.NewDownstreams(inf.cfg.Outbound)
 	if err != nil {
-		return nil, fmt.Errorf("build outbound http clients: %w", err)
+		return nil, fmt.Errorf("build outbound downstreams: %w", err)
 	}
 	inf.outbound = outbound
 	rb.push("outbound http clients", outbound.Close)
+	if names := outbound.Names(); len(names) > 0 {
+		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
+	}
 
 	// 3c. 响应缓存。默认关闭；关闭时产出透传中间件，调用方不必判空。
 	//     必须先于路由装配：模块在注册只读路由时就要挂上它。
@@ -479,6 +483,9 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 			Service:   svc.user,
 			Auth:      mw.auth,
 			RateLimit: rateLimitStager,
+			// 响应缓存注入口（cache-preset spec）：路由显式挂载才生效，
+			// 关闭态是透传中间件，模块无需判空。
+			Cache: inf.cache.Middleware,
 		})
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
@@ -614,7 +621,8 @@ func newTokenParser(cfg *config.Config, issuer jwtauth.TokenParser) (middleware.
 		return issuer, nil
 	}
 
-	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelCfg.Secret, laravelCfg.Algorithm, sharedauth.ClientRole)
+	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelCfg.Secret, laravelCfg.Algorithm, sharedauth.ClientRole,
+		time.Duration(cfg.JWT.ClockSkewSeconds)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("init laravel verifier: %w", err)
 	}

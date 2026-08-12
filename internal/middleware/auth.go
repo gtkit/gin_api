@@ -223,12 +223,18 @@ var errTokenAbsent = errors.New("token is absent")
 // tokenFromHeader 提取认证令牌（local-authentication spec）：
 // Bearer 为主、App-Token 兼容；两头同时出现且值不一致即拒绝——
 // 静默取其一会让代理注入的头悄悄改变认证身份。
+// **同名头出现多个不一致取值同样拒绝**：Header.Get 只取第一个，而不同的
+// 代理/框架取第一个还是最后一个并无共识——攻击者追加一个同名头，身份就
+// 随下游的取值策略漂移。一致的重复容忍：有些代理会原样复制既有头。
 func tokenFromHeader(c *gin.Context) (string, error) {
 	bearer, err := bearerToken(c)
 	if err != nil {
 		return "", err
 	}
-	legacy := c.Request.Header.Get(tokenHeaderName)
+	legacy, err := singleHeaderValue(c, tokenHeaderName)
+	if err != nil {
+		return "", err
+	}
 
 	switch {
 	case bearer != "" && legacy != "" && bearer != legacy:
@@ -243,12 +249,31 @@ func tokenFromHeader(c *gin.Context) (string, error) {
 	}
 }
 
+// singleHeaderValue 返回同名头的唯一取值；多个不一致取值即拒绝。
+func singleHeaderValue(c *gin.Context, name string) (string, error) {
+	values := c.Request.Header.Values(name)
+	if len(values) == 0 {
+		return "", nil
+	}
+	first := values[0]
+	for _, v := range values[1:] {
+		if v != first {
+			return "", fmt.Errorf("request carries %d conflicting %s headers", len(values), name)
+		}
+	}
+	return first, nil
+}
+
 // bearerToken 从 Authorization 头提取 Bearer 令牌。
 //
 // 头缺失或使用其他 scheme（如 Basic）→ 空串无错误：那不是本中间件的载体。
 // scheme 匹配（大小写不敏感，RFC 7235）但令牌为空 → 报错：形态非法不是缺席。
+// 同名头多个不一致取值 → 拒绝（见 tokenFromHeader 的说明）。
 func bearerToken(c *gin.Context) (string, error) {
-	raw := c.Request.Header.Get(authorizationHeaderName)
+	raw, err := singleHeaderValue(c, authorizationHeaderName)
+	if err != nil {
+		return "", err
+	}
 	if raw == "" {
 		return "", nil
 	}

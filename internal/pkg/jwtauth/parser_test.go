@@ -33,7 +33,7 @@ func TestNewFallbackParserRequiresPrimary(t *testing.T) {
 func TestFallbackParserParseToken(t *testing.T) {
 	t.Parallel()
 
-	laravelVerifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole)
+	laravelVerifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole, 0)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}

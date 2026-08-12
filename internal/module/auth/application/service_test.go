@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +63,9 @@ type fakeHasher struct {
 	dummyCalls int
 	hashErr    error
 	compareErr error
+	// dummyErr 模拟掩护比对自身的失败（闸门取消/超时）：
+	// 此时没有发生比对，dummyCalls 不计数。
+	dummyErr error
 }
 
 func (h *fakeHasher) Hash(_ context.Context, password string) (string, error) {
@@ -84,6 +88,9 @@ func (h *fakeHasher) Compare(_ context.Context, hashed, password string) error {
 func (h *fakeHasher) CompareWithDummy(context.Context, string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.dummyErr != nil {
+		return h.dummyErr
+	}
 	h.dummyCalls++
 	return ErrInvalidCredentials
 }
@@ -356,6 +363,60 @@ func TestUnknownAccountAndWrongPasswordAreIndistinguishable(t *testing.T) {
 	if unknownErr.Error() != wrongErr.Error() {
 		t.Fatalf("the two failures differ in text (%q vs %q): the response would tell an "+
 			"attacker which phones exist", unknownErr, wrongErr)
+	}
+}
+
+// TestGateFailureIsUniformAcrossAccountExistence 钉住防枚举的取消路径。
+//
+// 闸门饱和或请求取消时，掩护比对的错误若被吞掉，不存在的账号立刻回 401，
+// 存在的账号却报基础设施错误——状态码与耗时重新泄漏账号是否存在。
+func TestGateFailureIsUniformAcrossAccountExistence(t *testing.T) {
+	t.Parallel()
+
+	gateErr := fmt.Errorf("auth: wait for a password hashing slot: %w", context.Canceled)
+	ctx := context.Background()
+
+	// 不存在的账号：掩护比对报闸门错误。
+	unknown := newHarness(t)
+	unknown.hasher.dummyErr = gateErr
+	_, unknownErr := unknown.svc.Login(ctx, "13900000000", "pw")
+
+	// 存在的账号：真实比对报同一个闸门错误。
+	known := newHarness(t)
+	if _, err := known.svc.Register(ctx, "13800000000", "correct", "nick"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	known.hasher.compareErr = gateErr
+	_, knownErr := known.svc.Login(ctx, "13800000000", "correct")
+
+	if errors.Is(unknownErr, ErrInvalidCredentials) {
+		t.Fatalf("unknown-account path masked the gate failure as invalid credentials: %v", unknownErr)
+	}
+	if !errors.Is(unknownErr, context.Canceled) || !errors.Is(knownErr, context.Canceled) {
+		t.Fatalf("gate cancellation must propagate on both paths: unknown=%v known=%v",
+			unknownErr, knownErr)
+	}
+}
+
+// TestRegisterPartialSuccessIsExplicit 钉住"账号已建、令牌未签发"的表达。
+//
+// 表达成普通失败的话，客户端重试注册只会撞上"手机号已注册"——
+// 一个既成事实被表达成了从未发生。
+func TestRegisterPartialSuccessIsExplicit(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.refresh.issueErr = errors.New("redis is down")
+
+	_, err := h.svc.Register(context.Background(), "13800000000", "pw", "nick")
+	if !errors.Is(err, ErrRegisteredLoginRequired) {
+		t.Fatalf("Register = %v, want ErrRegisteredLoginRequired", err)
+	}
+	if _, exists := h.creds.byPhone["13800000000"]; !exists {
+		t.Fatal("the account was not created; the sentinel would be lying about a partial success")
+	}
+	if h.auditor.failureCount() == 0 {
+		t.Fatal("a partial success must be audited at failure level")
 	}
 }
 

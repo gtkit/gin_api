@@ -35,6 +35,17 @@ type Deps struct {
 	// 模块只声明受哪些策略约束，不决定每条挂在认证的哪一侧——那个位置由策略
 	// 自身的作用域决定，推导逻辑收口在装配层的唯一一处。
 	RateLimit func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+	// Cache 按 TTL 取路由级 GET 响应缓存中间件（cache-preset spec），由装配层注入。
+	// ttl <= 0 取配置默认值；缓存关闭时注入的是透传中间件，模块无需判空。
+	//
+	// 只对**匿名可访问的只读路由**有意义：带身份的请求在中间件内一律绕过缓存，
+	// 挂在认证路由上等于没挂。挂法（写在具体路由上，不 Group.Use 全组开启）：
+	//
+	//	g.GET("/hot", deps.Cache(0), handler.Hot)
+	//
+	// 本模块当前全部路由都要求身份，因此不挂；字段保留是装配契约——
+	// 新增匿名只读路由时直接使用，不需要再改装配层。
+	Cache func(ttl time.Duration) gin.HandlerFunc
 }
 
 // Register 在给定路由组上注册 user 模块的路由。

@@ -587,3 +587,35 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 		t.Fatalf("time.Local = %q, want Asia/Shanghai", got)
 	}
 }
+
+// TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail 钉住"先刷写再返回"
+// （resource-lifecycle spec）：主 logger 就绪后校验器初始化失败，
+// 已缓冲的日志与告警必须在错误返回前排空——装配失败恰是最需要告警送达的时刻。
+func TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail(t *testing.T) {
+	originalInitLog := initLogWithConfig
+	originalVerify := initVerify
+	originalJSONCheck := checkJSONRuntime
+	originalDrain := drainProcessLogs
+	defer func() {
+		initLogWithConfig = originalInitLog
+		initVerify = originalVerify
+		checkJSONRuntime = originalJSONCheck
+		drainProcessLogs = originalDrain
+	}()
+
+	initLogWithConfig = func(*config.Config) error { return nil }
+	initVerify = func(...verify.Option) error { return errors.New("validator exploded") }
+	checkJSONRuntime = func() {}
+
+	var drains int
+	drainProcessLogs = func(time.Duration, <-chan struct{}) { drains++ }
+
+	err := initProcessRuntime(&config.Config{Env: "test"})
+	if err == nil {
+		t.Fatal("initProcessRuntime succeeded despite the validator failure")
+	}
+	if drains != 1 {
+		t.Fatalf("logs were drained %d times before returning, want 1: a startup failure "+
+			"must not leave the alert queue unflushed", drains)
+	}
+}

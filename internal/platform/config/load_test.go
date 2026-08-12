@@ -495,11 +495,11 @@ func TestValidateLaravelJWTConfig(t *testing.T) {
 		},
 		{
 			name:    "enabled with secret and default algorithm passes",
-			laravel: LaravelJWTConfig{Enabled: true, Secret: "laravel-secret"},
+			laravel: LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 32)},
 		},
 		{
 			name:    "enabled with uppercase hs512 passes",
-			laravel: LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "HS512"},
+			laravel: LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 64), Algorithm: "HS512"},
 		},
 		{
 			name:        "enabled without secret rejected",
@@ -513,13 +513,30 @@ func TestValidateLaravelJWTConfig(t *testing.T) {
 		},
 		{
 			name:        "enabled with asymmetric algorithm rejected",
-			laravel:     LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "rs256"},
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 32), Algorithm: "rs256"},
 			wantErrText: "jwt.laravel.algorithm",
 		},
 		{
 			name:        "enabled with none algorithm rejected",
-			laravel:     LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "none"},
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 32), Algorithm: "none"},
 			wantErrText: "jwt.laravel.algorithm",
+		},
+		// 密钥长度下限按算法（laravel-legacy-token-verify spec）：
+		// 短于哈希输出长度的密钥让暴力搜索密钥比伪造签名更便宜。
+		{
+			name:        "hs256 short secret rejected",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 31)},
+			wantErrText: "requires at least 32 bytes",
+		},
+		{
+			name:        "hs384 short secret rejected",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 47), Algorithm: "hs384"},
+			wantErrText: "requires at least 48 bytes",
+		},
+		{
+			name:        "hs512 short secret rejected",
+			laravel:     LaravelJWTConfig{Enabled: true, Secret: strings.Repeat("s", 63), Algorithm: "hs512"},
+			wantErrText: "requires at least 64 bytes",
 		},
 	}
 
@@ -588,5 +605,56 @@ func validConfigForTest() *Config {
 			Issuer:    "gin-api",
 			Audiences: []string{"app"},
 		},
+	}
+}
+
+// TestValidateNewsConfig 钉住告警通道的启动校验：配置错误不得延迟到首次告警。
+func TestValidateNewsConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		news        NewsConfig
+		wantErrText string
+	}{
+		{name: "空配置合法（通道关闭）", news: NewsConfig{}},
+		{name: "留空平台走飞书默认", news: NewsConfig{FSURL: "https://open.feishu.cn/hook/x"}},
+		{name: "dingtalk 合法", news: NewsConfig{Platform: "dingtalk"}},
+		{name: "平台大小写不敏感", news: NewsConfig{Platform: "WeCom"}},
+		{
+			name:        "未知平台拒绝",
+			news:        NewsConfig{Platform: "slack"},
+			wantErrText: "news.platform",
+		},
+		{
+			name:        "相对 URL 拒绝",
+			news:        NewsConfig{FSURL: "open.feishu.cn/hook/x"},
+			wantErrText: "news.fsurl",
+		},
+		{
+			name:        "非 http(s) scheme 拒绝",
+			news:        NewsConfig{FSURL: "ftp://example.com/hook"},
+			wantErrText: "news.fsurl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateNewsConfig(tt.news)
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("validateNewsConfig() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateNewsConfig() = nil, want error containing %q", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("error %q does not contain %q", err, tt.wantErrText)
+			}
+		})
 	}
 }

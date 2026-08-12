@@ -139,6 +139,21 @@ func TestValidateOutboundConfig(t *testing.T) {
 			},
 			wantErr: "must not be empty",
 		},
+		{
+			name: "熔断阈值为负",
+			cfg:  OutboundConfig{Breaker: OutboundBreakerConfig{ConsecutiveFailures: -1}},
+			// 未声明客户端也要拦：写错的阈值会在第一个下游接入时才爆。
+			wantErr: "consecutive_failures -1 must not be negative",
+		},
+		{
+			name:    "熔断开启态超上限",
+			cfg:     OutboundConfig{Breaker: OutboundBreakerConfig{OpenTimeout: time.Hour}},
+			wantErr: "open_timeout",
+		},
+		{
+			name: "熔断零值合法（取库默认）",
+			cfg:  OutboundConfig{Breaker: OutboundBreakerConfig{}},
+		},
 	}
 
 	for _, tt := range tests {

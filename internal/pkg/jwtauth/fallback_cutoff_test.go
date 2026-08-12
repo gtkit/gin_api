@@ -34,7 +34,7 @@ func TestFallbackStopsAtCutoff(t *testing.T) {
 	cutoff := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	primaryErr := errors.New("primary rejects everything")
 
-	verifier, err := NewLaravelVerifier("a-laravel-secret-long-enough-for-hs256", "hs256", "user")
+	verifier, err := NewLaravelVerifier("a-laravel-secret-long-enough-for-hs256", "hs256", "user", 0)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestFallbackStopsAtCutoff(t *testing.T) {
 func TestFallbackRequiresCutoff(t *testing.T) {
 	t.Parallel()
 
-	verifier, err := NewLaravelVerifier("a-laravel-secret-long-enough-for-hs256", "hs256", "user")
+	verifier, err := NewLaravelVerifier("a-laravel-secret-long-enough-for-hs256", "hs256", "user", 0)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier: %v", err)
 	}

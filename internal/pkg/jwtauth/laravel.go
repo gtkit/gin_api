@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/gtkit/gojwt/claims"
@@ -21,6 +22,17 @@ var laravelSigningMethods = map[string]jwtv5.SigningMethod{
 	"hs512": jwtv5.SigningMethodHS512,
 }
 
+// laravelSecretMinBytes 是各算法的密钥长度下限（字节）。
+//
+// 下限取哈希输出长度（RFC 2104 对 HMAC 的建议下界）：HMAC 的安全强度上界
+// 是密钥熵，短于哈希输出长度的密钥让暴力搜索密钥比伪造签名更便宜——
+// 而"配置非空"完全表达不了这个约束。
+var laravelSecretMinBytes = map[string]int{
+	"hs256": 32,
+	"hs384": 48,
+	"hs512": 64,
+}
+
 // LaravelVerifier 验证旧 Laravel（tymon/jwt-auth）签发的存量 token：只验不签。
 // 过渡期兼容层——Laravel 下线且存量 token 全部过期后，整包删除本文件与 FallbackParser。
 //
@@ -30,12 +42,18 @@ type LaravelVerifier struct {
 	secret []byte
 	method jwtv5.SigningMethod
 	role   string
+	// leeway 是时效校验的时钟偏移容忍，与主验证器同源（jwt.clock_skew_seconds）。
+	// 两个验证器的时钟口径必须一致：否则同一枚"刚过期"的令牌，走哪条验签
+	// 路径决定它是否有效——行为随实现细节漂移。
+	leeway time.Duration
 }
 
 // NewLaravelVerifier 创建 Laravel 存量 token 验证器。
 // algorithm 取值 hs256|hs384|hs512（大小写不敏感，留空按 hs256）；
-// role 是验证通过后合成进 claims 的客户端角色，由装配方传入（如 sharedauth.ClientRole）。
-func NewLaravelVerifier(secret, algorithm, role string) (*LaravelVerifier, error) {
+// secret 长度必须达到所选算法的下限（HS256/384/512 分别为 32/48/64 字节）；
+// role 是验证通过后合成进 claims 的客户端角色，由装配方传入（如 sharedauth.ClientRole）；
+// leeway 是时效校验的时钟偏移容忍，传主验证器同源的值（负值按 0 处理）。
+func NewLaravelVerifier(secret, algorithm, role string, leeway time.Duration) (*LaravelVerifier, error) {
 	if strings.TrimSpace(secret) == "" {
 		return nil, errors.New("laravel verifier: secret is required")
 	}
@@ -51,11 +69,21 @@ func NewLaravelVerifier(secret, algorithm, role string) (*LaravelVerifier, error
 	if !ok {
 		return nil, fmt.Errorf("laravel verifier: algorithm %q is not supported (hs256|hs384|hs512)", algorithm)
 	}
+	if minLen := laravelSecretMinBytes[alg]; len(secret) < minLen {
+		return nil, fmt.Errorf(
+			"laravel verifier: secret is %d bytes, %s requires at least %d "+
+				"(a key shorter than the hash output weakens HMAC below its design strength)",
+			len(secret), alg, minLen)
+	}
+	if leeway < 0 {
+		leeway = 0
+	}
 
 	return &LaravelVerifier{
 		secret: []byte(secret),
 		method: method,
 		role:   role,
+		leeway: leeway,
 	}, nil
 }
 
@@ -65,10 +93,15 @@ func NewLaravelVerifier(secret, algorithm, role string) (*LaravelVerifier, error
 func (v *LaravelVerifier) ParseToken(
 	_ context.Context, tokenString string, opts ...jwtv5.ParserOption,
 ) (*claims.Claims, error) {
-	parserOpts := append([]jwtv5.ParserOption{
+	baseOpts := []jwtv5.ParserOption{
 		jwtv5.WithValidMethods([]string{v.method.Alg()}),
 		jwtv5.WithExpirationRequired(),
-	}, opts...)
+	}
+	// 与主验证器同源的时钟容忍：跨机器的合理时钟偏差不因验签路径不同而更严。
+	if v.leeway > 0 {
+		baseOpts = append(baseOpts, jwtv5.WithLeeway(v.leeway))
+	}
+	parserOpts := append(baseOpts, opts...)
 	parser := jwtv5.NewParser(parserOpts...)
 
 	mapClaims := jwtv5.MapClaims{}

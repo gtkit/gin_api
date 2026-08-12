@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
@@ -27,6 +28,8 @@ const defaultMigrationStartupTimeout = 15 * time.Second
 type MigrationRuntime struct {
 	cfg    *config.Config
 	client *ormx.Client
+	// closed 保证日志刷写恰好一次（Close 在 defer 路径上可能被多次调用）。
+	closed atomic.Bool
 }
 
 // NewMigrationRuntime 装配迁移运行时。
@@ -50,6 +53,9 @@ func NewMigrationRuntime(ctx context.Context) (*MigrationRuntime, error) {
 	creds := resolveDBCredentials(cfg, Options{UseMigrationCredentials: true})
 	client, err := openDBForMigration(openCtx, cfg.Database, creds, data.NewGormLogger(cfg))
 	if err != nil {
+		// 日志已就绪：失败必须先刷写再返回（resource-lifecycle spec），
+		// 否则"迁移为什么起不来"既不落盘也不告警。
+		closeProcessRuntime(nil)
 		return nil, fmt.Errorf("open database for migration: %w", err)
 	}
 
@@ -63,12 +69,20 @@ func (r *MigrationRuntime) Config() *config.Config { return r.cfg }
 // DB 返回迁移使用的 GORM 句柄。
 func (r *MigrationRuntime) DB() *ormx.Client { return r.client }
 
-// Close 释放数据库连接。
+// Close 释放数据库连接并刷写日志与告警队列。
+//
+// 迁移进程通常在 Close 后立即退出：不在这里刷写，迁移期间的错误日志与
+// 告警会随进程一起消失——而迁移失败恰是最需要留痕的事件。幂等。
 func (r *MigrationRuntime) Close() {
-	if r == nil || r.client == nil {
+	if r == nil {
 		return
 	}
-	if err := r.client.Close(); err != nil {
-		logger.Errorf("close migration database connection: %v", err)
+	if r.client != nil {
+		if err := r.client.Close(); err != nil {
+			logger.Errorf("close migration database connection: %v", err)
+		}
+	}
+	if r.closed.CompareAndSwap(false, true) {
+		closeProcessRuntime(nil)
 	}
 }

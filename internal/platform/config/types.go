@@ -333,6 +333,16 @@ type SSLConfig struct {
 	PEM string `mapstructure:"pem"`
 }
 
+// 支持的告警机器人平台（单一来源：internal/pkg/news 的分发按这组常量判定）。
+const (
+	NewsPlatformFeishu   = "feishu"
+	NewsPlatformDingTalk = "dingtalk"
+	NewsPlatformWeCom    = "wecom"
+)
+
+// newsPlatforms 是启动校验用的平台白名单。
+var newsPlatforms = []string{NewsPlatformFeishu, NewsPlatformDingTalk, NewsPlatformWeCom}
+
 // NewsConfig 是告警通道配置。
 //
 // webhook 底层用 gtkit/msgbot，因此支持飞书 / 钉钉 / 企业微信三家；

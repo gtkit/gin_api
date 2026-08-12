@@ -743,3 +743,84 @@ func TestModuleConfigAnchorsAreRequired(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrationsAreImmutableUnderForce 钉住迁移不可变（module-scaffold-wiring spec）。
+//
+// 迁移是按序执行过的历史：--force 改写一个已在任何环境执行过的文件，会让
+// "迁移已执行"的记录与文件内容失配，而且无从发现。force 只能刷新普通生成文件。
+func TestMigrationsAreImmutableUnderForce(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	generator, err := NewModuleGenerator(root)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator returned error: %v", err)
+	}
+	generator.now = func() time.Time {
+		return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC)
+	}
+
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Bootstrap: true, Public: true}); err != nil {
+		t.Fatalf("first Generate: %v", err)
+	}
+
+	// 人工修改迁移，模拟"已执行过的历史"与模板产出分叉。
+	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	edited := "-- executed in production\nCREATE TABLE IF NOT EXISTS `admins` (id BIGINT);\n"
+	if err := os.WriteFile(upSQL, []byte(edited), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	result, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: true, Bootstrap: true, Public: true})
+	if err != nil {
+		t.Fatalf("force Generate: %v", err)
+	}
+
+	content, err := os.ReadFile(upSQL)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != edited {
+		t.Fatal("force 覆盖了已存在的迁移文件：迁移历史被改写")
+	}
+
+	// 跳过必须可见：静默跳过会让使用者以为 schema 变更已随 force 生效。
+	var noted bool
+	for _, note := range result.Notes {
+		if strings.Contains(note, "alter migration") {
+			noted = true
+			break
+		}
+	}
+	if !noted {
+		t.Fatalf("Notes = %v, want a note pointing to a new alter migration", result.Notes)
+	}
+}
+
+// TestMigrationCharsetCollationComeFromOptions 钉住 charset/collation 的单一来源。
+//
+// 模板硬编码 collation 时，配置声称的"连接与迁移共用单一来源"是假的：
+// 改了配置，生成的迁移仍然是旧值，差异只在数据量上来后才暴露。
+func TestMigrationCharsetCollationComeFromOptions(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	generator, err := NewModuleGenerator(root)
+	if err != nil {
+		t.Fatalf("NewModuleGenerator returned error: %v", err)
+	}
+	generator.now = func() time.Time {
+		return time.Date(2026, 3, 24, 9, 8, 7, 0, time.UTC)
+	}
+
+	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{
+		Bootstrap: true, Public: true,
+		Charset: "utf8mb4", Collation: "utf8mb4_0900_ai_ci",
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	assertFileContains(t, upSQL, "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;")
+	assertFileNotContains(t, upSQL, "utf8mb4_unicode_ci")
+}

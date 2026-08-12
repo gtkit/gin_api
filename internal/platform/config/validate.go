@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/mail"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -156,6 +157,34 @@ func (c *Config) Validate() error {
 	if err := validateTasksConfig(c.Tasks, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateNewsConfig(c.News); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
+
+// validateNewsConfig 校验告警通道配置。
+//
+// 必须在启动期拦下：告警通道的配置错误只在告警发送时暴露，
+// 而那正是最不能失去告警的时刻。
+func validateNewsConfig(news NewsConfig) error {
+	var errs []error
+
+	if p := strings.ToLower(strings.TrimSpace(news.Platform)); p != "" && !slices.Contains(newsPlatforms, p) {
+		errs = append(errs, fmt.Errorf(
+			"news.platform %q is invalid: must be one of %s (or empty for the %s default)",
+			news.Platform, strings.Join(newsPlatforms, "|"), NewsPlatformFeishu))
+	}
+
+	if raw := strings.TrimSpace(news.FSURL); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || !u.IsAbs() || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Errorf(
+				"news.fsurl %q is not an absolute http(s) URL: the alert webhook would fail "+
+					"on its first delivery, which is exactly when an alert must not be lost", news.FSURL))
+		}
+	}
 
 	return errors.Join(errs...)
 }
@@ -176,7 +205,41 @@ func validateJWTConfig(jwt JWTConfig) error {
 		errs = append(errs, fmt.Errorf("jwt.laravel.algorithm %q is invalid: must be one of %s", laravel.Algorithm, strings.Join(laravelAlgorithms, "|")))
 	}
 
+	// 密钥长度按算法有下限（laravel-legacy-token-verify spec）。下限取哈希
+	// 输出长度：HMAC 的安全强度上界是密钥熵，短于哈希输出长度的密钥让暴力
+	// 搜索密钥比伪造签名更便宜——"非空"完全表达不了这个约束。
+	// 只在密钥与算法各自合法时判长度，避免同一根因重复报错。
+	if secret := laravel.Secret; strings.TrimSpace(secret) != "" &&
+		(alg == "" || slices.Contains(laravelAlgorithms, alg)) {
+		if minLen := laravelSecretMinBytes(alg); len(secret) < minLen {
+			errs = append(errs, fmt.Errorf(
+				"jwt.laravel.secret is %d bytes but %s requires at least %d bytes: "+
+					"rotate in a longer shared secret before enabling the fallback",
+				len(secret), effectiveLaravelAlgorithm(alg), minLen))
+		}
+	}
+
 	return errors.Join(errs...)
+}
+
+// laravelSecretMinBytes 返回算法要求的最小密钥长度（字节），空算法按默认 hs256。
+func laravelSecretMinBytes(normalizedAlg string) int {
+	switch normalizedAlg {
+	case "hs384":
+		return 48
+	case "hs512":
+		return 64
+	default:
+		return 32
+	}
+}
+
+// effectiveLaravelAlgorithm 把空算法解析为生效的默认值，供报错文本使用。
+func effectiveLaravelAlgorithm(normalizedAlg string) string {
+	if normalizedAlg == "" {
+		return "hs256 (the default)"
+	}
+	return normalizedAlg
 }
 
 // validatePprofConfig 强制 pprof 只绑**字面回环 IP**，且不分环境。

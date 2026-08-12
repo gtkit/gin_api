@@ -16,6 +16,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -30,6 +31,20 @@ import (
 // 会变得没有着落。
 const defaultJitterRatio = 0.1
 
+// defaultLoadTimeout 是单次回源的默认执行超时。
+//
+// 回源必须有独立超时：load 拿到的 ctx 剥离了调用方的取消（见 GetOrLoad），
+// 没有这层超时，一个永久阻塞的 loader 会让 goroutine 与 singleflight 条目
+// 随键空间无界积累——maxItems 管的是已完成的条目，管不到未完成的加载。
+// 30s 比任何合理的进程内回源都长；需要更长的调用方显式配置 WithLoadTimeout。
+const defaultLoadTimeout = 30 * time.Second
+
+// defaultMaxInflight 是同时在途回源数的默认上限。
+//
+// 它是"阻塞的 loader 最多留下多少个 goroutine"的硬上界：超时只对监听 ctx
+// 的 loader 有效，无视 ctx 的 loader 只能靠占着的在途名额把危害封在这个数以内。
+const defaultMaxInflight = 64
+
 // Cache 是一个有界的、带加载合并的进程内缓存。
 //
 // 并发安全。零值不可用，必须经 New 构造。
@@ -42,6 +57,12 @@ type Cache[T any] struct {
 
 	ttl         time.Duration
 	jitterRatio float64
+
+	// loadTimeout 约束单次回源的执行时长；inflight 的容量约束同时在途的
+	// 回源数（两者见 defaultLoadTimeout / defaultMaxInflight 的说明）。
+	loadTimeout time.Duration
+	maxInflight int
+	inflight    chan struct{}
 
 	// group 合并同一个键的并发加载。
 	group singleflight.Group
@@ -78,6 +99,24 @@ func WithJitterRatio[T any](ratio float64) Option[T] {
 	}
 }
 
+// WithLoadTimeout 设置单次回源的执行超时；非正值忽略，保持默认。
+func WithLoadTimeout[T any](d time.Duration) Option[T] {
+	return func(c *Cache[T]) {
+		if d > 0 {
+			c.loadTimeout = d
+		}
+	}
+}
+
+// WithMaxInflight 设置同时在途的回源数上限；非正值忽略，保持默认。
+func WithMaxInflight[T any](n int) Option[T] {
+	return func(c *Cache[T]) {
+		if n > 0 {
+			c.maxInflight = n
+		}
+	}
+}
+
 // New 构造缓存。
 //
 // maxItems 必须为正：无界缓存在键空间随请求变化时会一直涨。
@@ -96,12 +135,16 @@ func New[T any](maxItems int, ttl time.Duration, opts ...Option[T]) (*Cache[T], 
 		maxItems:    maxItems,
 		ttl:         ttl,
 		jitterRatio: defaultJitterRatio,
+		loadTimeout: defaultLoadTimeout,
+		maxInflight: defaultMaxInflight,
 		now:         time.Now,
 		jitter:      randomJitter,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	// 名额通道在选项定型后创建：容量就是上限。
+	c.inflight = make(chan struct{}, c.maxInflight)
 	return c, nil
 }
 
@@ -112,6 +155,10 @@ func New[T any](maxItems int, ttl time.Duration, opts ...Option[T]) (*Cache[T], 
 // ctx 取消只影响**当前调用方**：load 仍在为其他等待者继续执行。反过来做
 // （取消即中断 load）会让一个提前放弃的调用方连累所有等待者一起失败，
 // 而它们各自的 ctx 明明还有预算。
+//
+// load 的执行有两道独立上界：单次执行受 WithLoadTimeout 约束（load 必须
+// 监听传入的 ctx），同时在途的加载数受 WithMaxInflight 约束——排队等不到
+// 名额同样以超时失败。两道都是"阻塞的 loader 不无界积累"的保证。
 //
 // load 返回错误时不缓存：把失败缓存下来，一次瞬时故障会被固定住整个 TTL。
 func (c *Cache[T]) GetOrLoad(
@@ -129,11 +176,22 @@ func (c *Cache[T]) GetOrLoad(
 	// DoChan 而不是 Do：Do 会把调用方阻塞到 load 返回，没有办法响应
 	// 自己的 ctx 取消——一个 30s 的慢查询会把所有等待者一起扣住。
 	//
-	// 传给 load 的是 context.WithoutCancel(ctx)：这次加载可能在为其他
-	// 调用方服务，不能因为**发起者**放弃就中断。它保留了 ctx 的值
-	// （trace、租户标识），只丢弃取消信号。
-	loadCtx := context.WithoutCancel(ctx)
+	// 传给 load 的 ctx 剥离调用方的取消（WithoutCancel）：这次加载可能在为
+	// 其他调用方服务，不能因为**发起者**放弃就中断；值（trace、租户标识）
+	// 保留。但剥离取消不等于不设限——回源有自己的执行超时，等待在途名额
+	// 同受其约束：没有这两道，一个阻塞的 loader 会让 goroutine 与
+	// singleflight 条目随键空间无界积累，而 maxItems 管不到未完成的加载。
 	ch := c.group.DoChan(key, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
+		defer cancel()
+
+		select {
+		case c.inflight <- struct{}{}:
+			defer func() { <-c.inflight }()
+		case <-loadCtx.Done():
+			return zero, fmt.Errorf("cache: wait for a load slot: %w", loadCtx.Err())
+		}
+
 		value, err := load(loadCtx)
 		if err != nil {
 			return zero, err

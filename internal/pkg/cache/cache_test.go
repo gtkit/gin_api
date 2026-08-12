@@ -447,3 +447,85 @@ func TestPreCancelledContextSkipsLoad(t *testing.T) {
 		t.Fatal("已取消的调用仍然触发了加载")
 	}
 }
+
+// TestBlockedLoaderTimesOutIndependently 钉住回源的独立执行超时。
+//
+// load 拿到的 ctx 剥离了调用方的取消，没有独立超时的话，一个永久阻塞的
+// loader 会带着 goroutine 与 singleflight 条目一起留下来——每个不同的键
+// 一个，maxItems 管不到它们。
+func TestBlockedLoaderTimesOutIndependently(t *testing.T) {
+	t.Parallel()
+
+	c := newTestCache(t, 8, time.Minute, WithLoadTimeout[string](50*time.Millisecond))
+
+	start := time.Now()
+	_, err := c.GetOrLoad(context.Background(), "k", func(ctx context.Context) (string, error) {
+		<-ctx.Done() // 合规的 loader：阻塞但监听 ctx
+		return "", ctx.Err()
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context.DeadlineExceeded from the load timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("load 超时耗时 %s：独立超时没有生效", elapsed)
+	}
+
+	// 超时后同一个键必须能重新加载（singleflight 条目已清理）。
+	v, err := c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
+		return "recovered", nil
+	})
+	if err != nil || v != "recovered" {
+		t.Fatalf("重载 = (%q, %v)，want (recovered, nil)", v, err)
+	}
+}
+
+// TestInflightLoadsAreBounded 钉住在途回源数上限。
+//
+// 上限是"无视 ctx 的 loader 最多留下多少个 goroutine"的硬上界：
+// 名额被占满时，新键的加载排队等待，等不到即以超时失败——而不是
+// 为每个新键再起一个不受控的加载。
+func TestInflightLoadsAreBounded(t *testing.T) {
+	t.Parallel()
+
+	c := newTestCache(t, 8, time.Minute,
+		WithMaxInflight[string](1),
+		WithLoadTimeout[string](80*time.Millisecond),
+	)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// 占住唯一名额的加载：直到 release 才返回。
+		_, _ = c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
+			close(started)
+			<-release
+			return "a", nil
+		})
+	}()
+	<-started
+
+	// 第二个键排不到名额，应在加载超时内失败，而不是并发执行。
+	var ran atomic.Bool
+	_, err := c.GetOrLoad(context.Background(), "queued", func(context.Context) (string, error) {
+		ran.Store(true)
+		return "b", nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("排队加载 = %v，want 等名额超时（DeadlineExceeded）", err)
+	}
+	if ran.Load() {
+		t.Fatal("名额已满仍执行了新的加载：在途上限没有生效")
+	}
+
+	// 释放名额后新加载恢复正常。
+	close(release)
+	wg.Wait()
+	if v, err := c.GetOrLoad(context.Background(), "queued", func(context.Context) (string, error) {
+		return "b", nil
+	}); err != nil || v != "b" {
+		t.Fatalf("释放名额后的加载 = (%q, %v)，want (b, nil)", v, err)
+	}
+}

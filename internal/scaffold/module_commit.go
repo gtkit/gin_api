@@ -21,6 +21,15 @@ func (g *ModuleGenerator) writeManagedFile(file generatedFile, content []byte, f
 			result.Skipped = append(result.Skipped, relPath)
 			return nil
 		}
+		if file.immutable {
+			// 迁移不可变：跳过必须**可见**——静默跳过会让使用者以为
+			// schema 变更已随 force 生效，实际迁移文件纹丝不动。
+			result.Skipped = append(result.Skipped, relPath)
+			result.Notes = append(result.Notes, fmt.Sprintf(
+				"%s 已存在且与本次模板产出不一致，未覆盖（迁移不可变，--force 也不例外）；"+
+					"schema 变更请另建 alter migration", relPath))
+			return nil
+		}
 		if !force || !file.allowOverwrite {
 			result.Skipped = append(result.Skipped, relPath)
 			return nil

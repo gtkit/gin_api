@@ -195,6 +195,7 @@ func TestGeneratedWiringFillsEveryAccessDependency(t *testing.T) {
 				"OptionalAuth: mw.optionalAuth",
 				"Authorize: mw.authorizeByID",
 				"RateLimit: rateLimitStager",
+				"Cache: inf.cache.Middleware",
 			} {
 				assertFileContains(t, providers, field)
 			}

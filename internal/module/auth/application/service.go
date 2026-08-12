@@ -36,6 +36,13 @@ var (
 	// ErrPasswordTooLong 表示口令超出可处理的长度。
 	ErrPasswordTooLong = errors.New("auth: password is too long")
 
+	// ErrRegisteredLoginRequired 表示注册的账号已创建，但登录令牌签发失败。
+	//
+	// 单独成错是因为这是一次**部分成功**：账号这一侧的资源已经存在，
+	// 把它表达成普通失败，客户端重试注册只会撞上"手机号已注册"——
+	// 一个既成事实被表达成了从未发生。正确的客户端处置是直接登录。
+	ErrRegisteredLoginRequired = errors.New("auth: account created but tokens were not issued; log in instead")
+
 	// ErrRefreshReused 表示检测到刷新令牌重用。
 	//
 	// 它对客户端与 ErrRefreshRejected 同义（都该重新登录），单独定义只为让
@@ -148,7 +155,15 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 	}
 
 	s.audit("account registered: uid=%d", uid)
-	return s.issuePair(ctx, uid)
+	pair, err := s.issuePair(ctx, uid)
+	if err != nil {
+		// 账号已建、令牌未签发：必须显式表达这次部分成功。
+		// 审计走告警级——它意味着令牌基础设施（Redis/签发器）在注册路径上
+		// 出了问题，且已经产生了一个"注册成功但没拿到令牌"的用户。
+		s.fail("account registered but token issuance failed: uid=%d: %v", uid, err)
+		return TokenPair{}, fmt.Errorf("%w (uid=%d): %w", ErrRegisteredLoginRequired, uid, err)
+	}
+	return pair, nil
 }
 
 // Login 校验凭据并签发令牌。
@@ -168,7 +183,13 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		// bcrypt 比对要几百毫秒，直接返回只需几微秒。这个差值稳定、可测量，
 		// 攻击者据此可以枚举出哪些手机号已注册——一个不需要任何口令
 		// 就能拿到的用户名单。
-		_ = s.hasher.CompareWithDummy(ctx, password)
+		//
+		// 比对被取消/超时（闸门饱和、请求放弃）时必须与存在账号的路径
+		// **同语义传播**：这里吞掉错误的话，存在的账号报基础设施错误、
+		// 不存在的账号报 401，状态码与耗时就重新泄漏了账号是否存在。
+		if err := s.hasher.CompareWithDummy(ctx, password); err != nil && !errors.Is(err, ErrInvalidCredentials) {
+			return TokenPair{}, fmt.Errorf("auth: compare password: %w", err)
+		}
 		s.fail("login rejected: no account for the supplied phone")
 		s.event(ctx, EventLoginFailed)
 		return TokenPair{}, ErrInvalidCredentials

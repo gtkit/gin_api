@@ -80,10 +80,12 @@ database/migrations/<timestamp>_create_admins_table.down.sql
 
 生成器创建成对的 up/down SQL：
 
-- up 文件包含 `CREATE TABLE IF NOT EXISTS`。
+- up 文件包含 `CREATE TABLE IF NOT EXISTS`，CHARSET/COLLATE 取自 `database.charset` / `database.collation` 配置（配置缺席时用同一来源的默认值）。
 - down 文件包含 `DROP TABLE IF EXISTS`。
 
-SQL 文件是可执行草稿，但必须人工检查索引、唯一约束、默认值、comment、数据规模和回滚影响。当前项目没有自动 migration runtime，生成器不会自动执行 SQL。
+SQL 文件是可执行草稿，必须人工检查索引、唯一约束、默认值、comment、数据规模和回滚影响。生成器只落盘、不执行 SQL；执行走 `migrate` 子命令（最小装配：配置 + 日志 + 数据库，经 gtkit/migratex 按 `database/migrations` 目录迁移）。
+
+**迁移文件不可变**：已存在的 migration 与模板产出不一致时一律跳过并提示，`--force` 也不覆盖——迁移是按序执行过的历史，schema 变更请另建 alter migration。
 
 ## 验证
 

@@ -18,10 +18,9 @@ require (
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/dgraph-io/ristretto/v2 v2.4.2
-	github.com/go-resty/resty/v2 v2.17.2
 	github.com/gofrs/flock v0.13.0
 	github.com/gtkit/asynqx v1.5.0
-	github.com/gtkit/gincache v1.1.0
+	github.com/gtkit/gincache v1.2.0
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/gojwt v1.0.5
@@ -34,7 +33,6 @@ require (
 	github.com/gtkit/news v1.1.10
 	github.com/gtkit/ormx v1.5.0
 	github.com/gtkit/redisx v1.3.0
-	github.com/gtkit/restyx v1.1.0
 	github.com/gtkit/smsx v1.4.3
 	github.com/gtkit/smsx/providers/aliyun v0.0.0-20260418190407-648277873486
 	github.com/gtkit/stringx v1.1.6

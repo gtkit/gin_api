@@ -92,9 +92,22 @@ func BindErr(c *gin.Context, err error) {
 
 // MapErr 通过 mapper 解析业务错误并返回统一响应。
 // 匹配到已注册的 sentinel error 时使用对应业务码和文案，未匹配时按内部错误处理。
+//
+// 协作式超时/取消例外：未登记的 context.DeadlineExceeded / context.Canceled
+// 不在这里定局，记进 gin 错误链后交终态中间件（ErrorHandler）裁决——
+// 超时是 504、断开不回包，两者都不是 500。在这里写 500 会让那两条语义
+// 永远到不了终态中间件：它看到响应已写出，只能记日志。
+// 模块显式登记了 ctx 错误映射时仍以映射优先（Resolve 在前）。
 func MapErr(c *gin.Context, err error, mapper *ErrMapper) {
 	if goErr := mapper.Resolve(err); goErr != nil {
 		Err(c, goErr)
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if c != nil {
+			_ = c.Error(err)
+			c.Abort()
+		}
 		return
 	}
 	Err(c, goerr.New(err, goerr.StatusInternalServer()))

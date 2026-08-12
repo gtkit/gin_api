@@ -121,57 +121,68 @@ func (s *Stager) Middleware(ttl time.Duration) gin.HandlerFunc {
 		gincache.WithCacheableStatusCodes(http.StatusOK),
 		gincache.WithMaxBodySize(s.maxBody),
 		gincache.WithCacheStrategyByRequest(cacheableRequest),
+		// 响应期准入：请求期判据看不到响应头，而"这个响应能不能共享"
+		// 恰恰写在响应头里。写入、命中回放、singleflight 分发前都会复检。
+		gincache.WithCacheableResponse(cacheableResponse),
 	)
 
-	// 外层再包一道响应期审计。见 auditResponse 的说明：它挡不住泄漏，
-	// 但能让误用在日志里可见，而不是等到某天被用户发现。
+	// 外层再包一道响应期审计。见 auditResponse 的说明：准入已由库层拒绝，
+	// 审计负责把"这条路由不该挂缓存"的配置错误变成日志里的可见信号。
 	return func(c *gin.Context) {
 		cached(c)
 		auditResponse(c)
 	}
 }
 
-// auditResponse 检查响应是否本不该被缓存，发现即记 Error 日志。
+// cacheableResponse 是响应期准入判据（cache-preset spec）。
 //
-// **它无法阻止泄漏，只能暴露误用。** gincache v1.1.0 的
-// cloneCachedHeaders 只删 X-Cache，其余响应头**全部缓存并回放**——包括
-// Set-Cookie。而它的缓存判据（WithCacheStrategyByRequest）是**请求期**的，
-// 拿不到响应头，因此无法按响应内容决定是否缓存。缓存写入发生在 handler
-// 返回之后，此时已经晚了。
+// 基线（gincache.DefaultCacheableResponse）拒绝 Set-Cookie 与
+// Cache-Control: private/no-store/no-cache；本仓在其上**再拒绝任何带 Vary
+// 的响应**：缓存键只含方法、路径与查询串，不含任何请求头，带 Vary 的响应
+// 进缓存必然把按某个请求头协商出的内容回放给协商结果不同的请求
+// （CORS 的 Vary: Origin 是最常见的一例——拒绝它意味着跨域请求自动绕过
+// 缓存，同源与服务间调用不受影响）。
 //
-// 由此得到挂载这层中间件的硬约束——违反任一条都会泄漏：
+// 方向与请求期判据一致：宁可不缓存。漏缓存的代价是一次多余的查询，
+// 误缓存的代价是把 A 的内容发给 B。
+func cacheableResponse(status int, header http.Header) bool {
+	return gincache.DefaultCacheableResponse(status, header) && len(header.Values("Vary")) == 0
+}
+
+// auditResponse 检查已挂缓存的路由是否产出了不可共享的响应，发现即记 Warn 日志。
 //
-//	handler 不得设置 Set-Cookie：它会被缓存并原样发给后续所有请求，
-//	  即第一个用户的会话被发给其他人。
-//	handler 不得依赖 Cache-Control: private / no-store 来阻止缓存：
-//	  gincache 不看这个头，声明了也照缓存。
-//	handler 不得依赖 Vary：缓存键里没有 Vary 列出的请求头，
-//	  同一 URL 对不同 Accept-Language / Accept-Encoding 会回放同一份。
-//
-// 彻底修复需要 gincache 支持响应头过滤与 Vary 感知。在那之前，这层审计是
-// 唯一能把"已经发生的误用"变成可见信号的手段。
+// 泄漏本身由响应期准入挡住（gincache v1.2.0 起：基线拒绝 Set-Cookie 与
+// Cache-Control private/no-store/no-cache，逐跳头被过滤，命中回放前复检；
+// Vary 由本包的 cacheableResponse 追加拒绝）。审计暴露的是剩下的那个问题：
+// 一条持续产出不可共享响应的路由，挂缓存等于没挂——每个请求都执行 handler，
+// 而配置看起来"已经缓存了"。这类静默失效只有日志能让人看见。
 func auditResponse(c *gin.Context) {
 	header := c.Writer.Header()
 
 	if len(header.Values("Set-Cookie")) > 0 {
-		logger.Error("cached route set a Set-Cookie header; it will be replayed to other clients",
+		logger.Warn("cached route produced a Set-Cookie response; admission rejected it, "+
+			"so this route is effectively uncached and probably should not mount the cache middleware",
 			zap.String("path", c.FullPath()))
 	}
 	if cc := header.Get("Cache-Control"); cc != "" && containsNoStoreOrPrivate(cc) {
-		logger.Error("cached route declared Cache-Control private/no-store, but the cache does not honor it",
+		logger.Warn("cached route declared a non-shareable Cache-Control; admission rejected it, "+
+			"so this route is effectively uncached",
 			zap.String("path", c.FullPath()), zap.String("cache_control", cc))
 	}
 	if v := header.Get("Vary"); v != "" {
-		logger.Error("cached route declared Vary, but the cache key ignores it; responses will be mixed",
+		logger.Warn("cached route declared Vary; admission rejected it because the cache key "+
+			"carries no request headers, so this route is effectively uncached",
 			zap.String("path", c.FullPath()), zap.String("vary", v))
 	}
 }
 
 // containsNoStoreOrPrivate 判断 Cache-Control 是否声明了不可共享缓存。
+// 判定集合与准入基线一致（no-cache 对无 revalidation 的缓存等价于不可缓存）。
 func containsNoStoreOrPrivate(value string) bool {
 	for directive := range strings.SplitSeq(value, ",") {
-		switch strings.ToLower(strings.TrimSpace(directive)) {
-		case "private", "no-store":
+		name, _, _ := strings.Cut(directive, "=")
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "private", "no-store", "no-cache":
 			return true
 		}
 	}

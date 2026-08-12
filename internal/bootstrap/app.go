@@ -54,7 +54,7 @@ type App struct {
 	rateLimits rateLimitAssembly
 	// outbound 持有出站 HTTP 客户端；关停时释放空闲连接，否则它们会一直
 	// 挂到对端超时——滚动重启时旧实例仍占着下游的连接配额。
-	outbound *httpclient.Factory
+	outbound *httpclient.Downstreams
 	// cache 持有响应缓存的本地 store；关停时释放它的后台 goroutine。
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
@@ -95,6 +95,10 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close())
 	}
+
+	// 日志排空是进程的最后一段等待，同样受"第二个信号取消剩余等待"约束。
+	// 在进入请求并发阶段之前安装一次（见 SetDrainInterrupt 的约束）。
+	runtime.SetDrainInterrupt(providers.shutdown.ForcedCh())
 
 	return &App{
 		runtime:        runtime,
@@ -364,7 +368,19 @@ func (a *App) awaitShutdown(serverErrCh <-chan error) bool {
 func (a *App) gracefulShutdown(
 	ctx context.Context, serverErrCh <-chan error, serverExited bool, pprofEndpoint *pprofHandle,
 ) error {
-	base := context.WithoutCancel(ctx)
+	// base 剥离父 ctx 的取消（优雅路径不能被早已取消的信号 ctx 打断），
+	// 但接入强制信号：契约是"第二个信号取消**各阶段**剩余等待"，而尾段
+	// （worker 兜底清理、扩展释放、telemetry flush、pprof）此前不在覆盖
+	// 范围里——各自的预算串行叠加后，"再按一次立即退出"实际要等数十秒。
+	base, cancelOnForce := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelOnForce()
+	go func() {
+		select {
+		case <-a.shutdown.ForcedCh():
+			cancelOnForce()
+		case <-base.Done():
+		}
+	}()
 	var errs []error
 	collect := func(err error) {
 		if err != nil {

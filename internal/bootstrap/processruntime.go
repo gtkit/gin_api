@@ -23,6 +23,9 @@ var (
 	initJWTWithConfig = jwtauth.Assemble
 	initVerify        = verify.New
 	checkJSONRuntime  = json.CheckJSON
+	// drainProcessLogs 是日志排空的测试缝：装配失败路径"先刷写再返回"的
+	// 行为必须可被断言，否则回归时没有任何信号。
+	drainProcessLogs = drainLogsWithBudget
 )
 
 // initProcessRuntime 初始化**进程级、无连接**的运行时设施：时区、日志、校验器、JSON 实现。
@@ -36,14 +39,19 @@ func initProcessRuntime(cfg *config.Config) error {
 		return fmt.Errorf("init logging: %w", err)
 	}
 	installGinDiagnostics()
+	// 主 logger 就绪之后的任何失败都要先刷写再返回（resource-lifecycle spec）：
+	// 它持有异步告警队列，装配失败恰是最需要告警送达的时刻——不刷写的话，
+	// 启动失败的原因既不落盘也不告警。
 	// JWT issuer 不在此处创建：改由 NewRuntime 创建一次并持有，避免"预检创建一份又丢弃、
 	// 随后再创建一份"的冗余（见 runtime.go）。
 	if err := initVerify(); err != nil {
+		drainProcessLogs(loggerDrainBudget, nil)
 		return fmt.Errorf("init validator: %w", err)
 	}
 	checkJSONRuntime()
 
 	if err := applog.InitAccessLog(cfg); err != nil {
+		drainProcessLogs(loggerDrainBudget, nil)
 		return fmt.Errorf("init access logger: %w", err)
 	}
 
@@ -131,18 +139,23 @@ const loggerDrainBudget = 30 * time.Second
 // closeProcessRuntime 收尾进程级设施（刷日志缓冲）。
 //
 // 它**不关闭任何连接**：连接由 Resources.Close 按建立的逆序释放。
-func closeProcessRuntime() {
-	applog.SyncAccessLog()
-	syncLoggerWithBudget(loggerDrainBudget)
+// interrupt 是强制关停信号（可为 nil）：第二个信号到达时放弃剩余排空——
+// 契约是"取消各阶段剩余等待"，而日志排空正是进程的最后一段等待。
+func closeProcessRuntime(interrupt <-chan struct{}) {
+	drainProcessLogs(loggerDrainBudget, interrupt)
 }
 
-// syncLoggerWithBudget 在预算内等待主 logger 的 Sync 完成；超时放弃剩余排空。
+// drainLogsWithBudget 在**同一预算**内完成 access log 与主 logger（含告警队列）
+// 的排空；预算耗尽或强制信号到达即放弃剩余排空。
 //
+// access log 的 Sync 与主 logger 同在预算 goroutine 内：它此前不受任何预算
+// 约束，一个写不动的日志出口能把进程退出无限期扣住。
 // 被放弃的排空协程随进程退出回收。说明只能走 stderr：此刻日志设施
 // 自身正在关闭，它已经不是可用的输出通道。
-func syncLoggerWithBudget(budget time.Duration) {
+func drainLogsWithBudget(budget time.Duration, interrupt <-chan struct{}) {
 	done := make(chan struct{})
 	go func() {
+		applog.SyncAccessLog()
 		logger.Sync()
 		close(done)
 	}()
@@ -151,6 +164,8 @@ func syncLoggerWithBudget(budget time.Duration) {
 	defer timer.Stop()
 	select {
 	case <-done:
+	case <-interrupt: // nil 通道永远阻塞：未安装信号时本分支自然失效
+		fmt.Fprintln(os.Stderr, "forced shutdown: abandoning the remaining log drain")
 	case <-timer.C:
 		fmt.Fprintf(os.Stderr,
 			"logger drain exceeded its %s budget; abandoning the remaining alert notifications\n", budget)

@@ -134,9 +134,44 @@ func TestSyncLoggerWithBudgetAbandonsStuckDrain(t *testing.T) {
 	waitClosed(t, block.entered, "messager did not receive the alert")
 
 	start := time.Now()
-	syncLoggerWithBudget(100 * time.Millisecond)
+	drainLogsWithBudget(100*time.Millisecond, nil)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("syncLoggerWithBudget took %v; the drain budget did not bound a stuck channel", elapsed)
+		t.Fatalf("drainLogsWithBudget took %v; the drain budget did not bound a stuck channel", elapsed)
+	}
+}
+
+// TestDrainLogsAbandonedByForcedSignal 钉住强制信号能提前放弃日志排空。
+//
+// 排空是进程的最后一段等待；"第二个信号取消各阶段剩余等待"的契约
+// 若贯通不到这里，卡住的告警通道仍能把强制退出扣住整个预算。
+func TestDrainLogsAbandonedByForcedSignal(t *testing.T) {
+	block := &blockingMessager{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	inst := loggerv2.MustNew(
+		loggerv2.WithConsole(false),
+		loggerv2.WithFile(false),
+		loggerv2.WithMessager(block),
+		loggerv2.WithReplaceGlobals(false),
+	)
+	prev := loggerv2.Default()
+	loggerv2.SetDefault(inst)
+	t.Cleanup(func() {
+		loggerv2.SetDefault(prev)
+		close(block.release)
+	})
+
+	loggerv2.HErrorf("stuck alert")
+	waitClosed(t, block.entered, "messager did not receive the alert")
+
+	forced := make(chan struct{})
+	close(forced)
+
+	start := time.Now()
+	drainLogsWithBudget(time.Hour, forced)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("drainLogsWithBudget took %v; the forced signal did not cut the drain", elapsed)
 	}
 }
 

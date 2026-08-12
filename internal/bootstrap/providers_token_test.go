@@ -36,7 +36,7 @@ func TestNewTokenParser(t *testing.T) {
 		},
 		{
 			name:         "laravel enabled wraps fallback parser",
-			laravel:      config.LaravelJWTConfig{Enabled: true, Secret: "laravel-secret", Algorithm: "hs256"},
+			laravel:      config.LaravelJWTConfig{Enabled: true, Secret: "laravel-secret-0123456789abcdefgh", Algorithm: "hs256"},
 			wantFallback: true,
 		},
 		{
@@ -95,7 +95,7 @@ func TestNewTokenParserRequiresLaravelCutoff(t *testing.T) {
 
 	cfg := &config.Config{}
 	cfg.JWT.Laravel = config.LaravelJWTConfig{
-		Enabled: true, Secret: "laravel-secret", Algorithm: "hs256",
+		Enabled: true, Secret: "laravel-secret-0123456789abcdefgh", Algorithm: "hs256",
 	}
 	// 刻意不设 LaravelAcceptUntil。
 

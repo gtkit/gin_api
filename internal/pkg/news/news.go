@@ -90,11 +90,13 @@ func NewWithConfig(cfg *config.Config) (*Notifier, error) {
 	return n, nil
 }
 
-// 支持的机器人平台。留空按飞书处理——该字段是后加的，历史配置里没有它。
+// 支持的机器人平台，别名到 config 的单一来源常量：启动校验（validateNewsConfig）
+// 认哪些值，这里就分发哪些值——两处各写一份的话，白名单与分发迟早漂移。
+// 留空按飞书处理：该字段是后加的，历史配置里没有它。
 const (
-	platformFeishu   = "feishu"
-	platformDingTalk = "dingtalk"
-	platformWeCom    = "wecom"
+	platformFeishu   = config.NewsPlatformFeishu
+	platformDingTalk = config.NewsPlatformDingTalk
+	platformWeCom    = config.NewsPlatformWeCom
 )
 
 // webhookSenderFor 返回一个按 url 发送告警的函数。

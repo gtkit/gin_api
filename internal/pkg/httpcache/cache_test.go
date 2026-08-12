@@ -252,11 +252,10 @@ func TestIdentityHeadersCoverEveryAuthHeader(t *testing.T) {
 	}
 }
 
-// TestAuditFlagsUncacheableResponses 钉住响应期审计能识别三类误用。
+// TestAuditFlagsUncacheableResponses 钉住响应期审计的判据与准入基线同口径。
 //
-// 审计**挡不住泄漏**（gincache 的判据在请求期，缓存写入发生在 handler 返回后），
-// 它的作用是把已经发生的误用变成日志里可见的信号。判据本身必须是对的，
-// 否则连这点作用也没有。
+// 泄漏由准入挡住；审计负责把"这条路由产出的响应根本进不了缓存"的静默失效
+// 变成日志里可见的信号。判据本身必须与准入一致，否则日志与真实行为两张口径。
 func TestAuditFlagsUncacheableResponses(t *testing.T) {
 	t.Parallel()
 
@@ -269,8 +268,10 @@ func TestAuditFlagsUncacheableResponses(t *testing.T) {
 		{name: "no-store", value: "no-store", want: true},
 		{name: "组合指令中含 private", value: "max-age=60, private", want: true},
 		{name: "大小写与空格", value: "  No-Store  ", want: true},
+		{name: "no-cache（本缓存无 revalidation，存了必然无验证复用）", value: "no-cache", want: true},
+		{name: "带参数指令", value: "no-cache=\"set-cookie\"", want: true},
 		{name: "public 不算", value: "public, max-age=60", want: false},
-		{name: "no-cache 不算（它允许存储，只要求校验）", value: "no-cache", want: false},
+		{name: "自定义指令不做子串误判", value: "no-store-hint", want: false},
 		{name: "空值", value: "", want: false},
 	}
 
@@ -279,6 +280,49 @@ func TestAuditFlagsUncacheableResponses(t *testing.T) {
 			t.Parallel()
 			if got := containsNoStoreOrPrivate(tt.value); got != tt.want {
 				t.Fatalf("containsNoStoreOrPrivate(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUnshareableResponsesAreNotCached 钉住响应期准入（cache-preset spec）。
+//
+// 请求期判据看不到响应头，而"这个响应能不能共享"恰恰写在响应头里：
+// Set-Cookie 回放即把 A 的会话发给 B；Vary 声明了按请求头协商，
+// 而缓存键里没有任何请求头。这三类响应必须每次都到达 handler。
+func TestUnshareableResponsesAreNotCached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "Set-Cookie", header: "Set-Cookie", value: "session=abc"},
+		{name: "Vary（CORS 场景的 Vary: Origin）", header: "Vary", value: "Origin"},
+		{name: "Cache-Control private", header: "Cache-Control", value: "private"},
+		{name: "Cache-Control no-cache", header: "Cache-Control", value: "no-cache"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stager := newTestStager(t)
+			var calls atomic.Int32
+			engine := gin.New()
+			engine.Use(stager.Middleware(0))
+			engine.GET("/items", func(c *gin.Context) {
+				calls.Add(1)
+				c.Header(tt.header, tt.value)
+				c.JSON(http.StatusOK, gin.H{"n": calls.Load()})
+			})
+
+			for range 2 {
+				engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/items", nil))
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("handler 被调用 %d 次，want 2：不可共享的响应被缓存回放了", got)
 			}
 		})
 	}

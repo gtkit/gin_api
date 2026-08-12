@@ -13,7 +13,8 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 )
 
-const laravelTestSecret = "laravel-laravel-test-secret"
+// 32 字节：满足 hs256 的密钥下限。
+const laravelTestSecret = "laravel-test-secret-0123456789ab"
 
 func signLaravelTestToken(t *testing.T, userID int64) string {
 	t.Helper()
@@ -35,7 +36,7 @@ func signLaravelTestToken(t *testing.T, userID int64) string {
 func TestAuthAcceptsLaravelToken(t *testing.T) {
 	primary := newTestParser(t)
 
-	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelTestSecret, "hs256", "user")
+	laravelVerifier, err := jwtauth.NewLaravelVerifier(laravelTestSecret, "hs256", "user", 0)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}

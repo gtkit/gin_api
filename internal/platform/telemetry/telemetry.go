@@ -143,16 +143,17 @@ func (p *Provider) Enabled() bool { return p != nil && p.enabled }
 
 // Shutdown 在预算内 flush 并关闭 provider。
 //
-// 预算是独立的：调用方传进来的 ctx 在关停末期很可能已经被取消（强制关停），
-// 而此时仍应尽量把已采集的数据送出去。用 WithoutCancel 起一个新的带超时的
-// ctx，让"关停已被强制"不等于"遥测数据必然丢光"，同时超时保证它不会
-// 反过来拖住关停。
+// flush 有自己的预算上界，同时**尊重调用方 ctx 的取消**：优雅关停路径上
+// 调用方给的是一个不随信号 ctx 取消的 base（数据会在预算内送出去）；
+// 强制关停时那个 base 被取消，flush 如实中止——"第二个信号取消各阶段
+// 剩余等待"的契约在这里同样成立。此前这里用 WithoutCancel 丢弃取消信号，
+// 强制路径就得为一个不可达的 collector 白等满整个预算。
 func (p *Provider) Shutdown(ctx context.Context) error {
 	if p == nil || (p.meter == nil && p.tracer == nil) {
 		return nil
 	}
 
-	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.flushBudget())
+	flushCtx, cancel := context.WithTimeout(ctx, p.flushBudget())
 	defer cancel()
 
 	var errs []error

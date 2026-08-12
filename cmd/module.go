@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/gtkit/gin-api/internal/appmeta"
+	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/scaffold"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,15 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 				return commandError("create module generator", err)
 			}
 
+			// charset/collation 以数据库配置为单一来源：配置可加载时用它
+			// （含其默认值语义）；加载不到（配置文件尚未就绪的新仓库）留空，
+			// 生成器退回 config 包的默认常量——同一来源的默认，不是第二份口径。
+			var charset, collation string
+			if cfg, cfgErr := config.Load(); cfgErr == nil {
+				charset = cfg.Database.EffectiveCharset()
+				collation = cfg.Database.EffectiveCollation()
+			}
+
 			result, err := generator.GenerateWithOptions(args[0], scaffold.GenerateOptions{
 				Force:     force,
 				DryRun:    dryRun,
@@ -55,6 +65,8 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 				Fields:    fields,
 				Access:    access,
 				Public:    public,
+				Charset:   charset,
+				Collation: collation,
 			})
 			if err != nil {
 				return commandError("generate module scaffold", err)

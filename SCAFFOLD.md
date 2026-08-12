@@ -288,22 +288,23 @@ runner, err := singleton.NewRunner(lease, func(ctx context.Context, held singlet
 
 ### 接指标导出
 
-母版只依赖 OTel 的 **API 包**，不带 SDK、不带 exporter：Prometheus 拉取、
-OTLP 推送、云厂商专有协议的选择取决于你既有的监控栈，预置任何一个都会让
-用另一套的人先拆再接。
+母版预置了配置门控的 OTel 导出（SDK + OTLP/HTTP exporter，metrics 与 trace）：
+配 `telemetry.enabled: true` 加收集端 `endpoint` 即生效，**记录点一处都不用改**。
+关闭时进程沿用全局 no-op provider，零构造、零网络连接。导出器已纳入关停序列，
+flush 受 `telemetry.shutdown_timeout` 预算约束，且强制关停（第二个信号）会
+提前放弃剩余 flush。
 
-接线是在进程启动前设置全局 provider，**记录点一处都不用改**：
-
-```go
-// main.go，在 bootstrap 之前
-exporter, err := prometheus.New()          // 或 otlpmetricgrpc.New(...)
-if err != nil { return err }
-provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
-otel.SetMeterProvider(provider)
-defer provider.Shutdown(context.Background())
+```yaml
+telemetry:
+  enabled: true
+  endpoint: "otel-collector:4318"   # OTLP/HTTP，不带 scheme
+  metrics: true
+  traces: true
+  sample_ratio: 0.1
 ```
 
-需要额外引入 `go.opentelemetry.io/otel/sdk/metric` 与所选 exporter。
+用 Prometheus 拉取或云厂商专有协议的监控栈，在 `main.go` bootstrap 之前
+自行设置全局 provider（`otel.SetMeterProvider`），记录点同样不需要改动。
 
 **标签基数是硬约束**，加埋点时必须守住：路由标签用路由模板（`FullPath()`），
 未匹配路由归到固定常量；禁止把原始 URL、用户 ID、IP、令牌、订单号写进标签。
@@ -324,7 +325,7 @@ defer provider.Shutdown(context.Background())
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
-| 指标（OTel） | 默认 **no-op**：不接导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。接线见下方「接指标导出」 |
+| 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `useRateLimit(g, deps.RateLimit, "策略ID")` 引用它 |
 

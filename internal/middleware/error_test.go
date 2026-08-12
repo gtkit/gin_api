@@ -1,11 +1,15 @@
 package middleware
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
@@ -92,4 +96,43 @@ func TestErrorHandlerDoesNotOverwriteWrittenResponse(t *testing.T) {
 	if strings.Contains(body, "\"code\":10010001") {
 		t.Fatalf("written response should not be overwritten, got %s", body)
 	}
+}
+
+// TestErrorHandlerFinalizesMapErrContextErrors 钉住 handler 经 resp.MapErr
+// 上抛的未映射 ctx 错误最终由本中间件定局：超时 504、断开不回包。
+//
+// 这是回归测试：MapErr 曾把它们直接写成 500，本中间件看到"响应已写出"
+// 只能记日志，两条语义全部失效。
+func TestErrorHandlerFinalizesMapErrContextErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("deadline exceeded becomes 504", func(t *testing.T) {
+		engine := gin.New()
+		engine.Use(ErrorHandler())
+		engine.GET("/slow", func(c *gin.Context) {
+			resp.MapErr(c, fmt.Errorf("load profile: %w", context.DeadlineExceeded), resp.NewErrMapper())
+		})
+
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/slow", nil))
+
+		if recorder.Code != http.StatusGatewayTimeout {
+			t.Fatalf("status = %d, want 504", recorder.Code)
+		}
+	})
+
+	t.Run("client cancellation writes nothing", func(t *testing.T) {
+		engine := gin.New()
+		engine.Use(ErrorHandler())
+		engine.GET("/gone", func(c *gin.Context) {
+			resp.MapErr(c, fmt.Errorf("stream: %w", context.Canceled), resp.NewErrMapper())
+		})
+
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/gone", nil))
+
+		if recorder.Body.Len() != 0 {
+			t.Fatalf("a canceled request got a response body: %s", recorder.Body.String())
+		}
+	})
 }

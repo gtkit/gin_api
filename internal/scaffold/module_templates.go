@@ -574,6 +574,14 @@ type Deps struct {
 	//
 	// 模块只声明受哪些策略约束，位置由策略自身的作用域决定。
 	RateLimit func(route string, policyIDs ...string) (preAuth, postAuth []gin.HandlerFunc)
+	// Cache 按 TTL 取路由级 GET 响应缓存中间件，由装配层注入。
+	// ttl <= 0 取配置默认值；缓存关闭时注入的是透传中间件，无需判空。
+	//
+	// 只对**匿名可访问的只读路由**有意义：带身份的请求在中间件内一律绕过
+	// 缓存。挂法（写在具体路由上，不 Group.Use 全组开启）：
+	//
+	//	g.GET("", deps.Cache(0), handler.List)
+	Cache func(ttl time.Duration) gin.HandlerFunc
 }
 
 // Register 在给定路由组上注册本模块的路由。
@@ -837,7 +845,7 @@ CREATE TABLE IF NOT EXISTS ` + "`{{.TableName}}`" + ` (
   ` + "`deleted_at`" + ` timestamp NULL DEFAULT NULL,
   PRIMARY KEY (` + "`id`" + `),
   KEY ` + "`idx_{{.TableName}}_deleted_at`" + ` (` + "`deleted_at`" + `)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET={{.Charset}} COLLATE={{.Collation}};
 `
 
 const migrationDownTemplate = `-- Scaffold generated DOWN migration for {{.StructName}}

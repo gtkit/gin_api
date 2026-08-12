@@ -13,6 +13,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/platform/config"
+
 	"golang.org/x/tools/imports"
 )
 
@@ -59,6 +61,11 @@ type GenerateOptions struct {
 	// 访问策略是安全决策，刻意不设默认值——默认值等于允许"没想过"这个状态存在。
 	Access string
 	Public bool
+	// Charset / Collation 写进迁移模板的 CREATE TABLE。单一来源是数据库配置：
+	// cmd 层在配置可加载时取 EffectiveCharset/EffectiveCollation 传入；
+	// 空值退回 config 包的默认常量——那是同一来源的默认值，不是第二份口径。
+	Charset   string
+	Collation string
 }
 
 type GenerateResult struct {
@@ -103,6 +110,9 @@ type moduleTemplateData struct {
 	AuthorizerID string
 	// OwnsAuthorizer 为真时需要在 runtime 层生成该授权实现并注册。
 	OwnsAuthorizer bool
+	// Charset / Collation 进迁移模板的 CREATE TABLE，来源见 GenerateOptions。
+	Charset        string
+	Collation      string
 	Fields         []moduleField
 	NeedsModelTime bool
 }
@@ -112,6 +122,9 @@ type generatedFile struct {
 	template       string
 	allowOverwrite bool
 	formatGo       bool
+	// immutable 表示该文件一经存在即不可改写（迁移文件）：内容不一致时
+	// 无论是否 force 都跳过，并以 Note 提示另建 alter migration。
+	immutable bool
 }
 
 func NewModuleGenerator(startDir string) (*ModuleGenerator, error) {
@@ -164,6 +177,18 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 	data.RateLimitPolicies = choice.RateLimitPolicies
 	data.AuthorizerID = choice.AuthorizerID
 	data.OwnsAuthorizer = choice.OwnsAuthorizer
+
+	// charset/collation 以数据库配置为单一来源（cmd 层传入），空值退回
+	// 同一来源的默认常量。不在模板里硬编码：同一份 SQL 在不同默认 collation
+	// 的实例上，比较与排序结果会不同。
+	data.Charset = strings.TrimSpace(opts.Charset)
+	if data.Charset == "" {
+		data.Charset = config.DefaultDBCharset
+	}
+	data.Collation = strings.TrimSpace(opts.Collation)
+	if data.Collation == "" {
+		data.Collation = config.DefaultDBCollation
+	}
 
 	result := &GenerateResult{}
 	result.Notes = append(result.Notes, choice.Note)
@@ -497,18 +522,21 @@ func (g *ModuleGenerator) generatedMigrationFiles(data moduleTemplateData) ([]ge
 		basePath = filepath.Join(migrationsDir, fileName)
 	}
 
+	// 迁移不可变（module-scaffold-wiring spec）：迁移是按序执行过的历史，
+	// 改写一个已在任何环境执行过的文件，会让"迁移已执行"的记录与文件内容
+	// 失配，而且无从发现。因此 force 也不覆盖；schema 变更走新的 alter migration。
 	return []generatedFile{
 		{
-			path:           basePath + ".up.sql",
-			template:       migrationUpTemplate,
-			allowOverwrite: true,
-			formatGo:       false,
+			path:      basePath + ".up.sql",
+			template:  migrationUpTemplate,
+			formatGo:  false,
+			immutable: true,
 		},
 		{
-			path:           basePath + ".down.sql",
-			template:       migrationDownTemplate,
-			allowOverwrite: true,
-			formatGo:       false,
+			path:      basePath + ".down.sql",
+			template:  migrationDownTemplate,
+			formatGo:  false,
+			immutable: true,
 		},
 	}, nil
 }
@@ -545,7 +573,7 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 		data.ServiceVar, data.RuntimeAlias, data.ConfigFieldName, data.PackageName)
 	// 模块用 gin 的方式注册：在 RegisterModules 闭包里加一行 Register 调用。
 	//
-	// **四个依赖字段全部填齐**，与所选访问策略无关：模板的 Deps 声明了它们，
+	// **依赖字段全部填齐**，与所选访问策略无关：模板的 Deps 声明了它们，
 	// 而任一项留空都能通过编译、却在启动或首个请求上以空值调用崩溃，
 	// 崩溃点在业务路由注册处、与真正的原因（接线缺失）相隔很远。
 	// 早先这里只填 Service/Auth/RateLimit，于是 --access=admin/custom 生成的模块
@@ -553,7 +581,7 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 	moduleLine := fmt.Sprintf(
 		"\t\t%s.Register(v1, %s.Deps{Service: svc.%s, Auth: mw.auth, "+
 			"OptionalAuth: mw.optionalAuth, Authorize: mw.authorizeByID, "+
-			"RateLimit: rateLimitStager})\n",
+			"RateLimit: rateLimitStager, Cache: inf.cache.Middleware})\n",
 		data.HTTPAlias, data.HTTPAlias, data.ServiceVar)
 
 	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := providersMarkers()

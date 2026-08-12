@@ -1,8 +1,10 @@
 package resp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -170,6 +172,57 @@ func TestMapErrResolvesRegisteredSentinels(t *testing.T) {
 			t.Fatalf("status = %d, want 500", rec.Code)
 		}
 	})
+}
+
+// TestMapErrHandsContextErrorsToTheFinalizer 钉住协作式超时/取消不在响应层定局。
+//
+// MapErr 在这里写 500 的后果：终态中间件看到"响应已写出"只能记日志，
+// 504 与"客户端断开不回包"两条语义成为死代码。
+func TestMapErrHandsContextErrorsToTheFinalizer(t *testing.T) {
+	t.Parallel()
+
+	mapper := NewErrMapper()
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+		{name: "canceled", err: context.Canceled},
+		{name: "wrapped deadline", err: fmt.Errorf("load profile: %w", context.DeadlineExceeded)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, rec := newCtx()
+			MapErr(c, tt.err, mapper)
+
+			if c.Writer.Written() {
+				t.Fatalf("MapErr wrote %d %q; unmapped ctx errors must reach the finalizer middleware",
+					rec.Code, rec.Body.String())
+			}
+			if len(c.Errors) != 1 || c.Errors.Last().Err != tt.err {
+				t.Fatalf("errors = %v, want exactly the original error recorded for the finalizer", c.Errors)
+			}
+			if !c.IsAborted() {
+				t.Fatal("the chain was not aborted; later handlers would keep running on a dead request")
+			}
+		})
+	}
+}
+
+// TestMapErrPrefersAnExplicitContextMapping 钉住显式登记的 ctx 错误映射仍然优先。
+func TestMapErrPrefersAnExplicitContextMapping(t *testing.T) {
+	t.Parallel()
+
+	c, rec := newCtx()
+	mapper := NewErrMapper(ErrMapping{
+		Target: context.DeadlineExceeded, Status: goerr.StatusNotFound(), Message: "查询超时",
+	})
+	MapErr(c, context.DeadlineExceeded, mapper)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want the explicitly mapped 404", rec.Code)
+	}
 }
 
 // TestPayloadTooLargeCarriesTheLimit 钉住 413 告诉客户端上限是多少。

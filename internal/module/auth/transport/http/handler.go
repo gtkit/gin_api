@@ -47,6 +47,12 @@ var errMapper = resp.NewErrMapper(
 		Target: application.ErrPasswordTooLong,
 		Status: goerr.StatusValidateParams(), Message: "密码过长",
 	},
+	resp.ErrMapping{
+		// 部分成功：账号已建、令牌未签发。业务码 + HTTP 200——注册的资源侧
+		// 已经成功，客户端的正确处置是直接登录，不是把它当失败重试注册。
+		Target: application.ErrRegisteredLoginRequired,
+		Status: goerr.StatusLoginNotPerformed(), Message: "账号已创建，请直接登录",
+	},
 )
 
 // Handler 是认证端点。

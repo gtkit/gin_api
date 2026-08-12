@@ -78,6 +78,38 @@ func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 	}
 }
 
+// TestSaturatedGateFailsBothComparePathsAlike 钉住闸门饱和时两条比对路径同语义。
+//
+// 回归：CompareWithDummy 的闸门错误曾在 application 被吞掉，于是闸门饱和 +
+// 请求取消时，不存在的账号回 401、存在的账号报基础设施错误——
+// 状态码与耗时重新泄漏账号是否存在。
+func TestSaturatedGateFailsBothComparePathsAlike(t *testing.T) {
+	t.Parallel()
+
+	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+
+	// 占满唯一的名额，模拟闸门饱和。
+	release, err := h.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire the only slot: %v", err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dummyErr := h.CompareWithDummy(ctx, "pw")
+	compareErr := h.Compare(ctx, "hash", "pw")
+
+	if errors.Is(dummyErr, authapp.ErrInvalidCredentials) {
+		t.Fatalf("CompareWithDummy under a saturated gate = %v; masking it as invalid "+
+			"credentials re-opens the enumeration channel", dummyErr)
+	}
+	if !errors.Is(dummyErr, context.Canceled) || !errors.Is(compareErr, context.Canceled) {
+		t.Fatalf("both paths must surface the cancellation: dummy=%v compare=%v", dummyErr, compareErr)
+	}
+}
+
 // scriptedClient 是可编排返回值的 Redis 替身。
 type scriptedClient struct {
 	evalVal any

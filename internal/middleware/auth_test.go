@@ -125,6 +125,71 @@ func TestAuthBearerHeader(t *testing.T) {
 	}
 }
 
+// TestAuthRejectsConflictingDuplicateHeaders 钉住同名认证头多值不一致即拒绝。
+//
+// Header.Get 只取第一个，而不同的代理/框架取第一个还是最后一个并无共识：
+// 攻击者在合法请求上追加一个同名头，认证身份就随下游的取值策略漂移。
+// 一致的重复容忍——有些代理会原样复制既有头。
+func TestAuthRejectsConflictingDuplicateHeaders(t *testing.T) {
+	jwt := newTestJWT(t)
+	token, err := jwt.Issuer.Issue(context.Background(), 42, "user")
+	if err != nil {
+		t.Fatalf("Issue returned error: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		header     string
+		values     []string
+		wantStatus int
+	}{
+		{
+			name:       "重复 Authorization 不一致拒绝",
+			header:     "Authorization",
+			values:     []string{"Bearer " + token, "Bearer forged-token"},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "重复 App-Token 不一致拒绝",
+			header:     "App-Token",
+			values:     []string{token, "forged-token"},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "重复 Authorization 一致放行",
+			header:     "Authorization",
+			values:     []string{"Bearer " + token, "Bearer " + token},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "重复 App-Token 一致放行",
+			header:     "App-Token",
+			values:     []string{token, token},
+			wantStatus: http.StatusNoContent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			engine := gin.New()
+			engine.Use(mustAuthenticate(t, fakeUserVerifier{valid: true}, jwt.Parser, false))
+			engine.GET("/protected", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			for _, v := range tt.values {
+				req.Header.Add(tt.header, v)
+			}
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
 func TestAuthRejectsUnknownUser(t *testing.T) {
 	jwt := newTestJWT(t)
 	issuer := jwt.Issuer

@@ -23,6 +23,19 @@ type Runtime struct {
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt    *jwtauth.Assembly
 	closed atomic.Bool
+	// drainInterrupt 是日志排空的提前放弃信号（强制关停的 ForcedCh）。
+	// 由 App 在进入请求并发阶段之前安装一次；nil 表示排空只受预算约束。
+	drainInterrupt <-chan struct{}
+}
+
+// SetDrainInterrupt 安装日志排空的提前放弃信号。
+//
+// 只允许在进程装配阶段调用一次：Close 与本方法没有并发保护，
+// 进入请求并发阶段后再改动就是数据竞争。
+func (r *Runtime) SetDrainInterrupt(ch <-chan struct{}) {
+	if r != nil {
+		r.drainInterrupt = ch
+	}
 }
 
 // NewRuntime builds runtime dependencies that can be reused by commands.
@@ -45,7 +58,7 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		ctx, cfg, resolveDBCredentials(cfg, opts), resourceRequirements(cfg), data.DefaultBudget(),
 	)
 	if err != nil {
-		closeProcessRuntime()
+		closeProcessRuntime(nil)
 		return nil, fmt.Errorf("open resources: %w", err)
 	}
 
@@ -76,7 +89,7 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 // 根因用 %w 保留可 errors.Is/As，清理错误只作附加信息——
 // 反过来会让调用方拿不到真正的失败原因。
 func closeRuntimeOnFailure(resources *data.Resources, cause error) error {
-	closeProcessRuntime()
+	closeProcessRuntime(nil)
 	if err := resources.Close(); err != nil {
 		return errors.Join(cause, fmt.Errorf("close resources after failure: %w", err))
 	}
@@ -144,7 +157,7 @@ func (r *Runtime) Close() error {
 		err = r.resources.Close()
 	}
 	if r.closed.CompareAndSwap(false, true) {
-		closeProcessRuntime()
+		closeProcessRuntime(r.drainInterrupt)
 	}
 	if err != nil {
 		return fmt.Errorf("close resources: %w", err)

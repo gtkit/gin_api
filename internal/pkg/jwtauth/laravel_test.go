@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	testLaravelSecret = "test-laravel-jwt-secret"
+	// 64 字节：满足 hs512 的密钥下限，同一常量可驱动全部算法的用例。
+	testLaravelSecret = "test-laravel-jwt-secret-0123456789abcdef0123456789abcdef01234567"
 	testLaravelRole   = "user"
 )
 
@@ -53,13 +54,18 @@ func TestNewLaravelVerifier(t *testing.T) {
 		{name: "empty role rejected", secret: testLaravelSecret, algorithm: "hs256", role: "", wantErr: true},
 		{name: "asymmetric algorithm rejected", secret: testLaravelSecret, algorithm: "rs256", role: testLaravelRole, wantErr: true},
 		{name: "none algorithm rejected", secret: testLaravelSecret, algorithm: "none", role: testLaravelRole, wantErr: true},
+		// 密钥长度下限按算法：短于哈希输出长度的密钥让暴力搜索密钥比伪造签名更便宜。
+		{name: "hs256 short secret rejected", secret: strings.Repeat("a", 31), algorithm: "hs256", role: testLaravelRole, wantErr: true},
+		{name: "hs384 short secret rejected", secret: strings.Repeat("a", 47), algorithm: "hs384", role: testLaravelRole, wantErr: true},
+		{name: "hs512 short secret rejected", secret: strings.Repeat("a", 63), algorithm: "hs512", role: testLaravelRole, wantErr: true},
+		{name: "hs256 exactly 32 bytes accepted", secret: strings.Repeat("a", 32), algorithm: "hs256", role: testLaravelRole},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			verifier, err := NewLaravelVerifier(tt.secret, tt.algorithm, tt.role)
+			verifier, err := NewLaravelVerifier(tt.secret, tt.algorithm, tt.role, 0)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("NewLaravelVerifier expected error, got nil")
@@ -193,7 +199,7 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 		},
 	}
 
-	verifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole)
+	verifier, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole, 0)
 	if err != nil {
 		t.Fatalf("NewLaravelVerifier returned error: %v", err)
 	}
@@ -229,5 +235,37 @@ func TestLaravelVerifierParseToken(t *testing.T) {
 				t.Fatal("ExpiresAt is nil, want propagated exp")
 			}
 		})
+	}
+}
+
+// TestLaravelVerifierAppliesClockSkew 钉住 Laravel 验签与主验证器同源的时钟容忍。
+//
+// 两个验证器的时钟口径必须一致：否则同一枚"刚过期"的令牌，走哪条验签路径
+// 决定它是否有效——行为随实现细节漂移，跨机器的合理时钟偏差只在一条路径上被容忍。
+func TestLaravelVerifierAppliesClockSkew(t *testing.T) {
+	t.Parallel()
+
+	// 令牌 30 秒前过期：在 60 秒的容忍窗口内，超出零容忍。
+	mapClaims := jwtv5.MapClaims{
+		"sub": float64(42),
+		"exp": time.Now().Add(-30 * time.Second).Unix(),
+		"iat": time.Now().Add(-time.Hour).Unix(),
+	}
+	token := signLaravelToken(t, testLaravelSecret, jwtv5.SigningMethodHS256, mapClaims)
+
+	withSkew, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole, time.Minute)
+	if err != nil {
+		t.Fatalf("NewLaravelVerifier(withSkew): %v", err)
+	}
+	if _, err := withSkew.ParseToken(context.Background(), token); err != nil {
+		t.Fatalf("a token expired within the skew window was rejected: %v", err)
+	}
+
+	noSkew, err := NewLaravelVerifier(testLaravelSecret, "hs256", testLaravelRole, 0)
+	if err != nil {
+		t.Fatalf("NewLaravelVerifier(noSkew): %v", err)
+	}
+	if _, err := noSkew.ParseToken(context.Background(), token); err == nil {
+		t.Fatal("an expired token passed without any skew tolerance")
 	}
 }

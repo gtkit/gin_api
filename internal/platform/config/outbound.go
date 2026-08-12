@@ -16,6 +16,22 @@ type OutboundConfig struct {
 	Defaults OutboundClientConfig `mapstructure:"defaults"`
 	// Clients 按名字声明下游。名字即故障域，与熔断器的下游名一一对应。
 	Clients map[string]OutboundClientConfig `mapstructure:"clients"`
+	// Breaker 是全部下游共用的熔断阈值；实例按下游名各自独立。
+	//
+	// 阈值共用而实例独立：一个下游的故障只熔断它自己，而"多少次连续失败
+	// 算故障"是进程级的运维口径，按下游拆散只会让每个新下游多一组
+	// 没人知道该填什么的配置项。零值字段取熔断包的保守默认。
+	Breaker OutboundBreakerConfig `mapstructure:"breaker"`
+}
+
+// OutboundBreakerConfig 是出站熔断的阈值（outbound-http-resilience spec）。
+type OutboundBreakerConfig struct {
+	// ConsecutiveFailures 连续失败达到该值即熔断；0 取默认（5）。
+	ConsecutiveFailures int `mapstructure:"consecutive_failures"`
+	// OpenTimeout 是熔断后到半开探测的等待；0 取默认（60s）。
+	OpenTimeout time.Duration `mapstructure:"open_timeout"`
+	// HalfOpenMaxRequests 是半开期放行的探测请求数；0 取默认（1）。
+	HalfOpenMaxRequests int `mapstructure:"half_open_max_requests"`
 }
 
 // OutboundClientConfig 是单个出站客户端的参数。
@@ -53,6 +69,12 @@ const (
 // 超过它的"超时"实际等于没有超时：调用方（HTTP handler）自己的处理预算
 // 远小于这个量级，真等到它触发时请求早已被上游放弃。
 const maxOutboundTimeout = 5 * time.Minute
+
+// maxBreakerOpenTimeout 是熔断开启态时长的配置上限。
+//
+// 超过它的开启态等于把一个早已恢复的下游继续拒之门外：半开探测本身
+// 几乎免费，压低探测频率没有任何收益。
+const maxBreakerOpenTimeout = 10 * time.Minute
 
 // Resolved 返回按 Defaults 与内置兜底补齐后的配置。
 //
@@ -103,13 +125,34 @@ func firstPositiveInt(values ...int) int {
 
 // validateOutboundConfig 校验出站客户端配置。
 //
-// 未声明任何客户端时不校验：母版默认不启用出站能力。
+// 未声明任何客户端时只校验熔断阈值（写错的阈值即使暂时不生效也该被拦下，
+// 否则它会在第一个下游接入时才爆）；客户端配置本身不校验：母版默认不启用
+// 出站能力。
 func validateOutboundConfig(cfg OutboundConfig) error {
-	if len(cfg.Clients) == 0 {
-		return nil
+	var errs []error
+
+	if cfg.Breaker.ConsecutiveFailures < 0 {
+		errs = append(errs, fmt.Errorf(
+			"outbound.breaker.consecutive_failures %d must not be negative", cfg.Breaker.ConsecutiveFailures))
+	}
+	if cfg.Breaker.HalfOpenMaxRequests < 0 {
+		errs = append(errs, fmt.Errorf(
+			"outbound.breaker.half_open_max_requests %d must not be negative", cfg.Breaker.HalfOpenMaxRequests))
+	}
+	if cfg.Breaker.OpenTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"outbound.breaker.open_timeout %s must not be negative", cfg.Breaker.OpenTimeout))
+	}
+	if cfg.Breaker.OpenTimeout > maxBreakerOpenTimeout {
+		errs = append(errs, fmt.Errorf(
+			"outbound.breaker.open_timeout %s exceeds the %s cap: keeping a recovered downstream "+
+				"locked out that long has no upside, half-open probes are nearly free",
+			cfg.Breaker.OpenTimeout, maxBreakerOpenTimeout))
 	}
 
-	var errs []error
+	if len(cfg.Clients) == 0 {
+		return errors.Join(errs...)
+	}
 	for name, client := range cfg.Clients {
 		if strings.TrimSpace(name) == "" {
 			errs = append(errs, errors.New("outbound.clients: client name must not be empty"))
