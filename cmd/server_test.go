@@ -70,3 +70,19 @@ func TestBannerPaletteCoversEveryLine(t *testing.T) {
 		}
 	}
 }
+
+// TestBannerRuleColorIsOutsideThePalette 锁定「收边线不取色带里的任何一格」。
+//
+// 这是 bannerRule 注释里写下的声明，因此必须有一个「若声明为假就会失败」的
+// 用例：分隔线的作用是收住版面，取了色带里的色就会与字形融成一片，那时它
+// 既不分隔也不收边，而这种失效只在真正启动服务时用肉眼才看得出来。
+func TestBannerRuleColorIsOutsideThePalette(t *testing.T) {
+	t.Parallel()
+
+	for i, c := range bannerPalette {
+		if c == bannerRule {
+			t.Fatalf("bannerRule equals palette entry %d (%q); the separator must not blend into the art",
+				i, c)
+		}
+	}
+}

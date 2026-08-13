@@ -19,34 +19,58 @@ const _UI = `
  ╚═════╝  ╚═════╝        ╚═════╝ ╚═╝╚═╝  ╚═══╝      ╚═╝  ╚═╝╚═╝     ╚═╝
 `
 
-// gopherBlue 是 Go 品牌主色 Gopher Blue #00ADD8 在 xterm-256 里的对应格：
-// 38 号 = #00AFD7，与品牌色的 RGB 差为 (0,2,1)，肉眼不可分。
+// banner 用到的全部 SGR 序列。
 //
-// 用 256 色 SGR（`38;5;N`）而不是 24 位真彩（`38;2;R;G;B`）取精确 #00ADD8：
-// 差距已在感知阈之下，收益为零；而 macOS 的 Terminal.app 不支持真彩、会退回
-// 近似，换过去反而把一个稳定的结果变成一个依赖终端实现的结果。
-const gopherBlue = "\x1b[38;5;38m"
+// 逐个具名、不内联进调色板：切片里读到的应当是「这条色带由哪些颜色构成」，
+// 而不是六串需要逐字符数分号的转义码。改配色时也不必回头核对哪个数字是色号、
+// 哪个是模式位。
+//
+// 一律用 256 色索引（`38;5;N`），不用基本 8 色，也不用 24 位真彩：
+//
+//   - 基本 8 色**没有确定的 RGB**，由终端主题决定（同一个 `\x1b[32m` 在
+//     macOS Terminal 是 #00A600、xterm 是 #00CD00、VS Code Dark+ 是 #0DBC79）。
+//     用它等于把颜色的决定权交给终端。
+//   - 24 位真彩能取到精确的品牌色，但与 256 色格的差距已在感知阈之下（见
+//     gopherBlue），而 macOS 的 Terminal.app 不支持真彩、会退回近似——换过去
+//     等于把一个确定的结果变成一个依赖终端实现的结果。
+//
+// 两个取值不是随手挑的：
+//
+//   - gopherBlue 取 38 号，是全 256 色里离 Go 品牌主色 #00ADD8 最近的一格
+//     （#00AFD7，RGB 差 (0,2,1)，肉眼不可分）。
+//   - bannerRule 刻意不取色带里的任何一格——分隔线的作用是收住版面，
+//     与字形同色就会融成一片，那时它既不分隔也不收边（有测试锁定）。
+//
+// 行尾注释的 hex 是各色号在 xterm-256 色立方中的真实取值，不是近似描述。
+const (
+	bannerAqua  = "\x1b[38;5;51m"  // 51   #00FFFF  亮青
+	bannerSky   = "\x1b[38;5;45m"  // 45   #00D7FF  天青
+	bannerAzure = "\x1b[38;5;39m"  // 39   #00AFFF  湛蓝
+	gopherBlue  = "\x1b[38;5;38m"  // 38   #00AFD7  Go 品牌主色（官方 #00ADD8）
+	bannerSteel = "\x1b[38;5;32m"  // 32   #0087D7  钢蓝
+	bannerDeep  = "\x1b[38;5;26m"  // 26   #005FD7  深蓝
+	bannerRule  = "\x1b[38;5;240m" // 240  #585858  中性灰，收边线专用
+	bannerReset = "\x1b[0m"        // 复位，清除前景色；缺它后续输出会继承横幅的颜色
+)
 
 // bannerPalette 是 banner 逐行的前景色，按行下标取模取用。
 //
-// 默认单色 Gopher Blue：ANSI Shadow 的立体感来自字形本身（`█` 是字面，
-// `╗╝═║` 是描边与投影），由字符密度造出，与颜色无关——单色是这个字体的常规
-// 用法，不会损失任何层次。渐变只是额外装饰。
+// 青→蓝渐变，色带精确穿过 Gopher Blue（第 4 行）：六格全部落在 xterm-256
+// 色立方的 r=0 平面上（红分量恒为 0），因此从头到尾是同一个色相家族的明度与
+// 冷暖推移，不会中途串到别的颜色去。
 //
-// 想要渐变就往这里加色阶，打印逻辑不用动。例如青→蓝六段：
+// 色阶数与字形行数**不必相等**：打印逻辑按行下标取模。换字体改了行数、或
+// 这里增删色阶，都不需要动打印代码，也不会越界。
 //
-//	"\x1b[38;5;51m" // #00FFFF
-//	"\x1b[38;5;45m" // #00D7FF
-//	"\x1b[38;5;39m" // #00AFFF
-//	gopherBlue      // #00AFD7
-//	"\x1b[38;5;32m" // #0087D7
-//	"\x1b[38;5;26m" // #005FD7
-var bannerPalette = []string{gopherBlue}
-
-const (
-	bannerReset = "\x1b[0m"
-	bannerDim   = "\x1b[38;5;240m" // 分隔线用中性灰，不与字形争视觉重心
-)
+// 想回到单色只留一个元素即可，例如 `[]string{gopherBlue}`。
+var bannerPalette = []string{
+	bannerAqua,  // 51  #00FFFF  亮青
+	bannerSky,   // 45  #00D7FF
+	bannerAzure, // 39  #00AFFF
+	gopherBlue,  // 38  #00AFD7  ← Go 品牌主色 #00ADD8
+	bannerSteel, // 32  #0087D7
+	bannerDeep,  // 26  #005FD7  深蓝
+}
 
 // printBanner 渲染启动横幅：逐行渐变着色，末尾收一条与字形等宽的细线。
 //
@@ -72,7 +96,7 @@ func printBanner(w io.Writer) {
 		b.WriteString(bannerReset)
 		b.WriteByte('\n')
 	}
-	b.WriteString(bannerDim)
+	b.WriteString(bannerRule)
 	b.WriteString(strings.Repeat("─", width))
 	b.WriteString(bannerReset)
 	b.WriteString("\n\n")
