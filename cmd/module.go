@@ -50,12 +50,19 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 			}
 
 			// charset/collation 以数据库配置为单一来源：配置可加载时用它
-			// （含其默认值语义）；加载不到（配置文件尚未就绪的新仓库）留空，
-			// 生成器退回 config 包的默认常量——同一来源的默认，不是第二份口径。
+			// （含其默认值语义），否则退回 config 包的默认常量——同一来源的
+			// 默认，不是第二份口径。
+			//
+			// 加载失败**提示但不中止**：新仓库尚无配置文件时生成器仍应可用；
+			// 而静默吞掉会让使用者配的 collation 悄悄没生效，生成的迁移与项目
+			// 基线不一致，差异只在数据量上来后才暴露。
 			var charset, collation string
 			if cfg, cfgErr := config.Load(); cfgErr == nil {
 				charset = cfg.Database.EffectiveCharset()
 				collation = cfg.Database.EffectiveCollation()
+			} else {
+				cmd.PrintErrf("warning: config not loaded (%v); the migration will use the "+
+					"built-in charset/collation defaults\n", cfgErr)
 			}
 
 			result, err := generator.GenerateWithOptions(args[0], scaffold.GenerateOptions{

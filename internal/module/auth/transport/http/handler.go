@@ -48,6 +48,12 @@ var errMapper = resp.NewErrMapper(
 		Status: goerr.StatusValidateParams(), Message: "密码过长",
 	},
 	resp.ErrMapping{
+		// 账号形态非法是参数错误，不是凭据错误：它在任何存储访问之前就能
+		// 判定，也不泄漏账号是否存在（这样的账号根本不可能存在）。
+		Target: application.ErrInvalidAccount,
+		Status: goerr.StatusValidateParams(), Message: "手机号格式不正确",
+	},
+	resp.ErrMapping{
 		// 部分成功：账号已建、令牌未签发。业务码 + HTTP 200——注册的资源侧
 		// 已经成功，客户端的正确处置是直接登录，不是把它当失败重试注册。
 		Target: application.ErrRegisteredLoginRequired,

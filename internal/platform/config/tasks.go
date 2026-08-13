@@ -102,6 +102,13 @@ func validateTasksConfig(cfg TasksConfig, redis RedisConfig) error {
 				"declared databases, so the queue would get no client at all",
 			cfg.RedisDB, redis.DBs))
 	}
+	// 负值一律拒绝，不静默回退：回退让"配了一个非法值"与"没配"变成同一种
+	// 结果，而使用者以为自己配的那个值正在生效。
+	if cfg.Concurrency < 0 || cfg.TaskTimeout < 0 || cfg.ShutdownTimeout < 0 {
+		errs = append(errs, errors.New(
+			"tasks: negative concurrency / task_timeout / shutdown_timeout are not allowed "+
+				"(they silently fall back to defaults, so the configured value never takes effect)"))
+	}
 	for name, weight := range cfg.Queues {
 		if strings.TrimSpace(name) == "" {
 			errs = append(errs, errors.New("tasks.queues: queue name must not be empty"))

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // 业务错误。transport 层按类型映射状态码，不解析文本。
@@ -42,6 +44,12 @@ var (
 	// 把它表达成普通失败，客户端重试注册只会撞上"手机号已注册"——
 	// 一个既成事实被表达成了从未发生。正确的客户端处置是直接登录。
 	ErrRegisteredLoginRequired = errors.New("auth: account created but tokens were not issued; log in instead")
+
+	// ErrInvalidAccount 表示账号标识本身不合法（空、含空白）。
+	//
+	// 与"凭据错误"分开：它在任何存储访问之前就能判定，且不涉及口令——
+	// 合并成 ErrInvalidCredentials 会让一次明显的客户端错误消耗一次 bcrypt。
+	ErrInvalidAccount = errors.New("auth: account identifier is invalid")
 
 	// ErrRefreshReused 表示检测到刷新令牌重用。
 	//
@@ -121,6 +129,31 @@ func NewService(opts Options) (*Service, error) {
 	}, nil
 }
 
+// normalizeAccount 规范化账号标识，供限流、查询与写入**共用同一个值**。
+//
+// 三者必须同源：数据库列用 utf8mb4_unicode_ci，那是 PAD SPACE 语义——
+// "13800000000 " 与 "13800000000" 在查询里是同一行，而按原始输入派生的
+// HMAC 限流键却是两个不同的桶。攻击者每次在尾部多加一个空格，就能对同一个
+// 账号无限次尝试而每次都落在一个全新的桶里，账号维度限流形同虚设。
+//
+// 规范化在 application 入口一次完成：放到限流那一步单独做，写入路径就会
+// 存进未规范化的值，同一个账号从此有两种存在形式。
+//
+// 只做 Trim 与"不得含内部空白"，不做大小写折叠或 Unicode 归一：手机号是
+// 数字串，多做的每一步都要与数据库 collation 的口径逐条对齐，而对不上的
+// 那一步会重新打开同一个洞。
+func normalizeAccount(account string) (string, error) {
+	normalized := strings.TrimSpace(account)
+	if normalized == "" {
+		return "", ErrInvalidAccount
+	}
+	if strings.ContainsFunc(normalized, unicode.IsSpace) {
+		// 内部空白同样是 PAD SPACE 之外的等价面：直接拒绝，不猜测意图。
+		return "", ErrInvalidAccount
+	}
+	return normalized, nil
+}
+
 // TokenPair 是一次成功认证的产出。
 type TokenPair struct {
 	AccessToken  string
@@ -134,6 +167,10 @@ type TokenPair struct {
 // 注册后立即登录而不是要求再调一次登录：客户端刚提交过正确的口令，
 // 再要一次除了多一个往返没有任何安全收益。
 func (s *Service) Register(ctx context.Context, phone, password, nickname string) (TokenPair, error) {
+	phone, err := normalizeAccount(phone)
+	if err != nil {
+		return TokenPair{}, err
+	}
 	if err := s.gateAccount(ctx, phone, "register"); err != nil {
 		return TokenPair{}, err
 	}
@@ -168,6 +205,12 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 
 // Login 校验凭据并签发令牌。
 func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair, error) {
+	phone, err := normalizeAccount(phone)
+	if err != nil {
+		// 不做掩护比对：账号形态非法在任何存储访问之前就能判定，
+		// 它不泄漏"这个账号是否存在"——因为这样的账号根本不可能存在。
+		return TokenPair{}, err
+	}
 	if err := s.gateAccount(ctx, phone, "login"); err != nil {
 		return TokenPair{}, err
 	}
@@ -219,27 +262,34 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 }
 
 // Refresh 用刷新令牌换取新的令牌对。
+//
+// 次序是 **只读判定 → 签发访问令牌 → 提交消费**，不能反过来。
+//
+// 先消费再签发时，签发失败会留下一枚已被消费的刷新令牌：客户端手里那枚
+// 已经作废，而它唯一合理的动作（重试）在超过重放窗后会被判成令牌泄漏，
+// 整族随之撤销——一次令牌签发的抖动升级成一次强制登出。本次序下签发失败
+// 时状态零改动，重试完全安全。
+//
+// 判定与提交之间的竞态由 Consume 自己定局：它是唯一的原子权威，
+// 并发消费仍然只有一个成功，重用检测与族撤销的语义不受影响。
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
-	uid, next, err := s.refresh.Consume(ctx, refreshToken)
+	uid, err := s.refresh.Peek(ctx, refreshToken)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrRefreshReused):
-			// 重用是安全事件，必须以告警级别留痕：它意味着某个令牌被复制了
-			// 出去，而普通的"过期/找不到"只是日常。两者共用一条日志的话，
-			// 真正需要有人看的那条会淹没在噪音里。
-			s.fail("refresh token reuse detected, the whole token family was revoked: %v", err)
-			s.event(ctx, EventRefreshReused)
-			return TokenPair{}, ErrRefreshRejected
-		case errors.Is(err, ErrRefreshRejected):
-			return TokenPair{}, ErrRefreshRejected
-		default:
-			return TokenPair{}, fmt.Errorf("auth: consume refresh token: %w", err)
-		}
+		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
 	}
 
+	// 签发在消费之前：这一步失败时刷新令牌仍然有效。
 	accessToken, err := s.access.Issue(ctx, uid)
 	if err != nil {
-		return TokenPair{}, fmt.Errorf("auth: issue access token for uid=%d: %w", uid, err)
+		return TokenPair{}, fmt.Errorf(
+			"auth: issue access token for uid=%d (the refresh token is untouched, retry is safe): %w",
+			uid, err)
+	}
+
+	// 提交：轮换出下一代刷新令牌。到这里才第一次改动状态。
+	_, next, err := s.refresh.Consume(ctx, refreshToken)
+	if err != nil {
+		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
 	}
 
 	return TokenPair{
@@ -247,6 +297,30 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		RefreshToken: next,
 		ExpiresIn:    int64(s.accessTTL.Seconds()),
 	}, nil
+}
+
+// refreshRejected 把刷新链路的失败翻译成对外错误，并补齐重用的安全副作用。
+func (s *Service) refreshRejected(ctx context.Context, refreshToken string, err error) error {
+	switch {
+	case errors.Is(err, ErrRefreshReused):
+		// 重用是安全事件，必须以告警级别留痕：它意味着某个令牌被复制了
+		// 出去，而普通的"过期/找不到"只是日常。两者共用一条日志的话，
+		// 真正需要有人看的那条会淹没在噪音里。
+		s.fail("refresh token reuse detected, the whole token family was revoked: %v", err)
+		s.event(ctx, EventRefreshReused)
+		// **撤销必须真的发生**：只读判定不改状态，撤销与检测的原子绑定在
+		// Consume 内。不补这一次调用，重用就只是被记了一笔而没有任何处置。
+		// 它的结果必然仍是重用，因此只在失败时留痕，不改变对外错误。
+		if _, _, revokeErr := s.refresh.Consume(ctx, refreshToken); revokeErr != nil &&
+			!errors.Is(revokeErr, ErrRefreshReused) {
+			s.fail("revoking the reused refresh token family failed: %v", revokeErr)
+		}
+		return ErrRefreshRejected
+	case errors.Is(err, ErrRefreshRejected):
+		return ErrRefreshRejected
+	default:
+		return fmt.Errorf("auth: consume refresh token: %w", err)
+	}
 }
 
 // Logout 撤销当前访问令牌与刷新令牌族。

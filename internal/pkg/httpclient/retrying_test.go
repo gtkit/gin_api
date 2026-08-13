@@ -24,7 +24,13 @@ func TestRetryableFailureOnlyRetriesWhatIsWorthRetrying(t *testing.T) {
 		err    error
 		want   bool
 	}{
-		{name: "传输层错误重试", err: errors.New("connection refused"), want: true},
+		{name: "传输层错误重试（无状态码）", err: errors.New("connection refused"), want: true},
+		// 回归：err 优先的判定会把"下游明确回了 400、随后解码失败"判成可重试，
+		// 于是一次客户端错误被放大 N 倍，还计进熔断——用与下游健康无关的
+		// 信号熔断一个健康的下游。
+		{name: "400 + 解码错误不重试", status: http.StatusBadRequest, err: errors.New("decode: unexpected EOF"), want: false},
+		{name: "200 + 解码错误不重试", status: http.StatusOK, err: errors.New("decode: unexpected EOF"), want: false},
+		{name: "503 + 解码错误仍重试", status: http.StatusServiceUnavailable, err: errors.New("decode boom"), want: true},
 		{name: "调用方取消不重试", err: fmt.Errorf("do: %w", context.Canceled), want: false},
 		{name: "调用方超时不重试", err: fmt.Errorf("do: %w", context.DeadlineExceeded), want: false},
 		{name: "429 重试", status: http.StatusTooManyRequests, want: true},

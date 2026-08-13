@@ -126,7 +126,9 @@ func webhookSenderFor(platform, secret string) func(context.Context, string, ...
 			provider msgbot.Provider
 			err      error
 		)
-		switch strings.TrimSpace(platform) {
+		// 归一化与启动校验同口径（后者大小写不敏感）：两处不一致时，
+		// 一个通过了校验的 "Feishu" 会在运行期落到 default 分支报未知平台。
+		switch strings.ToLower(strings.TrimSpace(platform)) {
 		case platformDingTalk:
 			provider, err = dingtalk.New(cfg)
 		case platformWeCom:
@@ -145,6 +147,7 @@ func webhookSenderFor(platform, secret string) func(context.Context, string, ...
 	}
 }
 
+// Warn 扇出一条告警到全部已启用通道。
 func (n *Notifier) Warn(url string, args ...string) {
 	// nil 接收者直接返回而不是回退到某个包级默认实例：
 	// 包级默认实例正是本次要消灭的东西——它与 log 包内自行构造的那个并存，

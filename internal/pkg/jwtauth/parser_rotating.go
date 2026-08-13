@@ -91,7 +91,10 @@ func (p *Parser) ParseToken(
 
 // parseUncached 执行真正的验签。
 func (p *Parser) parseUncached(token string, opts ...jwtv5.ParserOption) (*claims.Claims, error) {
-	parserOpts := append(p.baseParserOptions(), opts...)
+	// 安全选项**最后**应用：jwtv5 后设选项覆盖先设的，调用方传入的
+	// WithValidMethods / WithoutClaimsValidation 之类若排在后面，就能把
+	// 算法白名单与 exp 必需一起关掉——一个本意是"补充"的入口变成了绕过口。
+	parserOpts := append(append([]jwtv5.ParserOption{}, opts...), p.baseParserOptions()...)
 
 	parsed, err := jwtv5.ParseWithClaims(token, &claims.Claims{}, p.keyFunc, parserOpts...)
 	if err != nil {

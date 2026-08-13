@@ -69,20 +69,25 @@ func (r *MigrationRuntime) Config() *config.Config { return r.cfg }
 // DB 返回迁移使用的 GORM 句柄。
 func (r *MigrationRuntime) DB() *ormx.Client { return r.client }
 
-// Close 释放数据库连接并刷写日志与告警队列。
+// Close 释放数据库连接并刷写日志与告警队列。幂等。
 //
-// 迁移进程通常在 Close 后立即退出：不在这里刷写，迁移期间的错误日志与
-// 告警会随进程一起消失——而迁移失败恰是最需要留痕的事件。幂等。
-func (r *MigrationRuntime) Close() {
+// **返回错误而不是只记日志**：连接关闭失败是迁移命令的退出事实，只记日志
+// 会让一次带故障的收尾表现成正常退出，而命令的退出码正是 CI 与部署脚本
+// 唯一看的东西。日志刷写不可省：迁移进程通常在 Close 后立即退出，不刷写
+// 则迁移期间的错误日志与告警随进程一起消失——而迁移失败最需要留痕。
+func (r *MigrationRuntime) Close() error {
 	if r == nil {
-		return
+		return nil
 	}
+	var err error
 	if r.client != nil {
-		if err := r.client.Close(); err != nil {
-			logger.Errorf("close migration database connection: %v", err)
+		if closeErr := r.client.Close(); closeErr != nil {
+			err = fmt.Errorf("close migration database connection: %w", closeErr)
+			logger.Errorf("%v", err)
 		}
 	}
 	if r.closed.CompareAndSwap(false, true) {
 		closeProcessRuntime(nil)
 	}
+	return err
 }

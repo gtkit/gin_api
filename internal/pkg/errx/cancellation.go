@@ -71,3 +71,35 @@ func IsPureAbort(err error) bool {
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
+
+// IsPureDeadline 报告错误树的**全部**分支是否都归结为 context.DeadlineExceeded。
+//
+// 与 IsPureCancellation 对称，供需要把"预算耗尽"与"调用方断开"分开处置的
+// 判定点使用（终态中间件：超时回 504，断开一个字节都不写）。
+//
+// 同样必须逐成员判定：`errors.Is(errors.Join(DeadlineExceeded, dbFailure), …)`
+// 整体判定为真，于是一次真实的下游故障被表达成"这次超时了"，
+// 客户端据此重试，而真正的原因从日志与指标里消失。
+func IsPureDeadline(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		members := joined.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !IsPureDeadline(member) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		if inner := wrapped.Unwrap(); inner != nil {
+			return IsPureDeadline(inner)
+		}
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}

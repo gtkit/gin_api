@@ -685,6 +685,12 @@ func (h *Handler) Get(c *gin.Context) {
 		resp.Err(c, goerr.New(err, goerr.StatusParams()))
 		return
 	}
+	// 非正主键一律拒绝：它不可能对应任何行，放行只会让每个这样的请求
+	// 白打一次数据库，而返回的"找不到"看起来与真实查询无异。
+	if id <= 0 {
+		resp.BadRequestErr(c, "id must be positive")
+		return
+	}
 
 	data, err := h.service.Get(c.Request.Context(), id)
 	if err != nil {

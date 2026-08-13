@@ -295,8 +295,9 @@ func (a *App) closeExtensions(ctx context.Context) error {
 	errs := []error{
 		closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close(),
 		// 入队端排在消费者停掉之后（worker 关停在前）：反过来会让正在收尾的
-		// 处理器无法再入队后续任务。
-		a.tasksProducer.Close(),
+		// 处理器无法再入队后续任务。用 Shutdown 而不是 Close：后者等在途投递
+		// 时不看任何 ctx，第二个信号切不断它。
+		a.tasksProducer.Shutdown(ctx),
 	}
 	// 遥测放在最后 flush：前面几步可能还会产出指标（关闭计数、错误），
 	// 先 flush 就把它们留在了本地。它自带独立预算，不会拖住关停。
@@ -525,6 +526,10 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 // 全部提前返回分支。
 func (a *App) closeResources() error {
 	if live := a.workers.LiveWorkers(); len(live) > 0 {
+		// 连接不关，**但日志照排空**：两者是不同的事，共用一个开关会让
+		// "现在不能关连接"顺带把退出告警与错误日志一起丢掉——而这条
+		// 异常退出路径恰恰是最需要留痕的那条。
+		a.runtime.DrainLogs()
 		return fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
 			len(live), strings.Join(live, ", "), ErrWorkerNotExited)
 	}
@@ -532,4 +537,12 @@ func (a *App) closeResources() error {
 		return nil
 	}
 	return a.runtime.Close()
+}
+
+// forceSignal 返回注入协调器的强制关停信号；未注入时为 nil（排空只受预算约束）。
+func (o Options) forceSignal() <-chan struct{} {
+	if o.Shutdown == nil {
+		return nil
+	}
+	return o.Shutdown.ForcedCh()
 }

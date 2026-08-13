@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ func init() {
 //
 // UseMigrationCredentials：迁移是唯一需要 DDL 权限的路径，配置了迁移专用账号时用它，
 // 未配置则回退运行凭据并告警（不失败，避免破坏尚未配置迁移凭据的存量部署）。
-func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func(), error) {
+func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() error, error) {
 	// module path 必须先解析：解析失败时不该先把数据库连上再报错。
 	modulePath, err := resolveModulePath()
 	if err != nil {
@@ -57,8 +58,7 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func(), err
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {
-		rt.Close()
-		return nil, nil, err
+		return nil, nil, errors.Join(err, rt.Close())
 	}
 
 	return cmds, rt.Close, nil
@@ -76,7 +76,9 @@ func firstToken(args []string) string {
 }
 
 // runMigratexSubtree 把参数转发给 migratex 内层命令；帮助或无参时不连库。
-func runMigratexSubtree(cmd *cobra.Command, args []string, pick func(*migrate.Commands) *cobra.Command, action string) error {
+func runMigratexSubtree(
+	cmd *cobra.Command, args []string, pick func(*migrate.Commands) *cobra.Command, action string,
+) (err error) {
 	if tok := firstToken(args); tok == "" || tok == "help" {
 		return cmd.Help()
 	}
@@ -85,7 +87,13 @@ func runMigratexSubtree(cmd *cobra.Command, args []string, pick func(*migrate.Co
 	if err != nil {
 		return commandError("bootstrap runtime", err)
 	}
-	defer closeRuntime()
+	// 收尾错误进返回值：连接关闭失败是本次命令的退出事实，只记日志会让
+	// 一次带故障的收尾表现成成功，而 CI 与部署脚本只看退出码。
+	defer func() {
+		if closeErr := closeRuntime(); closeErr != nil && err == nil {
+			err = commandError("close migration runtime", closeErr)
+		}
+	}()
 
 	sub := pick(cmds)
 	sub.SilenceUsage = true

@@ -102,6 +102,21 @@ type WorkerManager struct {
 	// 清理失败是进程退出时的资源事实，与"optional 运行故障不影响进程"的
 	// 运行期语义无关。由 TerminationErrors 在关停末端一次性收割。
 	termErrs []error
+
+	// forced 是强制关停信号（第二个 OS 信号）。清理预算必须能被它切断：
+	// cleanup ctx 刻意剥离了调用方的取消（见 cleanupEntry），若不单独接回
+	// 强制信号，"再按一次立刻退出"就要在每个 worker 的清理预算上依次等满。
+	// 装配期安装一次，进入并发阶段后不再改动。
+	forced <-chan struct{}
+}
+
+// SetForceSignal 安装强制关停信号，供清理预算提前放弃。
+//
+// 只允许在装配阶段调用一次：与 Start 之后的并发读没有同步保护。
+func (m *WorkerManager) SetForceSignal(ch <-chan struct{}) {
+	if m != nil {
+		m.forced = ch
+	}
 }
 
 // runningWorker 持有一个已启动 worker 的取消入口与退出信号。
@@ -566,9 +581,23 @@ func (m *WorkerManager) cleanupEntry(ctx context.Context, entry *preparedWorker)
 	entry.cleaned = true
 	m.mu.Unlock()
 
+	// 剥离调用方取消 + 独立预算 + **接回强制信号**：前两者的理由见上，
+	// 而强制路径的前提正是"已经等不下去了"——不接回的话，第二个信号之后
+	// 每个 worker 的清理预算仍会被依次等满，"立刻退出"名存实亡。
 	cleanupCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), m.budget.Cleanup)
 	defer cancel()
+	if m.forced != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-m.forced:
+				cancel()
+			case <-stop:
+			}
+		}()
+	}
 
 	return entry.worker.Cleanup(cleanupCtx)
 }

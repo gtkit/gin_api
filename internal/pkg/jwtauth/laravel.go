@@ -101,7 +101,9 @@ func (v *LaravelVerifier) ParseToken(
 	if v.leeway > 0 {
 		baseOpts = append(baseOpts, jwtv5.WithLeeway(v.leeway))
 	}
-	parserOpts := append(baseOpts, opts...)
+	// 安全选项**最后**应用：后设选项覆盖先设的，调用方选项排在后面就能
+	// 关掉算法白名单与 exp 必需（与主验证器同一处置）。
+	parserOpts := append(append([]jwtv5.ParserOption{}, opts...), baseOpts...)
 	parser := jwtv5.NewParser(parserOpts...)
 
 	mapClaims := jwtv5.MapClaims{}

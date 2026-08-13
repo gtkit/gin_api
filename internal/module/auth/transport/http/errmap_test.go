@@ -65,6 +65,14 @@ type stubRefresh struct {
 
 func (stubRefresh) Issue(context.Context, int64) (string, error) { return "refresh", nil }
 
+// Peek 与 Consume 同口径：只读判定失败即消费也会失败。
+func (s stubRefresh) Peek(context.Context, string) (int64, error) {
+	if s.consumeErr != nil {
+		return 0, s.consumeErr
+	}
+	return 7, nil
+}
+
 func (s stubRefresh) Consume(context.Context, string) (int64, string, error) {
 	if s.consumeErr != nil {
 		return 0, "", s.consumeErr

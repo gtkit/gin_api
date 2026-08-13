@@ -58,6 +58,9 @@ type AccountLimiter interface {
 // RefreshStore 保管刷新令牌。
 type RefreshStore interface {
 	Issue(ctx context.Context, uid int64) (string, error)
+	// Peek 只读判定令牌当前能否被消费，返回它归属的用户；不改动任何状态。
+	// 检测到重用时只报告不撤销——撤销必须与检测原子发生，那由 Consume 完成。
+	Peek(ctx context.Context, token string) (uid int64, err error)
 	// Consume 消费并轮换；检测到重用时撤销整族。
 	Consume(ctx context.Context, token string) (uid int64, newToken string, err error)
 	RevokeFamilyOfToken(ctx context.Context, token string) error

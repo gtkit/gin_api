@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	loggerv2 "github.com/gtkit/logger/v2"
 
@@ -123,7 +124,13 @@ func setNewLoggerForTest(fn func(opts ...loggerv2.Option) (*loggerv2.Logger, err
 // Access Logger — 使用 BufferedWriteSyncer，仅供 HTTP 访问日志中间件使用
 // ---------------------------------------------------------------------------
 
-var accessLog *loggerv2.Logger
+// accessLog 是 access logger 的当前实例。
+//
+// **必须是原子的**：排空（SyncAccessLog）可能在一个被放弃的 goroutine 里继续
+// 执行——排空受预算与强制信号约束，超时后调用方就返回了，而那个 goroutine
+// 还在读它；此时另一次 InitAccessLog（进程内重新装配、测试用例串跑）就是
+// 一次真实的读写竞争。定向 -race 已复现。
+var accessLog atomic.Pointer[loggerv2.Logger]
 
 // InitAccessLog 初始化 access logger（BufferedWriteSyncer 模式）。
 //
@@ -152,7 +159,7 @@ func InitAccessLog(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("build access logger: %w", err)
 	}
-	accessLog = inst
+	accessLog.Store(inst)
 	return nil
 }
 
@@ -170,15 +177,15 @@ var fallbackAccessLog = sync.OnceValue(func() *loggerv2.Logger {
 // 如果未初始化，返回缓存的纯控制台、不落盘兜底实例以保证安全——
 // 兜底实例若允许写文件，会以进程 cwd 为锚在任意目录刷出 logs/（曾污染 internal/router）。
 func AccessLog() *loggerv2.Logger {
-	if accessLog == nil {
-		return fallbackAccessLog()
+	if inst := accessLog.Load(); inst != nil {
+		return inst
 	}
-	return accessLog
+	return fallbackAccessLog()
 }
 
 // SyncAccessLog 刷写 access logger 的缓冲区并关闭文件资源。
 func SyncAccessLog() {
-	if accessLog != nil {
-		accessLog.Sync()
+	if inst := accessLog.Load(); inst != nil {
+		inst.Sync()
 	}
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -131,6 +132,11 @@ func firstPositiveInt(values ...int) int {
 func validateOutboundConfig(cfg OutboundConfig) error {
 	var errs []error
 
+	if cfg.Defaults.Timeout < 0 || cfg.Defaults.MaxResponseBytes < 0 ||
+		cfg.Defaults.MaxConnsPerHost < 0 || cfg.Defaults.MaxIdleConnsPerHost < 0 {
+		errs = append(errs, errors.New(
+			"outbound.defaults: negative values are not allowed (they silently fall back to built-ins)"))
+	}
 	if cfg.Breaker.ConsecutiveFailures < 0 {
 		errs = append(errs, fmt.Errorf(
 			"outbound.breaker.consecutive_failures %d must not be negative", cfg.Breaker.ConsecutiveFailures))
@@ -161,12 +167,25 @@ func validateOutboundConfig(cfg OutboundConfig) error {
 
 		resolved := client.Resolved(cfg.Defaults)
 
-		// base_url 必填：没有它，"这个名字对应哪个下游"只存在于调用点的字符串里，
-		// 换环境时没有任何一处可改。
-		if strings.TrimSpace(resolved.BaseURL) == "" {
+		// base_url 必填且必须是**绝对 http(s) URL**：相对路径或缺 scheme 的值
+		// 会让每次调用拼出一个本地地址，表现为莫名其妙的连接失败，而配置
+		// 看起来"填了"。
+		if raw := strings.TrimSpace(resolved.BaseURL); raw == "" {
 			errs = append(errs, fmt.Errorf(
 				"outbound.clients[%s].base_url is required: without it the downstream address "+
 					"lives only in call sites and cannot be changed per environment", name))
+		} else if u, parseErr := url.Parse(raw); parseErr != nil || !u.IsAbs() ||
+			u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Errorf(
+				"outbound.clients[%s].base_url %q is not an absolute http(s) URL", name, resolved.BaseURL))
+		}
+		// 负值一律拒绝，不静默回退：回退让"配了一个非法值"与"没配"变成同一种
+		// 结果，而使用者以为自己配的那个值正在生效。
+		if client.Timeout < 0 || client.MaxResponseBytes < 0 ||
+			client.MaxConnsPerHost < 0 || client.MaxIdleConnsPerHost < 0 {
+			errs = append(errs, fmt.Errorf(
+				"outbound.clients[%s]: negative values are not allowed (they silently fall back "+
+					"to defaults, so the configured value never takes effect)", name))
 		}
 		if resolved.Timeout > maxOutboundTimeout {
 			errs = append(errs, fmt.Errorf(

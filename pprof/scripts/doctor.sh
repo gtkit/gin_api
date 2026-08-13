@@ -105,7 +105,7 @@ if curl -fsS --max-time 3 "${BASE_URL}/" >"${index_file}" 2>"${error_file}"; the
     warn "端点返回了内容，但不像 pprof 索引页：${BASE_URL}/"
   fi
 else
-  warn "端点不可访问：${BASE_URL}/；当前项目源码尚未接入时这是预期现象，先按 01 文档第 3 节接入并启动服务"
+  warn "端点不可访问：${BASE_URL}/；服务未启动或 pprof.enabled 未开启时这是预期现象"
 fi
 rm -f "${index_file}" "${error_file}"
 

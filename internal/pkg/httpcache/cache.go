@@ -137,16 +137,34 @@ func (s *Stager) Middleware(ttl time.Duration) gin.HandlerFunc {
 // cacheableResponse 是响应期准入判据（cache-preset spec）。
 //
 // 基线（gincache.DefaultCacheableResponse）拒绝 Set-Cookie 与
-// Cache-Control: private/no-store/no-cache；本仓在其上**再拒绝任何带 Vary
-// 的响应**：缓存键只含方法、路径与查询串，不含任何请求头，带 Vary 的响应
-// 进缓存必然把按某个请求头协商出的内容回放给协商结果不同的请求
-// （CORS 的 Vary: Origin 是最常见的一例——拒绝它意味着跨域请求自动绕过
-// 缓存，同源与服务间调用不受影响）。
+// Cache-Control: private/no-store/no-cache；本仓在其上再按 Vary 收口：
+// 缓存键只含方法、路径与查询串，不含任何请求头，因此除 Origin 之外的
+// Vary 一律拒绝（Origin 的处置见 varyIsCacheable）。
 //
 // 方向与请求期判据一致：宁可不缓存。漏缓存的代价是一次多余的查询，
 // 误缓存的代价是把 A 的内容发给 B。
 func cacheableResponse(status int, header http.Header) bool {
-	return gincache.DefaultCacheableResponse(status, header) && len(header.Values("Vary")) == 0
+	return gincache.DefaultCacheableResponse(status, header) && varyIsCacheable(header)
+}
+
+// varyIsCacheable 判断响应的 Vary 是否与"键里没有请求头"相容。
+//
+// 恰为 `Vary: Origin` 是可缓存的：CORS 中间件对**每个**响应都写这个头
+// （包括无 Origin 的同源请求），而带 Origin 的请求已在请求期整体绕过缓存——
+// 能走到这里的响应都不随 Origin 变化。不放行它的话，只要挂了 CORS 中间件，
+// 响应缓存就永久失效，而每个请求还会多一条告警。
+//
+// 其余 Vary（Accept-Language、Accept-Encoding……）一律拒绝：那些请求头不在
+// 键里，缓存会把按某个头协商出的内容回放给协商结果不同的请求。
+func varyIsCacheable(header http.Header) bool {
+	for _, value := range header.Values("Vary") {
+		for field := range strings.SplitSeq(value, ",") {
+			if f := strings.TrimSpace(field); f != "" && !strings.EqualFold(f, "Origin") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // auditResponse 检查已挂缓存的路由是否产出了不可共享的响应，发现即记 Warn 日志。
@@ -169,9 +187,11 @@ func auditResponse(c *gin.Context) {
 			"so this route is effectively uncached",
 			zap.String("path", c.FullPath()), zap.String("cache_control", cc))
 	}
-	if v := header.Get("Vary"); v != "" {
-		logger.Warn("cached route declared Vary; admission rejected it because the cache key "+
-			"carries no request headers, so this route is effectively uncached",
+	if v := header.Get("Vary"); v != "" && !varyIsCacheable(header) {
+		// 只报真正被拒的：CORS 的 Vary: Origin 是可缓存的（见 varyIsCacheable），
+		// 对它告警会让每个请求都产出一条日志——噪音本身就是一次故障。
+		logger.Warn("cached route declared a Vary the cache key cannot honor, so this route "+
+			"is effectively uncached",
 			zap.String("path", c.FullPath()), zap.String("vary", v))
 	}
 }
@@ -236,6 +256,12 @@ func cacheableRequest(c *gin.Context) (bool, gincache.Strategy) {
 		if c.Request.Header.Get(header) != "" {
 			return false, gincache.Strategy{}
 		}
+	}
+	if c.Request.Header.Get("Origin") != "" {
+		// 跨源请求的响应按 Origin 变化（CORS 中间件回显请求来源），而缓存键里
+		// 没有任何请求头。绕过而不是缓存：把 A 源的响应发给 B 源既是跨源泄漏，
+		// 也会让 B 源被浏览器拒绝。同源与服务间调用不带 Origin，不受影响。
+		return false, gincache.Strategy{}
 	}
 	if c.Request.Header.Get("Cookie") != "" {
 		// Cookie 同样携带身份（会话 ID），且它常常是隐式带上的。

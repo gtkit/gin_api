@@ -344,12 +344,22 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 		t.Fatalf("StopKind error = %v, want it to carry ErrWorkerNotExited", err)
 	}
 
+	// 排空计数：连接不能关时日志仍必须排空（两者已解耦，见 Runtime.DrainLogs）。
+	originalDrain := drainProcessLogs
+	t.Cleanup(func() { drainProcessLogs = originalDrain })
+	var drains int
+	drainProcessLogs = func(time.Duration, <-chan struct{}) { drains++ }
+
 	app := &App{workers: mgr, runtime: &Runtime{}, shutdown: NewShutdownCoordinator()}
+	// 返回 ErrWorkerNotExited 即证明关闭被跳过：该错误只在跳过分支产生，
+	// 而那个分支在触碰 runtime 之前就 return 了。
 	if err := app.closeResources(); !errors.Is(err, ErrWorkerNotExited) {
 		t.Fatalf("closeResources = %v, want it to carry ErrWorkerNotExited", err)
 	}
-	if app.runtime.closed.Load() {
-		t.Fatal("runtime was closed while a worker was still running")
+	// 关键回归：连接跳过关闭，但退出告警与错误日志不能跟着一起丢。
+	if drains != 1 {
+		t.Fatalf("logs drained %d times on the skip path, want 1: skipping the connection "+
+			"close must not silently drop the process termination report", drains)
 	}
 
 	close(release)
@@ -358,8 +368,9 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 	if err := app.closeResources(); err != nil {
 		t.Fatalf("closeResources after workers exited: %v", err)
 	}
-	if !app.runtime.closed.Load() {
-		t.Fatal("runtime was not closed after all workers exited")
+	// 排空幂等：正常关闭路径不再重复排空。
+	if drains != 1 {
+		t.Fatalf("logs drained %d times in total, want exactly 1 (drain must be idempotent)", drains)
 	}
 }
 
@@ -464,4 +475,58 @@ func TestAppDoesNotRegisterSignalHandlers(t *testing.T) {
 
 	cancel()
 	<-errCh
+}
+
+// TestCleanupBudgetIsCutByForceSignal 钉住清理预算能被第二个信号切断。
+//
+// cleanup ctx 刻意剥离了调用方的取消（启动 deadline 过期正是最需要清理的时刻），
+// 但强制路径的前提是"已经等不下去了"：不接回强制信号，第二个信号之后
+// 每个 worker 的清理预算仍会被依次等满，"立刻退出"名存实亡。
+func TestCleanupBudgetIsCutByForceSignal(t *testing.T) {
+	cleanupEntered := make(chan struct{})
+	cleanupCtxErr := make(chan error, 1)
+	w := &funcWorker{
+		name: "slow-cleanup", kind: KindConsumer, lifecycle: LifecycleLongRunning, required: true,
+		run: func(ctx context.Context) error { <-ctx.Done(); return nil },
+		cleanup: func(ctx context.Context) error {
+			close(cleanupEntered)
+			<-ctx.Done() // 合规实现：监听 ctx，被切断即返回
+			cleanupCtxErr <- ctx.Err()
+			return nil
+		},
+	}
+
+	budget := testWorkerBudget()
+	budget.Cleanup = time.Hour // 预算长到只能靠强制信号切断
+	mgr, err := NewWorkerManager(budget, w)
+	if err != nil {
+		t.Fatalf("NewWorkerManager: %v", err)
+	}
+
+	coordinator := NewShutdownCoordinator()
+	mgr.SetForceSignal(coordinator.ForcedCh())
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.StopAll(context.Background()) }()
+
+	waitClosed(t, cleanupEntered, "cleanup did not start")
+	coordinator.Force()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup was not cut by the force signal; the second signal cannot force an exit")
+	}
+	select {
+	case err := <-cleanupCtxErr:
+		if err == nil {
+			t.Fatal("cleanup ctx carried no error: the force signal did not reach the cleanup budget")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup never observed its ctx being canceled")
+	}
 }

@@ -58,11 +58,18 @@ type Cache[T any] struct {
 	ttl         time.Duration
 	jitterRatio float64
 
-	// loadTimeout 约束单次回源的执行时长；inflight 的容量约束同时在途的
-	// 回源数（两者见 defaultLoadTimeout / defaultMaxInflight 的说明）。
+	// loadTimeout 约束单次回源的执行时长；maxInflight 约束**同时在途的不同键**
+	// 数量（两者见 defaultLoadTimeout / defaultMaxInflight 的说明）。
 	loadTimeout time.Duration
 	maxInflight int
-	inflight    chan struct{}
+
+	// loadMu 保护 loading，并让"准入登记"与 DoChan 成为一个原子步骤。
+	//
+	// 二者必须原子：分开做的话，登记已被摘除而 singleflight 尚未清理该键的
+	// 那个瞬间，新调用方会登记一个自己永远不会执行的加载——登记项就此泄漏，
+	// 上限最终把所有键都挡在门外。
+	loadMu  sync.Mutex
+	loading map[string]*loadEntry
 
 	// group 合并同一个键的并发加载。
 	group singleflight.Group
@@ -77,6 +84,22 @@ type entry[T any] struct {
 	value     T
 	expiresAt time.Time
 }
+
+// loadEntry 是一次在途回源的登记项。
+type loadEntry struct {
+	// fenced 记录这次加载期间该键是否被 Invalidate 过。
+	//
+	// 失效屏障（cache-preset spec）：数据源更新后调用方会 Invalidate，
+	// 而此前发起的那次查询可能**晚于**更新才返回——无条件回填等于把刚被
+	// 作废的旧值又按完整 TTL 写了回去，且没有任何一处会提示这件事。
+	fenced bool
+}
+
+// ErrLoadsSaturated 表示同时在途的回源数已达上限，本次未发起加载。
+//
+// 快速失败而不是排队：排队本身就要占一个 goroutine，而上限存在的理由
+// 正是"阻塞的 loader 不得无界积累"。
+var ErrLoadsSaturated = errors.New("cache: too many concurrent loads in flight")
 
 // Option 配置缓存。
 type Option[T any] func(*Cache[T])
@@ -143,8 +166,8 @@ func New[T any](maxItems int, ttl time.Duration, opts ...Option[T]) (*Cache[T], 
 	for _, opt := range opts {
 		opt(c)
 	}
-	// 名额通道在选项定型后创建：容量就是上限。
-	c.inflight = make(chan struct{}, c.maxInflight)
+	// 登记表在选项定型后创建：容量即上限。
+	c.loading = make(map[string]*loadEntry, c.maxInflight)
 	return c, nil
 }
 
@@ -173,32 +196,54 @@ func (c *Cache[T]) GetOrLoad(
 		return zero, err
 	}
 
+	// 准入登记必须在 DoChan **之前**：DoChan 对每个新键都会立刻起一个
+	// goroutine，把上限判定放进闭包里，高基数 miss 仍能在判定生效之前
+	// 堆起任意多个 goroutine 与 singleflight 条目——上限是假的。
+	//
+	// 登记与 DoChan 在同一把锁内完成：见 loadMu 的说明。
+	c.loadMu.Lock()
+	state, joining := c.loading[key]
+	if !joining {
+		if len(c.loading) >= c.maxInflight {
+			c.loadMu.Unlock()
+			return zero, fmt.Errorf("%w (limit %d, key %q)", ErrLoadsSaturated, c.maxInflight, key)
+		}
+		state = &loadEntry{}
+		c.loading[key] = state
+	}
+
 	// DoChan 而不是 Do：Do 会把调用方阻塞到 load 返回，没有办法响应
 	// 自己的 ctx 取消——一个 30s 的慢查询会把所有等待者一起扣住。
 	//
 	// 传给 load 的 ctx 剥离调用方的取消（WithoutCancel）：这次加载可能在为
 	// 其他调用方服务，不能因为**发起者**放弃就中断；值（trace、租户标识）
-	// 保留。但剥离取消不等于不设限——回源有自己的执行超时，等待在途名额
-	// 同受其约束：没有这两道，一个阻塞的 loader 会让 goroutine 与
-	// singleflight 条目随键空间无界积累，而 maxItems 管不到未完成的加载。
+	// 保留。剥离取消不等于不设限——回源有自己的执行超时。
+	//
+	// joining 为真时本闭包不会被执行（singleflight 已有该键的在途调用），
+	// 因此摘除登记的责任只属于登记者，不会重复也不会遗漏。
 	ch := c.group.DoChan(key, func() (any, error) {
+		if !joining {
+			defer c.finishLoad(key)
+		}
+
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
 		defer cancel()
-
-		select {
-		case c.inflight <- struct{}{}:
-			defer func() { <-c.inflight }()
-		case <-loadCtx.Done():
-			return zero, fmt.Errorf("cache: wait for a load slot: %w", loadCtx.Err())
-		}
 
 		value, err := load(loadCtx)
 		if err != nil {
 			return zero, err
 		}
-		c.set(key, value)
+		// 失效屏障：加载期间被 Invalidate 过就不回填——那次更新之后，
+		// 这个值已经是过期数据，写回去等于把它按完整 TTL 复活。
+		c.loadMu.Lock()
+		fenced := state.fenced
+		c.loadMu.Unlock()
+		if !fenced {
+			c.set(key, value)
+		}
 		return value, nil
 	})
+	c.loadMu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -280,12 +325,34 @@ func (c *Cache[T]) Len() int {
 }
 
 // Invalidate 删除一个键。数据源变更后调用它，比等 TTL 到期快得多。
+//
+// 同时对该键**在途的加载**竖起屏障：那次查询可能早于本次更新发出、晚于它
+// 返回，无条件回填会把刚作废的旧值按完整 TTL 写回去。屏障只影响已在途的
+// 加载，之后新发起的加载照常回填。
 func (c *Cache[T]) Invalidate(key string) {
+	c.loadMu.Lock()
+	if state, loading := c.loading[key]; loading {
+		state.fenced = true
+	}
+	c.loadMu.Unlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if element, ok := c.entries[key]; ok {
 		c.removeElementLocked(element)
 	}
+}
+
+// finishLoad 摘除登记并让 singleflight 立刻忘掉该键。
+//
+// Forget 是必需的：本函数在闭包的 defer 里执行，早于 singleflight 自己删除
+// 该键。不 Forget 的话，"登记已摘除、singleflight 仍持有"的瞬间会让下一个
+// 调用方登记一个自己永远不会执行的加载，登记项就此泄漏。
+func (c *Cache[T]) finishLoad(key string) {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	delete(c.loading, key)
+	c.group.Forget(key)
 }
 
 // randomJitter 在 [ttl*(1-ratio), ttl*(1+ratio)] 内取值。

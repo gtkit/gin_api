@@ -138,6 +138,25 @@ func (s refreshStore) Issue(ctx context.Context, uid int64) (string, error) {
 	return s.store.Issue(ctx, uid)
 }
 
+// Peek 只读判定，错误翻译与 Consume 同口径。
+func (s refreshStore) Peek(ctx context.Context, token string) (int64, error) {
+	uid, err := s.store.Peek(ctx, token)
+	switch {
+	case err == nil:
+		return uid, nil
+	case errors.Is(err, tokenstore.ErrRefreshReused):
+		return 0, authapp.ErrRefreshReused
+	case errors.Is(err, tokenstore.ErrRefreshNotFound),
+		errors.Is(err, tokenstore.ErrFamilyRevoked),
+		errors.Is(err, tokenstore.ErrMalformedToken):
+		return 0, authapp.ErrRefreshRejected
+	default:
+		// 基础设施故障保持原样：它不该被当成"令牌无效"，否则一次 Redis
+		// 抖动会把所有在线用户都告知"请重新登录"。
+		return 0, err
+	}
+}
+
 func (s refreshStore) Consume(ctx context.Context, token string) (int64, string, error) {
 	uid, next, err := s.store.Consume(ctx, token)
 	switch {

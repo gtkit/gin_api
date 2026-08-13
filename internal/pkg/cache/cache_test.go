@@ -479,18 +479,15 @@ func TestBlockedLoaderTimesOutIndependently(t *testing.T) {
 	}
 }
 
-// TestInflightLoadsAreBounded 钉住在途回源数上限。
+// TestInflightLoadsAreBounded 钉住在途上限是**真实**的：超限的新键
+// 立即失败，且不为它创建 goroutine 与 singleflight 条目。
 //
-// 上限是"无视 ctx 的 loader 最多留下多少个 goroutine"的硬上界：
-// 名额被占满时，新键的加载排队等待，等不到即以超时失败——而不是
-// 为每个新键再起一个不受控的加载。
+// 回归点：上限判定曾放在 DoChan 的闭包里，而 DoChan 对每个新键都会先起一个
+// goroutine——判定生效之前，高基数 miss 已经把 goroutine 堆起来了。
 func TestInflightLoadsAreBounded(t *testing.T) {
 	t.Parallel()
 
-	c := newTestCache(t, 8, time.Minute,
-		WithMaxInflight[string](1),
-		WithLoadTimeout[string](80*time.Millisecond),
-	)
+	c := newTestCache(t, 8, time.Minute, WithMaxInflight[string](1))
 
 	release := make(chan struct{})
 	started := make(chan struct{})
@@ -498,7 +495,6 @@ func TestInflightLoadsAreBounded(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// 占住唯一名额的加载：直到 release 才返回。
 		_, _ = c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
 			close(started)
 			<-release
@@ -507,25 +503,84 @@ func TestInflightLoadsAreBounded(t *testing.T) {
 	}()
 	<-started
 
-	// 第二个键排不到名额，应在加载超时内失败，而不是并发执行。
 	var ran atomic.Bool
 	_, err := c.GetOrLoad(context.Background(), "queued", func(context.Context) (string, error) {
 		ran.Store(true)
 		return "b", nil
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("排队加载 = %v，want 等名额超时（DeadlineExceeded）", err)
+	if !errors.Is(err, ErrLoadsSaturated) {
+		t.Fatalf("超限加载 = %v，want ErrLoadsSaturated", err)
 	}
 	if ran.Load() {
 		t.Fatal("名额已满仍执行了新的加载：在途上限没有生效")
 	}
 
-	// 释放名额后新加载恢复正常。
+	// 同一个键的并发调用是**合并**而不是新增在途项，不该被上限挡下。
+	joined := make(chan error, 1)
+	go func() {
+		_, joinErr := c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
+			return "should not run", nil
+		})
+		joined <- joinErr
+	}()
+
 	close(release)
 	wg.Wait()
+	if err := <-joined; err != nil {
+		t.Fatalf("同键并发调用 = %v，want nil（合并而非占用新名额）", err)
+	}
+
+	// 释放后新键恢复正常。这同时证明被拒的调用没有留下 singleflight 条目：
+	// 留下的话，这次同键调用会挂到一个永远不会执行的 leader 上。
 	if v, err := c.GetOrLoad(context.Background(), "queued", func(context.Context) (string, error) {
 		return "b", nil
 	}); err != nil || v != "b" {
 		t.Fatalf("释放名额后的加载 = (%q, %v)，want (b, nil)", v, err)
+	}
+}
+
+// TestInvalidateFencesInFlightLoad 钉住失效屏障：数据源更新并 Invalidate 之后，
+// 此前发起的旧查询不得把作废的值按完整 TTL 写回去。
+func TestInvalidateFencesInFlightLoad(t *testing.T) {
+	t.Parallel()
+
+	c := newTestCache(t, 8, time.Minute)
+
+	loading := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
+			close(loading)
+			<-release
+			return "stale", nil // 早于更新发出、晚于更新返回的旧值
+		})
+	}()
+
+	<-loading
+	c.Invalidate("k") // 数据源已更新
+	close(release)
+	<-done
+
+	// 屏障生效：旧值没有被写回，下一次读必须重新回源。
+	var reloaded atomic.Bool
+	v, err := c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
+		reloaded.Store(true)
+		return "fresh", nil
+	})
+	if err != nil {
+		t.Fatalf("GetOrLoad: %v", err)
+	}
+	if !reloaded.Load() || v != "fresh" {
+		t.Fatalf("命中了被 Invalidate 的旧值 %q：失效屏障没有生效", v)
+	}
+
+	// 屏障只作用于当时在途的那次加载，之后的加载照常回填。
+	if _, err := c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
+		t.Fatal("屏障没有解除：新加载的结果也被拒绝回填")
+		return "", nil
+	}); err != nil {
+		t.Fatalf("GetOrLoad after fence: %v", err)
 	}
 }

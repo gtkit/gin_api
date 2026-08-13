@@ -2,7 +2,8 @@
 
 > 目标读者：需要定位本项目 CPU 热点、内存占用、goroutine 泄漏、锁竞争的开发者。
 > 本文所有接入代码都基于项目真实结构（`internal/bootstrap`、`internal/router`、`internal/platform/config`），可直接落地。
-> 当前源码状态：尚未接入 pprof 端点；必须先完成第 3 节，采集脚本才有目标可连。
+> 当前源码状态：pprof 端点**已内置**，由 `pprof.enabled` 配置门控（默认关闭，
+> 只允许绑字面回环 IP）。第 3 节保留为原理与选型说明，落地只需改配置。
 
 ---
 

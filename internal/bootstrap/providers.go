@@ -247,6 +247,9 @@ func newProviders(
 	if coordinator == nil {
 		coordinator = NewShutdownCoordinator()
 	}
+	// 清理预算接回强制信号：cleanup ctx 刻意剥离了调用方的取消，
+	// 不单独接回的话，第二个信号之后仍要在每个 worker 的清理预算上依次等满。
+	workers.SetForceSignal(coordinator.ForcedCh())
 
 	// 7. 路由引擎：组装路由切片并初始化 Gin 引擎。
 	//    路由契约不合法属装配错误，在此透传为启动失败。

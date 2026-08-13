@@ -46,7 +46,11 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 				// 装配期收到信号：**纯取消**的错误树是中止的现象而非故障，
 				// 按信号语义静默退出（与启动屏障的取消语义一致）；混入
 				// 回滚/关闭失败的错误必须保留上报，不得随退出码 0 消失。
-				if ctx.Err() != nil && bootstrap.IsPureCancellation(err) {
+				//
+				// **强制路径例外**：第二个信号的契约是"以非零退出"。它到达时
+				// 装配同样会以纯取消结束，若也归一化成 0，进程就把一次被迫中止
+				// 报告成了正常退出——而编排器与脚本正是按退出码判断的。
+				if ctx.Err() != nil && bootstrap.IsPureCancellation(err) && !shutdown.Forced() {
 					return nil
 				}
 				return commandError("bootstrap app", err)

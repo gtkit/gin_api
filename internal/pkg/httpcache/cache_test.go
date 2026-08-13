@@ -299,7 +299,8 @@ func TestUnshareableResponsesAreNotCached(t *testing.T) {
 		value  string
 	}{
 		{name: "Set-Cookie", header: "Set-Cookie", value: "session=abc"},
-		{name: "Vary（CORS 场景的 Vary: Origin）", header: "Vary", value: "Origin"},
+		{name: "Vary: Accept-Language", header: "Vary", value: "Accept-Language"},
+		{name: "Vary 含 Origin 之外的字段", header: "Vary", value: "Origin, Accept-Encoding"},
 		{name: "Cache-Control private", header: "Cache-Control", value: "private"},
 		{name: "Cache-Control no-cache", header: "Cache-Control", value: "no-cache"},
 	}
@@ -326,4 +327,63 @@ func TestUnshareableResponsesAreNotCached(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCorsVaryOriginStaysCacheable 钉住 CORS 与响应缓存的组合仍然可缓存。
+//
+// CORS 中间件对**每个**响应都写 Vary: Origin（包括无 Origin 的同源请求）。
+// 一刀切拒绝所有 Vary 会让"挂了 CORS 的项目"缓存永久失效，而每个请求还多
+// 一条告警——预置能力互相组合后归零，比不预置更糟。
+func TestCorsVaryOriginStaysCacheable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("同源请求：Vary: Origin 不阻止缓存", func(t *testing.T) {
+		t.Parallel()
+
+		stager := newTestStager(t)
+		var calls atomic.Int32
+		engine := gin.New()
+		engine.Use(stager.Middleware(0))
+		engine.GET("/items", func(c *gin.Context) {
+			calls.Add(1)
+			c.Header("Vary", "Origin") // CORS 中间件的固定行为
+			c.JSON(http.StatusOK, gin.H{"n": calls.Load()})
+		})
+
+		for range 2 {
+			engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/items", nil))
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("handler 被调用 %d 次，want 1：Vary: Origin 不该让缓存整体失效", got)
+		}
+	})
+
+	t.Run("跨源请求：整体绕过缓存", func(t *testing.T) {
+		t.Parallel()
+
+		stager := newTestStager(t)
+		var calls atomic.Int32
+		engine := gin.New()
+		engine.Use(stager.Middleware(0))
+		engine.GET("/items", func(c *gin.Context) {
+			calls.Add(1)
+			c.Header("Vary", "Origin")
+			c.Header("Access-Control-Allow-Origin", c.Request.Header.Get("Origin"))
+			c.JSON(http.StatusOK, gin.H{"n": calls.Load()})
+		})
+
+		// 两个不同来源：响应按 Origin 回显，绝不能互相拿到对方的那一份。
+		for _, origin := range []string{"https://a.example", "https://b.example"} {
+			req := httptest.NewRequest(http.MethodGet, "/items", nil)
+			req.Header.Set("Origin", origin)
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, req)
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != origin {
+				t.Fatalf("Allow-Origin = %q, want %q：跨源响应被缓存回放了", got, origin)
+			}
+		}
+		if got := calls.Load(); got != 2 {
+			t.Fatalf("handler 被调用 %d 次，want 2：带 Origin 的请求必须绕过缓存", got)
+		}
+	})
 }

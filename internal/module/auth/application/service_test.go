@@ -120,6 +120,18 @@ type fakeRefresh struct {
 	consumeUID int64
 	revoked    []string
 	revokeErr  error
+	// peekErr 模拟只读判定失败；peekCalls / consumeCalls 用于钉住提交次序。
+	peekErr      error
+	peekCalls    int
+	consumeCalls int
+}
+
+func (r *fakeRefresh) Peek(context.Context, string) (int64, error) {
+	r.peekCalls++
+	if r.peekErr != nil {
+		return 0, r.peekErr
+	}
+	return r.consumeUID, nil
 }
 
 func (r *fakeRefresh) Issue(context.Context, int64) (string, error) {
@@ -130,6 +142,7 @@ func (r *fakeRefresh) Issue(context.Context, int64) (string, error) {
 }
 
 func (r *fakeRefresh) Consume(_ context.Context, _ string) (int64, string, error) {
+	r.consumeCalls++
 	if r.consumeErr != nil {
 		return 0, "", r.consumeErr
 	}
@@ -655,4 +668,149 @@ func TestAccountLimiterNilMeansDimensionOff(t *testing.T) {
 	if _, err := h.svc.Login(context.Background(), "13800000000", "pw"); errors.Is(err, ErrAccountRateLimited) {
 		t.Fatal("a nil account limiter must not rate limit anything")
 	}
+}
+
+// TestRefreshDoesNotConsumeWhenIssuanceFails 钉住刷新的提交次序（#9 回归）。
+//
+// 先消费再签发时，签发故障会留下一枚已作废的刷新令牌：客户端手里那枚不再
+// 可用，而它唯一合理的动作（重试）超过重放窗后被判成重用，整族被撤销——
+// 一次令牌签发的抖动升级成一次强制登出。
+func TestRefreshDoesNotConsumeWhenIssuanceFails(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.refresh.consumeUID = 42
+	h.issuer.err = errors.New("signing key unavailable")
+
+	_, err := h.svc.Refresh(context.Background(), "refresh-token")
+	if err == nil {
+		t.Fatal("Refresh succeeded although access token issuance failed")
+	}
+	if errors.Is(err, ErrRefreshRejected) {
+		t.Fatalf("签发故障被表达成令牌失效：%v（客户端会被迫重新登录）", err)
+	}
+	if h.refresh.consumeCalls != 0 {
+		t.Fatalf("consume 被调用 %d 次，want 0：签发失败时刷新令牌必须原封不动，重试才安全",
+			h.refresh.consumeCalls)
+	}
+	if h.refresh.peekCalls != 1 {
+		t.Fatalf("peek 调用 %d 次，want 1", h.refresh.peekCalls)
+	}
+}
+
+// TestRefreshReuseStillRevokesFamily 钉住只读判定不削弱重用处置。
+//
+// Peek 是只读的，撤销必须仍然真的发生——否则重用只是被记了一笔而没有任何处置。
+func TestRefreshReuseStillRevokesFamily(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.refresh.peekErr = ErrRefreshReused
+	h.refresh.consumeErr = ErrRefreshReused
+
+	_, err := h.svc.Refresh(context.Background(), "leaked-token")
+	if !errors.Is(err, ErrRefreshRejected) {
+		t.Fatalf("Refresh = %v, want ErrRefreshRejected", err)
+	}
+	// 撤销与检测的原子绑定在 Consume 内：必须补这一次调用。
+	if h.refresh.consumeCalls != 1 {
+		t.Fatalf("consume 被调用 %d 次，want 1：重用检测后族撤销没有发生", h.refresh.consumeCalls)
+	}
+	if h.auditor.failureCount() == 0 {
+		t.Fatal("重用未以告警级别留痕")
+	}
+}
+
+// TestRefreshRotatesAfterSuccessfulIssuance 钉住正常路径仍然轮换。
+func TestRefreshRotatesAfterSuccessfulIssuance(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.refresh.consumeUID = 7
+
+	pair, err := h.svc.Refresh(context.Background(), "refresh-token")
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if pair.AccessToken == "" || pair.RefreshToken != "rotated-refresh" {
+		t.Fatalf("Refresh 返回 %+v，want 新 access + 轮换后的 refresh", pair)
+	}
+	if h.refresh.consumeCalls != 1 {
+		t.Fatalf("consume 被调用 %d 次，want 1", h.refresh.consumeCalls)
+	}
+}
+
+// TestAccountNormalizationClosesTheRateLimitBypass 钉住账号规范化（#11 回归）。
+//
+// 数据库列是 utf8mb4_unicode_ci（PAD SPACE）：尾随空格与原值是同一行，
+// 而按原始输入派生的 HMAC 限流键却是两个桶——每次多加一个空格就能对同一个
+// 账号无限尝试，账号维度限流形同虚设。
+func TestAccountNormalizationClosesTheRateLimitBypass(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	seen := &recordingLimiter{}
+	svc, err := NewService(Options{
+		Credentials: h.creds, Hasher: h.hasher, AccessIssuer: h.issuer,
+		RefreshStore: h.refresh, RevocationList: h.revoke, Auditor: h.auditor,
+		AccessTTL: 15 * time.Minute, Accounts: seen,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := svc.Register(ctx, "13800000000", "pw", "nick"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// PAD SPACE 下这是同一个数据库账号。
+	_, _ = svc.Login(ctx, "13800000000 ", "pw")
+	_, _ = svc.Login(ctx, "  13800000000", "pw")
+
+	for _, account := range seen.accounts {
+		if account != "13800000000" {
+			t.Fatalf("限流看到未规范化的账号 %q：等价文本落进了不同的限流桶", account)
+		}
+	}
+	// 写入路径同样用规范化后的值，否则同一个账号会有两种存在形式。
+	if _, ok := h.creds.byPhone["13800000000"]; !ok {
+		t.Fatalf("账号未以规范化形式存储：%v", h.creds.byPhone)
+	}
+}
+
+// TestInvalidAccountIsRejectedBeforeAnyHashing 钉住非法账号在昂贵计算之前被拒。
+func TestInvalidAccountIsRejectedBeforeAnyHashing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ name, phone string }{
+		{name: "空", phone: ""},
+		{name: "全空白", phone: "   "},
+		{name: "内部空格", phone: "138 0000 0000"},
+		{name: "内部制表符", phone: "138\t00000000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t)
+			if _, err := h.svc.Login(context.Background(), tt.phone, "pw"); !errors.Is(err, ErrInvalidAccount) {
+				t.Fatalf("Login(%q) = %v, want ErrInvalidAccount", tt.phone, err)
+			}
+			if got := h.hasher.dummyCallCount(); got != 0 {
+				t.Fatalf("非法账号仍执行了 %d 次哈希比对：形态判定应在任何昂贵计算之前", got)
+			}
+			if _, err := h.svc.Register(context.Background(), tt.phone, "pw", "n"); !errors.Is(err, ErrInvalidAccount) {
+				t.Fatalf("Register(%q) = %v, want ErrInvalidAccount", tt.phone, err)
+			}
+		})
+	}
+}
+
+// recordingLimiter 记录限流看到的账号取值。
+type recordingLimiter struct{ accounts []string }
+
+func (l *recordingLimiter) Allow(_ context.Context, account string) bool {
+	l.accounts = append(l.accounts, account)
+	return true
 }

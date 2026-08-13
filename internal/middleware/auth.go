@@ -12,6 +12,7 @@ import (
 	"github.com/gtkit/goerr"
 	jwtclaims "github.com/gtkit/gojwt/claims"
 
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -102,6 +103,12 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 
 		claims, err := opts.Parser.ParseToken(c.Request.Context(), token)
 		if err != nil {
+			// 纯 ctx 错误交终态中间件：解析器可能查了远端密钥集，
+			// 请求预算到点或客户端断开都不是"凭据无效"。把它写成 401
+			// 会让一次超时看起来像一次认证失败，客户端据此清掉本地令牌。
+			if abortOnContextError(c, err) {
+				return
+			}
 			abortWith(c, goerr.New(err, goerr.StatusAuth(), "token parse failed"))
 			return
 		}
@@ -112,6 +119,11 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 
 		ok, err := opts.Verifier.ValidateUser(c.Request.Context(), claims.UserID)
 		if err != nil {
+			// 请求预算到点 / 客户端断开交终态中间件裁决（504 / 不回包）：
+			// 它们不是依赖不可用，写成 503 会让一次自身超时被记成下游故障。
+			if abortOnContextError(c, err) {
+				return
+			}
 			// 基础设施故障（如 DB 不可用）不能伪装成鉴权失败：返回 503，
 			// 让客户端/网关按"服务暂时不可用"重试，而不是误判为"用户无效"(401)。
 			abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "user verification unavailable"))
@@ -126,6 +138,9 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 		// 排在签名与用户有效性之后，非法请求不会白白消耗一次 Redis 查询。
 		if opts.Revocation != nil {
 			revoked, err := opts.Revocation.IsRevoked(c.Request.Context(), claims.TokenID)
+			if err != nil && abortOnContextError(c, err) {
+				return
+			}
 			if err != nil {
 				// **故障必须拒绝，不能放行**。
 				//
@@ -212,6 +227,21 @@ func authorizationRequest(c *gin.Context) sharedauth.AuthorizationRequest {
 func abortWith(c *gin.Context, err error) {
 	resp.Error(c, err)
 	c.Abort()
+}
+
+// abortOnContextError 把纯 ctx 错误交给终态中间件，返回是否已接管。
+//
+// 认证链上的每一步都可能做 I/O（远端密钥集、用户校验、撤销查询），而请求
+// 预算到点与客户端断开是**请求级事实**，不是这一步的语义：写成 401 会让一次
+// 超时看起来像凭据无效，写成 503 会让它看起来像下游故障。两者都让客户端与
+// 网关按错误的方向处置。判定用纯错误树——混入真实故障的错误仍按各自语义走。
+func abortOnContextError(c *gin.Context, err error) bool {
+	if !errx.IsPureAbort(err) {
+		return false
+	}
+	_ = c.Error(err)
+	c.Abort()
+	return true
 }
 
 // errTokenAbsent 区分"完全没带 token"与"带了但不合法"。

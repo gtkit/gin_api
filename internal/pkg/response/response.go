@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/gtkit/gin-api/internal/pkg/errx"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
 	logger "github.com/gtkit/logger/v2"
@@ -103,7 +105,10 @@ func MapErr(c *gin.Context, err error, mapper *ErrMapper) {
 		Err(c, goErr)
 		return
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	// 纯错误树判定：errors.Is 对聚合错误任一成员命中即真，
+	// `errors.Join(Canceled, dbFailure)` 会被当成单纯的取消交给终态中间件，
+	// 那条真实故障就此消失（既不回 500，也不进错误率）。
+	if errx.IsPureAbort(err) {
 		if c != nil {
 			_ = c.Error(err)
 			c.Abort()

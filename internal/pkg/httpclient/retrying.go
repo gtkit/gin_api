@@ -47,35 +47,40 @@ func (p RetryPolicy) validate() error {
 
 // RetryableFailure 判定一次失败是否值得重试。
 //
+// **有明确 HTTP 回答时以状态码为准**，err 只在没有状态码时说了算：下游回了
+// 400 而响应体解码失败，这是一次"请求本身不对"，重试它不会让参数变对，
+// 只会把一次客户端错误放大成 N 次，还把它计进熔断——用一个与下游健康无关
+// 的信号去熔断一个健康的下游。err 优先的判定曾把这类组合全部判成可重试。
+//
 // 导出是为了让使用方在自定义调用编排时复用同一份判据——判据散落在各处，
 // 迟早会有一处把 4xx 也重试掉。
 func RetryableFailure(status int, err error) bool {
-	if err != nil {
-		// 纯粹的取消/超时来自调用方：请求已被放弃，重试它只是给一个
-		// 没人等结果的调用再打一次下游。
-		if errx.IsPureAbort(err) {
-			return false
-		}
-		// 其余传输层错误（连接被拒、TLS 失败、响应没回来）：可能只是一次
-		// 抖动。注意"请求已发出但响应没回来"对非幂等请求正是最危险的一类，
-		// 所以本判据的安全性完全依赖调用方只对幂等调用启用重试。
-		return true
+	// 调用方取消/超时：请求已被放弃，没人在等它的结果，重试只是白打一次下游。
+	if err != nil && errx.IsPureAbort(err) {
+		return false
 	}
 
-	switch {
-	case status == http.StatusTooManyRequests:
-		// 被限流：退避后重试正是对方要求的行为。
-		return true
-	case status == http.StatusNotImplemented:
-		// 501 是"这个下游根本不做这件事"，重试多少次都一样。
-		return false
-	case status >= http.StatusInternalServerError:
-		return true
-	default:
-		// 4xx 是请求本身的问题（参数错、没权限、找不到）。重试不会让它
-		// 变对，只是把一次客户端错误放大成 N 次。
-		return false
+	if status > 0 {
+		switch {
+		case status == http.StatusTooManyRequests:
+			// 被限流：退避后重试正是对方要求的行为。
+			return true
+		case status == http.StatusNotImplemented:
+			// 501 是"这个下游根本不做这件事"，重试多少次都一样。
+			return false
+		case status >= http.StatusInternalServerError:
+			return true
+		default:
+			// 2xx/3xx/4xx：下游给出了明确回答。即便随后的解码失败，
+			// 重发同一个请求也只会得到同一个回答。
+			return false
+		}
 	}
+
+	// 没有状态码 = 没拿到回答：连接被拒、TLS 失败、响应没回来。可能只是一次
+	// 抖动。注意它涵盖"请求已发出但响应没回来"——对非幂等请求正是最危险的
+	// 一类，所以本判据的安全性完全依赖调用方只对幂等调用启用重试。
+	return err != nil
 }
 
 // retryAttempts 以指数退避执行 attempt，直到成功、不可重试或次数用尽。
@@ -88,6 +93,15 @@ func retryAttempts(ctx context.Context, retry RetryPolicy, client *httpc.Client,
 	var status int
 	var err error
 	for try := 0; ; try++ {
+		// **每轮之前无条件检查取消**，不依赖退避是否为零：零退避时循环里
+		// 没有任何取消检查点，一个已被放弃的调用会把重试次数全部打完。
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if try == 0 {
+				return 0, fmt.Errorf("httpclient: call abandoned before the first attempt: %w", ctxErr)
+			}
+			return status, retryAbandoned(err, ctxErr)
+		}
+
 		status, err = attempt(ctx, client)
 		if !RetryableFailure(status, err) || try >= retry.Attempts {
 			return status, err
@@ -98,10 +112,7 @@ func retryAttempts(ctx context.Context, retry RetryPolicy, client *httpc.Client,
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				if err == nil {
-					return status, fmt.Errorf("httpclient: retry wait canceled: %w", ctx.Err())
-				}
-				return status, fmt.Errorf("httpclient: retry wait canceled: %w", errors.Join(err, ctx.Err()))
+				return status, retryAbandoned(err, ctx.Err())
 			case <-timer.C:
 			}
 		}
@@ -111,4 +122,15 @@ func retryAttempts(ctx context.Context, retry RetryPolicy, client *httpc.Client,
 			wait = retry.MaxWaitTime
 		}
 	}
+}
+
+// retryAbandoned 把"最后一次真实失败"与调用方取消聚合返回。
+//
+// 真实的下游失败不能因为调用方在退避期放弃而被抹掉：熔断的失败判据依赖它
+// （errx.IsPureAbort 对聚合错误只在**全部**成员都是取消时才判真）。
+func retryAbandoned(last, ctxErr error) error {
+	if last == nil {
+		return fmt.Errorf("httpclient: retry abandoned: %w", ctxErr)
+	}
+	return fmt.Errorf("httpclient: retry abandoned: %w", errors.Join(last, ctxErr))
 }

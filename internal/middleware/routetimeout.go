@@ -2,11 +2,11 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -181,13 +181,18 @@ func logWriteDeadlineIssue(op string, err error) {
 //
 // 只认 context.DeadlineExceeded：客户端断开（context.Canceled）不是超时，
 // 而且**不该写任何响应**——连接已经没了，写只会产生一条无意义的错误日志。
+//
+// 用纯错误树判定而不是 errors.Is：后者对聚合错误任一成员命中即真，于是
+// `errors.Join(DeadlineExceeded, dbFailure)` 被整体判成"超时"，一次真实的
+// 下游故障就被表达成 504，客户端据此重试，而真正的原因从日志里消失。
 func IsTimeoutError(err error) bool {
-	return err != nil && errors.Is(err, context.DeadlineExceeded)
+	return errx.IsPureDeadline(err)
 }
 
 // IsClientGone 报告错误是否为客户端主动断开。
+// 同样用纯错误树：混入真实故障的错误必须按故障处置，而不是静默不回包。
 func IsClientGone(err error) bool {
-	return err != nil && errors.Is(err, context.Canceled)
+	return errx.IsPureCancellation(err)
 }
 
 // respondGatewayTimeout 写 504 并中止链路。

@@ -99,6 +99,8 @@ type RefreshStore struct {
 	sha atomic.Pointer[string]
 	// issueSHA 是签发脚本的缓存（与 sha 同款 NOSCRIPT 重载策略）。
 	issueSHA atomic.Pointer[string]
+	// peekSHA 是只读判定脚本的缓存（同款策略）。
+	peekSHA atomic.Pointer[string]
 }
 
 // issueScript 原子写入一条刷新令牌记录并设置 TTL（local-authentication spec）。
@@ -188,6 +190,44 @@ redis.call('EXPIRE', KEYS[3], ARGV[1])
 return {0, uid, ''}
 `
 
+// peekScript 只读判定一个刷新令牌当前能否被消费，**不改动任何状态**。
+//
+// 它服务于"先签发访问令牌、再提交消费"的次序（local-authentication spec）：
+// 反过来先消费再签发时，签发故障会留下一个已被消费的令牌——客户端手里那枚
+// 已经作废，而重试超过重放窗后会被判成重用，整族被撤销。一次令牌签发的
+// 抖动因此升级成一次强制登出。
+//
+// 判定必须与 consumeScript 同口径，否则两次判定之间会出现"Peek 放行、
+// Consume 拒绝"之外的第三种结果，而调用方无从处理。
+//
+// KEYS[1] 令牌记录；KEYS[2] 族撤销标记
+// ARGV[1] 当前时刻（毫秒）
+//
+// 返回 {code, uid}，code 与 consumeScript 同义：
+//
+//	0 可消费  1 令牌不存在  2 重用（此处**不撤销**，撤销由 Consume 原子完成）
+//	3 族已撤销  4 窗口内重放（可消费）
+const peekScript = `
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return {3, ''}
+end
+
+local record = redis.call('HMGET', KEYS[1], 'uid', 'used', 'next', 'replay_until')
+local uid, used, next_secret, replay_until = record[1], record[2], record[3], record[4]
+
+if not uid then
+  return {1, ''}
+end
+if used == '1' then
+  if next_secret and next_secret ~= '' and replay_until
+     and tonumber(ARGV[1]) < tonumber(replay_until) then
+    return {4, uid}
+  end
+  return {2, uid}
+end
+return {0, uid}
+`
+
 // NewRefreshStore 构造 RefreshStore 并预加载脚本。
 //
 // 预加载而不是首次使用时加载：Redis 不可达是本地认证的致命问题，
@@ -215,6 +255,10 @@ func NewRefreshStore(
 	if err != nil {
 		return nil, fmt.Errorf("tokenstore: load issue script: %w", err)
 	}
+	peekSHA, err := client.ScriptLoad(ctx, peekScript).Result()
+	if err != nil {
+		return nil, fmt.Errorf("tokenstore: load peek script: %w", err)
+	}
 
 	s := &RefreshStore{
 		client: client, prefix: prefix, ttl: ttl,
@@ -224,6 +268,7 @@ func NewRefreshStore(
 	}
 	s.sha.Store(&sha)
 	s.issueSHA.Store(&issueSHA)
+	s.peekSHA.Store(&peekSHA)
 	return s, nil
 }
 
@@ -286,6 +331,82 @@ func (s *RefreshStore) runIssue(ctx context.Context, key string, uid int64) erro
 		return fmt.Errorf("tokenstore: store refresh token: %w", err)
 	}
 	return nil
+}
+
+// Peek 只读判定一个刷新令牌当前能否被消费，返回它归属的用户。
+//
+// 它让调用方可以"先签发访问令牌、再提交消费"：签发失败时状态零改动，
+// 客户端手里的令牌仍然有效，重试是安全的。反过来（先消费后签发）时，
+// 一次签发抖动会留下一枚已作废的令牌，客户端重试超过重放窗即被判成重用，
+// 整族被撤销——一次基础设施抖动升级成一次强制登出。
+//
+// **重用在这里只报告、不撤销**：撤销必须与检测原子发生，那由 Consume 完成。
+// 调用方收到 ErrRefreshReused 时应调用 Consume 让撤销真正发生。
+func (s *RefreshStore) Peek(ctx context.Context, token string) (int64, error) {
+	family, secret, err := splitToken(token)
+	if err != nil {
+		return 0, err
+	}
+
+	keys := []string{s.recordKey(family, secret), s.familyKey(family)}
+	args := []any{strconv.FormatInt(s.now().UnixMilli(), 10)}
+
+	raw, err := s.client.EvalSha(ctx, *s.peekSHA.Load(), keys, args...).Result()
+	if err != nil && isNoScript(err) {
+		sha, loadErr := s.client.ScriptLoad(ctx, peekScript).Result()
+		if loadErr != nil {
+			return 0, fmt.Errorf("tokenstore: reload peek script: %w", loadErr)
+		}
+		s.peekSHA.Store(&sha)
+		raw, err = s.client.EvalSha(ctx, sha, keys, args...).Result()
+	}
+	if err != nil {
+		return 0, fmt.Errorf("tokenstore: peek refresh token: %w", err)
+	}
+
+	code, uid, err := parsePeekResult(raw)
+	if err != nil {
+		return 0, err
+	}
+	switch code {
+	case 0, 4: // 可消费（含窗口内重放）
+		return uid, nil
+	case 1:
+		return 0, ErrRefreshNotFound
+	case 2:
+		return 0, ErrRefreshReused
+	case 3:
+		return 0, ErrFamilyRevoked
+	default:
+		return 0, fmt.Errorf("tokenstore: unexpected peek result %d", code)
+	}
+}
+
+// parsePeekResult 解析只读判定脚本返回的二元组。
+func parsePeekResult(raw any) (code, uid int64, err error) {
+	values, ok := raw.([]any)
+	if !ok || len(values) != 2 {
+		return 0, 0, fmt.Errorf("tokenstore: malformed peek result %#v", raw)
+	}
+	code, ok = values[0].(int64)
+	if !ok {
+		return 0, 0, fmt.Errorf("tokenstore: malformed peek code %#v", values[0])
+	}
+	switch v := values[1].(type) {
+	case int64:
+		uid = v
+	case string:
+		if v != "" {
+			parsed, parseErr := strconv.ParseInt(v, 10, 64)
+			if parseErr != nil {
+				return 0, 0, fmt.Errorf("tokenstore: malformed peek uid %q: %w", v, parseErr)
+			}
+			uid = parsed
+		}
+	default:
+		return 0, 0, fmt.Errorf("tokenstore: malformed peek uid %#v", values[1])
+	}
+	return code, uid, nil
 }
 
 // Consume 消费一个刷新令牌并轮换出新的。

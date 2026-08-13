@@ -199,3 +199,44 @@ func TestRetryBackoffIsCancelable(t *testing.T) {
 		t.Fatalf("err = %v, want the last downstream failure preserved", err)
 	}
 }
+
+// TestZeroBackoffStillChecksCancellation 钉住零退避下的取消检查。
+//
+// 退避为 0 时循环里没有等待点，若不在每轮之前无条件检查 ctx，
+// 一个已被放弃的调用会把重试次数全部打完——白打下游，还计进熔断。
+func TestZeroBackoffStillChecksCancellation(t *testing.T) {
+	testutil.RequireLoopback(t)
+	t.Parallel()
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("oops"))
+	}))
+	t.Cleanup(server.Close)
+
+	d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 100})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := d.DoIdempotent(ctx, "orders",
+		RetryPolicy{Attempts: 3, WaitTime: 0, MaxWaitTime: 0}, // 零退避：循环里没有等待点
+		func(attemptCtx context.Context, client *httpc.Client) (int, error) {
+			_, status, getErr := client.GetRaw(attemptCtx, "/", nil)
+			cancel() // 本次尝试已完成，调用方随即放弃
+			return status, getErr
+		})
+
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("服务端收到 %d 次请求，want 1：取消之后不得继续重试", got)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled in the chain", err)
+	}
+	// 真实的下游失败仍需保留：熔断判据依赖它。
+	if !errors.Is(err, ErrDownstreamServerError) {
+		t.Fatalf("err = %v, want the last downstream failure preserved", err)
+	}
+}

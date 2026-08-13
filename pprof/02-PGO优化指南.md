@@ -75,7 +75,7 @@
 
 ## 3. 前置条件
 
-1. **pprof 已接入**：PGO 的 profile 来自 pprof 的 CPU profile 端点。先按 `01` 文档第 3 节接好 pprof。
+1. **pprof 已开启**：PGO 的 profile 来自 pprof 的 CPU profile 端点。端点已内置，把 `pprof.enabled` 配成 `true` 即可（见 `01` 文档第 3 节）。
 2. **能拿到代表性负载**：线上真实流量最佳；没有线上就用压测（`wrk`/`hey`）或 benchmark（见场景 D）。
 3. **Go 1.21+**：本项目 1.26，满足。
 

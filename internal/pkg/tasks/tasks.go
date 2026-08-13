@@ -51,6 +51,9 @@ func NewProducer(cfg config.TasksConfig, client redis.UniversalClient) (*Produce
 
 	inner, err := asynqx.NewProducer(
 		asynqx.WithRedisInstance(client),
+		// 任务超时属**投递端**：asynqx 在 Enqueue 时把它注入任务选项。
+		// 配到 Worker 上不生效——配置看起来生效了，实际投递仍用库默认值。
+		asynqx.WithDefaultTaskTimeout(cfg.EffectiveTaskTimeout()),
 		asynqx.WithShutdownTimeout(cfg.EffectiveShutdownTimeout()),
 	)
 	if err != nil {
@@ -78,13 +81,22 @@ func (p *Producer) Enqueue(
 	return nil
 }
 
-// Close 释放入队端。幂等。
+// Close 释放入队端。幂等。等价于 Shutdown(context.Background())。
 func (p *Producer) Close() error {
+	return p.Shutdown(context.Background())
+}
+
+// Shutdown 在 ctx 约束内释放入队端。幂等。
+//
+// ctx 感知是关停契约的一部分：Close 走 context.Background()，在途投递的等待
+// 因此切不断——第二个信号到达时进程仍要在这里干等。关停序列传入的是
+// "只被强制信号取消"的 ctx，取消只解除本次等待，底层释放仍由 asynqx 后台完成。
+func (p *Producer) Shutdown(ctx context.Context) error {
 	if p == nil || p.inner == nil {
 		return nil
 	}
 	var err error
-	p.closeOnce.Do(func() { err = p.inner.Close() })
+	p.closeOnce.Do(func() { err = p.inner.Shutdown(ctx) })
 	return err
 }
 
@@ -129,7 +141,7 @@ func (c *Consumer) Name() string { return c.name }
 //
 // 注册放在 Prepare 而不是 Run：处理器注册失败属装配错误，必须表现为启动失败，
 // 而不是让实例起来之后才发现某个任务类型没人处理。
-func (c *Consumer) Prepare(_ context.Context) error {
+func (c *Consumer) Prepare(ctx context.Context) error {
 	if c.client == nil {
 		return errors.New("tasks: consumer requires a redis client")
 	}
@@ -138,7 +150,6 @@ func (c *Consumer) Prepare(_ context.Context) error {
 		asynqx.WithRedisInstance(c.client),
 		asynqx.WithConcurrency(c.cfg.EffectiveConcurrency()),
 		asynqx.WithQueues(c.cfg.EffectiveQueues()),
-		asynqx.WithDefaultTaskTimeout(c.cfg.EffectiveTaskTimeout()),
 		asynqx.WithShutdownTimeout(c.cfg.EffectiveShutdownTimeout()),
 	)
 	if err != nil {
@@ -147,7 +158,14 @@ func (c *Consumer) Prepare(_ context.Context) error {
 
 	for _, register := range c.handlers {
 		if err := register(worker); err != nil {
-			return fmt.Errorf("tasks: register handler: %w", err)
+			// 已建的 worker 必须关掉：asynqx 的 NewWorker 即使从未 Start
+			// 也持有底层执行器，装配失败时不关就是一次泄漏（而这条路径
+			// 恰恰以启动失败告终，没有第二次机会）。
+			shutdownCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx), c.cfg.EffectiveShutdownTimeout())
+			defer cancel()
+			return errors.Join(
+				fmt.Errorf("tasks: register handler: %w", err), worker.Shutdown(shutdownCtx))
 		}
 	}
 	c.worker = worker
@@ -167,17 +185,17 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 // Cleanup 关闭 worker。幂等（契约要求）。
 //
-// 用独立预算而不是调用方的 ctx：关停末期 ctx 很可能已被强制取消，而此时
-// 仍应给在处理的任务一点时间收尾——它们要么完成、要么被 asynq 重新入队，
-// 直接掐断则两者都不发生。
+// 预算是自己的（drain 在处理中的任务需要时间：它们要么完成、要么被 asynq
+// 重新入队，直接掐断则两者都不发生），但**不再剥离调用方的取消**：
+// 传进来的 ctx 已由 worker 管理器构造成"只被强制信号取消"的形态，
+// 在这里二次剥离等于把第二个信号挡在门外——而强制路径的前提正是等不下去了。
 func (c *Consumer) Cleanup(ctx context.Context) error {
 	if c == nil || c.worker == nil {
 		return nil
 	}
 	var err error
 	c.once.Do(func() {
-		budget, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), c.cfg.EffectiveShutdownTimeout()+time.Second)
+		budget, cancel := context.WithTimeout(ctx, c.cfg.EffectiveShutdownTimeout()+time.Second)
 		defer cancel()
 		err = c.worker.Shutdown(budget)
 		c.worker = nil
