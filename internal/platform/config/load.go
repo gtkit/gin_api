@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
@@ -17,6 +19,51 @@ import (
 // configFile 是外置配置的固定相对路径。配置一律从磁盘读取，不进二进制、不进 git；
 // 路径解析见 resource.ResolvePath（可执行文件同级的 config/env/ 优先）。
 const configFile = "config/env/env.yml"
+
+// envPrefix 是配置覆盖层的环境变量前缀。
+//
+// 该前缀是本服务**独占**的命名空间：以它开头却映射不到任何配置键的变量会让启动
+// 失败（decode 的 ErrorUnused）。这是刻意的——这类变量最常见的成因是密钥变量名
+// 拼错，忽略它会让服务带着 YAML 里的空密码正常起来，直到第一次连库才报"认证失败"，
+// 而那条错误与真正的原因之间隔着一整条排查路径。
+const envPrefix = "APP_"
+
+// envReservedNames 是 `APP_` 前缀下已被本项目占用、不参与配置覆盖的变量名。
+//
+// `APP_ROOT` 指定项目根目录，`resource.ResolvePath`、`resource.WriteRoot` 与
+// `validateLogConfig` 都读它，生产的 supervisor 配置里就有这一条
+// （见 SCAFFOLD.md 的部署段）。不排除的话它会被映射成配置键 `root`，
+// 撞上未知键 fail-fast——一个由本层引入、让所有既有部署直接起不来的回归。
+//
+// 新增 `APP_` 开头的进程级变量时必须同步登记到这里，否则它会以同样的方式
+// 让启动失败，而错误信息指向的是"未知配置项"，与真正的原因隔着一层。
+var envReservedNames = map[string]struct{}{
+	"APP_ROOT": {},
+}
+
+// envKeyToConfigPath 把环境变量名转成配置键路径。
+//
+// 双下划线表示层级，单下划线保留为键名自身的一部分：
+//
+//	APP_DATABASE__PASSWORD         -> database.password
+//	APP_DATABASE__MIGRATE_USERNAME -> database.migrate_username
+//
+// 不用单下划线分层：配置键本身大量使用它（read_header_timeout、migrate_username、
+// key_hmac_secret），单下划线分层会把这些键切成不存在的路径，且启动失败时报出的
+// 位置与真正的错误无关。
+//
+// 返回空串表示忽略该变量——koanf 的 env provider 据此跳过它。裸 `APP_` 映射不到
+// 任何键，让它使整个进程起不来，与它可能只是环境里一个无关残留不相称。
+func envKeyToConfigPath(name string) string {
+	if _, reserved := envReservedNames[name]; reserved {
+		return ""
+	}
+	trimmed := strings.TrimPrefix(name, envPrefix)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ReplaceAll(strings.ToLower(trimmed), "__", ".")
+}
 
 // Load 从磁盘固定路径 config/env/env.yml 读取 typed config。
 // 找不到文件直接报错（fail-fast）：部署须显式提供该文件（参照 config/env.yml.example）。
@@ -77,6 +124,18 @@ func loadFromReader(r io.Reader) (*Config, error) {
 }
 
 func decode(k *koanf.Koanf) (*Config, error) {
+	// 环境变量覆盖层：在 YAML 之后加载，同名键以环境变量为准。
+	//
+	// 放在 decode 里而不是各调用点：Load（读磁盘）与 loadFromReader（读字节流）
+	// 都汇合到这里，两条路径因此拿到同一套覆盖语义，测试覆盖的也就是生产走的那条。
+	//
+	// parser 传 nil：env provider 通过 Read() 直接产出 map，不经字节解析
+	// （见 koanf.Load 对 nil parser 的分支）。
+	if err := k.Load(env.Provider(envPrefix, ".", envKeyToConfigPath), nil); err != nil {
+		// 错误里只提前缀，不带任何变量值——这一层承载的正是密钥。
+		return nil, fmt.Errorf("load %s environment overrides: %w", envPrefix, err)
+	}
+
 	var cfg Config
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。

@@ -161,6 +161,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
+| 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
 | 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |
 | 注销信息留存 | `user_deactivations` 表 | 明文保存注销前手机号/邮箱/昵称/IP 供申诉与风控；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见该表的迁移注释 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
