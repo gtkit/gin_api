@@ -1,3 +1,5 @@
+//go:build scaffold
+
 package cmd
 
 import (

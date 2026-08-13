@@ -10,8 +10,8 @@
 export GOPRIVATE=github.com/gtkit/*
 gonew github.com/gtkit/gin-api@latest example.com/yourorg/your-project ./your-project
 cd ./your-project
-go run . project init --name your-project --dry-run   # 预览
-go run . project init --name your-project             # 执行
+make project-init NAME=your_project ARGS=--dry-run   # 预览
+make project-init NAME=your_project                  # 执行
 ```
 
 完整流程、护栏说明与「移除 Laravel 兼容层」手动清单见 [`SCAFFOLD.md`](SCAFFOLD.md)。
@@ -76,7 +76,18 @@ cmd
 
 ## 当前模块
 
-当前业务模块只有 `user`：
+`auth`（仅 `auth.mode: local` 时注册；`external` 模式下本服务只验签与授权，不注册任何认证端点）：
+
+- `POST /api/v1/auth/register`：注册。
+- `POST /api/v1/auth/login`：登录，签发访问令牌与刷新令牌。
+- `POST /api/v1/auth/refresh`：刷新令牌轮换（一次性使用，重用即撤销整个令牌族）。
+- `POST /api/v1/auth/logout`：登出，访问令牌 jti 进撤销表。需认证。
+
+四个端点都禁止任何缓存层保存响应（携带令牌），并挂专用的严格限流：
+`register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
+`refresh`/`logout` 用 `auth.token`。
+
+`user`：
 
 - `GET /api/v1/user`：查询当前登录用户资料。
 - `PUT /api/v1/user`：更新当前登录用户资料。
@@ -104,9 +115,13 @@ cmd
 go run . server
 go run . doctor
 go run . jwt
-go run . module admin
-go run . module staff --field nickname:string --field status:uint8
+make module NAME=admin ARGS="--access authenticated"
+make module NAME=staff ARGS="--field nickname:string --field status:uint8 --access admin"
 ```
+
+`module` 与 `project init` 是**开发期工具**，由 `scaffold` 构建约束门控，不在服务二进制里——
+`make module` / `make project-init` 已把 tag 封装好。裸命令形式是
+`go run -tags scaffold . module <name>`。
 
 模块生成器说明见 `cmd/MODULE_GENERATOR.md`。
 

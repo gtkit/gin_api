@@ -6,15 +6,46 @@ import (
 	"testing"
 )
 
-func TestSuccessWritesColoredOutput(t *testing.T) {
-	buf := &bytes.Buffer{}
-	restoreOutput := setConsoleOutputForTest(buf)
-	defer restoreOutput()
+// TestColoredOutputBytes 锁定三个打印函数的**逐字节**输出。
+//
+// 期望值是替换 `github.com/mgutz/ansi` 之前实测得到的字节：
+//
+//	ansi.Color("MSG", "green")  == "\x1b[0;32mMSG\x1b[0m"
+//	ansi.Color("MSG", "red")    == "\x1b[0;31mMSG\x1b[0m"
+//	ansi.Color("MSG", "yellow") == "\x1b[0;33mMSG\x1b[0m"
+//
+// 注意 `0;` 前缀（先复位再设色）。裸 `\x1b[32m` 在终端上看不出差别，但对任何
+// 断言输出字节的调用方都不等价——自实现替换第三方库时，正是这种"看起来一样"
+// 的差异最容易溜过去。
+//
+// 此前这里只断言 `buf.Len() != 0`：色码写错、甚至消息内容写错，它都照样通过。
+// 「输出是彩色的」是本包唯一的契约（三个函数除颜色外没有任何差异），没有反证
+// 测试的契约等于凭空承诺。
+func TestColoredOutputBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		print func(string)
+		input string
+		want  string
+	}{
+		{"success is green", Success, "hello", "\x1b[0;32mhello\x1b[0m\n"},
+		{"error is red", Error, "boom", "\x1b[0;31mboom\x1b[0m\n"},
+		{"warning is yellow", Warning, "careful", "\x1b[0;33mcareful\x1b[0m\n"},
+		{"empty message still wrapped", Success, "", "\x1b[0;32m\x1b[0m\n"},
+	}
 
-	Success("hello")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			restoreOutput := setConsoleOutputForTest(buf)
+			defer restoreOutput()
 
-	if buf.Len() == 0 {
-		t.Fatal("expected success output to be written")
+			tt.print(tt.input)
+
+			if got := buf.String(); got != tt.want {
+				t.Fatalf("output = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

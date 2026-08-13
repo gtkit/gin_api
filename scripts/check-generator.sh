@@ -72,7 +72,7 @@ run_gate() {
   cd "$tmp"
 
   echo "[check-generator] 生成临时模块 $probe"
-  go run . module "$probe" --public --field title:string >/dev/null
+  go run -tags scaffold . module "$probe" --public --field title:string >/dev/null
 
   echo "[check-generator] go build ./..."
   go build ./...
@@ -122,7 +122,7 @@ run_self_test() {
   fi
 
   cd "$tmp"
-  if go run . module "$probe" --public --field title:string >/dev/null 2>&1; then
+  if go run -tags scaffold . module "$probe" --public --field title:string >/dev/null 2>&1; then
     echo "[self-test] FAIL: 锚点已破坏但生成仍成功——门禁没有真正验证工作树"
     exit 1
   fi

@@ -5,6 +5,63 @@
 
 破坏性变更一律用 ⚠ 标注，并附具体的迁移动作。
 
+## 未发布
+
+### 变更
+
+- **`internal/pkg/console` 不再直接依赖 `github.com/mgutz/ansi`**。该包对它的全部用量是一处
+  `ansi.Color`，颜色只有绿/红/黄三种，现改为包内 ANSI 转义常量。公开 API
+  （`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）与输出字节**逐字保持**——替换前实测
+  `ansi.Color("MSG","green")` 输出 `"\x1b[0;32mMSG\x1b[0m"`（注意 `0;` 前缀），新实现按此对齐，
+  并补了逐字节断言的测试（此前只断言"输出非空"，色码写错也照样通过）。
+
+  **移除的是这条 direct require，不是 console 这个包**——它是预置工具，按"电池内置"口径保留。
+  该模块也不会从 `go.mod` 消失：`gtkit/migratex` 经 `migratex/console` 仍传递依赖它，故降为
+  `// indirect`。本仓不再自己持有它，上游哪天弃用它时它会自然消失。
+
+### 依赖
+
+- **`go.mod` 不再含 `replace` 指令**。此前有一条 `replace github.com/gtkit/smsx v1.4.3 => v1.0.0`，
+  用来绕开 `smsx/providers/aliyun` 伪版本里那条指向不存在 tag 的依赖声明。`replace` 只在自身
+  为主模块时生效——母版经 `gonew` 复制后，派生项目的主模块就是它，这条补丁会原样生效于每个
+  派生项目，且没人知道它为何存在。现已对齐到上游的 `smsx v1.1.0` + `smsx/providers/aliyun v1.1.0`
+  双 tag（二者自洽），并新增门禁判据拒绝任何 `replace`。`httpc` 一并升至 v1.5.0，Go 基线声明
+  统一为 `go 1.26`。无代码改动。
+
+### 变更
+
+- ⚠ **`module` 与 `project init` 不再出现在服务二进制里**。二者由 `//go:build scaffold`
+  门控——`module` 会重写 `internal/bootstrap/providers.go`，`project init` 带
+  `--force-reinit-git` 且会永久丢弃 git 历史，对已经跑起来的派生项目都不存在正确用法。
+
+  **迁移动作**：调用方式从 `go run . module <name>` 改为 `make module NAME=<name> ARGS="..."`
+  （或裸命令 `go run -tags scaffold . module <name>`）；`project init` 同理，新增
+  `make project-init NAME=<name>`。CI 或脚本里若直接调用过这两条命令，需要加上 tag。
+
+  这不移除 `golang.org/x/tools` 与 `github.com/gofrs/flock` 这两个依赖——`go mod tidy`
+  枚举全部构建约束组合，它们仍是 direct require；变化的是**默认构建的依赖闭包**不再包含
+  它们（隔离前为 12 个包，现为 0），由 `check-architecture` 强制。
+
+- **启动横幅观感增强**。字形与内容不变，改动只在呈现：颜色由基本绿改为 Go 品牌主色
+  Gopher Blue（`38;5;38` = #00AFD7，与 #00ADD8 的 RGB 差为 (0,2,1)，肉眼不可分）；
+  末尾补一条与字形等宽的收边线，宽度按 art 实际 rune 数计算而非写死常量，换字体不会错位。
+  配色集中在 `bannerPalette` 一个切片，按行下标取模——默认单色，加色阶即变渐变，
+  打印逻辑不用动。
+
+### 文档
+
+- **预置能力清单补齐并加门禁**。此前漏掉告警扇出、出站 HTTP 客户端、熔断、GET 响应缓存、
+  任务队列五项能力与全部内部支撑包。其中**告警扇出有对外副作用**：进程记一条告警级日志
+  就会向已配置的通道各发一条消息（飞书/钉钉/企微 webhook、SMTP 邮件、阿里云短信，短信按条
+  计费）——不知情的派生项目会在生产上付这个代价。现已按「默认开启 / 需接线 / 示例可删 /
+  内部支撑」四种身份逐项登记，并由 `scripts/check-capability-inventory.sh` 保证穷尽
+  （存在性判据，检测不到归类错误，不是清单正确性的完整保证）。
+- **`README.md` 补上 `auth` 模块的四个端点**（register/login/refresh/logout）。此前只记了
+  `user` 模块，写着"当前业务模块只有 user"。
+- **模块生成器的文档示例此前全部无法执行**：生成器要求必填 `--access` 或 `--public`，而
+  README、`cmd/README.md`、`cmd/MODULE_GENERATOR.md` 里的示例一个都没带。现已按真实约束修正
+  并逐条实际执行验证。
+
 ## v0.1.2
 
 无破坏性变更：新增配置项留空即等于原行为，从 v0.1.1 升级无需改动 env.yml。

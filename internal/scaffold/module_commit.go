@@ -1,3 +1,5 @@
+//go:build scaffold
+
 // module_commit.go 承载生成结果的暂存与统一落盘：要么全部、要么零落盘，
 // 单文件写入原子生效，失败回滚只清除本次产物。
 package scaffold

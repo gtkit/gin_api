@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
 
@@ -16,6 +18,67 @@ const _UI = `
 ╚██████╔╝╚██████╔╝      ╚██████╔╝██║██║ ╚████║      ██║  ██║██║     ██║
  ╚═════╝  ╚═════╝        ╚═════╝ ╚═╝╚═╝  ╚═══╝      ╚═╝  ╚═╝╚═╝     ╚═╝
 `
+
+// gopherBlue 是 Go 品牌主色 Gopher Blue #00ADD8 在 xterm-256 里的对应格：
+// 38 号 = #00AFD7，与品牌色的 RGB 差为 (0,2,1)，肉眼不可分。
+//
+// 用 256 色 SGR（`38;5;N`）而不是 24 位真彩（`38;2;R;G;B`）取精确 #00ADD8：
+// 差距已在感知阈之下，收益为零；而 macOS 的 Terminal.app 不支持真彩、会退回
+// 近似，换过去反而把一个稳定的结果变成一个依赖终端实现的结果。
+const gopherBlue = "\x1b[38;5;38m"
+
+// bannerPalette 是 banner 逐行的前景色，按行下标取模取用。
+//
+// 默认单色 Gopher Blue：ANSI Shadow 的立体感来自字形本身（`█` 是字面，
+// `╗╝═║` 是描边与投影），由字符密度造出，与颜色无关——单色是这个字体的常规
+// 用法，不会损失任何层次。渐变只是额外装饰。
+//
+// 想要渐变就往这里加色阶，打印逻辑不用动。例如青→蓝六段：
+//
+//	"\x1b[38;5;51m" // #00FFFF
+//	"\x1b[38;5;45m" // #00D7FF
+//	"\x1b[38;5;39m" // #00AFFF
+//	gopherBlue      // #00AFD7
+//	"\x1b[38;5;32m" // #0087D7
+//	"\x1b[38;5;26m" // #005FD7
+var bannerPalette = []string{gopherBlue}
+
+const (
+	bannerReset = "\x1b[0m"
+	bannerDim   = "\x1b[38;5;240m" // 分隔线用中性灰，不与字形争视觉重心
+)
+
+// printBanner 渲染启动横幅：逐行渐变着色，末尾收一条与字形等宽的细线。
+//
+// 收边线的宽度按 art 的实际显示宽度算，不写死常量——字形换了、或某行长度
+// 变了，线会跟着变，不会出现"线比字长一截"这种一眼可见的错位。
+// 宽度按 rune 计：art 全部由单元格宽的制表符与块字符组成，len() 会按字节
+// 数算出三倍长度。
+func printBanner(w io.Writer) {
+	lines := strings.Split(strings.Trim(_UI, "\n"), "\n")
+
+	width := 0
+	for _, ln := range lines {
+		if n := len([]rune(ln)); n > width {
+			width = n
+		}
+	}
+
+	var b strings.Builder
+	b.WriteByte('\n')
+	for i, ln := range lines {
+		b.WriteString(bannerPalette[i%len(bannerPalette)])
+		b.WriteString(ln)
+		b.WriteString(bannerReset)
+		b.WriteByte('\n')
+	}
+	b.WriteString(bannerDim)
+	b.WriteString(strings.Repeat("─", width))
+	b.WriteString(bannerReset)
+	b.WriteString("\n\n")
+
+	fmt.Fprint(w, b.String())
+}
 
 func init() {
 	RegisterRootCommand(newServerCmd)
@@ -55,7 +118,7 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 				}
 				return commandError("bootstrap app", err)
 			}
-			fmt.Printf("\x1b[32m%s\x1b[0m", _UI)
+			printBanner(cmd.OutOrStdout())
 
 			return commandError("run app", app.Run(ctx))
 		},

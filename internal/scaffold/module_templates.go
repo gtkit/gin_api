@@ -1,3 +1,5 @@
+//go:build scaffold
+
 // module_templates.go 收纳模块生成器的全部代码模板。
 // 模板与编排、提交逻辑分文件：本文件只有字符串常量，无任何行为。
 package scaffold

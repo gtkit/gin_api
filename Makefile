@@ -51,6 +51,19 @@ build:
 
 GO_TARGETS ?= ./...
 LINT_TARGETS ?= ./...
+# 验证口径的构建约束。
+#
+# `scaffold` 门控着模块生成器（internal/scaffold）与项目实例化器
+# （internal/projectinit）——它们是开发期工具，不进服务二进制：`module` 会重写
+# internal/bootstrap/providers.go，`project init` 带 --force-reinit-git 且会永久
+# 丢弃 git 历史，两者对派生项目都不存在正确用法。
+#
+# 但**验证口径必须包含它们**：这些包的测试锁定着 module-scaffold-wiring 与
+# project-instantiation 两组需求。只加构建约束而不在这里带上 tag，那些测试就不再
+# 被编译，两组需求会静默失去保护而 `make check` 依然全绿——比不做隔离更危险。
+#
+# 因此：vet / test / coverage / lint 带 tag；build 目标与 Dockerfile 不带。
+GO_BUILD_TAGS ?= scaffold
 COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
 #
@@ -86,10 +99,10 @@ tool: ## Lint Go code with the installed golangci-lint
 	@ echo "✅ golangci-lint run"
 
 vet: ## Run go vet
-	go vet $(GO_TARGETS)
+	go vet -tags $(GO_BUILD_TAGS) $(GO_TARGETS)
 
 test-race: ## Run race-enabled tests
-	go test -race -count=1 -timeout=5m $(GO_TARGETS)
+	go test -tags $(GO_BUILD_TAGS) -race -count=1 -timeout=5m $(GO_TARGETS)
 
 test-integration: ## Run real-database integration tests locally (set REQUIRE_DB_INTEGRATION=1 to turn skips into failures)
 	go test -tags integration -race -count=1 -timeout=5m ./internal/repository/...
@@ -105,13 +118,34 @@ image: ## Build the Docker image locally, tagged with the current commit short s
 		-t $(APP_NAME):$$(git rev-parse --short HEAD) .
 
 test-coverage: ## Run race-enabled tests and write an aggregate coverage profile
-	ALLOW_NO_LOOPBACK=$(ALLOW_NO_LOOPBACK) ./scripts/test-coverage.sh $(COVERAGE_PROFILE) $(GO_TARGETS)
+	ALLOW_NO_LOOPBACK=$(ALLOW_NO_LOOPBACK) GO_BUILD_TAGS=$(GO_BUILD_TAGS) ./scripts/test-coverage.sh $(COVERAGE_PROFILE) $(GO_TARGETS)
 
 check-coverage: test-coverage ## Enforce the aggregate statement coverage baseline
 	./scripts/check-coverage.sh $(COVERAGE_PROFILE) $(COVERAGE_MIN)
 
 check-architecture: ## 校验分层架构边界
 	@ ./scripts/check-architecture.sh
+
+check-capability-inventory: ## 校验 SCAFFOLD.md 的预置能力清单穷尽
+	@ ./scripts/check-capability-inventory.sh
+
+## 单独跑一次**不带 tag** 的命令树断言。
+##
+## 必须单独一步：日常测试口径带 $(GO_BUILD_TAGS)，而在那个口径下 module/project
+## 本就应当在场，"缺席"断言只可能在默认口径下成立。不单独跑，它永远不会在门禁里
+## 执行——一个从不执行的断言不是保护，是装饰。
+check-scaffold-isolation: ## 断言默认构建的命令树不含脚手架命令
+	go test -count=1 -run TestDefaultBuildExcludesScaffoldCommands ./cmd/
+
+## 脚手架入口：模块生成器与项目实例化器由 `scaffold` 构建约束门控，不在服务二进制里。
+## 经 make 目标封装 tag，使用者不必记住它——两个入口形态一致，少一处能记错的地方。
+module: ## Generate a business module (usage: make module NAME=order ARGS="--field title:string")
+	@ test -n "$(NAME)" || { echo "usage: make module NAME=<module-name> [ARGS=\"--field title:string\"]" >&2; exit 2; }
+	go run -tags $(GO_BUILD_TAGS) . module $(NAME) $(ARGS)
+
+project-init: ## Instantiate a new project from this scaffold mother (usage: make project-init NAME=your_project ARGS="--dry-run")
+	@ test -n "$(NAME)" || { echo "usage: make project-init NAME=<project-name> [ARGS=\"--dry-run\"]" >&2; exit 2; }
+	go run -tags $(GO_BUILD_TAGS) . project init --name $(NAME) $(ARGS)
 
 hooks: ## 安装 git 钩子（pre-push 跑 make check-ci）
 	## 门禁存在不等于门禁被执行。CI 侧只部署、不承载质量 job（外部冻结契约），
@@ -221,7 +255,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

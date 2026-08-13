@@ -1,6 +1,6 @@
 module github.com/gtkit/gin-api
 
-go 1.26.4
+go 1.26
 
 require (
 	github.com/gin-gonic/gin v1.12.0
@@ -25,7 +25,7 @@ require (
 	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
-	github.com/gtkit/httpc v1.4.0
+	github.com/gtkit/httpc v1.5.0
 	github.com/gtkit/json v1.0.0
 	github.com/gtkit/logger/v2 v2.3.0
 	github.com/gtkit/migratex v0.4.0
@@ -33,8 +33,8 @@ require (
 	github.com/gtkit/news v1.1.10
 	github.com/gtkit/ormx v1.5.0
 	github.com/gtkit/redisx v1.3.0
-	github.com/gtkit/smsx v1.4.3
-	github.com/gtkit/smsx/providers/aliyun v0.0.0-20260418190407-648277873486
+	github.com/gtkit/smsx v1.1.0
+	github.com/gtkit/smsx/providers/aliyun v1.1.0
 	github.com/gtkit/stringx v1.1.6
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
 	github.com/knadh/koanf/parsers/yaml v1.1.0
@@ -42,7 +42,6 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/rawbytes v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
-	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d
 	github.com/sony/gobreaker/v2 v2.4.0
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.70.0
 	go.opentelemetry.io/otel v1.45.0
@@ -90,6 +89,7 @@ require (
 	github.com/hibiken/asynq v0.26.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
@@ -148,5 +148,3 @@ require (
 )
 
 tool golang.org/x/vuln/cmd/govulncheck
-
-replace github.com/gtkit/smsx v1.4.3 => github.com/gtkit/smsx v1.0.0

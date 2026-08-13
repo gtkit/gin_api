@@ -16,9 +16,15 @@ run:
   tests: true
   # 并发线程数（0 = 自动检测 CPU 核心数）
   concurrency: 0
-  # 构建标签（项目使用 sonic JSON 库需要此 tag）
+  # 构建标签
+  #   sonic    —— 项目使用 sonic JSON 库需要此 tag
+  #   scaffold —— 门控开发期脚手架工具（internal/scaffold、internal/projectinit）。
+  #               必须在此声明：不声明的话这两个包会静默退出 lint 覆盖范围，
+  #               与"只加构建约束却不调整测试口径"是同一类失效——检查看起来
+  #               通过了，实际上根本没检查。
   build-tags:
     - sonic
+    - scaffold
 
 # ═══════════════════════════════════════════════════════════════════
 # 输出配置

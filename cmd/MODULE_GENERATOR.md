@@ -4,11 +4,25 @@
 
 ## 使用方式
 
+生成器由 `scaffold` 构建约束门控（它不属于服务二进制——它会重写
+`internal/bootstrap/providers.go`）。`make module` 已把 tag 封装好：
+
 ```bash
-go run . module admin
-go run . module staff --field nickname:string --field status:uint8
-go run . module article-tag --field title:string --field enabled:bool
+make module NAME=admin ARGS="--access authenticated"
+make module NAME=staff ARGS="--field nickname:string --field status:uint8 --access admin"
+make module NAME=article_tag ARGS="--field title:string --field enabled:bool --public"
 ```
+
+裸命令形式（下面的参数说明按这个形式书写）：
+
+```bash
+go run -tags scaffold . module admin --access authenticated
+go run -tags scaffold . module staff --field nickname:string --field status:uint8 --access admin
+go run -tags scaffold . module article_tag --field title:string --field enabled:bool --public
+```
+
+> 在 IDE 里改生成器代码时，需要给 gopls 配 `"buildFlags": ["-tags=scaffold"]`，
+> 否则这些文件会被排除在索引之外（表现为满屏 undefined）。
 
 可选参数：
 

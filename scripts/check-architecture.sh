@@ -233,6 +233,52 @@ while IFS= read -r -d '' file; do
   fi
 done < <(find internal/repository -type f -name '*.go' ! -name '*_test.go' -print0)
 
+# go.mod 不得含 replace。
+#
+# replace 只在自身为主模块时生效——母版经 gonew 复制后，派生项目的主模块就是它，
+# 因此母版携带的每一条 replace 都会原样生效于每个派生项目。派生项目的维护者
+# 既不知道它为何存在，也不会在上游修好后删掉它，于是"上游声明依赖 A、实际编译
+# 用 B"成为一条永久且不可见的偏差。
+#
+# 上游依赖损坏时的正确修法是推动上游发布可用版本并对齐到它，而不是在母版里
+# 挂一条补丁分发给所有下游。本仓曾用 `replace smsx v1.4.3 => v1.0.0` 绕过一个
+# 从带本地 replace 的提交切出的坏伪版本，那条补丁就会跟着进每个派生项目。
+if grep -qE '^replace[[:space:]]' go.mod || grep -qE '^replace[[:space:]]*\(' go.mod; then
+  echo "FAIL: go.mod must not contain replace directives (they propagate to every derived project via gonew)"
+  grep -nE '^replace' go.mod
+  fail=1
+fi
+
+# 默认构建的依赖闭包不得含仅为脚手架工具服务的第三方库。
+#
+# 模块生成器与项目实例化器由 `scaffold` 构建约束门控（见 internal/scaffold、
+# internal/projectinit）。本判据证伪的是"隔离失效"：任何一个文件漏了构建约束，
+# 这两个库就会重新出现在默认构建里。隔离前的实测值是 12 个包。
+#
+# 注意判据的边界：它约束**构建闭包**，不是 go.mod 的 require 列表。
+# `go mod tidy` 枚举全部构建约束组合，这两个库仍会作为 direct require 保留——
+# 因此任何文档都不得把它表述为"移除了这两个依赖"。
+# fail-closed：`go list` 自身失败必须是失败，不能当成"没有匹配"。
+#
+# 反证测试发现过这个洞：把 2>/dev/null 套在 go list 上时，一个编译不过的
+# 默认构建会让 grep 收到空输入并返回 0，判据于是静默通过——而那种状态下
+# 隔离是否成立根本无从判断。本仓 supply-chain-gates 对扫描器有同一条要求
+#（"扫描执行失败不得走豁免"），依赖闭包判据同理。
+scaffold_deps_out="$(mktemp)"
+if ! go list -deps . >"$scaffold_deps_out" 2>"$scaffold_deps_out.err"; then
+  echo "FAIL: cannot enumerate the default build's dependency closure (go list failed); the isolation criterion is unevaluable, not satisfied"
+  sed 's/^/  /' "$scaffold_deps_out.err" | head -20
+  fail=1
+else
+  scaffold_dep_hits="$(grep -E '^golang\.org/x/tools|^github\.com/gofrs/flock' "$scaffold_deps_out" || true)"
+  if [ -n "$scaffold_dep_hits" ]; then
+    echo "FAIL: default build pulls in scaffold-only dependency package(s); a file is missing its '//go:build scaffold' constraint"
+    printf '%s\n' "$scaffold_dep_hits" | sed 's/^/  /'
+    fail=1
+  fi
+fi
+rm -f "$scaffold_deps_out" "$scaffold_deps_out.err"
+
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi

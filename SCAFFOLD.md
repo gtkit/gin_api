@@ -30,11 +30,16 @@ cd ./your-project
 
 ```bash
 # 预览将发生的改动（不落盘）
-go run . project init --name your_project --dry-run
+make project-init NAME=your_project ARGS=--dry-run
 
 # 实际执行
-go run . project init --name your_project
+make project-init NAME=your_project
 ```
+
+`project init` 与 `module` 是**开发期工具**，由 `scaffold` 构建约束门控——它们不在服务二进制里
+（`module` 会重写 `providers.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃 git 历史，
+两者对已经跑起来的派生项目都不存在正确用法）。上面的 make 目标已把 tag 封装好；
+裸命令形式是 `go run -tags scaffold . project init --name your_project`。
 
 `project init` 会：
 
@@ -75,7 +80,7 @@ go run . project init --name your_project
 
 ## 之后
 
-- 用生成器加业务模块：`go run . module <name> --field title:string ...`（自动接线进分阶段 `providers.go`，见 `cmd/MODULE_GENERATOR.md`）。
+- 用生成器加业务模块：`make module NAME=<name> ARGS="--field title:string ... --access authenticated"`（自动接线进分阶段 `providers.go`，见 `cmd/MODULE_GENERATOR.md`）。
 - `user` 模块保留作为认证/参考起点（它是 `sharedauth.UserVerifier` 提供者），按新项目需要改造或替换。
 - 提交前跑 `make check`；改动触及生成器/模板/`providers.go` 时再跑 `make check-ci`（额外含脚手架防腐冒烟 `check-generator`）。质量门禁全部在本地执行——部署脚本与 CI 配置是外部冻结方案，其中不含质量 job。
 
@@ -360,6 +365,23 @@ telemetry:
 | 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `useRateLimit(g, deps.RateLimit, "策略ID")` 引用它 |
+| 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
+| 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
+| 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
+| GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
+| 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
+
+### 告警扇出的对外副作用
+
+`internal/pkg/news` 挂在 `gtkit/logger/v2` 的 Messager 上：**进程记一条告警级日志，就会向已配置的全部通道各发一条消息**——飞书/钉钉/企业微信 webhook、SMTP 邮件、阿里云短信。
+
+因此它的误配置后果是**真实发送**，而不是一条错误日志：
+
+- `email.alert_to` 非空即启用邮件通道，收件人会收到真实邮件；
+- `sms.alert_phones` 与 `sms.alert_template` 成对配置即启用短信通道，号码会收到真实短信，**按条计费**；
+- webhook 配错群地址，告警内容会发进那个群。
+
+派生项目接手时应先确认这三处的取值，再让服务在有真实流量的环境启动。单次发送有 10s 独立超时（告警发生在日志调用路径上，通道故障不能拖住调用方），异步队列深度 64，超出即丢弃并计数——告警只承载进程级事件，积压几十条本身就已经是告警风暴。
 
 ### 【示例 — 可按需删除】
 
@@ -370,6 +392,27 @@ telemetry:
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
 | 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。**它是单实例任务**（见下方「后台任务的单实例执行」），因此启用时 Redis 是硬依赖。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |
+
+### 【内部支撑包 — 不构成能力，无需接线】
+
+这些包没有"启用方式"：它们要么已经被上面某项能力在内部使用，要么是供派生项目按需 import 的工具类型。列出它们是为了让清单穷尽——使用者不会去找一个他不知道存在的东西。
+
+| 包 | 内容 |
+|---|---|
+| `internal/pkg/errx` | 错误树判定谓词（`IsPureCancellation` / `IsPureAbort`）。逐成员判定聚合错误，避免"取消 + 回滚失败"被整体当成正常退出 |
+| `internal/pkg/response` | 统一 JSON 响应信封与错误码到 HTTP 状态码的映射，被中间件与各模块 handler 使用 |
+| `internal/pkg/ginc` | gin context helper（客户端 IP 唯一 accessor、请求上下文取值） |
+| `internal/pkg/paging` | 纯分页结果类型，不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import） |
+| `internal/pkg/cache` | 进程内缓存工具：singleflight 防击穿、TTL 抖动防雪崩、容量上限 + LRU 防无界。供派生项目按需 import，母版自身不构造实例（GET 响应缓存走的是 `httpcache`，两者不是一回事） |
+| `internal/pkg/console` | 带颜色的命令行输出 helper（`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）。ANSI 转义自实现，不依赖第三方着色库；不做 TTY 检测，重定向到文件时同样写入转义序列 |
+| `internal/pkg/log` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
+| `internal/pkg/metrics` | OTel 记录点封装，默认 no-op（见上表「指标（OTel）」） |
+| `internal/pkg/jwtauth` | JWT 签发/验签与多密钥轮换（见上文「JWT 密钥轮换操作手册」） |
+| `internal/pkg/credential` / `internal/pkg/tokenstore` | 本地认证模式的口令哈希与刷新令牌存储（见「认证：两种模式二选一」；切到 `external` 后可整体删除） |
+| `internal/pkg/singleton` | 基于 Redis 租约的单实例执行（见上文「后台任务的单实例执行」） |
+| `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，当前唯一构造点在 `internal/pkg/news`（见上文「告警扇出的对外副作用」） |
+
+配置里的 `application` / `ssl` / `cors` / `log` / `database` / `redis` / `env` 是进程与连接的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。
 
 ### 本地开发依赖（可选）
 
