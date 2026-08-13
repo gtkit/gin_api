@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -201,9 +202,14 @@ func TestReadyEndpointNilChecker(t *testing.T) {
 	}
 }
 
-func TestReadyEndpointHidesErrorDetail(t *testing.T) {
-	const secretErr = "dial tcp 10.0.0.5:3306: connection refused"
-	engine := newTestEngine(&stubChecker{dbErr: errors.New(secretErr)})
+// TestReadyEndpointReportsErrorDetail 钉住依赖失败原因进响应体。
+//
+// 这是一次**有意的取舍反转**：此前该端点刻意隐藏错误串，2026-08-13 按用户决策
+// 改为回传，以免每次排障都要先登进机器翻日志。代价是响应体携带内网拓扑与账号信息，
+// 因此 /ready 不得对公网开放——见 SCAFFOLD.md 与 readiness-probe spec。
+func TestReadyEndpointReportsErrorDetail(t *testing.T) {
+	const depErr = "dial tcp 10.0.0.5:3306: connection refused"
+	engine := newTestEngine(&stubChecker{dbErr: errors.New(depErr)})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -212,13 +218,55 @@ func TestReadyEndpointHidesErrorDetail(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("/ready status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
-	body := w.Body.String()
-	// 底层错误串绝不能出现在响应体里。
-	if strings.Contains(body, secretErr) {
-		t.Fatalf("/ready body leaked underlying error: %q", body)
+
+	var body ReadinessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/ready body is not parseable: %v", err)
 	}
-	// 应以固定标签 unavailable 呈现失败依赖。
-	if !strings.Contains(body, "unavailable") {
-		t.Fatalf("/ready body = %q, want fixed 'unavailable' label", body)
+	// 状态标签仍是固定取值，判定不依赖错误文本的措辞。
+	if got := body.Checks["database"].Status; got != statusUnavailable {
+		t.Fatalf("database status = %q, want %q", got, statusUnavailable)
+	}
+	if got := body.Checks["database"].Error; got != depErr {
+		t.Fatalf("database error = %q, want the underlying reason %q", got, depErr)
+	}
+}
+
+// TestReadyEndpointBoundsErrorDetail 钉住错误串的字节上限。
+//
+// err.Error() 的长度不受本项目控制（驱动可能塞进整条 SQL 或上游的 HTML 错误页）。
+// 不设界的话，探针响应会在故障期膨胀到下游拒绝解析——正好在最需要它的时候失效。
+func TestReadyEndpointBoundsErrorDetail(t *testing.T) {
+	longErr := strings.Repeat("x", maxDepErrorBytes*3)
+	engine := newTestEngine(&stubChecker{dbErr: errors.New(longErr)})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	engine.ServeHTTP(w, req)
+
+	var body ReadinessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("a truncated body must stay parseable: %v", err)
+	}
+	if got := len(body.Checks["database"].Error); got != maxDepErrorBytes {
+		t.Fatalf("error detail length = %d, want %d", got, maxDepErrorBytes)
+	}
+}
+
+// TestReadyEndpointOmitsErrorWhenHealthy 钉住健康依赖不带 error 字段。
+//
+// 回空串会让消费者需要区分"没有错误"与"错误是空的"，而后者本就不该出现。
+func TestReadyEndpointOmitsErrorWhenHealthy(t *testing.T) {
+	engine := newTestEngine(&stubChecker{})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	engine.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("/ready status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if strings.Contains(w.Body.String(), `"error"`) {
+		t.Fatalf("/ready body carries an error field while healthy: %q", w.Body.String())
 	}
 }

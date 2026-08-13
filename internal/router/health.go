@@ -31,12 +31,23 @@ const (
 // 一个要等好几秒才失败的探针会让编排器的判定同样迟钝，摘流也就跟着变慢。
 const ()
 
-// 对外只暴露固定状态标签，绝不回传底层错误串。
+// 状态标签的取值集合固定，不随错误种类变化。
+//
+// 失败原因走 DependencyCheck.Error 单独承载，不拼进标签——标签是编排器
+// 用来判定的，取值一旦随错误文本浮动，消费者就只能改用前缀匹配。
 const (
 	statusOK          = "ok"
 	statusDegraded    = "degraded"
 	statusUnavailable = "unavailable"
 )
+
+// maxDepErrorBytes 是响应体中单条依赖错误的字节上限。
+//
+// err.Error() 的长度不受本项目控制：驱动可能把整条 SQL、TLS 证书链或上游返回的
+// HTML 错误页放进去。探针必须在故障期保持可用，而一个膨胀到 LB 拒绝解析的响应
+// 恰好在最需要它的时候失效。256 字节足以容纳
+// `dial tcp <addr>: connect: connection refused` 这类典型错误的完整信息。
+const maxDepErrorBytes = 256
 
 // depFailureLogInterval 是同一依赖同一错误类别的重复失败日志间隔。
 //
@@ -77,18 +88,33 @@ type dependency struct {
 
 // LivenessResponse 是存活探针的响应体。
 //
-// 用具名类型而不是 gin.H：探针的响应形状是编排器的契约，也是 OpenAPI 契约的
-// 一部分。用 map 的话，契约只能靠人另写一份，而那份迟早与实现分叉。
-// 现在契约与实现共用同一个类型，改字段两边一起变。
+// 用具名类型而不是 gin.H：探针的响应形状是编排器的契约。用 map 的话，
+// 字段名散落在各个构造点，改一次要靠人找全所有位置，漏一处就是探针
+// 在某条路径上返回了另一种形状。
 type LivenessResponse struct {
 	Status string `json:"status"`
+}
+
+// DependencyCheck 是单个依赖在响应体中的呈现。
+//
+// 用结构体而不是把错误拼进状态串（`"unavailable: dial tcp ..."`）：拼接会让
+// 消费者用前缀匹配判断状态，状态判定从此依赖错误文本的措辞。分成两个字段后，
+// Status 保持固定取值集合，Error 是独立的附加信息。
+type DependencyCheck struct {
+	Status string `json:"status"`
+	// Error 是检查失败的原因，仅失败时出现，长度受 maxDepErrorBytes 约束。
+	//
+	// **该字段会携带内网拓扑与账号信息**（典型如
+	// `Access denied for user 'appuser'@'10.0.3.12'`）。这是为缩短排障路径
+	// 作出的取舍，代价是 /ready 不得对公网开放——见 SCAFFOLD.md 的说明。
+	Error string `json:"error,omitempty"`
 }
 
 // ReadinessResponse 是就绪探针的响应体。
 type ReadinessResponse struct {
 	Status string `json:"status"`
-	// Checks 是各依赖的状态，键为依赖名。
-	Checks map[string]string `json:"checks,omitempty"`
+	// Checks 是各依赖的状态与失败原因，键为依赖名。
+	Checks map[string]DependencyCheck `json:"checks,omitempty"`
 	// Phase 仅在关停期出现。
 	Phase string `json:"phase,omitempty"`
 	// Failed 是导致不可用的进程能力。
@@ -172,8 +198,25 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 type depOutcome struct {
 	name     string
 	status   string
+	detail   string
 	required bool
 	failed   bool
+}
+
+// truncateDepError 把错误文本收敛到 maxDepErrorBytes 以内。
+//
+// 按字节而不是按字符截断，可能切断多字节字符的中间。这里可接受：错误串是给人读的
+// 排障线索，不是需要精确往返的数据；且 encoding/json 会把非法 UTF-8 字节编码为
+// U+FFFD 而不是报错，响应因此仍然可解析——而"响应可解析"正是设上限要保住的东西。
+func truncateDepError(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := err.Error()
+	if len(detail) <= maxDepErrorBytes {
+		return detail
+	}
+	return detail[:maxDepErrorBytes]
 }
 
 // runDependencyChecks 在全局预算内**并发**执行全部依赖检查。
@@ -185,7 +228,7 @@ type depOutcome struct {
 // 结果按依赖名**稳定排序**收集：JSON 字段顺序抖动会干扰比对与告警去重。
 func runDependencyChecks(
 	parent context.Context, deps []dependency, limiter *depFailureLogLimiter,
-) (map[string]string, bool, bool) {
+) (map[string]DependencyCheck, bool, bool) {
 	ctx, cancel := context.WithTimeout(parent, readyGlobalDeadline)
 	defer cancel()
 
@@ -205,9 +248,15 @@ func runDependencyChecks(
 				outcomes[i] = depOutcome{name: dep.name, status: statusOK, required: dep.required}
 			case !dep.required:
 				// 可选依赖的失败不是"不可用"，而是"这台实例少了一项能力"。
-				outcomes[i] = depOutcome{name: dep.name, status: statusDegraded, failed: true}
+				outcomes[i] = depOutcome{
+					name: dep.name, status: statusDegraded,
+					detail: truncateDepError(err), failed: true,
+				}
 			default:
-				outcomes[i] = depOutcome{name: dep.name, status: statusUnavailable, required: true, failed: true}
+				outcomes[i] = depOutcome{
+					name: dep.name, status: statusUnavailable,
+					detail: truncateDepError(err), required: true, failed: true,
+				}
 			}
 			return nil
 		})
@@ -218,10 +267,10 @@ func runDependencyChecks(
 
 	slices.SortFunc(outcomes, func(a, b depOutcome) int { return cmp.Compare(a.name, b.name) })
 
-	results := make(map[string]string, len(outcomes))
+	results := make(map[string]DependencyCheck, len(outcomes))
 	var anyRequiredFailed, anyOptionalFailed bool
 	for _, o := range outcomes {
-		results[o.name] = o.status
+		results[o.name] = DependencyCheck{Status: o.status, Error: o.detail}
 		if !o.failed {
 			continue
 		}

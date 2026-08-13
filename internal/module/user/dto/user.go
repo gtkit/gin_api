@@ -19,13 +19,6 @@ const (
 	GenderFemale
 )
 
-// SchemaEnumValues 让契约生成器产出枚举取值。
-//
-// 结构化实现 openapi.SchemaEnum，不 import 它——dto 不该依赖契约生成器。
-func (Gender) SchemaEnumValues() []any {
-	return []any{int(GenderUnknown), int(GenderMale), int(GenderFemale)}
-}
-
 // NormalizeGender 把任意底层取值收敛到合法枚举。
 //
 // 数据库里可能存在历史脏数据或将来新增而本版本不认识的取值。直接透传会让

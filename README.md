@@ -85,7 +85,9 @@ cmd
 基础探针：
 
 - `GET /health`：存活检查。
-- `GET /ready`：MySQL、Redis 就绪检查。
+- `GET /ready`：MySQL、Redis 就绪检查。响应体按依赖分列状态与失败原因，
+  例如 `{"database":{"status":"unavailable","error":"dial tcp ...: connection refused"}}`。
+  **错误详情会带出内网地址与数据库账号名，该端点只应对编排器与内网可达，不得暴露到公网。**
 
 ### 通用 HTTP 行为
 

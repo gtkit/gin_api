@@ -164,6 +164,37 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |
 | 注销信息留存 | `user_deactivations` 表 | 明文保存注销前手机号/邮箱/昵称/IP 供申诉与风控；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见该表的迁移注释 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
+| 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态与失败原因，错误详情截断至 256 字节；**响应体含内网地址与数据库账号名，该端点不得对公网开放**（见下节） |
+
+### 就绪探针的暴露面约束
+
+`/ready` 的响应体按依赖分列状态与**失败原因**：
+
+```json
+{
+  "status": "unavailable",
+  "checks": {
+    "database": { "status": "unavailable", "error": "dial tcp 10.0.3.12:3306: connect: connection refused" },
+    "redis": { "status": "ok" }
+  }
+}
+```
+
+依赖级状态沿用四态模型：required 依赖（database，以及 `auth.mode: local` 下的 redis）
+失败是 `unavailable` + 503；optional 依赖失败是 `degraded` + 200，实例仍接流量。
+整体 `status` 取最严重的那一项。
+
+带错误原因是为了让排障止步于探针，不必每次都登进机器翻日志。代价是响应体会带出
+内网拓扑与账号信息——`dial tcp 10.0.3.12:3306` 暴露内网地址与端口，
+`Access denied for user 'appuser'@'10.0.3.12'` 连账号名一起给出。
+
+**因此该端点只应对编排器与内网可达，不得暴露到公网。** 探针本就不该对公网开放，
+带上错误详情后代价更高。反向代理侧按路径拦掉 `/ready` 的外部访问即可，
+代码层不做限制：探针必须能被编排器无凭据访问，加鉴权会让它在正常部署中失效。
+
+错误详情截断至 256 字节。`err.Error()` 的长度不受本项目控制——驱动可能把整条 SQL、
+TLS 证书链或上游返回的 HTML 错误页放进去，而一个膨胀到下游拒绝解析的探针响应，
+恰好在最需要它的时候失效。
 
 ### 认证：两种模式二选一（`auth.mode`，无默认值）
 
