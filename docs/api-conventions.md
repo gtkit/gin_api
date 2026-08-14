@@ -197,9 +197,17 @@ func Register(r *gin.RouterGroup, deps Deps) {
     handler := NewHandler(deps.Service)
 
     g := r.Group("/thing")
-    g.Use(middleware.Timeout(5*time.Second, 2*time.Second))
-    useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
-    g.Use(deps.Auth)                    // 需要鉴权就挂上
+    g.Use(middleware.Timeout(thingDeadline, thingWriteGrace))
+
+    // 声明受哪些限流策略约束。**不决定挂在认证的哪一侧**——
+    // 那由策略自身的作用域决定，推导收口在装配层。
+    preAuth, postAuth := stageRateLimits(deps.RateLimit, "/thing", "default.ip", "default.user")
+
+    // 顺序是契约：来源限流挡的是尚未证明身份的流量，必须在认证之前；
+    // 身份限流拿不到身份就退化成"每个请求都被拒"，必须在认证之后。
+    g.Use(preAuth...)
+    g.Use(deps.Auth)          // 需要鉴权就挂上
+    g.Use(postAuth...)
 
     g.GET("", handler.List)
     g.POST("", middleware.JSONBody(0), handler.Create)

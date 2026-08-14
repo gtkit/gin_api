@@ -57,10 +57,12 @@ v1.GET("/public/hot", cacheStager.Middleware(5*time.Second), handler)  // 覆盖
 
 ```go
 c, err := cache.New[Article](1000, time.Minute)   // 容量与 TTL 都必填且必须为正
-article, err := c.GetOrLoad(ctx, id, func(ctx context.Context) (Article, error) {
-    return repo.FindByID(ctx, id)
+
+key := strconv.FormatInt(articleID, 10)           // key 是 string，不是任意类型
+article, err := c.GetOrLoad(ctx, key, func(ctx context.Context) (Article, error) {
+    return repo.FindByID(ctx, articleID)
 })
-c.Invalidate(id)                                   // 写 DB 成功后主动失效
+c.Invalidate(key)                                  // 写 DB 成功后主动失效
 ```
 
 - **singleflight**：同一个键的并发加载只执行一次。热点键过期的瞬间所有并发请求同时回源，

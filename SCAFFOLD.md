@@ -254,9 +254,17 @@ func Register(r *gin.RouterGroup, deps Deps) {
     handler := NewHandler(deps.Service)
 
     g := r.Group("/thing")
-    g.Use(middleware.Timeout(5*time.Second, 2*time.Second))
-    useRateLimit(g, deps.RateLimit, "default.ip", "default.user")
-    g.Use(deps.Auth)                    // 需要鉴权就挂上
+    g.Use(middleware.Timeout(thingDeadline, thingWriteGrace))
+
+    // 声明受哪些限流策略约束。**不决定挂在认证的哪一侧**——
+    // 那由策略自身的作用域决定，推导收口在装配层。
+    preAuth, postAuth := stageRateLimits(deps.RateLimit, "/thing", "default.ip", "default.user")
+
+    // 顺序是契约：来源限流挡的是尚未证明身份的流量，必须在认证之前；
+    // 身份限流拿不到身份就退化成"每个请求都被拒"，必须在认证之后。
+    g.Use(preAuth...)
+    g.Use(deps.Auth)          // 需要鉴权就挂上
+    g.Use(postAuth...)
 
     g.GET("", handler.List)
     g.POST("", middleware.JSONBody(0), handler.Create)
@@ -290,7 +298,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 | `middleware.NoStore()` | `Cache-Control: no-store`（`internal/middleware/nostore.go`）。挂在携带令牌/凭据的响应上——这类响应一旦进浏览器缓存、共享代理或 CDN，令牌的寿命就不再由服务端控制。头在 handler 之前设置，流式/提前写出的响应同样带上。母版已挂在四个认证端点上 |
 | `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入（`internal/middleware/auth.go`） |
 | `deps.Authorize(id)` | 具名授权 |
-| `useRateLimit(g, deps.RateLimit, "策略ID")` | 路由级限流（`internal/middleware/ratelimit.go`）。响应头用 `X-RateLimit-*` 而非 RFC 9331 的 `RateLimit-*`——前者是当前生态里客户端与网关实际在读的那一组 |
+| `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` | 路由级限流（`internal/middleware/ratelimit.go`），返回 `(preAuth, postAuth)` 两组，**分别挂在认证前后**。响应头用 `X-RateLimit-*` 而非 RFC 9331 的 `RateLimit-*`——前者是当前生态里客户端与网关实际在读的那一组 |
 
 全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / 统一错误响应 / CORS / 体积上限）
 在 `internal/router/init.go` 里按固定顺序装配，顺序有测试锁定。
@@ -379,7 +387,7 @@ telemetry:
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
 | 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
-| 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `useRateLimit(g, deps.RateLimit, "策略ID")` 引用它 |
+| 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
 | 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
