@@ -260,8 +260,17 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
     g.GET("", handler.List)
     g.POST("", middleware.JSONBody(0), handler.Create)
+
+    // 需要具名授权的路由单独分组：授权**必须排在认证之后**，
+    // 因为它要的是已认证的身份。挂反了会得到"没有身份"而不是"没有权限"。
+    admin := g.Group("", deps.Authorize("role.admin"))
+    admin.DELETE("/:id", handler.Delete)
 }
 ```
+
+**访问控制由代码位置表达**：这条 `DELETE` 之所以要管理员，是因为它写在 `admin` 组里。
+写在 `g` 上就是所有已认证用户都能删——而编译、`go vet` 与全部测试都不会有任何异常。
+母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
 然后在 `internal/bootstrap/providers.go` 的 `opt.RegisterModules` 里加一行
 `xxxhttp.Register(v1, ...)`。`make module` 生成的模板已经是这个形状。
