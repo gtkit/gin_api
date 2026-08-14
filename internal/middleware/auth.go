@@ -18,6 +18,27 @@ import (
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
+// 认证/授权失败的技术原因。**只进日志，不对客**。
+//
+// 它们作为 cause 传给 goerr.New，而对客文案由 Status 的内置文案承担：
+// goerr 的 Item 把两者分开——Error()（含 cause 详情）进日志，
+// Message()（对客）在未显式指定时回退到 Status 文案。
+//
+// 为什么对客不区分具体原因：区分等于告诉调用方他手里的令牌处于哪种状态。
+// 攻击者据此能判断一个令牌是"从未有效"还是"曾经有效但已撤销"，
+// 后者说明这个账号真实存在且曾登录过。本仓在刷新令牌的处置上已采用这条原则
+// （刷新失败一律指向"重新登录"），认证入口沿用同一条。
+//
+// 刻意**不导出**：它们是日志内容，不是调用方需要 errors.Is 判断的契约。
+// 导出会让它们变成事实上的公开 API，而对外承诺一组"失败原因"恰好与上面那条相反。
+var (
+	errTokenSubjectInvalid       = errors.New("token subject is invalid")
+	errPrincipalUnavailable      = errors.New("principal is unavailable")
+	errTokenRevoked              = errors.New("token has been revoked")
+	errAuthorizeWithoutPrincipal = errors.New("authorization requires an authenticated principal")
+	errPermissionDenied          = errors.New("permission denied")
+)
+
 // token 只经请求头承载，`Authorization: Bearer` 为主要形态（标准形态，
 // 网关/代理/工具链的默认支持面最大），App-Token 为存量客户端兼容保留。
 //
@@ -109,11 +130,11 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 			if abortOnContextError(c, err) {
 				return
 			}
-			abortWith(c, goerr.New(err, goerr.StatusAuth(), "token parse failed"))
+			abortWith(c, goerr.New(fmt.Errorf("token parse failed: %w", err), goerr.StatusAuth()))
 			return
 		}
 		if claims == nil || claims.UserID <= 0 {
-			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "token subject is invalid"))
+			abortWith(c, goerr.New(errTokenSubjectInvalid, goerr.StatusAuth()))
 			return
 		}
 
@@ -126,11 +147,11 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 			}
 			// 基础设施故障（如 DB 不可用）不能伪装成鉴权失败：返回 503，
 			// 让客户端/网关按"服务暂时不可用"重试，而不是误判为"用户无效"(401)。
-			abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "user verification unavailable"))
+			abortWith(c, goerr.New(fmt.Errorf("user verification unavailable: %w", err), goerr.StatusDependencyUnavailable()))
 			return
 		}
 		if !ok {
-			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "user is unavailable"))
+			abortWith(c, goerr.New(errPrincipalUnavailable, goerr.StatusAuth()))
 			return
 		}
 
@@ -147,12 +168,13 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 				// 把查询失败当作"未撤销"，会让一次 Redis 抖动变成"所有已登出的
 				// 令牌重新生效"——恰恰在最需要它生效的时候失效。回 503 而不是
 				// 401：这是依赖不可用，不是凭据无效，客户端据此重试才是对的。
-				abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(),
-					"token revocation check unavailable"))
+				abortWith(c, goerr.New(
+					fmt.Errorf("token revocation check unavailable: %w", err),
+					goerr.StatusDependencyUnavailable()))
 				return
 			}
 			if revoked {
-				abortWith(c, goerr.New(nil, goerr.StatusAuth(), "token has been revoked"))
+				abortWith(c, goerr.New(errTokenRevoked, goerr.StatusAuth()))
 				return
 			}
 		}
@@ -189,7 +211,7 @@ func Authorize(authorizer sharedauth.Authorizer, authorizerID string) gin.Handle
 		if !ok {
 			// 授权必须排在认证之后。走到这里说明装配顺序错了，
 			// 而"没有身份"绝不能被解释成"允许"。
-			abortWith(c, goerr.New(nil, goerr.StatusAuth(), "authorization requires an authenticated principal"))
+			abortWith(c, goerr.New(errAuthorizeWithoutPrincipal, goerr.StatusAuth()))
 			return
 		}
 
@@ -197,11 +219,11 @@ func Authorize(authorizer sharedauth.Authorizer, authorizerID string) gin.Handle
 		if err != nil {
 			// 依赖故障不是拒绝：把"角色数据源挂了"映射成 403，
 			// 会让一次基础设施故障表现为全体用户突然失去权限。
-			abortWith(c, goerr.New(err, goerr.StatusDependencyUnavailable(), "authorization unavailable"))
+			abortWith(c, goerr.New(fmt.Errorf("authorization unavailable: %w", err), goerr.StatusDependencyUnavailable()))
 			return
 		}
 		if !allowed {
-			abortWith(c, goerr.New(nil, goerr.StatusPermission(), "permission denied"))
+			abortWith(c, goerr.New(errPermissionDenied, goerr.StatusPermission()))
 			return
 		}
 		c.Next()

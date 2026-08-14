@@ -9,6 +9,26 @@
 
 ### 变更
 
+- ⚠ **认证/授权失败的对客文案改变**。`code` 与 HTTP 状态码**不变**，仅响应体 `msg` 字段的取值变化。
+
+  此前中间件把认证失败细分成多条英文消息发给客户端（`token parse failed`、
+  `token subject is invalid`、`user is unavailable`、`token has been revoked`、
+  `authorization requires an authenticated principal`），`user` 模块另有一条
+  `user not authenticated`。现统一为 `goerr` 的内置中文文案（认证失败 → `认证失败`，
+  权限不足 → `权限不足`，依赖不可用 → `依赖服务不可用`）。
+
+  **为什么改**：区分失败原因等于告诉调用方他手里的令牌处于哪种状态——攻击者据此
+  能判断一个令牌是"从未有效"还是"曾经有效但已撤销"，后者说明该账号真实存在且曾登录过。
+  本仓在刷新令牌的处置上早已采用这条原则（刷新失败一律指向"重新登录"），
+  认证入口此前与它相反。
+
+  **技术原因不再泄漏，但也没有丢**：它们改为经 cause 传入，出现在服务端日志中
+  （`Item.Error()`）而不出现在响应体（`Item.Message()`）。日志因此比改动前**更详细**——
+  此前多处 cause 传的是 nil，日志与对客文案是同一个字符串。
+
+  **迁移**：按 `msg` 文案做分支的客户端需改为按 `code` 或 HTTP 状态码判断——
+  后两者才是稳定契约，且本次未变。按状态码/`code` 判断的客户端无需改动。
+
 - **`internal/pkg/console` 不再直接依赖 `github.com/mgutz/ansi`**。该包对它的全部用量是一处
   `ansi.Color`，颜色只有绿/红/黄三种，现改为包内 ANSI 转义常量。公开 API
   （`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）与输出字节**逐字保持**——替换前实测

@@ -1,6 +1,8 @@
 package http
 
 import (
+	"errors"
+
 	"github.com/gtkit/gin-api/internal/module/user/application"
 	"github.com/gtkit/gin-api/internal/module/user/dto"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
@@ -17,6 +19,31 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrUserNotFound, Status: goerr.StatusNotFound(), Message: "用户不存在或已注销"},
 )
 
+// errUpdateNoField 是"更新请求未携带任何可更新字段"的对客文案。
+//
+// 提为常量而不是写在调用点：它是对客契约的一部分，散在 handler 里的字面量
+// 既无法被统一修改，也不会出现在任何一张能一眼看全的表里。
+const errUpdateNoField = "至少有一个字段不能为空"
+
+// authenticatedUserID 取当前登录用户 ID；取不到时**已写出响应**并返回 false。
+//
+// helper 自己写响应而不是返回 error 交给调用方：三个调用点若各自处理，
+// 重复只是从字面量变成了调用，而对客文案仍会分散在三处。
+//
+// 走到这里说明认证中间件已放行却没有身份——那是装配顺序错误，
+// 不是用户的凭据问题，因此技术原因只进日志，对客沿用 goerr 的内置文案。
+func authenticatedUserID(c *gin.Context) (int64, bool) {
+	userID := ginc.UserIDFromContext(c)
+	if userID == 0 {
+		resp.Err(c, goerr.New(errMissingPrincipal, goerr.StatusAuth()))
+		return 0, false
+	}
+	return userID, true
+}
+
+// errMissingPrincipal 只进日志，不对客（见 authenticatedUserID）。
+var errMissingPrincipal = errors.New("authenticated handler reached without a principal")
+
 type Handler struct {
 	service *application.Service
 }
@@ -26,9 +53,8 @@ func NewHandler(service *application.Service) *Handler {
 }
 
 func (h *Handler) Get(c *gin.Context) {
-	userID := ginc.UserIDFromContext(c)
-	if userID == 0 {
-		resp.Err(c, goerr.New(nil, goerr.StatusAuth(), "user not authenticated"))
+	userID, ok := authenticatedUserID(c)
+	if !ok {
 		return
 	}
 
@@ -50,13 +76,12 @@ func (h *Handler) Update(c *gin.Context) {
 
 	// 至少要传一个可更新字段（手机号更新需独立验证码流程，不在此处处理）。
 	if req.NickName == "" && req.Avatar == "" && req.Gender == nil {
-		resp.OkErr(c, goerr.New(nil, goerr.StatusParams(), "至少有一个字段不能为空"))
+		resp.OkErr(c, goerr.New(nil, goerr.StatusParams(), errUpdateNoField))
 		return
 	}
 
-	userID := ginc.UserIDFromContext(c)
-	if userID == 0 {
-		resp.Err(c, goerr.New(nil, goerr.StatusAuth(), "user not authenticated"))
+	userID, ok := authenticatedUserID(c)
+	if !ok {
 		return
 	}
 	cmd := application.UpdateProfileCommand{
@@ -88,9 +113,8 @@ func (h *Handler) Deactivate(c *gin.Context) {
 		return
 	}
 
-	userID := ginc.UserIDFromContext(c)
-	if userID == 0 {
-		resp.Err(c, goerr.New(nil, goerr.StatusAuth(), "user not authenticated"))
+	userID, ok := authenticatedUserID(c)
+	if !ok {
 		return
 	}
 

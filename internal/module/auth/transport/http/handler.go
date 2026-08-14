@@ -61,6 +61,10 @@ var errMapper = resp.NewErrMapper(
 	},
 )
 
+// errUnrevocableToken 只进日志，不对客：拿不到令牌标识属于服务端状态问题，
+// 而对客文案不区分认证失败的具体原因（见 internal/middleware 的同类处置）。
+var errUnrevocableToken = errors.New("cannot revoke a token without an id and expiry")
+
 // Handler 是认证端点。
 type Handler struct {
 	service *application.Service
@@ -148,8 +152,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	if !ok || identity.TokenID == "" || identity.ExpiresAt.IsZero() {
 		// 拿不到令牌标识就无法撤销。报错而不是回成功——回成功会让用户
 		// 以为自己已经登出，而那个令牌仍然可用直到自然过期。
-		resp.Err(c, goerr.New(nil, goerr.StatusAuth(),
-			"cannot revoke a token without an id and expiry"))
+		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
 		return
 	}
 
