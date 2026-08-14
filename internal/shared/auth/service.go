@@ -23,3 +23,20 @@ type UserVerifier interface {
 type VIPVerifier interface {
 	ValidateVIP(ctx context.Context, userID int64) (bool, error)
 }
+
+// RoleVerifier 定义角色判定能力，实现方查询**权威角色源**。
+//
+// 与 UserVerifier / VIPVerifier 同一契约：仓储故障必须是 error 而非 false。
+// 把"角色库挂了"折叠成"没有权限"，会让一次基础设施故障表现为全体管理员
+// 突然失去权限，而客户端收到的是一个正常的 403——既不会重试，也不会触发告警。
+//
+// **实现必须查权威源，不得仅采信令牌里的角色声明**：令牌的寿命由签发时决定，
+// 其中的角色反映的是签发那一刻的事实。仅采信它等于把一次签发当成持续有效的
+// 高权限——一个被撤销管理员权限的账号，在令牌自然过期前仍然畅通无阻，
+// 而系统里没有任何地方能看出这件事（见 Principal.Roles 的说明）。
+//
+// 只暴露 HasRole 而不是 ListRoles：判定只需要一个布尔，而 ListRoles 会把
+// 可能很大的角色集合搬进内存，并诱导每个调用点各自决定缓存策略。
+type RoleVerifier interface {
+	HasRole(ctx context.Context, userID int64, role string) (bool, error)
+}

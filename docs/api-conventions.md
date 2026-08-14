@@ -141,10 +141,9 @@ func (h *Handler) Update(c *gin.Context) {
         return
     }
 
-    userID := ginc.UserIDFromContext(c)
-    if userID == 0 {
-        resp.Err(c, goerr.New(nil, goerr.StatusAuth(), "user not authenticated"))
-        return
+    userID, ok := authenticatedUserID(c)
+    if !ok {
+        return  // helper 已写出响应（技术原因进日志，对客用内置文案）
     }
 
     data, err := h.service.UpdateProfile(c.Request.Context(), userID, application.UpdateCommand{
@@ -214,6 +213,32 @@ func Register(r *gin.RouterGroup, deps Deps) {
 而编译、`go vet` 与全部测试都不会有任何异常。本项目没有中央路由描述符机制，
 访问控制由代码位置表达——这是选择 gin 惯用写法的代价。
 
+### 具名授权的三态契约
+
+授权实现返回 `(bool, error)`，三种取值的含义互不相同：
+
+| 返回 | 含义 |
+|---|---|
+| `(true, nil)` | 允许 |
+| `(false, nil)` | 明确拒绝 → 403 |
+| `(_, non-nil)` | **依赖故障 → 503**，不得当作拒绝 |
+
+第三条是关键：把「角色/权益数据源挂了」映射成 403，会让一次基础设施故障表现为
+全体用户突然失去权限，而客户端收到的是一个正常的业务拒绝——既不会重试，
+也不会触发任何告警。
+
+两条配套约束：
+
+- **依赖未注入时返回拒绝**，不是允许。装配缺失绝不能表现为放行。
+- **查权威源，不采信令牌里的角色声明**。`Principal.Roles` 反映的是**签发那一刻**的事实，
+  而令牌寿命可达数十天。仅采信它，等于把一次签发当成持续有效的高权限——
+  一个被撤销权限的账号在令牌过期前仍然畅通无阻，而系统里没有任何地方能看出这件事。
+  它可用于优化（先判否再查库），但不能单独作为放行依据。
+
+判定需要缓存时加在 verifier 的实现侧，authorizer 与路由都不用改——
+这正是把它定义成 port 的收益。**缓存的失效策略取决于「刚撤销的权限多久生效」
+这个业务要求**，没有通用答案：设长了撤销不及时，设短了缓存形同虚设。
+
 ## 通用 HTTP 行为
 
 以下语义对全部路由生效：
@@ -254,7 +279,7 @@ GinRecovery → RequestID → [otelgin] → GinLogger → Metrics
 | `middleware.FormBody` / `MultipartBody` / `NoBody` | 其余三种请求体形态 |
 | `middleware.NoStore()` | `Cache-Control: no-store`，挂在携带令牌/凭据的响应上 |
 | `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入 |
-| `deps.Authorize(id)` | 具名授权 |
+| `deps.Authorize(id)` | 具名授权，`id` 是注册表里的标识（`role.admin` / `entitlement.vip`） |
 
 请求体形态必须显式声明：接受 JSON、接受 multipart 与「不接受请求体」三者的处置完全不同，
 漏写会让中间件放行任意内容类型——一个只接受 JSON 的接口因此会收到 multipart，

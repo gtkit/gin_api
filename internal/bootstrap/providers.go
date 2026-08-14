@@ -25,6 +25,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
+	"github.com/gtkit/gin-api/internal/repository/userrole"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
@@ -95,6 +96,11 @@ type services struct {
 	// 零值可用是有意的：外部身份模式下这些端点不存在，而"不存在"应当表达为
 	// 一个不被注册的模块，不是一个注册了却永远报错的模块。
 	auth authruntime.Assembly
+	// roles 是权威角色源，供 role.admin 判定使用。
+	//
+	// **示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。它是 port 而非具体仓储：
+	// 换成 IAM / IdP 同步表时只改这一处的构造，authorizer 与路由都不用动。
+	roles sharedauth.RoleVerifier
 	// scaffold:module-service-fields
 }
 
@@ -350,6 +356,13 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 		}
 		svc.auth = assembly
 	}
+
+	// 权威角色源。**示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。
+	//
+	// 直接构造仓储而不经模块 application：角色判定没有业务规则，
+	// 加一层 service 只会多一个纯转发。接入 IAM / IdP 同步表时替换这一行即可。
+	svc.roles = userrole.New(inf.mysqlDB)
+
 	// scaffold:module-services
 
 	return svc, nil
@@ -402,12 +415,16 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	reg := sharedauth.NewAuthorizerRegistry()
 
-	// role.admin 目前**没有权威角色源**：仓库里没有角色表，也没有 IAM adapter。
-	// 唯一安全的占位是恒拒绝——绝不能仅凭 30 天 TTL 的 JWT role claim 放行 admin，
-	// 那等于把"一次签发"当成"持续有效的高权限"。
-	// 接入真实角色源后替换本实现，RouteSpec 无需改动。
-	if err := reg.Register("role.admin", sharedauth.DenyAll(
-		"no authoritative role source is wired yet; replace this adapter after integrating one")); err != nil {
+	// role.admin 查 user_roles 表这一权威角色源。**这是示例实现，可按需删除**
+	// （删除清单见 SCAFFOLD.md）。
+	//
+	// 它刻意不采信 JWT 的 role claim：令牌寿命可达数十天，其中的角色是签发那一刻
+	// 的事实。仅凭它放行 admin 等于把"一次签发"当成"持续有效的高权限"——
+	// 一个被撤销权限的账号在令牌过期前仍然畅通无阻。
+	//
+	// 未接入角色数据时（表空或未建），判定一律拒绝，因此**替换恒拒绝占位没有放宽默认行为**。
+	if err := reg.Register("role.admin",
+		newRoleAuthorizer(svc.roles, adminRoleName)); err != nil {
 		return nil, err
 	}
 
