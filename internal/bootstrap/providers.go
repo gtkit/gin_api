@@ -591,6 +591,23 @@ func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, 
 		workers = append(workers, consumer)
 	}
 
+	// 周期任务调度器：未启用队列/调度器、或未声明任何周期任务时不注册。
+	//
+	// 周期任务由使用者在下方标记处按 tasks.PeriodicTask 追加，**每条都必须声明
+	// 重复投递时靠什么保证正确**（零值在构造期被拒绝）——底层调度器没有任何
+	// 跨实例协调，租约只把重复降到易主窗口内，消除不了它。
+	scheduler, schedulerErr := tasks.NewScheduler(
+		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-scheduler",
+		schedulerObserver(),
+		// scaffold:periodic-tasks
+	)
+	if schedulerErr != nil {
+		return nil, fmt.Errorf("build task scheduler: %w", schedulerErr)
+	}
+	if worker := newAsynqSchedulerWorker(scheduler); worker != nil {
+		workers = append(workers, worker)
+	}
+
 	// scaffold:module-workers
 
 	return NewWorkerManager(DefaultWorkerBudget(), workers...)

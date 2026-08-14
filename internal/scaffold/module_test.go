@@ -545,10 +545,11 @@ func createProjectFixture(t *testing.T) string {
 	files := map[string]string{
 		"go.mod": "module github.com/gtkit/gin-api\n\ngo 1.26.1\n",
 		// fixture 镜像真实 providers.go 的分阶段结构与全部脚手架标记
-		// （四个注入型 + 三个校验型：scaffold:module-workers、
-		//  scaffold:module-authorizers、scaffold:task-handlers）。
-		// scaffold:task-handlers 的缩进必须与真实文件一致（在调用参数表里，
-		// 比语句层深一级）：校验按含缩进的字面量匹配。
+		// （四个注入型 + 四个校验型：scaffold:module-workers、
+		//  scaffold:module-authorizers、scaffold:task-handlers、
+		//  scaffold:periodic-tasks）。
+		// 后两个的缩进必须与真实文件一致（在调用参数表里，比语句层深一级）：
+		// 校验按含缩进的字面量匹配。
 		"internal/bootstrap/providers.go": `package bootstrap
 
 import (
@@ -595,6 +596,15 @@ func buildWorkers(_ services) {
 		// scaffold:task-handlers
 	)); consumer != nil {
 		_ = consumer
+	}
+
+	scheduler, _ := tasks.NewScheduler(
+		cfg, client, "asynq-scheduler",
+		schedulerObserver(),
+		// scaffold:periodic-tasks
+	)
+	if worker := newAsynqSchedulerWorker(scheduler); worker != nil {
+		_ = worker
 	}
 
 	// scaffold:module-workers

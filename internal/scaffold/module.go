@@ -684,6 +684,16 @@ func providersValidateOnlyMarkers() []string {
 		//
 		// 缩进比其他标记深一级：它在函数调用的参数列表里，而不是语句层。
 		"\t\t// scaffold:task-handlers\n",
+		// scaffold:periodic-tasks 位于 buildWorkers 内的调度器构造参数表里，是
+		// tasks.PeriodicTask 的追加锚点。它不参与注入：**每条周期任务都必须声明
+		// 重复投递时靠什么保证正确**，而那是业务判断——生成器无从替使用者回答，
+		// 自动注入一条带占位 Guarantee 的声明恰好会绕过这个强制声明的意义。
+		//
+		// 没有周期任务时调度器根本不构造（不是构造一个空转的 leader 循环），
+		// 因此"未追加任何周期任务也能正常启动"无需注入任何东西即成立。
+		//
+		// 缩进同 task-handlers：它也在函数调用的参数列表里。
+		"\t\t// scaffold:periodic-tasks\n",
 	}
 }
 

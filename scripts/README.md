@@ -23,6 +23,25 @@ make check-hooks  # 验证（已接入 make check）
 ./scripts/check-architecture.sh
 ```
 
+## check-capability-inventory.sh
+
+校验 `SCAFFOLD.md` 的预置能力清单是否穷尽。覆盖四处：`internal/pkg/*/`、`pkg/*/`、
+`internal/middleware/*.go`、`Config` 结构体的顶层 `mapstructure` 段。
+
+```bash
+make check-capability-inventory   # 自检 + 实检（已接入 make check）
+./scripts/check-capability-inventory.sh --print-scope   # 打印覆盖范围
+./scripts/check-capability-inventory.sh --self-test     # 只跑自检
+```
+
+覆盖范围由脚本内的 `SCOPES` 单点定义：`--print-scope` 打印它，扫描循环遍历它，
+`--self-test` 也遍历它来为每个 scope 构造一个未登记条目并断言判据失败。三者同源，
+因此"声明覆盖 A、实际只扫 B"不会发生。新增 scope 需同时实现 `scope_describe` /
+`scope_entries` / `scope_match_kind` / `scope_fixture` 四处，缺一则 `--self-test` 失败。
+
+这是一条**存在性**判据：它只回答"这个名字在清单里出现过吗"，检测不到归类错误或
+说明与行为不符。扩大覆盖范围不等于提高检查强度。
+
 ## test-coverage.sh / check-coverage.sh
 
 `test-coverage.sh` 运行 race 测试并生成聚合 coverage profile，`check-coverage.sh` 校验最低覆盖率。统一入口：

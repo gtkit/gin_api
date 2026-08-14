@@ -156,10 +156,14 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层有保守写超时兜底，流式路由经 `ResponseController` 覆盖 |
+| Panic 恢复 | `internal/middleware/recovery.go` | 全局第一道。普通 panic 返回统一 500；连接已断或响应已开始写出时只记日志不改写响应。**刻意不接告警**——请求级异常接告警会在一次流量异常里形成告警风暴，淹没进程级事件 |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
+| 统一错误响应 | `internal/middleware/error.go` | 收集 handler 挂在 gin context 上的错误，转成与业务接口同一个 JSON 信封 |
+| 请求指标 | `internal/middleware/metrics.go` | 记录每请求的量/时延/状态码。recorder 为 nil 时返回直接放行的中间件——"没接指标"是正常路径，装配处不写判空。默认 no-op，导出见「接指标导出」 |
+| CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法由路由索引提供，不硬编码 |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
-| 认证与授权分离 | `internal/middleware` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403 |
+| 认证与授权分离 | `internal/middleware/auth.go` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403。token **只经请求头承载**（`Authorization: Bearer` 为主，`App-Token` 为存量兼容）：query 会进访问日志、Referer 与浏览器历史，是长期泄漏面 |
 | 限流契约 | `pkg/ratelimit` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
 | JWT 密钥轮换 | `internal/pkg/jwtauth` | 令牌带 kid；未知 kid 直接拒绝（无回退遍历）；退役公钥仍可验签 |
 | 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
@@ -274,10 +278,12 @@ func Register(r *gin.RouterGroup, deps Deps) {
 | `middleware.StreamTimeout(idleWrite)` | 流式响应的空闲写超时（SSE） |
 | `middleware.JSONBody(maxBytes)` | 要求 JSON 并限大小；0 表示沿用全局上限 |
 | `middleware.NoBody()` | 拒绝携带请求体 |
-| `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入 |
+| `middleware.NoStore()` | `Cache-Control: no-store`（`internal/middleware/nostore.go`）。挂在携带令牌/凭据的响应上——这类响应一旦进浏览器缓存、共享代理或 CDN，令牌的寿命就不再由服务端控制。头在 handler 之前设置，流式/提前写出的响应同样带上。母版已挂在四个认证端点上 |
+| `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入（`internal/middleware/auth.go`） |
 | `deps.Authorize(id)` | 具名授权 |
+| `useRateLimit(g, deps.RateLimit, "策略ID")` | 路由级限流（`internal/middleware/ratelimit.go`）。响应头用 `X-RateLimit-*` 而非 RFC 9331 的 `RateLimit-*`——前者是当前生态里客户端与网关实际在读的那一组 |
 
-全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / CORS / 体积上限）
+全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / 统一错误响应 / CORS / 体积上限）
 在 `internal/router/init.go` 里按固定顺序装配，顺序有测试锁定。
 
 ### 后台任务的单实例执行
@@ -370,6 +376,7 @@ telemetry:
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
 | 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
+| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `providers.go` 的 `scaffold:periodic-tasks` 标记处追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
 
 ### 告警扇出的对外副作用
 
@@ -395,10 +402,11 @@ telemetry:
 
 ### 【内部支撑包 — 不构成能力，无需接线】
 
-这些包没有"启用方式"：它们要么已经被上面某项能力在内部使用，要么是供派生项目按需 import 的工具类型。列出它们是为了让清单穷尽——使用者不会去找一个他不知道存在的东西。
+这些没有"启用方式"：它们要么已经被上面某项能力在内部使用，要么是供派生项目按需 import 的工具类型。列出它们是为了让清单穷尽——使用者不会去找一个他不知道存在的东西。
 
-| 包 | 内容 |
+| 位置 | 内容 |
 |---|---|
+| `internal/middleware/redact.go` | 日志脱敏的判定与替换，无导出构造函数，由访问日志与 panic 恢复在内部调用。敏感键分精确匹配与子串匹配两组——`code` 这类短名走精确匹配，否则会误伤 `zipcode`/`areacode` |
 | `internal/pkg/errx` | 错误树判定谓词（`IsPureCancellation` / `IsPureAbort`）。逐成员判定聚合错误，避免"取消 + 回滚失败"被整体当成正常退出 |
 | `internal/pkg/response` | 统一 JSON 响应信封与错误码到 HTTP 状态码的映射，被中间件与各模块 handler 使用 |
 | `internal/pkg/ginc` | gin context helper（客户端 IP 唯一 accessor、请求上下文取值） |

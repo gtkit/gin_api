@@ -127,6 +127,10 @@ check-architecture: ## 校验分层架构边界
 	@ ./scripts/check-architecture.sh
 
 check-capability-inventory: ## 校验 SCAFFOLD.md 的预置能力清单穷尽
+## 先自检后实检：自检为每个已声明的 scope 造一个未登记条目并断言判据失败，
+## 再断言登记后通过。缺了它，一个 scope 的枚举实现写坏（返回空）时实检会全绿——
+## 判据本身失效恰恰不会有任何症状，而那正是本次扩围要消除的失败模式。
+	@ ./scripts/check-capability-inventory.sh --self-test
 	@ ./scripts/check-capability-inventory.sh
 
 ## 单独跑一次**不带 tag** 的命令树断言。

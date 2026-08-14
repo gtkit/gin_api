@@ -1,0 +1,86 @@
+# 质量门禁的自动执行点。
+#
+# 为什么需要它：本地 pre-push 钩子要人先跑一次 `make hooks` 才生效。新克隆忘了装、
+# 派生项目接手的人不知道要装，门禁的实际覆盖率就是零——而且没有任何信号表明它没在跑，
+# 推送一切正常。"门禁存在不等于门禁被执行"这条理由，对"安装钩子"这一步本身同样成立。
+#
+# 本 workflow 只做一件事：执行**与本地完全相同**的那条命令（`make check-ci`）。
+# 不在这里重列检查项——两份清单必然分叉，而分叉的方向通常是 CI 那份漏掉新增的判据，
+# 于是新判据从未在共享路径上执行过。
+#
+# 它不替代本地钩子：CI 在推送后才反馈，钩子在推送前拦截。
+name: check
+
+on:
+  push:
+  pull_request:
+
+# 只读：本 job 不写任何东西，默认权限对它过宽。
+permissions:
+  contents: read
+
+# 同一分支连续推送时，过时的那次没有继续跑的价值。
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # 第三方 action 一律钉 commit SHA，与 security/toolchain.mk 钉镜像摘要同一条理由：
+      # tag 可变，同一个 @v7 在不同时间可能指向不同代码，于是"昨天通过、今天失败"
+      # 无从复现。action 比镜像更值得钉——它在有仓库访问权的上下文里执行。
+      # 保留可读 tag 作注释：只写 SHA 时没人能一眼看出这是哪个版本。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Go 版本取自 go.mod，不在这里写死：写死会产生第二个版本来源，
+      # 而 toolchain-consistency 要求全仓一致。
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install golangci-lint (version from security/toolchain.mk)
+        run: |
+          set -euo pipefail
+
+          # 版本必须来自集中声明。scripts/check-tool-version.sh 会强制 PATH 上的实际版本
+          # 等于该声明——在这里另写一份，升级时改了 toolchain.mk 忘了改这里，
+          # 表现是 CI 红而本地绿，而此时最先被怀疑的是那条判据本身，不是版本号。
+          version="$(grep -E '^GOLANGCI_LINT_VERSION[[:space:]]*=' security/toolchain.mk \
+            | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
+
+          # 解析失败必须中止，不回落默认版本：拿不到版本说明 toolchain.mk 的形状变了，
+          # 静默用默认版本会让门禁检查的是另一个版本的规则集。
+          if [ -z "${version}" ]; then
+            echo "FAIL: 无法从 security/toolchain.mk 解析 GOLANGCI_LINT_VERSION" >&2
+            echo "      该文件的形状变了，请修正此处的解析而不是绕过它" >&2
+            exit 1
+          fi
+          echo "golangci-lint version from toolchain.mk: ${version}"
+
+          tarball="golangci-lint-${version}-linux-amd64.tar.gz"
+          base="https://github.com/golangci/golangci-lint/releases/download/v${version}"
+
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "${tmp}"' EXIT
+          cd "${tmp}"
+
+          # 校验和取自**同一个 release** 的官方 checksums 文件，不在本文件写死 sha256：
+          # 写死的 hash 与版本号绑定，升级时要同时改两处，而第二处没有任何判据保护。
+          # checksums 的 URL 含版本号，因此内容随版本不可变——
+          # "版本单一来源"与"完整性验证"两个目标由此同时成立，没有一处需要人工同步。
+          curl -fsSL --retry 3 -o "${tarball}" "${base}/${tarball}"
+          curl -fsSL --retry 3 -o checksums.txt "${base}/golangci-lint-${version}-checksums.txt"
+          sha256sum --ignore-missing --check checksums.txt
+
+          tar -xzf "${tarball}"
+          sudo install -m 0755 "golangci-lint-${version}-linux-amd64/golangci-lint" /usr/local/bin/golangci-lint
+          golangci-lint --version
+
+      # 与本地 pre-push 钩子执行的是同一条命令。
+      # 刻意不设 ALLOW_NO_LOOPBACK：该开关用于禁止绑定回环端口的受限沙箱，
+      # runner 可以绑定回环，因此这里跑的是完整测试集。
+      - name: make check-ci
+        run: make check-ci

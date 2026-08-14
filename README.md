@@ -74,6 +74,15 @@ cmd
 
 应用层不得依赖 Gin、GORM 或具体 repository。跨 repository 事务通过 application 定义的 `TxManager` port 编排，repository 统一经 `mdbCtx(ctx)` 获取事务句柄。
 
+## 工程规范
+
+分层约束、API 约定、数据访问、Worker、缓存、出站调用、可观测性、测试与门禁的完整规范
+在 [`docs/`](docs/)，索引见 [`docs/README.md`](docs/README.md)。
+
+每条硬约束尽量对应一条可执行判据（`make check`）：判据回答「违反了没有」，
+文档回答「为什么这么定」。新增代码前先读 [`docs/architecture.md`](docs/architecture.md)，
+提交前走一遍 [`docs/review-checklist.md`](docs/review-checklist.md)。
+
 ## 当前模块
 
 `auth`（仅 `auth.mode: local` 时注册；`external` 模式下本服务只验签与授权，不注册任何认证端点）：
@@ -143,8 +152,17 @@ make module NAME=staff ARGS="--field nickname:string --field status:uint8 --acce
 过传感器 / goimports 干净。它另有两个自检入口：`--self-test` 证明门禁验的是工作树而非 HEAD，
 `--verify-scope` 证明导出范围恰好覆盖四类边界行为。
 
-**所有质量门禁都在本地执行**：`deployment.sh` 与 `.gitlab-ci.yml` 是外部冻结的专属部署方案，
-CI 中不含质量 job。
+门禁有两条自动执行点，覆盖前提不同、互不替代：
+
+| 执行点 | 何时反馈 | 覆盖前提 |
+|--------|---------|---------|
+| 本地 pre-push 钩子 | 推送**前**拦截 | 需先执行一次 `make hooks` |
+| GitHub Actions（`.github/workflows/check.yml`） | 推送**后**反馈 | 无前提，克隆即生效 |
+
+两者执行的是同一条 `make check-ci`，不存在只在一侧生效的检查项。
+
+`deployment.sh` 与 `.gitlab-ci.yml` 是外部冻结的专属**部署**方案，其中不含质量 job——
+质量门禁走上面两条。
 
 ### 装上钩子（克隆后第一件事）
 
@@ -164,8 +182,8 @@ make hooks
 
 ## 部署
 
-发布物是在目标机通过 `go build` 生成的**版本化静态二进制**；CI 只负责调用部署脚本
-（质量门禁在本地执行，见下），进程由 Supervisor 托管。
+发布物是在目标机通过 `go build` 生成的**版本化静态二进制**；GitLab CI 只负责调用部署脚本
+（质量门禁走「质量门禁」一节的两条执行点，不在这条部署流水线上），进程由 Supervisor 托管。
 环境边界：服务器无 Docker、不跑本机 MySQL/Redis（应用连接远程实例，配置在 `env.yml`）；
 数据库 schema 由外部维护，项目当前不含迁移 runtime（模块生成器产出的 `.up.sql`/`.down.sql`
 草稿仅供 DBA 审阅后手工执行）。
@@ -188,7 +206,8 @@ make hooks
 产物名来自 `project.mk` 的 `APP_NAME`：`make build` 输出 `bin/$(APP_NAME)`，当前为 `bin/gin_api`，
 与上表一致。改 `APP_NAME` 需同步确认部署侧约定。
 
-**CI 中不含任何质量门禁 job**，因此所有门禁都在本地执行（见「质量门禁」一节），提交前自行运行。
+**这条部署流水线中不含任何质量门禁 job**——它是外部冻结的部署契约，只负责发布。
+质量门禁由 pre-push 钩子与 GitHub Actions 承担（见「质量门禁」一节）。
 
 目标机一次性准备：
 
