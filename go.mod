@@ -25,6 +25,7 @@ require (
 	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/gojwt v1.0.5
 	github.com/gtkit/golimit/v2 v2.2.0
+	github.com/gtkit/gouploader v1.7.0
 	github.com/gtkit/httpc v1.5.0
 	github.com/gtkit/json v1.0.0
 	github.com/gtkit/logger/v2 v2.3.0
@@ -81,23 +82,33 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/gtkit/json/v2 v2.0.7 // indirect
+	github.com/gtkit/logger v1.4.6 // indirect
 	github.com/gtkit/logrotate v1.1.3 // indirect
 	github.com/hibiken/asynq v0.26.0 // indirect
+	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
+	github.com/minio/crc64nvme v1.1.1 // indirect
+	github.com/minio/md5-simd v1.1.2 // indirect
+	github.com/minio/minio-go/v7 v7.0.100 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pressly/goose/v3 v3.27.3 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
+	github.com/rs/xid v1.6.0 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
+	github.com/tinylib/msgp v1.6.3 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/wneessen/go-mail v0.8.1 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
@@ -113,6 +124,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/grpc v1.83.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 
 require (
