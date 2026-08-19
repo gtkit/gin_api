@@ -160,6 +160,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
 | 统一错误响应 | `internal/middleware/error.go` | 收集 handler 挂在 gin context 上的错误，转成与业务接口同一个 JSON 信封 |
+| 校验错误中文消息 | `internal/bootstrap/validation.go` + `internal/pkg/response` | 绑定/校验失败的 422 `msg` 为中文、按对外 json 字段名呈现（多字段失败取字段名排序后的第一条）；启动阶段初始化翻译器（`gtkit/verify`），失败即启动失败——validator 首次校验即缓存字段名，晚初始化会让消息漏出 Go 字段名。非校验类绑定错误（如 JSON 语法错误）不经翻译路径 |
 | 请求指标 | `internal/middleware/metrics.go` | 记录每请求的量/时延/状态码。recorder 为 nil 时返回直接放行的中间件——"没接指标"是正常路径，装配处不写判空。默认 no-op，导出见「接指标导出」 |
 | CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法由路由索引提供，不硬编码 |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
@@ -382,6 +383,7 @@ telemetry:
 | 后台任务 | 在 `providers.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
 | 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `providers.go` 里 `svc.roles` 的构造，authorizer 与路由都不用动 |
+| 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
@@ -389,6 +391,10 @@ telemetry:
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
+| 写操作审计（`internal/pkg/auditlog` + `internal/middleware/audit.go` + `internal/repository/auditlog` + `operation_audit_logs` 表） | 母版不接线。装配四步：① `auditlog.New(repo, Options{})` 构造记录器；② 把 `recorder.Run` 注册为 consumer worker（HTTP 停止后 drain 存量）；③ 在需要审计的路由组（认证之后）挂 `middleware.OperationAudit(recorder.Enqueue)`；④ 保留期清理接 singleton 周期任务调 `repo.DeleteOlderThan`（保留期是合规决定，母版不定值）。**语义是尽力而为**：队列满载与落库故障丢弃并计数告警，不阻塞业务；不记请求体/响应体/query。不用时删除：包目录 ×3 + 中间件文件 + `internal/models/operation_audit.go` + 对应迁移 |
+| 上传文件回源安全（`internal/pkg/upload` + `internal/middleware/uploadheaders.go`） | 在上传文件的静态服务/下载路由组上挂 `middleware.UploadedFileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
+| 验证码（`internal/pkg/verifycode`） | 母版不构造实例。装配处 `verifycode.New(ctx, redis客户端, sender, Options{})` 按渠道各建一个实例（短信/邮件用不同 `KeyPrefix`），sender 用闭包适配 `internal/pkg/sms`/`mail`。包内兑现：Lua 原子校验（命中即毁、尝试超限销毁）、SetNX 发送节流、Redis 键经 SHA-256 不落明文手机号/邮箱。**⚠ `Options.Debug` 是显式后门（固定码 + 只存不发），仅限本地/自动化测试装配，生产环境不得注入**——包内不做环境判断，责任在装配处 |
+| 图形验证码（`internal/pkg/captcha`） | 母版不构造实例。装配处 `captcha.New(redis客户端, Options{})`，`Generate` 返回 ID + base64 图片（答案只落 Redis），`Verify` 一次性消费：无论对错同一 ID 只有一次校验机会，猜错必须换新图 |
 | 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
@@ -428,7 +434,7 @@ telemetry:
 | `internal/pkg/errx` | 错误树判定谓词（`IsPureCancellation` / `IsPureAbort`）。逐成员判定聚合错误，避免"取消 + 回滚失败"被整体当成正常退出 |
 | `internal/pkg/response` | 统一 JSON 响应信封与错误码到 HTTP 状态码的映射，被中间件与各模块 handler 使用 |
 | `internal/pkg/ginc` | gin context helper（客户端 IP 唯一 accessor、请求上下文取值） |
-| `internal/pkg/paging` | 纯分页结果类型，不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import） |
+| `internal/pkg/paging` | 纯分页类型（查询入参 `Query` 与结果元信息 `Paging`），不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import）；`Query.Sort` 须经数据访问层白名单映射后才进 SQL |
 | `internal/pkg/cache` | 进程内缓存工具：singleflight 防击穿、TTL 抖动防雪崩、容量上限 + LRU 防无界。供派生项目按需 import，母版自身不构造实例（GET 响应缓存走的是 `httpcache`，两者不是一回事） |
 | `internal/pkg/console` | 带颜色的命令行输出 helper（`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）。ANSI 转义自实现，不依赖第三方着色库；不做 TTY 检测，重定向到文件时同样写入转义序列 |
 | `internal/pkg/log` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
@@ -439,6 +445,29 @@ telemetry:
 | `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，当前唯一构造点在 `internal/pkg/news`（见上文「告警扇出的对外副作用」） |
 
 配置里的 `application` / `ssl` / `cors` / `log` / `database` / `redis` / `env` 是进程与连接的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。
+
+### 接入文件上传 / 对象存储
+
+上传能力经 `github.com/gtkit/gouploader` 接入（API 以 v1.7.0 核实）：对象存储抽象
+（内置本地磁盘与 S3 兼容实现）、分片断点续传、STS 直传、大小与类型限制都在包内；
+云厂商 adapter 是独立 module，按需 `go get github.com/gtkit/gouploader/{aliyun,tencent,huawei,aws}`。
+
+该依赖**不在母版 go.mod 里**：仓内没有真实 import 的依赖会被 `go mod tidy` 移除。
+派生项目接入时：
+
+```go
+// go get github.com/gtkit/gouploader
+uploader, err := gouploader.New(
+    gouploader.WithLocalStorage(cfg.UploadDir), // 或 WithS3Storage / 云厂商 adapter
+    gouploader.WithMaxFileSize(32<<20),
+    gouploader.WithAllowedTypes(".jpg", ".png", ".pdf"),
+)
+```
+
+HTTP 路由、鉴权与响应头由业务侧负责（gouploader 明确不做）：上传路由按
+`docs/api-conventions.md` 挂 `middleware.MultipartBody(上限)`；**回源路由必须挂
+`middleware.UploadedFileHeaders`**（见上方注册位表），否则上传的 HTML/SVG
+会被浏览器内联渲染，构成存储型 XSS。
 
 ### 本地开发依赖（可选）
 

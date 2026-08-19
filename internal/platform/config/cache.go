@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -17,6 +18,9 @@ type CacheConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// Store 是后端：redis（跨副本共享）或 memory（单副本本地）。
 	Store string `mapstructure:"store"`
+	// RedisDB 是 redis 后端使用的逻辑库号，零值为 0。
+	// 必须出现在 redis.dbs 里：资源层只打开声明过的库。
+	RedisDB int `mapstructure:"redis_db"`
 	// TTL 是默认缓存时长；路由可各自覆盖。
 	TTL time.Duration `mapstructure:"ttl"`
 	// MaxBodyBytes 是可缓存响应体的上限，超过即不缓存。
@@ -84,6 +88,16 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 		if strings.TrimSpace(redis.Addr) == "" {
 			errs = append(errs, errors.New(
 				"cache.store is redis but redis.addr is empty: the cache would silently never hit"))
+		}
+		// redis_db 必须真的在 redis.dbs 里：不校验的话资源层取不到该库的客户端，
+		// 装配报出的错误（"requires a redis client"）不会指向真实原因。
+		if cfg.RedisDB < 0 {
+			errs = append(errs, fmt.Errorf("cache.redis_db %d must not be negative", cfg.RedisDB))
+		} else if !slices.Contains(redis.DBs, cfg.RedisDB) {
+			errs = append(errs, fmt.Errorf(
+				"cache.redis_db %d is not listed in redis.dbs %v: the resource layer only opens the "+
+					"declared databases, so the cache would fail assembly with a misleading error",
+				cfg.RedisDB, redis.DBs))
 		}
 	case CacheStoreMemory:
 		// memory 后端必须有容量上限。无界的本地缓存在键空间随请求变化时

@@ -114,7 +114,9 @@ import (
 	"fmt"
 
 	"{{.ProjectModulePath}}/internal/models"
+	"{{.ProjectModulePath}}/internal/pkg/paging"
 
+	"github.com/gtkit/ormx/paginator"
 	"gorm.io/gorm"
 )
 
@@ -138,35 +140,52 @@ func (r *Repository) Get(ctx context.Context, id int64, fields ...string) (*mode
 	return &entity, true, nil
 }
 
-func (r *Repository) List(ctx context.Context, offset, limit int, fields ...string) ([]*models.{{.StructName}}, int64, error) {
-	var list []*models.{{.StructName}}
-	var total int64
+// listSortMapping 是排序白名单：外部排序键 → 受信任列名。
+// 动态排序列进不了参数占位符，白名单是 ORM 项目里防注入的唯一手段
+// （docs/db-patterns.md「防御性查询」）。未命中的键由执行器回退默认排序（模型主键）。
+// 新增可排序字段时，与 dto.{{.StructName}}ListRequest 的 sort oneof 白名单同步更新。
+var listSortMapping = map[string]string{
+	"id":         "id",
+	"created_at": "created_at",
+}
 
-	if offset < 0 {
-		offset = 0
+// List 经 ormx/paginator 执行有界分页查询。
+//
+// 执行器自动追加主键次级排序，等值排序键下翻页不重不漏；越界页码钳制到
+// 最后一页，返回的分页元信息是实际生效值（空结果 CurrentPage/TotalPage 为 0）。
+// fields 投影同时作用于总数统计（GORM Count 语义随 Select 变化，见 ormx 包文档），
+// 需要精确总数的自定义投影请另写专用查询。
+func (r *Repository) List(ctx context.Context, query paging.Query, fields ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+	// 防御钳制与 application 归一化同值：repo 也可能被 application 之外的
+	// 调用方直接使用，无界查询不能指望上游都归一化过。
+	if query.PageSize <= 0 {
+		query.PageSize = 20
 	}
-	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
+	if query.PageSize > 100 {
+		query.PageSize = 100
 	}
 
-	baseQuery := r.mdbCtx(ctx).Model(&models.{{.StructName}}{})
-	if err := baseQuery.Session(&gorm.Session{}).Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("count {{.PackageName}} list: %w", err)
-	}
-
-	query := baseQuery.Session(&gorm.Session{})
+	q := r.mdbCtx(ctx).Model(&models.{{.StructName}}{})
 	if len(fields) > 0 {
-		query = query.Select(fields)
+		q = q.Select(fields)
 	}
 
-	if err := query.Order("id ASC").Offset(offset).Limit(limit).Find(&list).Error; err != nil {
-		return nil, 0, fmt.Errorf("list {{.PackageName}}: %w", err)
+	page, err := paginator.Paginate[*models.{{.StructName}}](q, paginator.Params{
+		Page:     query.Page,
+		PageSize: query.PageSize,
+		Sort:     query.Sort,
+		Order:    query.Order,
+	}, paginator.WithSortMapping(listSortMapping))
+	if err != nil {
+		return nil, paging.Paging{}, fmt.Errorf("list {{.PackageName}}: %w", err)
 	}
 
-	return list, total, nil
+	return page.Items, paging.Paging{
+		CurrentPage: page.CurrentPage,
+		PageSize:    page.PageSize,
+		TotalPage:   page.TotalPage,
+		TotalCount:  page.TotalCount,
+	}, nil
 }
 
 // ExistsByID 判断指定主键的 {{.StructName}} 是否存在。
@@ -186,11 +205,14 @@ import (
 	"context"
 
 	"{{.ProjectModulePath}}/internal/models"
+	"{{.ProjectModulePath}}/internal/pkg/paging"
 )
 
 type {{.StructName}}Repository interface {
 	Get(ctx context.Context, id int64, fields ...string) (*models.{{.StructName}}, bool, error)
-	List(ctx context.Context, offset, limit int, fields ...string) ([]*models.{{.StructName}}, int64, error)
+	// List 返回一页数据与实际生效的分页元信息。query.Sort 是外部排序键，
+	// 由实现方经白名单映射后才进入 SQL，未命中回退默认排序。
+	List(ctx context.Context, query paging.Query, fields ...string) ([]*models.{{.StructName}}, paging.Paging, error)
 }
 `
 
@@ -255,17 +277,14 @@ func NewWithDeps(repo {{.StructName}}Repository, opts ...ServiceOption) (*Servic
 	return s, nil
 }
 
-// ListQuery 是与传输协议无关的分页查询参数。
-type ListQuery struct {
-	Page     int
-	PageSize int
-}
-
 // List 返回有界分页列表。
-func (s *Service) List(ctx context.Context, query ListQuery) (dto.{{.StructName}}ListResponse, error) {
+//
+// 入参是 paging.Query（协议无关）：排序键在 dto 层经 oneof 白名单校验、
+// 在 repository 层经映射白名单进入 SQL。分页元信息取执行器返回的实际生效值：
+// 越界页码被钳制到最后一页，空结果 CurrentPage/TotalPage 为 0。
+func (s *Service) List(ctx context.Context, query paging.Query) (dto.{{.StructName}}ListResponse, error) {
 	query = s.normalizeListQuery(query)
-	offset := (query.Page - 1) * query.PageSize
-	list, total, err := s.repo.List(ctx, offset, query.PageSize)
+	list, page, err := s.repo.List(ctx, query)
 	if err != nil {
 		return dto.{{.StructName}}ListResponse{}, fmt.Errorf("list {{.PackageName}}: %w", err)
 	}
@@ -275,19 +294,9 @@ func (s *Service) List(ctx context.Context, query ListQuery) (dto.{{.StructName}
 		response = append(response, to{{.StructName}}Response(item))
 	}
 
-	totalPage := 0
-	if total > 0 {
-		totalPage = int((total + int64(query.PageSize) - 1) / int64(query.PageSize))
-	}
-
 	return dto.{{.StructName}}ListResponse{
-		List: response,
-		Paging: paging.Paging{
-			CurrentPage: query.Page,
-			PageSize:    query.PageSize,
-			TotalPage:   totalPage,
-			TotalCount:  total,
-		},
+		List:   response,
+		Paging: page,
 	}, nil
 }
 
@@ -304,11 +313,11 @@ func (s *Service) Get(ctx context.Context, id int64) (dto.{{.StructName}}Respons
 	return to{{.StructName}}Response(entity), nil
 }
 
-// normalizeListQuery 收敛分页参数。
+// normalizeListQuery 收敛分页参数（Sort/Order 原样透传，白名单在 dto 与 repository 两侧）。
 //
 // 上界 maxListPageSize 无条件生效，**配置也不能突破**：它挡的是
 // "一次请求把整张表拉出来"，而那既是内存风险也是慢查询来源。
-func (s *Service) normalizeListQuery(query ListQuery) ListQuery {
+func (s *Service) normalizeListQuery(query paging.Query) paging.Query {
 	if query.Page <= 0 {
 		query.Page = defaultListPage
 	}
@@ -357,26 +366,25 @@ import (
 	"testing"
 
 	"{{.ProjectModulePath}}/internal/models"
+	"{{.ProjectModulePath}}/internal/pkg/paging"
 )
 
 type fake{{.StructName}}Repository struct {
-	entity     *models.{{.StructName}}
-	found      bool
-	list       []*models.{{.StructName}}
-	total      int64
-	err        error
-	lastOffset int
-	lastLimit  int
+	entity    *models.{{.StructName}}
+	found     bool
+	list      []*models.{{.StructName}}
+	page      paging.Paging
+	err       error
+	lastQuery paging.Query
 }
 
 func (f *fake{{.StructName}}Repository) Get(context.Context, int64, ...string) (*models.{{.StructName}}, bool, error) {
 	return f.entity, f.found, f.err
 }
 
-func (f *fake{{.StructName}}Repository) List(_ context.Context, offset, limit int, _ ...string) ([]*models.{{.StructName}}, int64, error) {
-	f.lastOffset = offset
-	f.lastLimit = limit
-	return f.list, f.total, f.err
+func (f *fake{{.StructName}}Repository) List(_ context.Context, query paging.Query, _ ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+	f.lastQuery = query
+	return f.list, f.page, f.err
 }
 
 // mustService 构造 service；测试 fake 恒为合法依赖，构造失败即测试装置错误。
@@ -404,33 +412,24 @@ func TestServiceList(t *testing.T) {
 
 	repoErr := errors.New("repository unavailable")
 	tests := []struct {
-		name          string
-		query         ListQuery
-		repo          *fake{{.StructName}}Repository
-		wantErr       error
-		wantPage      int
-		wantPageSize  int
-		wantTotalPage int
-		wantOffset    int
-		wantLimit     int
+		name      string
+		query     paging.Query
+		repo      *fake{{.StructName}}Repository
+		wantErr   error
+		wantQuery paging.Query
 	}{
 		{
-			name:         "default pagination",
-			repo:         &fake{{.StructName}}Repository{},
-			wantPage:     1,
-			wantPageSize: 20,
-			wantOffset:   0,
-			wantLimit:    20,
+			name:      "default pagination",
+			repo:      &fake{{.StructName}}Repository{},
+			wantQuery: paging.Query{Page: 1, PageSize: 20},
 		},
 		{
-			name:          "page size is capped",
-			query:         ListQuery{Page: 2, PageSize: 500},
-			repo:          &fake{{.StructName}}Repository{total: 250},
-			wantPage:      2,
-			wantPageSize:  100,
-			wantTotalPage: 3,
-			wantOffset:    100,
-			wantLimit:     100,
+			name:  "page size capped and sort passed through",
+			query: paging.Query{Page: 2, PageSize: 500, Sort: "created_at", Order: "desc"},
+			repo: &fake{{.StructName}}Repository{
+				page: paging.Paging{CurrentPage: 2, PageSize: 100, TotalPage: 3, TotalCount: 250},
+			},
+			wantQuery: paging.Query{Page: 2, PageSize: 100, Sort: "created_at", Order: "desc"},
 		},
 		{
 			name:    "repository error",
@@ -453,14 +452,13 @@ func TestServiceList(t *testing.T) {
 			if err != nil {
 				t.Fatalf("List() unexpected error: %v", err)
 			}
-			if got.Paging.CurrentPage != tt.wantPage || got.Paging.PageSize != tt.wantPageSize {
-				t.Fatalf("List() paging = (%d,%d), want (%d,%d)", got.Paging.CurrentPage, got.Paging.PageSize, tt.wantPage, tt.wantPageSize)
+			if tt.repo.lastQuery != tt.wantQuery {
+				t.Fatalf("repository query = %+v, want %+v", tt.repo.lastQuery, tt.wantQuery)
 			}
-			if got.Paging.TotalPage != tt.wantTotalPage {
-				t.Fatalf("List() total page = %d, want %d", got.Paging.TotalPage, tt.wantTotalPage)
-			}
-			if tt.repo.lastOffset != tt.wantOffset || tt.repo.lastLimit != tt.wantLimit {
-				t.Fatalf("repository pagination = (%d,%d), want (%d,%d)", tt.repo.lastOffset, tt.repo.lastLimit, tt.wantOffset, tt.wantLimit)
+			// 分页元信息必须原样来自执行器（越界钳制后的实际生效值），
+			// 由 application 自行推算会与实际执行脱节。
+			if got.Paging != tt.repo.page {
+				t.Fatalf("List() paging = %+v, want repository page %+v", got.Paging, tt.repo.page)
 			}
 		})
 	}
@@ -637,6 +635,7 @@ import (
 
 	"{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
 	"{{.ProjectModulePath}}/internal/module/{{.PackageName}}/dto"
+	"{{.ProjectModulePath}}/internal/pkg/paging"
 	resp "{{.ProjectModulePath}}/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -669,9 +668,11 @@ func (h *Handler) List(c *gin.Context) {
 		return
 	}
 
-	data, err := h.service.List(c.Request.Context(), application.ListQuery{
+	data, err := h.service.List(c.Request.Context(), paging.Query{
 		Page:     req.Page,
 		PageSize: req.PageSize,
+		Sort:     req.Sort,
+		Order:    req.Order,
 	})
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
@@ -715,22 +716,25 @@ import (
 
 	"{{.ProjectModulePath}}/internal/models"
 	"{{.ProjectModulePath}}/internal/module/{{.PackageName}}/application"
+	"{{.ProjectModulePath}}/internal/pkg/paging"
 
 	"github.com/gin-gonic/gin"
 )
 
 type fake{{.StructName}}Repository struct {
-	entity *models.{{.StructName}}
-	found  bool
-	err    error
+	entity     *models.{{.StructName}}
+	found      bool
+	err        error
+	listCalled bool
 }
 
 func (f *fake{{.StructName}}Repository) Get(context.Context, int64, ...string) (*models.{{.StructName}}, bool, error) {
 	return f.entity, f.found, f.err
 }
 
-func (f *fake{{.StructName}}Repository) List(context.Context, int, int, ...string) ([]*models.{{.StructName}}, int64, error) {
-	return nil, 0, f.err
+func (f *fake{{.StructName}}Repository) List(context.Context, paging.Query, ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+	f.listCalled = true
+	return nil, paging.Paging{}, f.err
 }
 
 // mustService 构造 service；测试 fake 恒为合法依赖，构造失败即测试装置错误。
@@ -753,7 +757,10 @@ func TestHandlerList(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "success", target: "/?page=1&page_size=20", repo: &fake{{.StructName}}Repository{}, wantStatus: http.StatusOK},
+		{name: "sorted success", target: "/?sort=created_at&order=desc", repo: &fake{{.StructName}}Repository{}, wantStatus: http.StatusOK},
 		{name: "invalid page size", target: "/?page_size=101", repo: &fake{{.StructName}}Repository{}, wantStatus: http.StatusUnprocessableEntity},
+		{name: "sort key outside whitelist", target: "/?sort=password", repo: &fake{{.StructName}}Repository{}, wantStatus: http.StatusUnprocessableEntity},
+		{name: "invalid order", target: "/?order=sideways", repo: &fake{{.StructName}}Repository{}, wantStatus: http.StatusUnprocessableEntity},
 		{name: "repository error", target: "/", repo: &fake{{.StructName}}Repository{err: repoErr}, wantStatus: http.StatusInternalServerError},
 	}
 
@@ -767,6 +774,11 @@ func TestHandlerList(t *testing.T) {
 
 			if recorder.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			// 绑定层拒绝的请求不得触达仓储：非法排序键若继续执行，
+			// 白名单就退化成了"只是响应了 422 的日志"。
+			if tt.wantStatus == http.StatusUnprocessableEntity && tt.repo.listCalled {
+				t.Fatal("repository List executed despite binding rejection")
 			}
 		})
 	}
@@ -817,6 +829,11 @@ import (
 type {{.StructName}}ListRequest struct {
 	Page     int ` + "`form:\"page\" binding:\"omitempty,gte=1\"`" + `
 	PageSize int ` + "`form:\"page_size\" binding:\"omitempty,gte=1,lte=100\"`" + `
+	// Sort 的 oneof 是可排序键白名单，与 repository 的 listSortMapping 同源；
+	// 新增可排序字段时两处同步更新。非法键在绑定层拒绝（422），
+	// 而不是静默回退——静默回退会把客户端拼错的键藏起来。
+	Sort  string ` + "`form:\"sort\" binding:\"omitempty,oneof=id created_at\"`" + `
+	Order string ` + "`form:\"order\" binding:\"omitempty,oneof=asc desc\"`" + `
 }
 
 type {{.StructName}}DetailRequest struct {

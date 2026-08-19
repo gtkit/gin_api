@@ -84,23 +84,6 @@ func bodyGuard(wantType string, maxBytes int64) gin.HandlerFunc {
 	}
 }
 
-// effectiveLimit 取路由级与全局的**较严**者。
-//
-// 路由级放宽会让全局上限形同虚设，而全局上限正是那道不需要逐个路由审查
-// 就能成立的兜底。注册期已拒绝越界值，这里再夹一次，防止装配顺序变化时
-// 一个未经校验的值溜进来。
-//
-//nolint:unused // 保留给需要显式比较两级上限的调用方
-func effectiveLimit(routeMax, globalMax int64) int64 {
-	if globalMax <= 0 {
-		globalMax = DefaultMaxBytesLimitConfig.MaxBytes
-	}
-	if routeMax <= 0 || routeMax > globalMax {
-		return globalMax
-	}
-	return routeMax
-}
-
 // hasBody 报告请求是否携带（或声称携带）请求体。
 //
 // ContentLength 为 -1 表示 chunked——长度未知但确实有 body，不能当成没有。

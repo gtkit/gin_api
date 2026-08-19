@@ -225,6 +225,16 @@ func (r *Runner) runOnce(ctx context.Context) {
 
 	r.observer.LeaseAcquired(r.lease.name, held.Fence)
 
+	// 释放必须在 defer 里：任务函数 panic 时（panic 继续向上传播，由进程
+	// 编排的 recover 兜底），锁同样要归还——否则只能等租期自然过期，
+	// 下一轮白等一个 TTL。释放用**独立的 ctx**：任务 ctx 在此时已经取消，
+	// 用它释放会立刻失败。
+	defer func() {
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), r.renewTimeout)
+		defer releaseCancel()
+		_ = r.lease.Release(releaseCtx, held)
+	}()
+
 	// 任务 ctx 由三件事终止：进程关停（父 ctx）、最大执行时长、失去租约。
 	taskCtx, cancel := context.WithTimeout(ctx, r.maxRuntime)
 	defer cancel()
@@ -256,12 +266,6 @@ func (r *Runner) runOnce(ctx context.Context) {
 	default:
 		r.observer.TaskFailed(r.lease.name, taskErr)
 	}
-
-	// 释放用**独立的 ctx**：任务 ctx 此时已经取消（上面的 cancel），
-	// 用它释放会立刻失败，锁只能等租期自然过期——那让下一轮白等一个租期。
-	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), r.renewTimeout)
-	defer releaseCancel()
-	_ = r.lease.Release(releaseCtx, held)
 }
 
 // keepAlive 周期性续租，失去租约时取消任务。

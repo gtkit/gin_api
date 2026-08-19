@@ -272,6 +272,53 @@ func Register(r *gin.RouterGroup, deps Deps) {
 - 列表接口给默认值和最大 page size。
 - 复杂跨字段校验放 application 层，不塞进 handler。
 
+### 列表排序参数
+
+列表接口接受 `sort` / `order` query 参数（`make module` 生成的模板即此形状）：
+
+- `sort` 的合法取值在 dto 的 `oneof` 白名单里声明（默认 `id`、`created_at`），
+  非法键在绑定层拒绝（422）；repository 侧另有 `listSortMapping` 白名单把外部键
+  映射为受信任列名，未命中回退默认排序。**新增可排序字段时两处同步更新**——
+  动态排序列进不了参数占位符，白名单是防注入的唯一手段（见 `db-patterns.md`）。
+- `order` 取 `asc` / `desc`。
+- 分页查询经 `ormx/paginator` 执行：自动追加主键次级排序（等值排序键下翻页
+  不重不漏），越界页码钳制到最后一页，响应里的 `paging` 是实际生效值
+  （空结果 `currentPage` / `totalPage` 为 0）。
+
+### 校验错误的对客消息
+
+校验失败（`validator.ValidationErrors`）的 422 响应中，`msg` 是中文、以对外 json
+字段名呈现的消息；多字段同时失败时取字段名排序后的第一条，保证同一输入的响应确定。
+这由 `internal/bootstrap/validation.go` 在启动阶段初始化的翻译器（`gtkit/verify`）
+与 `resp.BindErr` / `resp.BindStructErr` 共同兑现，handler 照常把绑定错误交给这两个
+函数即可，不需要感知翻译。
+
+初始化必须早于任何绑定：validator 在首次校验某类型时缓存字段名元数据，
+晚初始化会让已缓存类型的消息漏出 Go 字段名。因此**参与校验的 DTO 字段必须有
+稳定的 json tag**——它就是错误消息里的字段名。
+
+### 自定义校验规则
+
+新校验 tag 及其中文消息在 `internal/bootstrap/validation.go` 的 `validationOptions`
+里注册（启动阶段、任何绑定之前）：
+
+```go
+var validationOptions = func() []verify.Option {
+    return []verify.Option{
+        // 新 tag + 校验函数 + 中文消息
+        verify.WithTranslation("mobile_cn", "必须是有效的大陆手机号", func(fl validator.FieldLevel) bool {
+            return mobileRe.MatchString(fl.Field().String())
+        }),
+        // 给既有 tag 补中文消息
+        verify.WithValidationTranslation("datetime", "时间格式不正确"),
+    }
+}
+```
+
+只能在这里注册：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争。
+需要查库的唯一性检查不属于校验规则——那是业务规则，放 application 层并以数据库
+唯一索引兜底（校验层查库会让 transport 依赖数据访问，违反分层禁止规则）。
+
 ## 中间件
 
 ### 全局（`internal/router/init.go`，顺序有测试锁定）

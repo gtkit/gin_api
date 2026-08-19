@@ -133,6 +133,13 @@ func newProviders(
 		}
 	}()
 
+	// 0. 校验翻译器。必须先于任何可能发生请求绑定的时点：validator 在首次
+	//    校验某类型时缓存字段名元数据，晚初始化会让已缓存类型永远输出
+	//    Go 字段名。它不依赖任何资源、无副作用可回滚，失败即启动失败。
+	if err := initValidation(); err != nil {
+		return nil, err
+	}
+
 	// 1. 基础设施：数据库连接、配置文件、HTTP 配置、日志、消息队列、缓存、文件存储等。
 	inf, err := resolveInfra(runtime)
 	if err != nil {
@@ -196,7 +203,21 @@ func newProviders(
 
 	// 3c. 响应缓存。默认关闭；关闭时产出透传中间件，调用方不必判空。
 	//     必须先于路由装配：模块在注册只读路由时就要挂上它。
-	responseCache, err := httpcache.New(inf.cfg.Cache, inf.resources.Rdb(0), inf.cfg.App.Name)
+	//
+	//     Redis 已配置但启动期不可达时按禁用降级，而不是阻断启动：
+	//     缓存运行期本就 fail-open（后端出错即穿透执行 handler），
+	//     一次无害降级不该换掉进程的可启动性——那会恰好堵死 Redis 故障
+	//     期间的滚动重启（资源契约见 resources.go：可降级的能力应当降级）。
+	//     "Redis 根本没配置却启用 redis 后端"仍在配置校验期失败，不进这里。
+	cacheCfg := inf.cfg.Cache
+	cacheClient := inf.resources.Rdb(cacheCfg.RedisDB)
+	if responseCacheShouldDegrade(cacheCfg, cacheClient == nil, inf.resources.RedisConfigured()) {
+		logger.Warnf("response cache disabled for this process lifetime: redis (db %d) is configured "+
+			"but unreachable during startup; restart after redis recovers to re-enable it",
+			cacheCfg.RedisDB)
+		cacheCfg.Enabled = false
+	}
+	responseCache, err := httpcache.New(cacheCfg, cacheClient, inf.cfg.App.Name)
 	if err != nil {
 		return nil, fmt.Errorf("build response cache: %w", err)
 	}
@@ -283,6 +304,17 @@ func newProviders(
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil
+}
+
+// responseCacheShouldDegrade 判定响应缓存是否按禁用降级：redis 后端、
+// 客户端缺失、且 Redis **已配置**——即"配置了但启动期不可达"。
+// 缓存运行期本就 fail-open（后端出错即穿透），一次无害降级不该换掉
+// 进程的可启动性；"根本没配置却启用 redis 后端"在配置校验期已失败，
+// 不会走到这里（redisConfigured 为假时不降级，让装配错误如实暴露）。
+func responseCacheShouldDegrade(cfg config.CacheConfig, clientMissing, redisConfigured bool) bool {
+	return cfg.Enabled &&
+		strings.TrimSpace(cfg.Store) == config.CacheStoreRedis &&
+		clientMissing && redisConfigured
 }
 
 // resolveInfra 从 Runtime 取出基础设施连接与派生的 HTTP 配置。

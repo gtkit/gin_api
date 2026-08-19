@@ -158,8 +158,11 @@ if ! diff -u "$SNAPSHOT" "$workdir/after-first-up.snapshot"; then
   exit 1
 fi
 
-echo "[migrate-verify] down"
-run_migrate migrate down --force >/dev/null
+echo "[migrate-verify] down（reset：回滚全部迁移）"
+# down 只回滚最后一个迁移——仓里存在第二个迁移起，这条命令就永远
+# 无法把受管表清零，往返验证必然假红。reset 回滚全部迁移才是
+# "up → 清零 → 再 up" 的正确往返形态。
+run_migrate migrate reset --force >/dev/null
 remaining="$(mysql_exec -e "SELECT COUNT(*) FROM information_schema.TABLES
   WHERE TABLE_SCHEMA='$DB_NAME' AND TABLE_NAME<>'goose_db_version';")"
 if [ "$(echo "$remaining" | tr -d '[:space:]')" != "0" ]; then

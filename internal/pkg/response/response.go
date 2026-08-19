@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 	"github.com/gtkit/goerr"
 	logger "github.com/gtkit/logger/v2"
+	"github.com/gtkit/verify"
 	"go.uber.org/zap"
 )
 
@@ -82,8 +85,33 @@ func Err(c *gin.Context, err error) {
 
 // BindErr 处理参数绑定/验证错误，返回 HTTP 422；请求体超限单独映射为 413。
 func BindErr(c *gin.Context, err error) {
+	bindErrResponse(c, err)
+}
+
+// validationTranslationReady 由启动装配在翻译器初始化成功后置位。
+// 渲染路径绝不能自己触发初始化：verify 的懒初始化会在请求并发期间
+// 改写全局 validator（注册与校验不能并发执行），是真实数据竞争。
+var validationTranslationReady atomic.Bool
+
+// EnableValidationTranslation 声明校验翻译器已就绪。
+// 只应由启动装配在翻译器初始化成功之后调用（任何绑定发生之前）。
+func EnableValidationTranslation() { validationTranslationReady.Store(true) }
+
+// bindErrResponse 是 BindErr / BindStructErr 的共用收口。
+// 校验类错误（validator.ValidationErrors）在翻译器就绪时输出中文、
+// 按对外 json 字段名组织的消息；多字段失败时取字段名排序后的第一条。
+// 翻译器未就绪或错误非校验类（如 JSON 语法错误）时保持既有渲染，
+// 不因翻译能力引入新的失败模式。
+func bindErrResponse(c *gin.Context, err error) {
 	if payloadTooLargeFromBind(c, err) {
 		return
+	}
+	var verrs validator.ValidationErrors
+	if errors.As(err, &verrs) && validationTranslationReady.Load() {
+		if translated := verify.StructErr(err); translated != nil {
+			Err(c, translated)
+			return
+		}
 	}
 	message := "bad request"
 	if err != nil {
@@ -230,14 +258,7 @@ func OkErr(c *gin.Context, err goerr.Error) {
 
 // BindStructErr 处理结构体绑定/验证错误，使用 HTTP 422；请求体超限单独映射为 413。
 func BindStructErr(c *gin.Context, err error) {
-	if payloadTooLargeFromBind(c, err) {
-		return
-	}
-	message := "bad request"
-	if err != nil {
-		message = err.Error()
-	}
-	Err(c, goerr.New(err, goerr.StatusValidateParams(), message))
+	bindErrResponse(c, err)
 }
 
 // TooManyRequestsCode 是被限流时对客户端暴露的业务错误码。

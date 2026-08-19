@@ -49,8 +49,12 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, routerFile, "middleware.Timeout(")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "transport", "http", "handler_test.go"), "func TestHandlerList")
 	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "func (r *Repository) Get")
-	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "Limit(limit)")
+	// 列表查询必须经钦定执行器 + 排序白名单，而不是手写 LIMIT/OFFSET 与裸列名。
+	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "paginator.Paginate[*models.Admin]")
+	assertFileContains(t, filepath.Join(root, "internal", "repository", "admin", "repository_util.go"), "paginator.WithSortMapping(listSortMapping)")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "dto", "admin.go"), "type AdminResponse struct")
+	// 排序键的绑定层白名单：缺它意味着非法键静默回退而不是 422。
+	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "dto", "admin.go"), `oneof=id created_at`)
 	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql"), "CREATE TABLE IF NOT EXISTS `admins`")
 	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.down.sql"), "DROP TABLE IF EXISTS `admins`")
 

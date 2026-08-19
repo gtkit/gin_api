@@ -46,12 +46,14 @@
 
 ## 分页包约定
 
-- `internal/pkg/paging`：纯分页结果类型，不依赖 gorm，**任何层可 import**。
+- `internal/pkg/paging`：纯分页类型——查询入参 `Query`（页码、页大小、排序键）与
+  结果元信息 `Paging`，不依赖 gorm，**任何层可 import**。
 - `github.com/gtkit/ormx/paginator`：GORM 分页查询执行器（外部库），
   **application / dto / models 禁止 import**（传感器禁 `gtkit/ormx` 整个模块）。
 
-分开的理由：分页结果是业务语义（第几页、共多少条），分页执行是数据访问细节。
-合成一个包会让 application 为了返回分页结果而 import gorm。
+分开的理由：分页入参与结果是业务语义（第几页、按什么排、共多少条），
+分页执行是数据访问细节。合成一个包会让 application 为了分页类型而 import gorm。
+`Query.Sort` 是外部排序键，必须由数据访问层经白名单映射后才进入 SQL。
 
 ## 日志
 

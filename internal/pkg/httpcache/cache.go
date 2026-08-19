@@ -62,7 +62,17 @@ func New(cfg config.CacheConfig, client *redis.Client, keyPrefix string) (*Stage
 		}
 		// 前缀隔离：缓存键与业务键混在同一个 keyspace 里，一次 FLUSH 或一次
 		// 键扫描就会互相波及。
-		stager.store = persist.NewRedisStore(client, persist.WithKeyPrefix(keyPrefix+":httpcache:"))
+		//
+		// 读写超时必须显式给：库默认 3s+3s 且用 context.Background()，
+		// 路由的协作式超时切不断这段 I/O——Redis 卡顿（未断连、只是慢）时
+		// 一次挂了缓存的 GET 会比路由预算多挂 6s。读取 1s：缓存读慢于它
+		// 已失去加速意义，超时的结果只是穿透执行 handler（无害路径）；
+		// 写回 2s：发生在响应写出之后，是对大 payload 的让步。
+		stager.store = persist.NewRedisStore(client,
+			persist.WithKeyPrefix(keyPrefix+":httpcache:"),
+			persist.WithReadTimeout(time.Second),
+			persist.WithWriteTimeout(2*time.Second),
+		)
 
 	case config.CacheStoreMemory:
 		if cfg.MaxBytes <= 0 {

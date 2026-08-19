@@ -180,7 +180,7 @@ repository → models, 中立错误包
 ## 包可见范围
 
 - **纯基础包：任何层可 import**。无业务、无 HTTP 协议、无 gorm/redis 依赖的工具包，
-  以及 `appmeta`、`models`、`shared/*`。纯分页结果类型放 `internal/pkg/paging`。
+  以及 `appmeta`、`models`、`shared/*`。纯分页类型（查询入参与结果元信息）放 `internal/pkg/paging`。
 - **基础设施型包：仅 repository、runtime/module、platform 可 import**。依赖 GORM/Redis/文件系统/
   外部 SDK 的工具包，例如 GORM 分页执行器 `github.com/gtkit/ormx/paginator`（含 `gtkit/ormx` 全部子包）。
 - **协议/HTTP 适配包：仅 transport/http、router、middleware 可 import**。例如 response、
@@ -188,7 +188,7 @@ repository → models, 中立错误包
 
 分页边界：
 
-- `internal/pkg/paging`：纯分页结果类型，不依赖 gorm，任何层可 import。
+- `internal/pkg/paging`：纯分页类型（查询入参 `Query` 与结果元信息 `Paging`），不依赖 gorm，任何层可 import。
 - `github.com/gtkit/ormx/paginator`：GORM 查询执行器（外部库），application / dto / models 禁止 import。
 
 ## 禁止规则
