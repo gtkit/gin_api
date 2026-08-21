@@ -144,6 +144,44 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 
 > 注意：代码里 `applog` / `data` / `initProcessRuntime` 只是现有基础设施（日志 / DAO / worker）的命名，**与 Laravel 无关，不要动**。
 
+## 移除 OTel 预置（手动清单）
+
+母版把 OpenTelemetry 定位为预置能力：默认经 `telemetry.enabled` 关闭，关闭时零构造、
+零网络连接，只剩 no-op 记录点的调用开销。确认所有部署环境都永远不接 OTLP 收集端时，
+才值得做这份减法。`project init` **不会自动删除**（涉及多文件源码编辑，自动手术脆弱），
+请按下面清单手动移除：
+
+1. 删除文件：
+   - `internal/platform/telemetry/`（整包，含测试）
+   - `internal/platform/data/tracing.go`、`internal/platform/data/tracing_test.go`
+   - `internal/platform/config/telemetry.go`、`internal/platform/config/telemetry_test.go`
+2. `internal/platform/config`：删 `types.go` 的 `Telemetry` 字段，以及 `validate.go` 中
+   `validateTelemetryConfig` 的调用行。
+3. `internal/bootstrap/providers.go`：删 2a 步（`telemetry.New` 装配块，含 `rb.push` 与
+   启用日志）和 2a' 步（`InstrumentTracing` 调用）；删 `providerSet` 与 `infra` 两个
+   结构体的 `telemetry` 字段及构造处的赋值；删 `buildEngine` 里 `TracingEnabled` /
+   `ServiceName` 两行接线。2b 步 `metrics.New(otel.GetMeterProvider().Meter(metricsScope))`
+   保留原样——`otel` 的 API import 随之保留。
+4. `internal/bootstrap/app.go`：删 `App` 的 `telemetry` 字段、构造处赋值与关停序列里的
+   `a.telemetry.Shutdown(ctx)`。
+5. `internal/router/init.go`：删 otelgin import、`Options` 的 `TracingEnabled` 与
+   `ServiceName` 字段（后者仅供 otelgin 使用），以及 `engine.Use(otelgin.Middleware(...))`
+   所在的条件块。
+6. 删除 `config/env.yml.example` 的「OpenTelemetry 导出」一段；实际部署环境的 `env.yml`
+   同理。
+7. 跑 `go mod tidy`：两个 OTLP exporter 与 otelgin / otelgorm / redisotel 三个埋点库随之
+   消失。`go.opentelemetry.io/otel` 与 `otel/metric` 由 `internal/pkg/metrics` 的记录点
+   保留（轻量 API 包，无 SDK、无网络连接）；`otel/sdk` / `otel/sdk/metric` 以测试依赖
+   身份留在 go.mod——指标的反证测试用内存 reader 断言记录值，它们只被 `_test.go`
+   import，不进生产二进制。
+8. 跑 `make check` 确认全绿。
+
+> 边界：`internal/pkg/metrics` 建在 OTel metric **API** 上，是 HTTP 请求量/时延/状态、
+> 限流判定、worker 健康、DB 连接池、认证事件这些指标的记录点，本清单保留它——
+> 摘除的是导出侧与链路追踪。连指标底座也要换（如直连 Prometheus client）属于重写
+> `internal/pkg/metrics` 的工程，改动面是它的全部调用方
+> （`grep -rl "internal/pkg/metrics" internal` 枚举）。
+
 ## 预置能力清单
 
 逐项标注状态，避免"以为它已经在工作"或"以为它是示例可以删"两类误解。

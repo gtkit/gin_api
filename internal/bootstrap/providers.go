@@ -162,6 +162,15 @@ func newProviders(
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
 	}
 
+	// 2a'. 数据层追踪埋点（GORM + 全部已初始化 Redis DB）。必须在 telemetry.New
+	//      之后：otelgorm 在构造期就从全局 TracerProvider 取 tracer，先挂后设
+	//      provider 与 2b 对 Meter 的顾虑是同一件事。埋点无条件挂载、不设开关，
+	//      未接导出时走全局 no-op tracer（「埋点与导出是两件事」，
+	//      docs/observability.md）；失败即装配失败——埋点缺失是静默的观测盲区。
+	if err := inf.resources.InstrumentTracing(inf.cfg.Database.Name); err != nil {
+		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
+	}
+
 	// 2b. 指标仪表。必须先于中间件与路由：两者都要在装配期拿到它。
 	//     未接导出时全局是 no-op，每次记录都是空操作。
 	recorder, err := metrics.New(otel.GetMeterProvider().Meter(metricsScope))
