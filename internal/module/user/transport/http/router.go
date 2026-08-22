@@ -73,13 +73,31 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 顺序是契约：来源限流挡的是尚未证明身份的流量，必须在认证之前；
 	// 身份限流拿不到身份就退化成"每个请求都被拒"，必须在认证之后。
 	g.Use(preAuth...)
-	// 三条路由都要求已认证身份。
-	g.Use(deps.Auth)
-	g.Use(postAuth...)
 
-	g.GET("", handler.Get)
-	g.PUT("", middleware.JSONBody(0), handler.Update)
-	g.POST("/deactivate", middleware.JSONBody(0), handler.Deactivate)
+	// 按请求体形态分子组，让**请求体治理排在认证之前**
+	//（http-request-contract spec）。
+	//
+	// 必须分组而不是把 JSONBody 写在路由上：gin 的组中间件恒先于路由级中间件，
+	// 所以"认证挂组上、body 治理挂路由上"的写法里，认证永远先跑——一个
+	// Content-Type 不符的请求要先付掉令牌解析、用户查库与撤销查 Redis 才被 415 拒。
+	//
+	// 也**不**把认证下移到路由级来排这个顺序：那样认证从一处声明变成每条路由
+	// 各一处，新增路由漏写即成公开接口，而该遗漏在编译与静态检查里都不显形。
+	// 用一个每条路由都可能犯的错，换一次内容类型判定的开销，不成比例。
+	read := g.Group("", middleware.NoBody())
+	write := g.Group("", middleware.JSONBody(0))
+
+	// 认证与身份限流对两个子组同款：新增路由落进哪个子组都自动继承。
+	// 挂载点因此从一处变成两处，由 router_test.go 的 TestEveryRouteGoesThroughAuth
+	// 逐条路由兜住——它是这套结构下访问控制的唯一自动化保障。
+	for _, sub := range []*gin.RouterGroup{read, write} {
+		sub.Use(deps.Auth)
+		sub.Use(postAuth...)
+	}
+
+	read.GET("", handler.Get)
+	write.PUT("", handler.Update)
+	write.POST("/deactivate", handler.Deactivate)
 }
 
 // stageRateLimits 容错地调用装配层注入的分组函数。

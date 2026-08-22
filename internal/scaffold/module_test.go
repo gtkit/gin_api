@@ -840,3 +840,31 @@ func TestMigrationCharsetCollationComeFromOptions(t *testing.T) {
 	assertFileContains(t, upSQL, "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;")
 	assertFileNotContains(t, upSQL, "utf8mb4_unicode_ci")
 }
+
+// TestGeneratedResponseDTOOmitsZeroTimestamps 锁住生成物的对外契约标注。
+//
+// 母版是传播源：Response DTO 模板写错的标注会跟着每个 `make module` 进到派生
+// 项目的对外契约里，而它的失效是静默的——encoding/json 的 omitempty 对 struct
+// 类型**永不触发**，零值时间照样输出 "0001-01-01T00:00:00Z"。
+//
+// 断言分正反两条：必须出现 omitzero，且必须不出现时间字段的 omitempty 形态。
+// 只断言前者的话，一个同时留着两种标注的模板也能通过。
+func TestGeneratedResponseDTOOmitsZeroTimestamps(t *testing.T) {
+	t.Parallel()
+
+	root := createProjectFixture(t)
+	generator, err := NewModuleGenerator(filepath.Join(root, "internal", "module"))
+	if err != nil {
+		t.Fatalf("NewModuleGenerator returned error: %v", err)
+	}
+
+	if _, err := generator.GenerateWithOptions("report", GenerateOptions{Public: true}); err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	dtoPath := filepath.Join(root, "internal", "module", "report", "dto", "report.go")
+	assertFileContains(t, dtoPath, `json:"created_at,omitzero"`)
+	assertFileContains(t, dtoPath, `json:"updated_at,omitzero"`)
+	assertFileNotContains(t, dtoPath, `json:"created_at,omitempty"`)
+	assertFileNotContains(t, dtoPath, `json:"updated_at,omitempty"`)
+}

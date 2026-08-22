@@ -840,10 +840,13 @@ type {{.StructName}}DetailRequest struct {
 	ID int64 ` + "`json:\"id\" form:\"id\" binding:\"required,gte=1\"`" + `
 }
 
+// 时间字段用 omitzero 而不是 omitempty：后者对 struct 类型永不触发，零值时间
+// 照样输出 "0001-01-01T00:00:00Z"——标注写了却不生效。omitzero（Go 1.24 起）
+// 按 IsZero() 判定。这是对外响应契约，写错会跟着每个生成的模块一起扩散。
 type {{.StructName}}Response struct {
 	ID        int64     ` + "`json:\"id\"`" + `
-	CreatedAt time.Time ` + "`json:\"created_at,omitempty\"`" + `
-	UpdatedAt time.Time ` + "`json:\"updated_at,omitempty\"`" + `
+	CreatedAt time.Time ` + "`json:\"created_at,omitzero\"`" + `
+	UpdatedAt time.Time ` + "`json:\"updated_at,omitzero\"`" + `
 {{- range .Fields }}
 	{{.FieldName}} {{.Type}} ` + "`{{.ResponseTag}}`" + `
 {{- end }}

@@ -26,9 +26,18 @@ func (c DatabaseConfig) EffectiveMaxOpenConn() int {
 }
 
 // EffectiveMaxIdleConn 返回生效的最大空闲连接数，且永不超过生效的打开上限。
+//
+// 回填只看本字段自身，**不看 MaxOpenConn 是否配置**。此前的条件是两者同时未配置
+// 才回填，于是"只调大 maxopenconn、不写 maxidleconn"这个常见的扩容动作会得到
+// idle=0——而驱动把非正的空闲数解释为不保留任何空闲连接，每个请求新建 TCP +
+// 鉴权握手再关闭。它没有任何报错，表现为数据库侧连接数刷屏与响应时延抬升，
+// 而运维刚做的恰恰是"扩容"。
+//
+// 0 一律视为未配置。真要禁用空闲池得写负值，而负值由池参数校验拒绝——
+// 本项目不接受零空闲池：让每个请求重建连接，代价与收益完全不成比例。
 func (c DatabaseConfig) EffectiveMaxIdleConn() int {
 	idle := c.MaxIdleConn
-	if c.MaxOpenConn <= 0 && idle <= 0 {
+	if idle <= 0 {
 		idle = DefaultDBMaxIdleConn
 	}
 	if open := c.EffectiveMaxOpenConn(); idle > open {

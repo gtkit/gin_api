@@ -112,6 +112,9 @@ func (c *Config) Validate() error {
 	if err := validateRedisConfig(c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateRedisDBZeroConsumers(*c); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateLogConfig(c.Env, c.Log, os.Getenv("APP_ROOT")); err != nil {
 		errs = append(errs, err)
 	}
@@ -374,6 +377,52 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// fixedRedisDB 是若干能力在装配处固定取用的 Redis 逻辑库号。
+//
+// 它们不像 cache / tasks 那样各有配置项：把数据放到非 0 库目前没有需求驱动，
+// 而缺库号导致的误诊断只需要一条校验就能消除。
+const fixedRedisDB = 0
+
+// validateRedisDBZeroConsumers 校验取固定逻辑库的能力所需的库号已被声明。
+//
+// 为什么必须在配置层拦：资源层只打开 redis.dbs 声明过的库，取未声明的库得到
+// nil 客户端。而 nil 客户端与"Redis 启动期不可达"在装配处**无法区分**，于是
+// 缺库号的后果是指向错误方向的诊断——fail_open 的限流策略静默进入进程级永久
+// 降级、注销清理 worker 不注册、日志声称 "redis is configured but unreachable"，
+// 而 Redis 完全健康。运维会去查一个没有问题的 Redis。
+//
+// cache.redis_db 与 tasks.redis_db 早有同款校验，理由与此完全一致。
+//
+// 聚合成一条错误而不是逐项报：三项说的是同一件事，逐项会让运维看到三行
+// 几乎相同的消息。
+func validateRedisDBZeroConsumers(c Config) error {
+	var consumers []string
+
+	if slices.ContainsFunc(c.RateLimit.Policies, func(p RateLimitPolicyConfig) bool {
+		return strings.TrimSpace(p.Store) == storeRedis
+	}) {
+		consumers = append(consumers, "rate limit policies using the redis store")
+	}
+	if c.Auth.LocalEnabled() {
+		consumers = append(consumers, "local authentication (refresh tokens and revocations)")
+	}
+	if c.Modules.User.DeactivationRetentionDays > 0 {
+		consumers = append(consumers, "deactivation archive cleanup (singleton lease)")
+	}
+
+	if len(consumers) == 0 || slices.Contains(c.Redis.DBs, fixedRedisDB) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"redis.dbs %v must include database %d because these enabled capabilities take it at "+
+			"assembly time: %s. Without it the resource layer hands them a nil client, which is "+
+			"indistinguishable from an unreachable Redis: rate limiting would silently degrade for "+
+			"the whole process and the cleanup worker would not register, while Redis itself is "+
+			"healthy. Fix it by adding %d to redis.dbs",
+		c.Redis.DBs, fixedRedisDB, strings.Join(consumers, "; "), fixedRedisDB)
 }
 
 func validateRedisConfig(redis RedisConfig) error {

@@ -102,9 +102,11 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 			Expr:              `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
 			AuthorizerID:      "role.admin",
 			RateLimitPolicies: rateLimitPoliciesWithUser,
-			Note: "模块要求 role.admin 授权。**当前没有权威角色源**，" +
-				"role.admin 是恒拒绝的占位实现，所有请求都会 403。" +
-				"接入数据库/IAM 等实时角色源后替换该 adapter，路由代码无需改动。" +
+			Note: "模块要求 role.admin 授权。该标识**已接真实判定**：查 user_roles 表这一" +
+				"权威角色源，表里有 admin 角色行的账号即通行。" +
+				"未建表或表为空时一律拒绝，因此空库上的表现仍是 403——" +
+				"但不要据此以为这条路由是关着的。" +
+				"换成 IAM / IdP 同步表时只改 providers.go 里 svc.roles 的构造，路由代码无需改动。" +
 				"绝不要改成仅凭 JWT 的 role claim 放行——那是一次签发当成持续有效的高权限。",
 		}, nil
 	case AccessOptionCustom:

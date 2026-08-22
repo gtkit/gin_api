@@ -72,10 +72,25 @@ check_no_match \
 #
 # 只禁 ShouldBind / ShouldBindJSON / ShouldBindWith：ShouldBindQuery 与
 # ShouldBindUri 的数据来源本就是 query 与路径，语义明确，不在此列。
-check_no_match \
-  "transport/http uses gin body binding (use ginx.BindBody: query must not pollute body)" \
-  "c\.(ShouldBind|ShouldBindJSON|ShouldBindWith|Bind|BindJSON)\(" \
-  internal/module/*/transport/http
+# 结尾的 `\(` 负责这件事——`ShouldBind\(` 不会匹配 `ShouldBindQuery(`。
+#
+# **接收者是任意标识符，不是字面量 `c`**。此前判据写死 `c\.`，于是把 gin 上下文
+# 命名为 `ctx`（一种极常见的写法）就能静默绕过整条规则——而这条规则存在的理由
+# 恰恰是"加字段的人不会收到任何提示"，一个能被改个变量名绕过的提示等于没有提示。
+#
+# 判据排除注释（行首到调用之间不出现 //），与 ClientIP、出站 HTTP 两条规则同款：
+# 母版生成的 handler 注释里就写着"不要用 c.ShouldBind"，而规则的正文也必须能
+# 提及被禁的 API。若把注释算作违规，规则就会永远为真而无法归零，最终被人加豁免绕过。
+bodybind_hits="$(mktemp)"
+find internal/module/*/transport/http -type f -name '*.go' ! -name '*_test.go' -print0 2>/dev/null |
+  xargs -0 grep -nE '^[^/]*[^/[:space:]]\.(ShouldBind|ShouldBindJSON|ShouldBindWith|Bind|BindJSON)\(' 2>/dev/null |
+  grep -v '^[^:]*:[0-9]*:[[:space:]]*//' >>"$bodybind_hits" || true
+if [ -s "$bodybind_hits" ]; then
+  echo "FAIL: transport/http uses gin body binding (use ginx.BindBody: query must not pollute body)"
+  cat "$bodybind_hits"
+  fail=1
+fi
+rm -f "$bodybind_hits"
 
 check_no_match \
   "repository imports gin / module" \

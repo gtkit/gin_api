@@ -12,6 +12,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/singleton"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/testutil"
 )
 
 // schedulerConfig 返回一个启用了调度器的配置。
@@ -30,8 +31,15 @@ func schedulerConfig() config.TasksConfig {
 	return cfg
 }
 
+// newTestRedis 起一个进程内 Redis 并返回连上它的客户端。
+//
+// 声明端口依赖放在这里而不是 10 个调用方那里：miniredis.RunT 起的是**真实的
+// TCP 监听**，本函数就是那个直接绑定者。绑不上端口时 RunT 走 t.Fatalf，
+// 于是在受限环境里这些测试会**失败**而不是跳过——而受限实跑只在 release-check
+// 里执行，那种失败会一路潜伏到发版当天。分散到调用方则是下一个新增调用方再漏一次。
 func newTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) {
 	t.Helper()
+	testutil.RequireLoopback(t)
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	t.Cleanup(func() { _ = client.Close() })

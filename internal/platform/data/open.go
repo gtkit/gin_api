@@ -48,12 +48,50 @@ func OpenDB(
 	creds config.DBCredentials,
 	gormLogger gormlogger.Interface,
 ) (*ormx.Client, error) {
+	return openAndVerify(ctx, dbCfg, serverOpenOptions(dbCfg, creds), gormLogger)
+}
+
+// OpenMigrationDB 为**迁移**建立连接：除驱动级 I/O deadline 外与 OpenDB 完全一致。
+//
+// 单独具名而不是给 OpenDB 加参数，是为了让"本次用的是哪种超时语义"在调用点可读。
+// 此前两条路径共用一个入口，迁移因此静默继承了 server 的 30s 上限，而调用点
+// 完全看不出这件事——那正是本入口要消除的形态。
+//
+// **迁移路径不施加驱动级 I/O deadline**，理由是失效形态不对称：驱动的读 deadline
+// 作用于"发出语句后等待响应包"，对 DDL 等价于给单条语句的执行时长封顶；而 MySQL
+// 的 DDL 非事务性、**不随客户端断连回滚**。于是一次超时留下的是"schema 已变更、
+// 迁移版本表未记录"——迁移命令报失败，数据库侧却已完成，且空库上的迁移验证
+// 永远复现不出来。相比之下迁移是一次性前台命令，墙钟上界由操作者与 CI 承担：
+// 一次可见的挂起优于一次静默的 schema 分叉。
+//
+// 去掉 deadline **不会**让连接建立阶段失去上界：Ping 与两次会话校验都经 ctx 执行，
+// 调用方给的启动预算仍然生效。失去上界的只有本函数返回之后由迁移库执行的语句。
+//
+// 不要在服务进程路径上调用它：那里需要"单次网络操作上界"来保护请求 goroutine。
+func OpenMigrationDB(
+	ctx context.Context,
+	dbCfg config.DatabaseConfig,
+	creds config.DBCredentials,
+	gormLogger gormlogger.Interface,
+) (*ormx.Client, error) {
+	return openAndVerify(ctx, dbCfg, migrationOpenOptions(dbCfg, creds), gormLogger)
+}
+
+// openAndVerify 是两个入口共用的建立与启动校验流程。
+//
+// 两个入口的差异只在传入的 opts 上，其余步骤共用同一份代码——否则"除超时外
+// 完全一致"就得靠人逐行比对两份拷贝来维持。
+func openAndVerify(
+	ctx context.Context,
+	dbCfg config.DatabaseConfig,
+	opts []ormx.Option,
+	gormLogger gormlogger.Interface,
+) (*ormx.Client, error) {
 	minVersion, err := parseMinVersion(dbCfg.EffectiveMinVersion())
 	if err != nil {
 		return nil, fmt.Errorf("invalid database.min_version: %w", err)
 	}
 
-	opts := buildOpenOptions(dbCfg, creds)
 	if gormLogger != nil {
 		// GORM logger 由调用方注入而不是在本函数内构造：它需要 log 配置，
 		// 而本函数只接收数据库配置——把整份 *Config 传进来就等于让底层去猜用途，
@@ -76,10 +114,42 @@ func OpenDB(
 	return client, nil
 }
 
-func buildOpenOptions(dbCfg config.DatabaseConfig, creds config.DBCredentials) []ormx.Option {
-	// 读写超时是"单次网络操作"的上界，不该跟连接寿命同量级。
-	readWriteTimeout := min(time.Duration(dbCfg.EffectiveMaxLifeSeconds())*time.Second, 30*time.Second)
+// serverIOTimeoutCap 是服务进程路径的驱动 I/O deadline 上限。
+const serverIOTimeoutCap = 30 * time.Second
 
+// migrationIOTimeout 表示不施加驱动级 I/O deadline。
+//
+// 0 是这件事在驱动层的表达而不是"回落默认值"：ormx 的 option 覆盖 DefaultConfig
+// 的 30s，go-sql-driver 在 readTimeout <= 0 时不设读 deadline。
+const migrationIOTimeout time.Duration = 0
+
+// serverIOTimeout 是服务进程路径的驱动 I/O deadline。
+//
+// 取连接寿命与上限中的较小值：读写超时是"单次网络操作"的上界，不该跟连接寿命
+// 同量级；而寿命本身更短时，用比寿命更长的 deadline 没有意义。
+func serverIOTimeout(dbCfg config.DatabaseConfig) time.Duration {
+	return min(time.Duration(dbCfg.EffectiveMaxLifeSeconds())*time.Second, serverIOTimeoutCap)
+}
+
+// serverOpenOptions 是服务进程路径的连接选项。
+func serverOpenOptions(dbCfg config.DatabaseConfig, creds config.DBCredentials) []ormx.Option {
+	return buildOpenOptions(dbCfg, creds, serverIOTimeout(dbCfg))
+}
+
+// migrationOpenOptions 是迁移路径的连接选项。
+func migrationOpenOptions(dbCfg config.DatabaseConfig, creds config.DBCredentials) []ormx.Option {
+	return buildOpenOptions(dbCfg, creds, migrationIOTimeout)
+}
+
+// buildOpenOptions 组装连接选项。
+//
+// ioTimeout 由调用方按用途给出，本函数不再替所有用途算一个值：server 与迁移
+// 对"语句被客户端掐断"的容忍度相反，而此前的单一公式让调用点看不出这件事。
+func buildOpenOptions(
+	dbCfg config.DatabaseConfig,
+	creds config.DBCredentials,
+	ioTimeout time.Duration,
+) []ormx.Option {
 	return []ormx.Option{
 		ormx.WithHost(dbCfg.Host),
 		ormx.WithPort(dbCfg.Port),
@@ -99,9 +169,10 @@ func buildOpenOptions(dbCfg config.DatabaseConfig, creds config.DBCredentials) [
 		// 跳过 GORM 自己的版本探测（那次往返不受 ctx 约束），改由本函数显式校验。
 		ormx.WithSkipInitializeWithVersion(true),
 		ormx.WithServerVersion(dbCfg.EffectiveMinVersion()),
-		// 读写超时兜住其余不受 ctx 约束的路径。
-		ormx.WithReadTimeout(readWriteTimeout),
-		ormx.WithWriteTimeout(readWriteTimeout),
+		// 读写超时兜住其余不受 ctx 约束的路径；取值由调用方按用途决定，
+		// 迁移路径传 0 表示不施加（见 OpenMigrationDB）。
+		ormx.WithReadTimeout(ioTimeout),
+		ormx.WithWriteTimeout(ioTimeout),
 
 		// 会话语义固定，不依赖数据库环境默认值。
 		ormx.WithParseTime(true),

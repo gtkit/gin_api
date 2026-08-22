@@ -56,6 +56,47 @@ func TestDatabasePoolDefaults(t *testing.T) {
 				"idleTime": DefaultDBMaxIdleTimeSeconds,
 			},
 		},
+		{
+			// 只调大 open、不写 idle：一次常见的"扩容"动作。
+			//
+			// 此前 idle 的回填要求 open 也未配置，于是这个组合得到 idle=0，
+			// 而驱动把非正的空闲数解释为**不保留任何空闲连接**——每个请求
+			// 新建 TCP + 鉴权握手再关闭。没有任何报错，表现为数据库侧连接数
+			// 刷屏与 P99 抬升，而运维刚做的恰恰是扩容。
+			//
+			// 这个组合此前不在用例里：上面四个用例枚举了全空、全设、idle>open、
+			// 负值，恰好漏掉"设了一个、没设另一个"。
+			name: "only open configured still keeps an idle pool",
+			cfg:  DatabaseConfig{MaxOpenConn: 100},
+			want: map[string]int{
+				"open":     100,
+				"idle":     DefaultDBMaxIdleConn,
+				"life":     DefaultDBMaxLifeSeconds,
+				"idleTime": DefaultDBMaxIdleTimeSeconds,
+			},
+		},
+		{
+			// 与上一条相对：open 配得比默认 idle 还小时，回填值必须被钳住，
+			// 否则 idle > open 会让驱动持续关掉多余连接再重建。
+			name: "backfilled idle is still capped at open",
+			cfg:  DatabaseConfig{MaxOpenConn: 2},
+			want: map[string]int{
+				"open":     2,
+				"idle":     2,
+				"life":     DefaultDBMaxLifeSeconds,
+				"idleTime": DefaultDBMaxIdleTimeSeconds,
+			},
+		},
+		{
+			name: "only idle configured leaves open at its default",
+			cfg:  DatabaseConfig{MaxIdleConn: 7},
+			want: map[string]int{
+				"open":     DefaultDBMaxOpenConn,
+				"idle":     7,
+				"life":     DefaultDBMaxLifeSeconds,
+				"idleTime": DefaultDBMaxIdleTimeSeconds,
+			},
+		},
 	}
 
 	for _, tt := range tests {

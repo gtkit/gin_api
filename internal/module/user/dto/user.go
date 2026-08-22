@@ -48,14 +48,25 @@ type UserProfileResponse struct {
 
 // UserUpdateRequest 资料更新请求。字段是否用指针按「零值是否是合法目标值」决定：
 //   - Gender 的 0 可能是合法取值（如"保密"），必须区分「未传(nil)」与「传 0」→ *int8；
-//   - NickName/Avatar 的空串不是合法目标（空头像/空昵称无意义，Avatar 还要过 url 校验），
+//   - NickName/Avatar 的空串不是合法目标（空头像/空昵称无意义，Avatar 还要过 URL 校验），
 //     "传空串" 与 "未传" 都视为不更新 → 值类型 + omitempty 即可，无需指针。
 //
 // Phone 不在此处更新：手机号变更需走独立的验证码校验流程。
+//
+// Avatar 的两条约束各自不可省：
+//
+//   - `max=255` 与 `users.avatar` 的列宽对齐。契约放行一个数据库存不下的值，
+//     只会把入口可拒绝的请求变成写入失败——严格模式下那是一个未被错误映射覆盖的
+//     驱动错误，于是一次纯客户端输入错误被记成 500 与 error 级日志。
+//   - `http_url` 而不是 `url`：后者**不限 scheme**，实测接受 `javascript:`、`data:`、
+//     `file:`、`vbscript:`。头像 URL 入库后由任意消费端渲染成链接即是存储型 XSS
+//     载体，而入口是唯一能以零成本拒绝它的位置。
+//     注意 `http_url` 不在 validator 的中文翻译包里，它的中文消息由
+//     internal/bootstrap/validation.go 的注册位补上。
 type UserUpdateRequest struct {
 	NickName string `json:"nick_name" form:"nick_name" binding:"omitempty,max=50"`
 	Gender   *int8  `json:"gender" form:"gender" binding:"omitempty,min=0,max=2"`
-	Avatar   string `json:"avatar" form:"avatar" binding:"omitempty,url"`
+	Avatar   string `json:"avatar" form:"avatar" binding:"omitempty,http_url,max=255"`
 }
 
 // UserDeactivateRequest 用户注销请求体。

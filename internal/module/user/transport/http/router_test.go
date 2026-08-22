@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -195,4 +196,88 @@ func keys(m map[string]struct{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestBodyGovernanceRunsBeforeAuth 钉住请求体治理先于认证执行
+// （http-request-contract spec「请求体治理位于认证之前」）。
+//
+// 为什么这条测试必须断言**执行序**：gin 的组中间件恒先于路由级中间件，
+// 所以"每条路由都写了 JSONBody"看起来是对的，执行序却可能是反的——
+// 认证挂在组上时，它永远先跑。注册序看不出这件事。
+//
+// 后果不是安全漏洞而是代价错配：一个 Content-Type 不符的请求要先完成
+// 令牌解析、用户查库与撤销查 Redis，才被 415 拒绝。而 body 治理只读
+// header 与 ContentLength，本该先拒。
+func TestBodyGovernanceRunsBeforeAuth(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	var order []string
+	mark := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			order = append(order, name)
+			c.Next()
+		}
+	}
+
+	engine := gin.New()
+	// body 治理由模块自己声明，无法从外部注入 mark，因此用"认证是否已执行"
+	// 反推：415 由 body 治理产生，若此时 auth 已在序列里，说明顺序反了。
+	Register(engine.Group("/api/v1"), Deps{
+		Auth: mark("auth"),
+		RateLimit: func(_ string, ids ...string) (preAuth, postAuth []gin.HandlerFunc) {
+			for _, id := range ids {
+				switch id {
+				case "default.ip":
+					preAuth = append(preAuth, mark("ratelimit.ip"))
+				case "default.user":
+					postAuth = append(postAuth, mark("ratelimit.user"))
+				}
+			}
+			return preAuth, postAuth
+		},
+	})
+
+	// 写路由声明只接受 JSON，这里故意送 text/plain。
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/user", strings.NewReader("plain"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415（Content-Type 不符应由 body 治理拒绝）", rec.Code)
+	}
+	if slices.Contains(order, "auth") {
+		t.Errorf("认证在请求体治理之前执行（序列 %v）："+
+			"一个内容类型不符的请求先付掉了令牌解析、用户查库与撤销查询", order)
+	}
+	// 免身份限流仍必须在 body 治理之前：它挡的是尚未证明身份的流量，
+	// 而 body 治理本身也是可被无身份流量触发的判定。
+	if !slices.Contains(order, "ratelimit.ip") {
+		t.Errorf("免身份限流未在请求体治理之前执行（序列 %v）", order)
+	}
+}
+
+// TestGetRouteRejectsRequestBody 钉住只读路由显式声明不接受请求体
+// （http-request-contract spec「请求体形态必须显式声明」三选一）。
+//
+// 静默放行的 body 意味着客户端以为自己传了参数，而服务端从未读过它——
+// 那种不一致只有在业务结果不对时才会被发现。
+func TestGetRouteRejectsRequestBody(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Auth: func(c *gin.Context) { c.Next() },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user", strings.NewReader(`{"a":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400：只读路由应显式拒绝请求体", rec.Code)
+	}
 }

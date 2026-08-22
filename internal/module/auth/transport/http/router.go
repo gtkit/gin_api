@@ -66,7 +66,11 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	token.POST("/refresh", middleware.JSONBody(0), handler.Refresh)
 	// 登出要求认证：要撤销的正是本次请求所用的令牌，
 	// 而它的标识只有认证中间件能提供。
-	token.POST("/logout", deps.Auth, middleware.JSONBody(0), handler.Logout)
+	//
+	// body 治理排在认证之前（http-request-contract spec）：内容类型不符的请求
+	// 不该先付掉一次令牌解析与撤销查询。两者都在路由级，因此换序即可，
+	// 认证的挂载点数量不变。
+	token.POST("/logout", middleware.JSONBody(0), deps.Auth, handler.Logout)
 }
 
 // stageRateLimits 容错地调用装配层注入的 pre-identity 取用函数。

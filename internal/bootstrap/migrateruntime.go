@@ -14,7 +14,12 @@ import (
 )
 
 // openDBForMigration 是注入点，便于测试断言迁移路径只建数据库连接、不碰其他基础设施。
-var openDBForMigration = data.OpenDB
+//
+// 指向 OpenMigrationDB 而不是 OpenDB：后者会给连接装上"单次网络操作上界"的
+// 驱动 I/O deadline（连接寿命与 30s 的较小值），那对 DDL 等价于给单条语句的
+// 执行时长封顶。大表建索引撞上它时客户端断连、迁移记为失败，而 MySQL 侧的
+// DDL 不随断连回滚、继续执行到完成——留下 schema 已变而版本表未记的静默分叉。
+var openDBForMigration = data.OpenMigrationDB
 
 // defaultMigrationStartupTimeout 是迁移建立数据库连接的启动预算。
 const defaultMigrationStartupTimeout = 15 * time.Second

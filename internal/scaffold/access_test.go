@@ -88,10 +88,14 @@ func TestResolveAccessChoiceMapsEveryMode(t *testing.T) {
 	}
 }
 
-// TestAdminNoteWarnsAboutPlaceholder 守住一条容易被忽略的提示：
-// role.admin 当前是恒拒绝的占位实现。不说明的话，使用者会以为它已经能用，
-// 然后在遇到持续 403 时无从下手——更糟的是可能"顺手"改成凭 JWT role claim 放行。
-func TestAdminNoteWarnsAboutPlaceholder(t *testing.T) {
+// TestAdminNoteCoversSourceAndPitfall 守住 admin 提示必须讲清三件事：
+// 权威角色源是什么、空库上为何仍是 403、以及绝不能改成凭 JWT role claim 放行。
+//
+// 本测试此前叫 TestAdminNoteWarnsAboutPlaceholder，注释写着"role.admin 当前是
+// 恒拒绝的占位实现"——那句话在 role.admin 接上 user_roles 真实判定之后就不成立了，
+// 而测试名与注释是读者判断"这条测试在保护什么"的依据，留着旧说法等于把一条
+// 已经作废的事实继续当契约传播。
+func TestAdminNoteCoversSourceAndPitfall(t *testing.T) {
 	t.Parallel()
 
 	got, err := ResolveAccessChoice(AccessOptionAdmin, false, "demo")
@@ -243,5 +247,49 @@ func TestAccessChoiceRateLimitScopeMatchesIdentity(t *testing.T) {
 					got.RateLimitPolicies)
 			}
 		})
+	}
+}
+
+// TestAdminAccessNoteMatchesTheRealAuthorizer 钉住生成器提示与真实机制一致
+// （access-policy-enforcement spec 的「生成器提示与真实机制一致」）。
+//
+// 这条判据是补的，因为分叉真的发生过：提示长期写着「当前没有权威角色源，
+// role.admin 是恒拒绝的占位实现，所有请求都会 403」，而 providers.go 早已把
+// role.admin 注册成查 user_roles 表的真实判定（见 CHANGELOG 与 SCAFFOLD.md）。
+//
+// 方向危险才是重点：使用者被告知"这条路由现在全 403、上线前必须自己替换
+// adapter"，于是把它当成一扇关着的门；而只要 user_roles 里有 admin 行，
+// 门是开的。一个被以为关着的门开着，比一个已知开着的门危险得多。
+//
+// 判据是文本级的、粗粒度的：断言 admin 选项的提示不再宣称"占位/恒拒绝/
+// 没有角色源"，且确实点出权威来源。精确到语义需要把提示与 authorizer 实现
+// 绑在一起，而那超出脚手架包能看到的范围——本判据能挡住的正是这次这种漂移。
+func TestAdminAccessNoteMatchesTheRealAuthorizer(t *testing.T) {
+	t.Parallel()
+
+	choice, err := ResolveAccessChoice(AccessOptionAdmin, false, "demo")
+	if err != nil {
+		t.Fatalf("ResolveAccessChoice(admin) 出错: %v", err)
+	}
+
+	// 不得再宣称它是未接入的占位实现。
+	for _, stale := range []string{"占位", "恒拒绝", "没有权威角色源", "尚未注册"} {
+		if strings.Contains(choice.Note, stale) {
+			t.Errorf("admin 提示仍含已过期的表述 %q：role.admin 已接 user_roles 真实判定，"+
+				"把它说成占位会让使用者以为路由是关着的\n提示全文: %s", stale, choice.Note)
+		}
+	}
+	// 必须点出权威来源，否则使用者无从判断"谁能通过"。
+	if !strings.Contains(choice.Note, "user_roles") {
+		t.Errorf("admin 提示未点出权威角色源 user_roles\n提示全文: %s", choice.Note)
+	}
+	// custom 选项确实是未注册的恒拒绝，它的提示**应当**保留那套表述——
+	// 缺了这条反向锚，一个把两个选项提示都改空的实现也能让上面的断言通过。
+	custom, err := ResolveAccessChoice(AccessOptionCustom, false, "demo")
+	if err != nil {
+		t.Fatalf("ResolveAccessChoice(custom) 出错: %v", err)
+	}
+	if !strings.Contains(custom.Note, "尚未注册") {
+		t.Errorf("custom 提示应说明该标识尚未注册（它确实是恒拒绝）\n提示全文: %s", custom.Note)
 	}
 }
