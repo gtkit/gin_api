@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -113,5 +114,37 @@ func TestCredentialAndTokenEndpointsUseDifferentLimits(t *testing.T) {
 	if requested["default.ip"] || requested["default.user"] {
 		t.Error("auth endpoints fell back to the business default limits: those are far " +
 			"too loose for the only endpoints that accept password guesses")
+	}
+}
+
+// TestLogoutBodyGovernanceRunsBeforeAuth 补上 order-body-governance-before-auth
+// 自陈缺失的那条判据。
+//
+// `/logout` 的 body 治理与认证都在路由级，改动只是把两个中间件换序——而换序
+// **没有任何测试兜住**：换回去不会有任何失败。交叉验证把它列为"无判据"，这里补上。
+//
+// 断言执行序而非注册序：注册顺序对了但被别的中间件插队同样会坏。
+func TestLogoutBodyGovernanceRunsBeforeAuth(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	var authRan bool
+	engine := gin.New()
+	Register(engine.Group("/api/v1"), Deps{
+		Auth: func(c *gin.Context) { authRan = true; c.Next() },
+	})
+
+	// 只接受 JSON 的路由，故意送 text/plain。
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader("plain"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415（Content-Type 不符应由 body 治理拒绝）", rec.Code)
+	}
+	if authRan {
+		t.Error("认证在 body 治理之前执行：一个内容类型不符的请求先付掉了" +
+			"令牌解析与撤销查询，而 body 治理只读 header")
 	}
 }

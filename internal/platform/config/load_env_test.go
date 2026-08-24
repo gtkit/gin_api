@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -85,6 +86,40 @@ news:
 // TestEnvOverrideFillsEmptyValue 覆盖规划场景 1：YAML 留空、环境变量供值。
 //
 // 这是该能力存在的理由——密钥不必明文落在磁盘配置里。
+// clearConfigEnv 清掉宿主环境里全部参与配置覆盖的 APP_ 变量，测试结束后原样恢复。
+//
+// **为什么必须显式清**：本文件里断言"不设环境变量时行为不变"的用例，其前提是环境里
+// 没有 APP_DATABASE__* 一类变量——而它此前只是**假设**如此，没有建立这个前提。
+// 开发者在 shell 里导出一个 APP_DATABASE__PASSWORD（本地联调的常见做法）就会让这些
+// 用例失败，而失败信息读起来像配置加载有 bug："database.password = "xxx", want empty"。
+//
+// 前提必须由测试自己建立，不能靠宿主环境凑巧干净——这与本仓对端口依赖的处置同源：
+// 环境依赖要么显式声明，要么显式消除，不能默认它成立。
+//
+// APP_ROOT 不清：它指定项目根目录、不参与配置覆盖，清掉会改变路径解析。
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(key, envPrefix) {
+			continue
+		}
+		if _, reserved := envReservedNames[key]; reserved {
+			continue
+		}
+		saved := os.Getenv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+		t.Cleanup(func() {
+			if err := os.Setenv(key, saved); err != nil {
+				t.Errorf("restore %s: %v", key, err)
+			}
+		})
+	}
+}
+
 func TestEnvOverrideFillsEmptyValue(t *testing.T) {
 	t.Setenv("APP_DATABASE__PASSWORD", "from-env")
 
@@ -114,6 +149,8 @@ func TestEnvOverrideReplacesExistingValue(t *testing.T) {
 //
 // 这条是整个能力的兼容性底线：既有部署不设任何 APP_ 变量，加载结果必须与从前一致。
 func TestEnvOverrideAbsentKeepsYAML(t *testing.T) {
+	clearConfigEnv(t)
+
 	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML()))
 	if err != nil {
 		t.Fatalf("loadFromReader returned error: %v", err)
@@ -131,6 +168,8 @@ func TestEnvOverrideAbsentKeepsYAML(t *testing.T) {
 // 环境里叫 DATABASE__PASSWORD 的变量可能属于任何其它软件，
 // 让它影响本服务的配置会造成难以追查的串扰。
 func TestUnprefixedEnvIsIgnored(t *testing.T) {
+	clearConfigEnv(t)
+
 	t.Setenv("DATABASE__PASSWORD", "not-mine")
 
 	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML()))

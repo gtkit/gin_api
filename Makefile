@@ -152,8 +152,9 @@ project-init: ## Instantiate a new project from this scaffold mother (usage: mak
 	go run -tags $(GO_BUILD_TAGS) . project init --name $(NAME) $(ARGS)
 
 hooks: ## 安装 git 钩子（pre-push 跑 make check-ci）
-	## 门禁存在不等于门禁被执行。CI 侧只部署、不承载质量 job（外部冻结契约），
-	## 所以本地这一道是代码进入共享历史前唯一的自动检查点。
+	## 门禁存在不等于门禁被执行。外部冻结的部署流水线只负责部署、不承载质量 job，
+	## 而本仓自己的质量 CI（.github/workflows/check.yml）调的正是 make check-ci ——
+	## 与本地同一入口，因此两处不会漂移。本地这一道是提交前的第一个检查点。
 	## 幂等可重跑；已存在非本仓的同名钩子时报错中止，不覆盖。
 	@ bash ./scripts/install-hooks.sh
 

@@ -9,6 +9,10 @@ config/pem/*.pem
 # 必须忽略：deployment.sh 的 git clean -f -d 不带 -x，忽略项不会被清除，
 # 否则每次发布会把 releases/ 历史版本清光、回滚失效。
 /releases/
+# 本地构建产物：`make build` 的输出目录。
+# 此前未被忽略，于是任何跑过一次 make build 的人都会看到一个未跟踪的 bin/，
+# 而它极易被顺手 `git add .` 带进提交——一个交叉编译的二进制进库既无意义又很大。
+/bin/
 # Go workspace：单模块仓库不需要，仅本机开发用（含本地 replace 目录），不提交。
 go.work
 go.work.sum

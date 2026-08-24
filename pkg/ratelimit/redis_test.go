@@ -3,7 +3,6 @@ package ratelimit
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,20 +135,34 @@ func TestRedisBackendFailsWhenScriptCannotLoad(t *testing.T) {
 	}
 }
 
-// TestRedisBackendReportsUncleanProbe 验证探测键删除失败被报告。
+// TestRedisBackendToleratesUncleanProbe 验证探测键删除失败**不**让构造失败。
 //
-// 不报的话，"探测留了垃圾"永远不会被发现——键虽有短 TTL，但删除失败
-// 通常意味着权限问题，那会在别处以更难查的方式再次出现。
-func TestRedisBackendReportsUncleanProbe(t *testing.T) {
+// 本测试此前叫 TestRedisBackendReportsUncleanProbe，断言的是相反的行为：
+// "删除失败被报告"，而报告的形式是让构造返回错误。那个断言有两处站不住：
+//
+//   - 它的理由写着"键虽有短 TTL，但删除失败通常意味着权限问题"。而权限问题
+//     具体就是"允许 EVALSHA、不允许 DEL"这种最小权限配置——限流的运行期路径
+//     从不删除键（键一律靠 TTL 回收），所以那个权限缺失不影响任何功能。
+//     让它阻断启动，等于以"更安全"的名义拒绝一个完好可用的系统。
+//   - 它引用的那句错误信息说键"expire in 10s"，用的是一个从未被用于设置任何
+//     TTL 的常量；真实 TTL 由 bucketTTL 算出（探针策略约 61s）。运维照它等
+//     10 秒等不到键消失。
+//
+// 清理仍然会被尝试（见断言），只是失败被就地丢弃——依据是两个键都在创建
+// 它们的同一段 Lua 里 PEXPIRE。
+func TestRedisBackendToleratesUncleanProbe(t *testing.T) {
 	t.Parallel()
 
 	fake := &fakeRedis{delErr: errors.New("NOPERM del")}
-	_, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
-	if err == nil {
-		t.Fatal("NewRedisBackend succeeded although the probe key could not be removed")
+	backend, err := NewRedisBackend(context.Background(), fake, WithKeyPrefix("svc"))
+	if err != nil {
+		t.Fatalf("仅 DEL 无权限时构造必须成功，得到: %v", err)
 	}
-	if !strings.Contains(err.Error(), "could not be removed") {
-		t.Fatalf("error %q does not describe the probe cleanup failure", err)
+	if backend == nil {
+		t.Fatal("构造成功却返回 nil 后端")
+	}
+	if _, _, del := fake.counts(); del == 0 {
+		t.Error("清理是尽力而为，但必须真的尝试过")
 	}
 }
 

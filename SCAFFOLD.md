@@ -200,7 +200,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 统一错误响应 | `internal/middleware/error.go` | 收集 handler 挂在 gin context 上的错误，转成与业务接口同一个 JSON 信封 |
 | 校验错误中文消息 | `internal/bootstrap/validation.go` + `internal/pkg/response` | 绑定/校验失败的 422 `msg` 为中文、按对外 json 字段名呈现（多字段失败取字段名排序后的第一条）；启动阶段初始化翻译器（`gtkit/verify`），失败即启动失败——validator 首次校验即缓存字段名，晚初始化会让消息漏出 Go 字段名。非校验类绑定错误（如 JSON 语法错误）不经翻译路径 |
 | 请求指标 | `internal/middleware/metrics.go` | 记录每请求的量/时延/状态码。recorder 为 nil 时返回直接放行的中间件——"没接指标"是正常路径，装配处不写判空。默认 no-op，导出见「接指标导出」 |
-| CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法由路由索引提供，不硬编码 |
+| CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法取自 gin 在 405 路径上写好的 `Allow` 头（真实路由树匹配），不自建路由索引、也不硬编码——自建索引要在应用层重写一遍路由匹配，而两份匹配逻辑一旦在带参路由这类边界上不一致，表现就是「预检说路径不存在、实际请求却成功」。因此本中间件要求 engine 开启 `HandleMethodNotAllowed`；路径上自行注册了 OPTIONS 时，预检交给那个 handler |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
 | 认证与授权分离 | `internal/middleware/auth.go` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403。token **只经请求头承载**（`Authorization: Bearer` 为主，`App-Token` 为存量兼容）：query 会进访问日志、Referer 与浏览器历史，是长期泄漏面 |
 | 限流契约 | `pkg/ratelimit` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |

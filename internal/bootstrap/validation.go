@@ -20,7 +20,23 @@ var verifyInit = verify.New
 // 注册只能发生在这里（启动阶段、任何绑定之前）：validator/v10 的注册
 // 与校验不能并发执行，handler 里注册规则是数据竞争。
 var validationOptions = func() []verify.Option {
-	return nil
+	return []verify.Option{
+		// http_url 的中文消息。
+		//
+		// **必须补**：validator 的中文翻译包收录了 `url` 与 `max`，没有收录 `http_url`。
+		// 而母版的 UserUpdateRequest.Avatar 用的是后者——`url` 不限 scheme，实测放行
+		// javascript:／data:／file:／vbscript:，那类值入库后由消费端渲染成链接即是
+		// 存储型 XSS 载体。
+		//
+		// 缺了这条注册，校验照样生效，只是该字段的错误消息退回英文（"link http_url"）。
+		// 那是一次静默的、按字段的降级：不报错、不影响判定，只有真正触发该字段
+		// 校验失败时才看得见。
+		//
+		// 用 WithValidationTranslation 而不是 WithTranslation：前者给**既有** tag 配消息，
+		// 后者用于新 tag 且要求同时提供校验函数——而 http_url 的校验函数由 validator
+		// 内置，自己再写一份只会多一处可能与内置行为漂移的实现。
+		verify.WithValidationTranslation("http_url", "{0}必须是 http 或 https 链接"),
+	}
 }
 
 // initValidation 初始化 gin 共享 validator 的中文翻译与自定义规则。

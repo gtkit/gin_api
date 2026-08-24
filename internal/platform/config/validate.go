@@ -323,8 +323,9 @@ func validateAppConfig(app AppConfig) error {
 		// 保留这个键并静默忽略，会让人以为自己配置了保护而实际没有；
 		// 因此这里直接拒绝启动，并在错误里给出迁移方向。
 		errs = append(errs, errors.New(
-			"application.writertimeout is no longer supported: the server-level write timeout is "+
-				"now fixed at 0 and each route sets its own connection-level write deadline via routespec.TimeoutPolicy; "+
+			"application.writertimeout is no longer supported: the server-level write timeout is now a "+
+				"conservative fallback set in code, and routes that need longer writes extend the "+
+				"connection-level deadline per response via the route timeout middleware; "+
 				"remove this key from your config"))
 	}
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))

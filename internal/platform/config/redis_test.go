@@ -161,7 +161,12 @@ func TestDeprecatedWriteTimeoutIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("validateAppConfig accepted the deprecated application.writertimeout key")
 	}
-	for _, want := range []string{"application.writertimeout", "no longer supported", "TimeoutPolicy"} {
+	// 断言指向**实际存在**的机制。此前这里断言 "TimeoutPolicy"——那是随路由 DSL
+	// 一并移除的机制名，照它去找会一无所获，而这条文案出现在启动失败的那一刻，
+	// 是使用者最需要它准确的时候。
+	for _, want := range []string{
+		"application.writertimeout", "no longer supported", "conservative fallback", "route timeout middleware",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not mention %q", err, want)
 		}

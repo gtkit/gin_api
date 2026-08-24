@@ -116,8 +116,26 @@ pathlib.Path(out).write_text(src, encoding="utf-8")
 PY
 }
 
+# run_migrate 在**隔离的配置环境**里执行迁移命令。
+#
+# 必须清掉宿主的 APP_ 配置覆盖变量（APP_ROOT 除外——它正是本函数用来指向临时
+# 工作区的）：本脚本刻意自带 MySQL 容器并写一份临时 env.yml，而 APP_ 覆盖的
+# 优先级**高于** YAML。宿主环境里存在 APP_DATABASE__PORT 一类变量时，迁移与
+# schema 比对会静默地打到另一个数据库上——门禁照常给出结论，而那个结论与
+# 本脚本创建的库无关。
+#
+# 这不是假设性风险：把 APP_DATABASE__* 指向另一个库时，本门禁实测报出
+# "实际 schema 与快照不一致"，而真实原因是它验错了对象。
+isolate_config_env() {
+  local key
+  for key in $(env | sed -n -E 's/^(APP_[A-Za-z0-9_]+)=.*/\1/p'); do
+    [ "$key" = "APP_ROOT" ] && continue
+    unset "$key"
+  done
+}
+
 run_migrate() {
-  APP_ROOT="$workdir" GOWORK=off go run . "$@"
+  ( isolate_config_env; APP_ROOT="$workdir" GOWORK=off go run . "$@" )
 }
 
 dump_schema() {

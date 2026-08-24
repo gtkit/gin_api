@@ -153,7 +153,7 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 		}
 	})
 
-	t.Run("redis down degrades", func(t *testing.T) {
+	t.Run("redis down degrades when optional", func(t *testing.T) {
 		t.Parallel()
 		report := Run(context.Background(), configWithRealKeys(t), Options{
 			Deep:   true,
@@ -161,6 +161,33 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 		})
 		if got := findCheck(t, report, "redis").Status; got != StatusDegraded {
 			t.Fatalf("redis status = %q, want degraded", got)
+		}
+		if code := report.ExitCode(); code != ExitDegraded {
+			t.Fatalf("exit code = %d, want %d", code, ExitDegraded)
+		}
+	})
+
+	// redis 必需时必须是 fail 而不是 degraded。
+	//
+	// 这条缺失的后果具体而危险：auth.mode: local 的部署里 Redis 是必需的
+	// （刷新令牌、撤销表、租约都在它上面）。此前 redis 检查把 required 写死为
+	// false，Redis 挂掉时 doctor --deep 报退出码 2「仅降级」，部署脚本据此放行，
+	// 紧接着服务因必需 Redis 失败而根本起不来——doctor 在它最该拦住的那一刻放了行。
+	//
+	// 必需性由调用方注入，与装配层的能力推导同源（bootstrap.RedisRequired）。
+	t.Run("redis down fails when required", func(t *testing.T) {
+		t.Parallel()
+		report := Run(context.Background(), configWithRealKeys(t), Options{
+			Deep:          true,
+			RedisRequired: true,
+			Probes:        Probes{PingDB: func(context.Context) error { return nil }, PingRedis: down},
+		})
+		if got := findCheck(t, report, "redis").Status; got != StatusFail {
+			t.Fatalf("redis status = %q, want fail：必需依赖不可达不能记成降级", got)
+		}
+		if code := report.ExitCode(); code != ExitFailed {
+			t.Fatalf("exit code = %d, want %d：运维脚本按退出码放行，2 会让它放过一台起不来的机器",
+				code, ExitFailed)
 		}
 	})
 }

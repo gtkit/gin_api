@@ -302,10 +302,14 @@ func (m *WorkerManager) startBackgroundWorkers(parent context.Context) {
 			continue // 已在启动屏障内执行并清理
 		}
 
-		// 豁免理由：cancel 不在本函数内调用是**有意的**——它被存进 runningWorker，
+		// cancel 不在本函数内调用是**有意的**——它被存进 runningWorker，
 		// 由 StopKind 在关停对应相位时调用，这正是分相关停的实现方式。
 		// 三个类别都由 gracefulShutdown / StopAll 覆盖，不存在无人调用的分支。
-		runCtx, cancel := context.WithCancel(base) //nolint:gosec // cancel 由 StopKind 持有并调用
+		//
+		// 此处此前带一条 //nolint:gosec 抑制。当前钉住的 lint 版本不再在该行报告，
+		// 于是那条抑制被 nolintlint 判为 unused——一条没有作用的抑制指令留着，
+		// 只会让门禁永久报一条无法归零的问题。
+		runCtx, cancel := context.WithCancel(base)
 		rw := &runningWorker{entry: entry, cancel: cancel, done: make(chan struct{})}
 
 		m.runMu.Lock()

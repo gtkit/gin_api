@@ -61,7 +61,16 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 				return fmt.Errorf("validate runtime configuration: config loader returned nil")
 			}
 
-			opts := diagnostics.Options{Deep: deep, Timeout: perCheck}
+			// 必需性由装配层的能力推导给出，不让诊断层自己再算一遍。
+			//
+			// 命令层是唯一同时看得到装配层与诊断层的位置，因此注入点在这里：
+			// 诊断层若反向 import 装配层，就会在装配起不来时连诊断也用不了，
+			// 而那正是最需要诊断的时候。
+			opts := diagnostics.Options{
+				Deep:          deep,
+				Timeout:       perCheck,
+				RedisRequired: bootstrap.RedisRequired(cfg),
+			}
 			if deep && buildProbes != nil {
 				probes, release, probeErr := buildProbes(cmd.Context())
 				if probeErr != nil {

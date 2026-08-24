@@ -175,15 +175,28 @@ scan_image() {
   info "导出镜像归档供扫描"
   docker save "$ref" -o "$archive" || fail "镜像导出失败（扫描器错误不可豁免）"
 
+  # 两次 trivy 调用**共享缓存卷**。
+  #
+  # 不共享的后果是每次发版要做两次完整的冷启动：扫描与 SBOM 各自重新下载整个
+  # 漏洞库（容器是 --rm，库存在容器内）。实测在网络较慢时这会让发版随机失败在
+  # 其中一步上——三次尝试分别死在拉 manifest、库下载超时、SBOM 分析超时。
+  #
+  # 共享缓存**不削弱门禁**：扫描器镜像、漏洞库来源与判定标准都不变，省掉的只是
+  # 同一次发版内的重复下载；库是否过期由 trivy 自己判断并更新，新鲜度不受影响。
+  local trivy_cache="gin-api-trivy-cache"
+  local trivy_common=(--rm
+    -v "${workdir}:/scan:ro" -v "${ROOT_DIR}/${CACHE_DIR}:/out"
+    -v "${trivy_cache}:/root/.cache/trivy")
+
   info "trivy 镜像漏洞扫描"
-  docker run --rm -v "${workdir}:/scan:ro" -v "${ROOT_DIR}/${CACHE_DIR}:/out" \
+  docker run "${trivy_common[@]}" \
     "$TRIVY_IMAGE" image --input /scan/image.tar \
     --format json --output /out/trivy-image.json --exit-code 0 --quiet ||
     fail "trivy 镜像扫描执行失败（扫描器错误不可豁免）"
   info "镜像扫描结果 → $out"
 
   info "生成 CycloneDX SBOM"
-  docker run --rm -v "${workdir}:/scan:ro" -v "${ROOT_DIR}/${CACHE_DIR}:/out" \
+  docker run "${trivy_common[@]}" \
     "$TRIVY_IMAGE" image --input /scan/image.tar \
     --format cyclonedx --output /out/sbom.cdx.json --quiet ||
     fail "SBOM 生成失败（扫描器错误不可豁免）"

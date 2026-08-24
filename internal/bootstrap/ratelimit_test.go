@@ -195,7 +195,7 @@ func TestRedisRequiredForRateLimit(t *testing.T) {
 				t.Fatalf("redisRequiredForRateLimit = %v, want %v", got, tc.want)
 			}
 			// redisRequired 必须把该判据接进去，否则推导表形同虚设。
-			if got := redisRequired(cfg); got != tc.want {
+			if got := RedisRequired(cfg); got != tc.want {
 				t.Fatalf("redisRequired = %v, want %v (the rate limit rule must feed the requirement table)",
 					got, tc.want)
 			}

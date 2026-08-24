@@ -256,3 +256,37 @@ func TestEnabledLabel(t *testing.T) {
 		})
 	}
 }
+
+// TestDoctorWiresRedisRequirednessFromAssembly 守住 doctor 的必需性接线。
+//
+// 这条是交叉验证与对抗性审查同时指出的缺口：被修的原缺陷正是"redis 检查的
+// required 被写死成 false 而没人检查"，而修完之后**仍然没人检查**——实测把
+// `cmd/doctor.go` 里那行 `RedisRequired: bootstrap.RedisRequired(cfg)` 删掉，
+// `go build` 与 `go test ./cmd/... ./internal/diagnostics/... ./internal/bootstrap/...`
+// 全部照样通过。诊断层的反证只覆盖 Options 字段的语义，覆盖不到命令层的接线。
+//
+// 判据是源码级的：命令层必须把装配层的推导交给诊断层，而不是自己传常量或省略。
+// 精确到行为需要一次带真实 Redis 的 deep 探测，那超出单测范围；而本判据能挡住的
+// 正是"这一行被删掉/被写成字面量"这种回归。
+func TestDoctorWiresRedisRequirednessFromAssembly(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("doctor.go")
+	if err != nil {
+		t.Fatalf("read doctor.go: %v", err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "RedisRequired: bootstrap.RedisRequired(cfg)") {
+		t.Fatal("doctor 命令未把装配层的 Redis 必需性推导注入诊断层：\n" +
+			"诊断层自己算一份必然与装配层分叉，而写死成常量会让必需依赖不可达时" +
+			"退出码落在「仅降级」档——运维脚本据此放行，紧接着服务根本起不来")
+	}
+	// 反向锚：不得出现写死的字面量。
+	for _, literal := range []string{"RedisRequired: false", "RedisRequired: true"} {
+		if strings.Contains(body, literal) {
+			t.Errorf("doctor 命令把 Redis 必需性写死为 %q：必需性取决于哪些能力被启用，"+
+				"必须由装配层推导", literal)
+		}
+	}
+}

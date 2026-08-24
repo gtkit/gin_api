@@ -21,11 +21,6 @@ const (
 	// 没有余量的话，一个刚好在补满边界到达的请求会读到已过期的键，
 	// 拿到一个满桶——限额被悄悄放大。
 	ttlSlack = 60 * time.Second
-	// probeKeyTTL 是能力探测用的临时键的存活时长。
-	//
-	// 必须短且自清理：探测失败时清理动作本身也可能失败，
-	// 而一个永久残留的探测键会长期占着 Redis 内存且无人认领。
-	probeKeyTTL = 10 * time.Second
 )
 
 // scriptRunner 是本包需要的 Redis 能力，便于测试替换。
@@ -144,12 +139,20 @@ func (b *RedisBackend) probe(ctx context.Context) error {
 			"cannot serve rate limit decisions", decision.Outcome)
 	}
 
-	// 探测产物立即删除：桶键**与**注册表键。删除失败不算探测失败——两者都带
-	// 短 TTL 会自行回收，但必须让调用方知道，否则"探测留了垃圾"永远不会被发现。
-	if err := b.client.Del(ctx, b.qualifiedKey(key), b.registryKey(probePolicy)).Err(); err != nil {
-		return fmt.Errorf("probe succeeded but its keys could not be removed (they expire in %s): %w",
-			probeKeyTTL, err)
-	}
+	// 探测产物尽力清理：桶键与注册表键。
+	//
+	// **清理失败就地丢弃，不作为探测结果返回。** 这是一次有意的忽略错误，依据是
+	// 两个键的存活时长由创建它们的同一段脚本设置（script.go 对注册表键与桶键
+	// 各有一次 PEXPIRE），因此清理失败的唯一后果是它们多存活一个 TTL 周期后
+	// 自行消失。
+	//
+	// 反过来把它当成能力失败，会让"允许 EVALSHA 但不允许 DEL"这种最小权限配置
+	// 使含 fail_closed 策略的进程**永久起不来**——而限流能力本身完好：运行期
+	// 路径从不删除键，键一律靠 TTL 回收。那个方向的失败不是保守，是错误。
+	//
+	// 也不经 Observer 上报：被上报的事实是一个自行消失的状态，而 Observer 是
+	// 对外发布的接口，为它加一个方法会破坏所有外部实现者。
+	_ = b.client.Del(ctx, b.qualifiedKey(key), b.registryKey(probePolicy)).Err()
 	return nil
 }
 

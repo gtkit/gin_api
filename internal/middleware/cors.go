@@ -22,21 +22,22 @@ var allowedRequestHeaders = []string{
 const allowHeadersValue = "Content-Type,AccessToken,X-CSRF-Token,Authorization," +
 	"Token,X-Token,X-User-Id,App-Token"
 
-// AllowedMethodsFunc 返回某条路径允许的方法（形如 "GET, HEAD, OPTIONS"）。
-//
-// 路径不存在时返回空串。由路由索引提供——CORS 中间件自己不知道注册了哪些路由，
-// 而预检必须回答"这个路径上这个方法真的能用吗"。
-type AllowedMethodsFunc func(path string) string
-
 // Cors 返回 CORS 中间件，仅允许 allowedOrigins 中列出的来源跨域访问。
 //
 // 特殊值 "*" 表示允许所有来源（开发环境），此时 Access-Control-Allow-Credentials
 // 设为 false（规范要求 wildcard 与 credentials 不兼容）。
 //
-// allowedMethods 为 nil 时预检不校验目标路由。传 nil 只应出现在没有路由索引的
-// 场景（例如本包的单测）；生产装配必须传入，否则预检会对不存在的路径回 204，
-// 而随后的实际请求拿到 404——客户端据此排查的方向是错的。
-func Cors(allowedOrigins []string, allowedMethods AllowedMethodsFunc) gin.HandlerFunc {
+// **要求 engine 开启 HandleMethodNotAllowed**：预检的可用方法取自 gin 在
+// 405 路径上写的 `Allow` 头，该标志关闭时 gin 既不产生 405 也不写该头，
+// 于是每个预检都会被判成"路径不存在"。生产 engine 对该标志有断言
+// （internal/router 的 engine 字段清单测试）。
+//
+// 预检的"这个路径上这个方法能用吗"取自 gin 已经写好的 `Allow` 响应头，
+// 本中间件不自建路由索引：gin 在进入中间件链之前就用**真实的路由树匹配**
+// 算出了该路径支持的方法（RFC 7231 §6.5.5 要求 405 携带 Allow），
+// 而应用层自己推导必然要重写一遍那套匹配——两份匹配逻辑在带参路由这类
+// 边界上一旦不一致，表现就是"预检说路径不存在、实际请求却成功"。
+func Cors(allowedOrigins []string) gin.HandlerFunc {
 	allowAll := slices.Contains(allowedOrigins, "*")
 
 	// 预构建小写白名单，用于精确匹配。
@@ -80,21 +81,18 @@ func Cors(allowedOrigins []string, allowedMethods AllowedMethodsFunc) gin.Handle
 		}
 
 		c.Header("Access-Control-Allow-Headers", allowHeadersValue)
-		// 允许方法取自**路由索引**，与预检校验同一来源。
-		//
-		// 写死一份清单会与实际注册的路由分叉，而分叉的两个方向都坏：
-		// 清单少写（此前缺 PATCH 与 HEAD）会让浏览器拒绝一个服务端支持的方法；
-		// 多写则让浏览器放行一个会 405 的请求。
-		//
-		// 拿不到索引时退回一个保守常量：那只出现在没有索引的装配场景（本包单测），
-		// 生产装配必然传入。
-		c.Header("Access-Control-Allow-Methods", allowedMethodsHeader(c, allowedMethods))
 		c.Header("Access-Control-Expose-Headers",
 			"Content-Length,Access-Control-Allow-Origin,Access-Control-Allow-Headers,"+
 				"Content-Type,New-Token,New-Expires-At")
 
+		// Access-Control-Allow-Methods 只写在预检响应里。
+		//
+		// 按 CORS 规范，浏览器只在预检响应中消费该头。写在每个跨源响应上不仅无用，
+		// 还需要为"已匹配到路由"的实际请求另找一个方法来源——而实际请求走的不是
+		// 405 路径，gin 不会设 Allow，于是只能自建索引或退回保守常量，两者都是
+		// 本次要消除的形态。
 		if c.Request.Method == http.MethodOptions {
-			handlePreflight(c, allowedMethods)
+			handlePreflight(c)
 			return
 		}
 
@@ -107,7 +105,7 @@ func Cors(allowedOrigins []string, allowedMethods AllowedMethodsFunc) gin.Handle
 // 无条件 204 的后果是**预检成功、实际请求失败**：浏览器据此放行，随后拿到
 // 404 或 405，而开发者看到的现象是"CORS 明明通过了却还是失败"——
 // 排查方向被引向了错误的地方。
-func handlePreflight(c *gin.Context, allowedMethods AllowedMethodsFunc) {
+func handlePreflight(c *gin.Context) {
 	// 预检响应还依这两个请求头而变。
 	c.Writer.Header().Add("Vary", "Access-Control-Request-Method")
 	c.Writer.Header().Add("Vary", "Access-Control-Request-Headers")
@@ -119,18 +117,40 @@ func handlePreflight(c *gin.Context, allowedMethods AllowedMethodsFunc) {
 		return
 	}
 
-	if allowedMethods != nil {
-		allow := allowedMethods(c.Request.URL.Path)
-		if allow == "" {
-			// 路径不存在：预检不该假称它可用。
-			c.AbortWithStatus(http.StatusNotFound)
+	// 可用方法取自 gin 已写好的 Allow 头。
+	//
+	// OPTIONS 通常不是注册过的方法，因此 gin 走的是"方法不匹配"分支：它用真实的
+	// 路由树匹配枚举该路径支持的方法、Set("Allow", ...)，然后才进入中间件链。
+	// 于是这里读到的就是框架的答案——带路径参数的路由也被正确匹配，而路径确实
+	// 不存在时它为空（gin 落到未匹配路由分支，不设该头）。
+	//
+	// 不自建索引：那要在应用层重写一遍路由树匹配，而两份匹配逻辑一旦在边界上
+	// 不一致，表现就是"预检说路径不存在、实际请求却成功"。
+	allow := c.Writer.Header().Get("Allow")
+	if allow == "" {
+		// 空 Allow 有两种成因，必须区分，否则会把可用的路径判成不存在。
+		//
+		// ① 应用**自己注册了 OPTIONS**：gin 直接匹配到那条路由，根本不进 405 分支，
+		//    因此不会写 Allow。此时路径是存在的，且应用显式接管了预检——交给它处理。
+		//    判据用 c.FullPath()：405 与 404 两条路径上它都为空，只有真的匹配到
+		//    路由时才非空。
+		// ② 路径确实不存在：gin 落到未匹配路由分支，同样不写 Allow。
+		//
+		// 不区分的后果与本中间件要消除的缺陷完全同形：预检回 404 而实际请求 200，
+		// 浏览器据此拦下一个本该成功的请求。区别只是触发条件从"带参路由"换成
+		// "注册了 OPTIONS 的路径"。
+		if c.FullPath() != "" {
+			c.Next()
 			return
 		}
-		if !methodAllowed(allow, requested) {
-			c.Header("Allow", allow)
-			c.AbortWithStatus(http.StatusMethodNotAllowed)
-			return
-		}
+		// 路径不存在：预检不该假称它可用。
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if !methodAllowed(allow, requested) {
+		// Allow 已由 gin 写在响应头上，无需重复设置。
+		c.AbortWithStatus(http.StatusMethodNotAllowed)
+		return
 	}
 
 	if !requestHeadersAllowed(c.GetHeader("Access-Control-Request-Headers")) {
@@ -140,24 +160,9 @@ func handlePreflight(c *gin.Context, allowedMethods AllowedMethodsFunc) {
 		return
 	}
 
+	// 预检通过：把该路径实际支持的方法回给浏览器。
+	c.Header("Access-Control-Allow-Methods", allow)
 	c.AbortWithStatus(http.StatusNoContent)
-}
-
-// fallbackAllowedMethods 是拿不到路由索引时的保守取值。
-//
-// 只在没有索引的装配场景出现（本包单测）；生产装配必然传入索引。
-const fallbackAllowedMethods = "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS"
-
-// allowedMethodsHeader 返回该路径实际支持的方法。
-func allowedMethodsHeader(c *gin.Context, allowedMethods AllowedMethodsFunc) string {
-	if allowedMethods == nil {
-		return fallbackAllowedMethods
-	}
-	if allow := allowedMethods(c.Request.URL.Path); allow != "" {
-		return allow
-	}
-	// 路径未注册：预检会在下一步返回 404，这里的取值不影响结论。
-	return fallbackAllowedMethods
 }
 
 // methodAllowed 判断请求的方法是否在 Allow 头里。

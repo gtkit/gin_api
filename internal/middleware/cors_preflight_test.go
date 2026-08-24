@@ -9,13 +9,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// corsEngine 挂一条 CORS 中间件，并按给定的 Allow 表回答路由存在性。
-func corsEngine(t *testing.T, origins []string, allow map[string]string) *gin.Engine {
+// corsEngine 挂一条 CORS 中间件，并注册真实路由。
+//
+// 不再注入"路径 → 方法"表：预检的可用方法现在取自 gin 已写好的 Allow 头，
+// 而那要求 engine 真的注册过路由且开启 HandleMethodNotAllowed。用假表会让
+// 测试绕开真实机制——本次的缺陷（带参路由被误判为路径不存在）恰恰是假表
+// 掩盖不了、真路由才暴露得出来的那一类。
+func corsEngine(t *testing.T, origins []string) *gin.Engine {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Cors(origins, func(path string) string { return allow[path] }))
+	// 与生产装配同款：gin 据此在 405 路径上写 Allow。
+	engine.HandleMethodNotAllowed = true
+	engine.Use(Cors(origins))
 	engine.Handle(http.MethodGet, "/api/v1/thing", func(c *gin.Context) { c.Status(http.StatusOK) })
 	return engine
 }
@@ -28,8 +35,6 @@ func corsEngine(t *testing.T, origins []string, allow map[string]string) *gin.En
 // 每条分支都要覆盖：中间件里每个分支都会 return，逐条补写必然漏掉其中一条。
 func TestCorsAlwaysDeclaresVaryOrigin(t *testing.T) {
 	t.Parallel()
-
-	allow := map[string]string{"/api/v1/thing": "GET, HEAD, OPTIONS"}
 
 	tests := []struct {
 		name   string
@@ -56,7 +61,7 @@ func TestCorsAlwaysDeclaresVaryOrigin(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			corsEngine(t, []string{"https://example.com"}, allow).ServeHTTP(rec, req)
+			corsEngine(t, []string{"https://example.com"}).ServeHTTP(rec, req)
 
 			vary := rec.Header().Values("Vary")
 			var hasOrigin bool
@@ -78,8 +83,6 @@ func TestCorsAlwaysDeclaresVaryOrigin(t *testing.T) {
 // 而开发者看到的现象是"CORS 明明通过了却还是失败"——排查方向被引向错误的地方。
 func TestPreflightValidatesTheTargetRoute(t *testing.T) {
 	t.Parallel()
-
-	allow := map[string]string{"/api/v1/thing": "GET, HEAD, OPTIONS"}
 
 	tests := []struct {
 		name           string
@@ -134,7 +137,7 @@ func TestPreflightValidatesTheTargetRoute(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			corsEngine(t, []string{"https://example.com"}, allow).ServeHTTP(rec, req)
+			corsEngine(t, []string{"https://example.com"}).ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
@@ -165,8 +168,7 @@ func TestPreflightAllowHeadersMatchesWhatIsAccepted(t *testing.T) {
 		req.Header.Set("Access-Control-Request-Headers", name)
 
 		rec := httptest.NewRecorder()
-		corsEngine(t, []string{"https://example.com"},
-			map[string]string{"/api/v1/thing": "GET, HEAD, OPTIONS"}).ServeHTTP(rec, req)
+		corsEngine(t, []string{"https://example.com"}).ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("header %q is advertised in Access-Control-Allow-Headers but the preflight "+

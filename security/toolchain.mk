@@ -37,7 +37,7 @@ TRIVY_IMAGE    = aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806
 
 # golangci-lint 消除 PATH 漂移：本地安装版本必须与此处声明一致。
 # 该版本无法经 go.mod tool 指令构建（依赖树与本模块冲突），因此改为声明 + 执行前校验。
-GOLANGCI_LINT_VERSION = 2.11.4
+GOLANGCI_LINT_VERSION = 2.13.1
 
 # 扫描产物固定路径，全部在 .gitignore 排除的 .cache/security/ 下。
 SECURITY_CACHE = .cache/security

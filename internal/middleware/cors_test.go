@@ -11,7 +11,11 @@ import (
 func newCorsTestEngine(allowedOrigins []string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(Cors(allowedOrigins, nil))
+	// 与生产装配同款：预检的可用方法取自 gin 在 405 路径上写的 Allow 头，
+	// 该标志关闭时 gin 不产生 405、也不写 Allow，预检就无从判断路径是否存在。
+	// 生产侧由 engine_baseline_test 的字段清单断言它为 true。
+	engine.HandleMethodNotAllowed = true
+	engine.Use(Cors(allowedOrigins))
 	engine.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
@@ -133,6 +137,13 @@ func TestCors_PreflightAllowed(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodOptions, "/test", nil)
 	req.Header.Set("Origin", "https://app.example.com")
+	// 预检的定义就是带 Access-Control-Request-Method 的 OPTIONS。
+	//
+	// 这里此前没有设置它——于是这个名叫 Preflight 的测试发的并不是预检请求，
+	// 而它断言的 Access-Control-Allow-Methods 之所以还在，是因为旧实现把该头
+	// 无条件写在每个跨源响应上。该头按规范只在预检响应里被消费，收进预检分支
+	// 之后，这个测试才真正测到它声称要测的东西。
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 

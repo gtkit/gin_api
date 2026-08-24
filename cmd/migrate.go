@@ -53,6 +53,8 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() erro
 			&models.User{},
 			&models.UserProfile{},
 			&models.UserDeactivation{},
+			&models.UserRole{},
+			&models.OperationAudit{},
 			// scaffold:migrate-models
 		),
 		migrate.WithTimeout(5*time.Minute),

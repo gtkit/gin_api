@@ -3,7 +3,6 @@ package router
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -31,6 +30,12 @@ type Options struct {
 	// 此时 ClientIP 只取真实 TCP peer 地址，客户端伪造的转发头一律忽略。
 	TrustedProxies []string
 	// RemoteIPHeaders 是允许用于提取客户端 IP 的转发头，仅在请求来自可信代理时才被采信。
+	//
+	// **空 = 不采信任何转发头**（客户端 IP 取 TCP 连接对端），不回落框架默认值。
+	//
+	// 限定 TCP 是准确的：gin 对 unix socket 监听会把「可信」置真而对端 IP 保持 nil，
+	// 此时留空会让 ClientIP() 返回字面量 "<nil>"。本仓只 net.Listen("tcp", …)，
+	// 因此不可达；但母版的注释不该写成无条件断言。
 	RemoteIPHeaders []string
 	// HealthChecker 供系统探针路由使用。为 nil 时 /ready 一律报未就绪——
 	// 装配错误必须表现为"未就绪"，而不是让错配的实例被纳入流量。
@@ -133,7 +138,9 @@ func ginModeFromEnv(envName string) string {
 //	UseEscapedPath          false 保持：同上。
 //	UnescapePathValues      true  保持：路径参数解码后交给 handler，是既有行为。
 //	RemoveExtraSlash        false 保持：同 RedirectFixedPath，归一化会与上游规则分叉。
-//	RemoteIPHeaders         配置驱动：opt 为空时保持 gin 默认。
+//	RemoteIPHeaders         配置驱动，**无条件赋值**：留空即不采信任何转发头。
+//	                        不保留 gin 默认（X-Forwarded-For / X-Real-IP）——那会让
+//	                        "留空 = 不取 header" 这条随仓文档承诺不成立。
 //	TrustedPlatform         ""    保持：设置它等于无条件信任某云厂商的 IP 头，
 //	                        本仓走显式可信代理列表。
 //	MaxMultipartMemory      32MB  保持：仓库无 multipart 路由，全局 body 上限已封顶
@@ -150,9 +157,16 @@ func configureEngine(engine *gin.Engine, opt Options) error {
 	if err := engine.SetTrustedProxies(opt.TrustedProxies); err != nil {
 		return err
 	}
-	if len(opt.RemoteIPHeaders) > 0 {
-		engine.RemoteIPHeaders = opt.RemoteIPHeaders
-	}
+	// **无条件赋值**：留空即"不采信任何转发头"。
+	//
+	// 加 len > 0 判断的后果是留空时 gin 的默认值继续生效——默认是
+	// ["X-Forwarded-For", "X-Real-IP"]，而随仓配置样例把空值注释为
+	// "不配置=不从任何 header 取 IP"。客户端 IP 是审计事实与限流主体的来源，
+	// 运维据注释以为它只来自 TCP 对端，实际却来自请求头。
+	//
+	// gin 的判据是 RemoteIPHeaders != nil 且遍历该切片，因此 nil 与空切片
+	// 都会落到连接对端，不需要额外的哨兵值。
+	engine.RemoteIPHeaders = opt.RemoteIPHeaders
 
 	engine.RedirectTrailingSlash = false
 	engine.HandleMethodNotAllowed = true
@@ -218,31 +232,11 @@ func useGlobalMiddleware(engine *gin.Engine, opt Options) error {
 	engine.Use(middleware.SecurityHeaders())
 	engine.Use(middleware.ErrorHandler())
 	if len(opt.AllowedOrigins) > 0 {
-		engine.Use(middleware.Cors(opt.AllowedOrigins, allowedMethodsOf(engine)))
+		engine.Use(middleware.Cors(opt.AllowedOrigins))
 	}
 	engine.Use(middleware.MaxBytesLimit(middleware.MaxBytesLimitConfig{MaxBytes: opt.MaxBodyBytes}))
 
 	return nil
-}
-
-// allowedMethodsOf 返回一个查询函数：给定路径，回答它允许哪些方法。
-//
-// 预检必须回答"这个路径上这个方法真的能用吗"。无条件回 204 的后果是
-// **预检成功、实际请求失败**：浏览器据此放行，随后拿到 404 或 405，
-// 而开发者看到的现象是"CORS 明明通过了却还是失败"。
-//
-// 闭包在**请求期**读 engine.Routes()：路由此时已全部注册完毕，
-// 而中间件是在注册之前挂上去的。
-func allowedMethodsOf(engine *gin.Engine) middleware.AllowedMethodsFunc {
-	return func(path string) string {
-		var methods []string
-		for _, r := range engine.Routes() {
-			if r.Path == path {
-				methods = append(methods, r.Method)
-			}
-		}
-		return joinMethods(methods)
-	}
 }
 
 // RateLimitStager 按策略标识取限流中间件，并**按作用域**分成认证前、认证后两组。
@@ -345,15 +339,6 @@ func NewRateLimitStager(opt Options) (RateLimitStager, PreIdentityRateLimiter, f
 	}
 
 	return stager, preIdentity, verify
-}
-
-// joinMethods 把方法列表拼成 Allow 头的值，顺序稳定。
-func joinMethods(methods []string) string {
-	if len(methods) == 0 {
-		return ""
-	}
-	slices.Sort(methods)
-	return strings.Join(slices.Compact(methods), ", ")
 }
 
 // registerSystemRoutes 注册存活与就绪探针。

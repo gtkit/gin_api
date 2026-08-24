@@ -69,6 +69,26 @@ func validateProxyConfig(proxy ProxyConfig, env Env) error {
 		}
 	}
 
+	// 声明了可信代理却不列转发头 = 矛盾配置，拒绝启动。
+	//
+	// `trusted_proxies` 的**唯一**用途就是决定"来自哪些对端时才采信转发头"。
+	// 列了代理却不列头，那份信任没有任何作用，而使用者显然是想让代理后面的
+	// 真实客户端 IP 生效。
+	//
+	// **为什么必须 fail-closed 而不是留空回落框架默认值**：客户端 IP 是限流主体
+	// 与审计事实的来源。静默回落到框架默认（X-Forwarded-For / X-Real-IP）会让
+	// 配置说的和实际做的不一致；而静默取连接对端则让代理后面所有客户端共用
+	// 同一个限流桶（IP 维度限流退化成全局限流，第一个繁忙时段把所有人打成 429），
+	// 审计里的来源 IP 也全部变成代理自己。两种静默都是错的，只有报错能让人改对。
+	if len(proxy.TrustedProxies) > 0 && len(proxy.RemoteIPHeaders) == 0 {
+		errs = append(errs, errors.New(
+			"proxy.trusted_proxies is set but proxy.remote_ip_headers is empty: trusting proxies only "+
+				"has an effect through those headers, so this combination silently makes every client "+
+				"behind the proxy share one rate-limit bucket and records the proxy's own IP in audit "+
+				"logs. List the header your proxy actually sets (commonly [\"X-Forwarded-For\"]), or "+
+				"clear proxy.trusted_proxies if no proxy fronts this service"))
+	}
+
 	return errors.Join(errs...)
 }
 

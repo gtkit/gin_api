@@ -117,6 +117,17 @@ type Options struct {
 	Timeout time.Duration
 	// Probes 提供 deep 检查的执行体；为 nil 时 deep 检查记为 skipped。
 	Probes Probes
+	// RedisRequired 表示当前配置下 Redis 是**必需**依赖，探测失败即 fail 而非 degraded。
+	//
+	// **由调用方注入，不在本包推导**：必需性取决于"哪些依赖 Redis 的能力被启用了"，
+	// 而那张能力表在装配层（bootstrap.RedisRequired）。本包自己再算一遍必然与它
+	// 分叉，而分叉的两份里诊断这份永远不会跟上——它此前被硬编码为 false，于是
+	// auth.mode: local 的部署在 Redis 挂掉时得到退出码 2「仅降级」，运维脚本据此
+	// 放行，紧接着服务因必需 Redis 失败而根本起不来。
+	//
+	// 注入而非 import bootstrap：诊断层的价值之一是在装配起不来时仍然可用，
+	// 不该反向依赖装配层。命令层同时看得到两边，是唯一不产生第二份实现的注入点。
+	RedisRequired bool
 	// ProbesUnavailable 表示 deep 检查的探测能力**建立失败**（如数据库连不上
 	// 导致运行时起不来），与"没有注入探针"区分开。
 	//
@@ -211,7 +222,7 @@ func buildChecks(cfg *config.Config, opts Options) []check {
 			return checkProbe(ctx, opts, opts.Probes.PingDB, true)
 		}},
 		{name: "redis", run: func(ctx context.Context) CheckResult {
-			return checkProbe(ctx, opts, opts.Probes.PingRedis, false)
+			return checkProbe(ctx, opts, opts.Probes.PingRedis, opts.RedisRequired)
 		}},
 	}
 }
