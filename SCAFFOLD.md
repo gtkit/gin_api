@@ -192,6 +192,7 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 |------|------|------|
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
+| 文档引用存在性检查 | `scripts/check-doc-refs.go` | 跟踪的 `*.md` 里的链接与反引号裸路径必须解析到真实路径；解析不到要么修好、要么在登记表中认领，失效的登记同样失败 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层有保守写超时兜底，流式路由经 `ResponseController` 覆盖 |
 | Panic 恢复 | `internal/middleware/recovery.go` | 全局第一道。普通 panic 返回统一 500；连接已断或响应已开始写出时只记日志不改写响应。**刻意不接告警**——请求级异常接告警会在一次流量异常里形成告警风暴，淹没进程级事件 |

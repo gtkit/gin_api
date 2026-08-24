@@ -203,6 +203,13 @@ security-release: ## 供应链门禁（发版前）：追加全历史密钥扫�
 check-package-vars: ## 包级变量重绑定检查（每处必须删除或在登记表中认领）
 	@ GOWORK=off go run ./scripts/check-package-vars.go internal cmd
 
+check-doc-refs: ## 文档内引用必须解析到真实路径（每处解析不到要么修好，要么在登记表中认领）
+## 先自检后实检：自检造一批已知的死引用与一批良性形态，断言前者被抓到、后者零误报。
+## 缺了它，正则写坏或规则收得过紧时实检会全绿——判据失效恰恰不会有任何症状，
+## 而 docs/ 是工程约定的单一来源，它的引用腐烂只会在有人照着文档找不到东西时才暴露。
+	@ GOWORK=off go run ./scripts/check-doc-refs.go --self-test
+	@ GOWORK=off go run ./scripts/check-doc-refs.go
+
 
 check-tidy: ## 依赖清单必须整洁
 	## 手工跑过的检查必须进门禁：只在记得的时候跑，等于它不存在。
@@ -260,7 +267,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

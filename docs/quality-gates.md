@@ -14,7 +14,8 @@ make check-ci   # 推送前（额外跑脚手架防腐冒烟）
 1. 架构边界检查（`check-architecture`）
 2. 预置能力清单穷尽（`check-capability-inventory`，含 `--self-test`）
 3. 开发期工具隔离（`check-scaffold-isolation`）
-4. 依赖清单整洁（`check-tidy`）、包级变量重绑定认领（`check-package-vars`）
+4. 依赖清单整洁（`check-tidy`）、包级变量重绑定认领（`check-package-vars`）、
+   文档引用存在性（`check-doc-refs`）
 5. 镜像摘要固定、安全判定自检、发布接线、应用身份零漂移、钩子安装语义、构建上下文
 6. `golangci-lint run ./...` 与 `go vet ./...`
 7. race 测试并生成聚合 coverage profile
@@ -93,6 +94,8 @@ import 路径，不碰 shell 脚本。硬编码母版路径的正则在派生项
 | `check-capability-inventory.sh` | `--print-scope` | 覆盖范围与扫描行为同源 |
 | `check-generator.sh` | `--self-test` | 门禁验的是工作树而非 HEAD |
 | `check-generator.sh` | `--verify-scope` | 导出范围恰好覆盖四类边界行为 |
+| `check-doc-refs.go` | `--self-test` | 已知的死引用确实被抓到，且一批良性形态（符号引用、外部模块名、glob、端点路径）零误报 |
+| `check-doc-refs.go` | `--print-scope` | 覆盖范围与扫描行为同源 |
 
 新增门禁时，如果它的失效不会有任何症状，就必须配自检。
 

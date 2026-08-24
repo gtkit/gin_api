@@ -42,6 +42,26 @@ make check-capability-inventory   # 自检 + 实检（已接入 make check）
 这是一条**存在性**判据：它只回答"这个名字在清单里出现过吗"，检测不到归类错误或
 说明与行为不符。扩大覆盖范围不等于提高检查强度。
 
+## check-doc-refs.go
+
+校验被 git 跟踪的 `*.md` 里的引用是否指向真实路径。两类引用都查：Markdown 行内链接
+`[文字](路径)`，以及反引号里的仓内路径（如 `docs/architecture.md`）——后者是本仓真正会腐烂的那一类
+（文档表格里的路径大多是裸路径而非链接）。
+
+```bash
+make check-doc-refs                                   # 自检 + 实检（已接入 make check）
+GOWORK=off go run ./scripts/check-doc-refs.go --print-scope   # 打印覆盖范围
+GOWORK=off go run ./scripts/check-doc-refs.go --self-test     # 只跑自检
+```
+
+解析不到的引用要么修好，要么在 `doc-refs-allowlist.txt` 里登记并写明所有者与理由；
+一条不再命中的登记同样使门禁失败——豁免不得比现实活得久。
+
+这是一条**存在性**判据。它检测不到：引用指向了一个存在但错误的文件、锚点是否真的存在、
+不在反引号里的散文式路径提及、以及符号引用（`包路径.符号`）是否仍然存在。
+判定"是不是仓内路径"的规则刻意保守（须含内部 `/`，末段带已知扩展名或以 `/` 结尾，
+排除绝对路径 / `~` / `$` / 花括号 / glob），因此外部模块名与符号引用不参与判定。
+
 ## test-coverage.sh / check-coverage.sh
 
 `test-coverage.sh` 运行 race 测试并生成聚合 coverage profile，`check-coverage.sh` 校验最低覆盖率。统一入口：
