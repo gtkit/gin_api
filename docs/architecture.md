@@ -181,8 +181,16 @@ repository → models, 中立错误包
 
 - **纯基础包：任何层可 import**。无业务、无 HTTP 协议、无 gorm/redis 依赖的工具包，
   以及 `appmeta`、`models`、`shared/*`。纯分页类型（查询入参与结果元信息）放 `internal/pkg/paging`。
+  租户身份载体 `internal/shared/tenant` 属此类，且它「只依赖标准库」这一点有判据看住——
+  否则某天为了省事在里面 import gorm 取个常量，包的可见范围就变了，而没有任何检查会异常。
 - **基础设施型包：仅 repository、runtime/module、platform 可 import**。依赖 GORM/Redis/文件系统/
-  外部 SDK 的工具包，例如 GORM 分页执行器 `github.com/gtkit/ormx/paginator`（含 `gtkit/ormx` 全部子包）。
+  外部 SDK 的工具包，例如 GORM 分页执行器 `github.com/gtkit/ormx/paginator`（含 `gtkit/ormx` 全部子包），
+  以及租户隔离插件 `internal/pkg/dataisolate`。
+
+租户隔离的包切分是被本节的规则逼出来的，不是审美选择：中间件要把租户写进请求
+上下文，而中间件是协议层、隔离插件依赖 GORM 属基础设施型包——中间件 import 插件包
+会违反可见范围。于是身份载体（纯基础包）与插件（基础设施型包）必须分家。
+副产品是 `application` 层也能读写租户身份而不必 import GORM。
 - **协议/HTTP 适配包：仅 transport/http、router、middleware 可 import**。例如 response、
   gin context helper、中间件。
 
@@ -219,6 +227,12 @@ repository → models, 中立错误包
 - **出站 HTTP 不得用全局 client**：`http.DefaultClient` / `http.Get` / `http.Post` / `http.Head`
   用的是同一个进程级 client，它的 `Timeout` 为 0（没有任何超时），Transport 全局共享
   （一个依赖的连接池耗尽会波及所有其他依赖），且无处设置单依赖的超时或连接池。
+- **数据访问层不得使用裸 SQL 入口**：`internal/repository` 与 `internal/runtime` 下禁止
+  `.Raw(` / `.Exec(`。它是租户数据隔离能力边界的执行者——隔离在 SQL 生成之前经 clause
+  注入条件，而裸 SQL 那里 Statement 里是调用方给的文本，没有可注入的结构。
+  放行等于留一个不报错、不进日志的越权入口；改成「检查 SQL 文本里有没有判别列」
+  则是把正确性押在字符串形态上。把检测不到的洞变成提交前失败，是唯一诚实的处置。
+  `internal/platform/data` 不在覆盖范围内：那里的裸 SQL 是启动期连接校验，不碰业务表。
 
 ## 访问控制由代码位置表达
 

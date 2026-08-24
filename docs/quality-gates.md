@@ -76,6 +76,7 @@ make hooks
 - 禁 `ShouldBind` / `ShouldBindJSON` / `ShouldBindWith`
 - 客户端 IP 只经唯一 accessor 取值
 - 禁 `http.DefaultClient` / `http.Get` / `http.Post` / `http.Head`
+- 数据访问层（repository / runtime）禁裸 SQL `.Raw(` / `.Exec(`
 - 开发期工具不进默认构建的依赖闭包
 
 测试文件单独豁免，避免集成测试误判生产代码。

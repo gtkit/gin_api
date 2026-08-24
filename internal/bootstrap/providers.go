@@ -171,6 +171,14 @@ func newProviders(
 		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
 	}
 
+	// 2a''. 共享表租户隔离。**按配置**安装，默认关闭——与埋点不同，这个插件装上
+	//       就改变语句行为，不能替使用者做这个决定。装配期会核对判别列确实存在
+	//       于某个受管模型上、豁免清单里的表名确实存在，对不上即启动失败：
+	//       列名写错时判定永不命中，隔离会静默消失而一切看起来正常。
+	if err := installTenantIsolation(inf.cfg, inf.resources); err != nil {
+		return nil, err
+	}
+
 	// 2b. 指标仪表。必须先于中间件与路由：两者都要在装配期拿到它。
 	//     未接导出时全局是 no-op，每次记录都是空操作。
 	recorder, err := metrics.New(otel.GetMeterProvider().Meter(metricsScope))

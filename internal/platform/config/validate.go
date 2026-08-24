@@ -154,6 +154,9 @@ func (c *Config) Validate() error {
 	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateDataIsolateConfig(c.DataIsolate); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateTelemetryConfig(c.Telemetry); err != nil {
 		errs = append(errs, err)
 	}
