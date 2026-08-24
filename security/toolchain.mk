@@ -17,7 +17,7 @@
 #
 # 升级流程：`docker buildx imagetools inspect <tag>` 取顶层 Digest，改这里，
 # 再跑 `make check-image-digests`。绝不手抄或推测摘要。
-GOLANG_IMAGE = golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468
+GOLANG_IMAGE = golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
 ALPINE_IMAGE = alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 # 受限验证的测试运行器。
 #
@@ -27,7 +27,7 @@ ALPINE_IMAGE = alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68af
 # "git 不存在"失败，把真正的端口信号淹没在噪音里。
 #
 # 与交付镜像不一致是可以接受的：它只是测试运行器，不进任何交付物。
-RESTRICTED_RUNNER_IMAGE = golang:1.26@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+RESTRICTED_RUNNER_IMAGE = golang:1.27@sha256:65b6f280bf050ec5af12716857e8ea8439d694dbba8f31ceeb7630670071f2bb
 
 MYSQL_IMAGE  = mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
 REDIS_IMAGE  = redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2

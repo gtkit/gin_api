@@ -133,9 +133,13 @@ func startPprofServer(cfg config.PprofConfig) (*pprofHandle, error) {
 // 挂进全局 mux，业务 engine 若也用了它，pprof 就会暴露在业务端口上。
 func newPprofMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	// pprof.Index 处理 /debug/pprof/ 下的 heap、goroutine、allocs、block、
-	// mutex、threadcreate 等子路径；profile/cmdline/symbol/trace 是特殊
-	// handler，必须单独注册。
+	// pprof.Index 按名分发 /debug/pprof/ 下的**全部**内置 profile（heap、goroutine、
+	// goroutineleak、allocs、block、mutex、threadcreate）；profile/cmdline/symbol/trace
+	// 是特殊 handler，必须单独注册。
+	//
+	// 按名分发而不是逐个显式注册：后者看起来更明确，实际是把「Go 新增内置 profile」
+	// 变成「文档承诺的端点静默 404」。goroutineleak（Go 1.27 新增）正是靠按名分发
+	// 自动可用的。TestPprofMuxServesEveryBuiltinProfile 钉住这一点。
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile) // CPU profile

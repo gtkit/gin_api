@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	runtimepprof "runtime/pprof"
 	"strconv"
 	"strings"
 	"testing"
@@ -227,6 +228,77 @@ func TestPprofUsesItsOwnMux(t *testing.T) {
 		if h, pattern := mux.Handler(req); h == nil || pattern == "" {
 			t.Errorf("no handler registered for %s", path)
 		}
+	}
+}
+
+// TestPprofMuxServesEveryBuiltinProfile 钉住独立 mux 能服务 runtime/pprof 的
+// **每一个**内置 profile，而不是一份手工维护的端点白名单。
+//
+// 为什么需要它：本仓刻意不用 net/http/pprof 的 init 副作用（那会把 handler 挂进全局
+// DefaultServeMux，业务端口一旦也用它就连带暴露 pprof），改为手工注册。手工注册天然
+// 诱导"把端点逐个列出来"——那看起来更明确，实际是把「Go 新增内置 profile」变成
+// 「文档承诺的端点静默 404」。Go 1.27 的 goroutineleak 就是第一个撞上这条的：
+// 它靠 pprof.Index 的按名分发自动可用，任何白名单式重构都会丢掉它且无人报错。
+//
+// 反证性质：把 newPprofMux 改成逐个显式注册并漏掉任一内置 profile，本测试即失败。
+func TestPprofMuxServesEveryBuiltinProfile(t *testing.T) {
+	t.Parallel()
+
+	mux := newPprofMux()
+
+	profiles := runtimepprof.Profiles()
+	if len(profiles) == 0 {
+		t.Fatal("runtime/pprof reports no builtin profiles; the check would be vacuous")
+	}
+
+	for _, p := range profiles {
+		name := p.Name()
+		h, pattern := mux.Handler(httptestRequest("/debug/pprof/" + name))
+		if h == nil || pattern == "" {
+			t.Errorf("no handler for builtin profile %q; a whitelist-style registration "+
+				"would silently 404 the endpoint the pprof guide promises", name)
+		}
+	}
+}
+
+// TestPprofServesGoroutineLeakProfile 验证 goroutineleak 端点**真的能取到数据**，
+// 而不只是"handler 已注册"。
+//
+// 手册承诺的是端点可用，所以断言落在响应上。注意该端点每次请求都会强制一次完整 GC
+// （Go 1.27 的泄漏检测走 GC 可达性分析），因此它只出现在这一个用例里，不进任何循环。
+func TestPprofServesGoroutineLeakProfile(t *testing.T) {
+	testutil.RequireLoopback(t)
+	resetProfileRates(t)
+
+	h, err := startPprofServer(config.PprofConfig{Enabled: true, Host: "127.0.0.1", Port: "0"})
+	if err != nil {
+		t.Fatalf("startPprofServer: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown: %v", err)
+		}
+	})
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("http://" + h.Addr() + "/debug/pprof/goroutineleak?debug=1")
+	if err != nil {
+		t.Fatalf("GET /debug/pprof/goroutineleak: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %q", resp.StatusCode, body)
+	}
+	// debug=1 的文本形态以 profile 名开头；空泄漏集合（total 0）同样是有效结果——
+	// 断言的是端点提供该 profile，不是本进程一定有泄漏。
+	if !strings.Contains(string(body), "goroutineleak profile") {
+		t.Fatalf("response is not a goroutineleak profile: %q", body)
 	}
 }
 

@@ -1,6 +1,6 @@
 # gin_api
 
-`gin_api`（模块路径 `github.com/gtkit/gin-api`）是基于 Go 1.26、Gin、GORM、MySQL 和 Redis 的模块化 Web 服务脚手架，定位为**孵化新项目的脚手架母版**。
+`gin_api`（模块路径 `github.com/gtkit/gin-api`）是基于 Go 1.27、Gin、GORM、MySQL 和 Redis 的模块化 Web 服务脚手架，定位为**孵化新项目的脚手架母版**。
 
 ## 作为脚手架母版孵化新项目
 

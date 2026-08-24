@@ -9,6 +9,36 @@
 
 ### 变更
 
+- ⚠ **Go 基线由 1.26 升至 1.27**：`go.mod` 声明 `go 1.27`，builder 镜像与受限验证运行器同步为
+  `golang:1.27-alpine` / `golang:1.27`（均钉多平台 OCI index 摘要）。交付二进制因此获得 1.27 的运行时
+  能力，包括 `runtime/pprof` 内置的 `goroutineleak` profile（`/debug/pprof/goroutineleak`）。
+
+  声明 `go 1.27` 会翻转两个 GODEBUG 默认值：**`tracebacklabels` 0→1**——traceback 头行开始包含
+  `runtime/pprof` 的 goroutine 标签；**`x509sslcertoverrideplatform` 0→1**。本仓自身不调用
+  `pprof.Labels`/`pprof.Do`，但派生项目一旦使用 goroutine 标签，标签内容会随 panic 栈与崩溃日志一起输出。
+
+  **升级动作**：本地安装 Go 1.27+ 工具链（`make check` 所钉的 golangci-lint 2.13.1 即以 go1.27 构建）。
+  本地若有 `go.work`（未入库的 workspace），其 `go` 指令也要升到 1.27.x——否则 `go list` 会因
+  "module requires go >= 1.27, but go.work lists go 1.26.x" 失败，表现为 `make check` 第一步就报
+  依赖闭环无法枚举。若标签含敏感信息而不希望它进入 traceback，设 `GODEBUG=tracebacklabels=0`
+  （该开关官方预期长期保留）。
+
+- ⚠ **上传库 `gouploader` 升至 v1.8.1，库自身不再输出任何日志**。v1.8.0 起 gouploader 移除了内部
+  日志实现，无返回路径的错误——后台会话清理失败、被隔离的钩子 panic、宽松模式降级放行、启动期
+  安全建议——改为只经 `WithOnBackgroundError` 回调上报，**未装配时丢弃**。
+
+  本仓 `internal/pkg/upload.NewLocalUploader` 已默认把该回调接进 `logger/v2`，因此经本入口装配的
+  上传器无需改动即可保留这些事件（级别取 Error：上游未提供级别区分入参，而这些事件没有第二条
+  上报路径）。默认出口排在附加选项之前，传入自己的 `WithOnBackgroundError` 即可取代它。
+
+  同时 `github.com/gtkit/logger v1.4.6` 从依赖图消失。它此前是 gouploader 的传递依赖，本仓代码
+  从未 import 它，因此任何搜索 import 的检查都看不见——但 v1 的包级函数有 `zap.NewDevelopment()`
+  兜底，上传路径的日志会以 Debug 全开写进 stderr，绕开本仓配置的级别、轮转与字段规范。
+  `internal/pkg/upload` 下新增依赖卫兵测试，v1 若经任何传递依赖回归即失败。
+
+  **升级动作**：绕过本仓入口、直接用 gouploader 原生 API 自行装配上传器的派生项目，需自行接上
+  `WithOnBackgroundError`，否则升级后这些事件不再有任何出口。
+
 - ⚠ **`redis.dbs` 必须包含库 0**（启用下列任一能力时）：使用 `store: redis` 的限流策略、
   `auth.mode: local`、`modules.user.deactivation_retention_days > 0`。缺失即启动失败。
 
