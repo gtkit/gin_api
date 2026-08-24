@@ -82,7 +82,18 @@ preflight() {
   maj="${current%%.*}"
   patch="${current##*.}"
   min="${current#*.}"; min="${min%.*}"
-  new="v${maj}.${min}.$((patch + 1))"
+
+  # 默认 PATCH 自增。破坏性变更必须走 MINOR：项目的 Go 模块版本策略规定
+  # 破坏性变更留在现有 major 线以 **MINOR** 发布（且只允许 fail-closed 形态），
+  # 而 PATCH 会让使用者以为可以无脑升级。
+  #
+  # 做成显式 flag 而不是自动推导：哪些改动算破坏性是人的判断，脚本无从得知。
+  # 默认保持 PATCH，因此不传 flag 时行为与从前逐字一致。
+  case "$BUMP_KIND" in
+    patch) new="v${maj}.${min}.$((patch + 1))" ;;
+    minor) new="v${maj}.$((min + 1)).0" ;;
+    *)     die "未知的 bump 类型：$BUMP_KIND" ;;
+  esac
 
   ! git rev-parse -q --verify "refs/tags/$new" >/dev/null ||
     die "tag $new 已存在，拒绝重复发布"
@@ -92,7 +103,7 @@ run_release() {
   local branch current new remote
   preflight
 
-  printf 'Bump: v%s -> %s (branch %s, remote %s)\n' "$current" "$new" "$branch" "$remote"
+  printf 'Bump[%s]: v%s -> %s (branch %s, remote %s)\n' "$BUMP_KIND" "$current" "$new" "$branch" "$remote"
 
   # ① 先在本地生成 release commit——此时绝不推送、绝不打 tag。
   #    门禁必须跑在**最终 commit** 上，否则验证的是一份不会被发布的树。
@@ -174,8 +185,9 @@ STUB
 
   run_in() {
     local dir="$1" exit_code="$2"
+    shift 2
     ( cd "$dir" && PATH="$sandbox/bin:$PATH" GATE_LOG="$sandbox/gate.log" \
-        GATE_EXIT="$exit_code" bash "$script" >"$sandbox/out.txt" 2>&1 )
+        GATE_EXIT="$exit_code" bash "$script" "$@" >"$sandbox/out.txt" 2>&1 )
   }
 
   # --- 用例 1：门禁通过 → 建 tag + 推送 ---
@@ -198,6 +210,25 @@ STUB
        "refs/heads/$(git -C "$sandbox/ok" symbolic-ref --short HEAD)" >/dev/null && echo yes || echo no)" "yes"
   check "the version file is bumped" \
     "$(grep -c 'v1.2.4' "$sandbox/ok/version.go")" "1"
+
+  # --- 用例 1b：--minor 递增 MINOR 并把 PATCH 归零 ---
+  #
+  # 破坏性变更必须走 MINOR（项目的 Go 模块版本策略），而这条路径若没有判据，
+  # 算错版本号的后果是对外契约错误：使用者按 PATCH 语义无脑升级，撞上
+  # fail-closed 的破坏性变更。默认路径仍是 PATCH，因此两条都要断言。
+  : > "$sandbox/gate.log"
+  setup_repo "$sandbox/minor"
+  run_in "$sandbox/minor" 0 --minor && status=0 || status=$?
+
+  check "a minor release succeeds" "$status" "0"
+  check "--minor bumps the minor and zeroes the patch" \
+    "$(git -C "$sandbox/minor.remote.git" tag -l v1.3.0)" "v1.3.0"
+  check "--minor does not create the patch tag" \
+    "$(git -C "$sandbox/minor.remote.git" tag -l v1.2.4)" ""
+  check "--minor bumps the version file to the minor version" \
+    "$(grep -c 'v1.3.0' "$sandbox/minor/version.go")" "1"
+  check "--minor still runs the aggregated release check" \
+    "$(cat "$sandbox/gate.log")" "release-check"
 
   # --- 用例 2：门禁失败 → 无 tag、无推送、保留本地 commit ---
   : > "$sandbox/gate.log"
@@ -288,8 +319,12 @@ STUB
   echo "[self-test] OK: the release gate is provably invoked, and failure never publishes"
 }
 
+# BUMP_KIND 决定版本号如何递增；默认 patch，与本脚本此前的行为逐字一致。
+BUMP_KIND=patch
+
 case "${1:-}" in
   --self-test) run_self_test ;;
   "")          run_release ;;
-  *)           die "用法: $(basename "$0") [--self-test]" ;;
+  --minor)     BUMP_KIND=minor; run_release ;;
+  *)           die "用法: $(basename "$0") [--self-test|--minor]" ;;
 esac

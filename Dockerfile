@@ -2,7 +2,7 @@
 # 构建阶段：golang:1.26 + 静态编译
 # 依赖层缓存：先 COPY go.mod/go.sum 下载依赖，源码变更不重复拉依赖。
 # ============================================================================
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+FROM golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS builder
 
 # APP_NAME 决定 builder 阶段的产物名，来源是 project.mk（应用身份的唯一来源），
 # 由 `make image` 经 --build-arg 传入。它只在本阶段生效——容器内路径固定，见 stage 2。
