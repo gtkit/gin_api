@@ -2,7 +2,7 @@
 
 > PGO = Profile-Guided Optimization（基于性能剖析数据的编译优化）。
 > 它把 pprof 采集的 **CPU profile** 喂给 Go 编译器，让编译器针对程序的**真实热路径**做更激进的优化（内联、去虚拟化等）。
-> 本文覆盖「是否需要 → 怎么做 → 各种场景 → 坑」，所有命令贴合本项目（Go 1.26、`sonic` 标签、根目录 main 包、`make build` 构建）。
+> 本文覆盖「是否需要 → 怎么做 → 各种场景 → 坑」，所有命令贴合本项目（Go 1.27、`sonic` 标签、根目录 main 包、`make build` 构建）。
 
 ---
 
@@ -65,7 +65,7 @@
 | 是否长期运行的服务 | 是（Gin HTTP 服务 + 后台 worker） | ✅ 长期运行最划算 |
 | 是否有稳定热路径 | 是（鉴权中间件、JSON 编解码、DB/Redis 访问、LLM/订单处理每请求都走） | ✅ 热点集中 |
 | 接口调用是否多 | 多（模块化分层、大量 interface 注入，见 `providers.go`） | ✅ 去虚拟化收益大 |
-| Go 版本是否支持 | 1.26（`go.mod`），远超 PGO 要求的 1.21 | ✅ 完全支持 |
+| Go 版本是否支持 | 1.27（`go.mod`），远超 PGO 要求的 1.21 | ✅ 完全支持 |
 | 接入成本 | 仅需放一个 `default.pgo` 到根目录，构建命令不用改 | ✅ 极低 |
 | 风险 | 几乎为零（不改业务代码，可随时 `-pgo=off` 回退） | ✅ 低风险 |
 
@@ -77,7 +77,7 @@
 
 1. **pprof 已开启**：PGO 的 profile 来自 pprof 的 CPU profile 端点。端点已内置，把 `pprof.enabled` 配成 `true` 即可（见 `01` 文档第 3 节）。
 2. **能拿到代表性负载**：线上真实流量最佳；没有线上就用压测（`wrk`/`hey`）或 benchmark（见场景 D）。
-3. **Go 1.21+**：本项目 1.26，满足。
+3. **Go 1.21+**：本项目 1.27，满足。
 
 ---
 
@@ -219,7 +219,7 @@ PPROF_ADDR=127.0.0.1:16060 ./pprof/scripts/pgo-merge.sh collect 5 30
 # 因为 default.pgo 已在仓库根目录，go build 自动识别。
 build:
   stage: build
-  image: golang:1.26
+  image: golang:1.27
   script:
     - make build        # default.pgo 在根目录 → 自动 PGO
   artifacts:

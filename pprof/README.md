@@ -66,7 +66,7 @@ brew install graphviz
 | 环境判断 | `config.Env`，`IsProd()`/`IsTest()`/`IsDev()` | 控制是否启用 pprof |
 | 开发启动 | `make dev` = `go run -tags="sonic" . server -c dev` | |
 | 生产构建 | `make build` = `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags="sonic" -ldflags "-s -w"` + upx | PGO 的 `default.pgo` 放项目根目录即自动生效 |
-| Go 版本 | 1.26（`go.mod`） | 完整支持 PGO |
+| Go 版本 | 1.27（`go.mod`） | 完整支持 PGO |
 
 ---
 

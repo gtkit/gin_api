@@ -122,7 +122,7 @@ cmd_verify() {
   else
     echo "⚠ 未在编译日志中发现 -pgoprofile。可能原因："
     echo "   - default.pgo 不在 main 包目录（应在项目根：${PROJECT_ROOT}）"
-    echo "   - Go 版本过低（PGO 需 Go 1.21+，本项目 go.mod 为 1.26，正常满足）"
+    echo "   - Go 版本过低（PGO 需 Go 1.21+，本项目 go.mod 为 1.27，正常满足）"
   fi
 }
 

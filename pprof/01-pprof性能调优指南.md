@@ -54,7 +54,7 @@
 ## 2. 环境准备
 
 ```bash
-# 1) go tool pprof 随 Go 自带，确认 Go 版本（本项目要求 1.26）
+# 1) go tool pprof 随 Go 自带，确认 Go 版本（本项目要求 1.27）
 go version
 
 # 2) 火焰图的「调用图（Graph）」视图依赖 graphviz；「Flame Graph」视图是内置的不依赖它
