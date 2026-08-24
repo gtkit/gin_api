@@ -150,7 +150,9 @@ go build -a -x -tags="sonic" -o /dev/null . 2>&1 | grep pgoprofile
 
 - **本地/部署机构建**：`make build`
   = `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags="sonic" -ldflags "-s -w" -o bin/gin_api . && upx -9 bin/gin_api`
-- **CI**：`.gitlab-ci.yml` 当前**只有 `check` 阶段**（`make check` = 架构检查 + lint + vet + race 测试），**不做构建/发布**。
+- **CI**：两条流水线都只跑门禁、不做构建/发布——`.github/workflows/check.yml`
+  （用 `go-version-file: go.mod` 取 Go 版本）与 `.gitlab-ci.yml` 的 `check` 阶段，
+  内容都是 `make check`。
 
 ### PGO 融入点
 
@@ -208,7 +210,7 @@ PPROF_ADDR=127.0.0.1:16060 ./pprof/scripts/pgo-merge.sh collect 5 30
 
 ### 场景 C：CI/CD 集成
 
-本项目 CI 当前只有 `check` 阶段、不构建。两种推进方式：
+本项目 CI 当前只跑门禁、不构建（见上一节）。两种推进方式：
 
 **方式 1（当前最简单）**：把 `default.pgo` 提交进仓库，构建始终在 `make build`（部署机/手动）执行，自动带 PGO。无需改 CI。
 
@@ -233,11 +235,13 @@ build:
 
 完全没有可施压的运行环境时，可用 benchmark 产出的 CPU profile（代表性弱于真实流量，聊胜于无）：
 
+前提：本仓目前**没有 benchmark**，这条路径要先为目标包补一个 `func BenchmarkXxx`。
+
 ```bash
-# 用已有 benchmark 生成 cpu profile（本项目有 encoding / copier benchmark）
-./pprof/scripts/bench-profile.sh ./internal/pkg/encoding
+# 先为热点包写好 benchmark，再对该包采样（<包路径> 换成你补了 benchmark 的包）
+./pprof/scripts/bench-profile.sh <包路径>
 # 把产出的 cpu.pprof 当作 PGO profile
-cp pprof/profiles/bench-_internal_pkg_encoding-*/cpu.pprof default.pgo
+cp pprof/profiles/bench-*/cpu.pprof default.pgo
 go build -a -x -tags="sonic" -o /dev/null . 2>&1 | grep pgoprofile
 ```
 
@@ -262,9 +266,13 @@ go build -pgo=auto -tags="sonic" .
 - 常规迭代：每隔几个版本或每季度刷新一次即可，PGO 对轻微陈旧有鲁棒性（见第 8 节）。
 - 把「刷新 default.pgo」作为一个低频例行任务，而非每次发版都做。
 
-### 场景 G：examples 下的其它 main 包
+### 场景 G：仓库里的其它 main 包
 
-本项目 `examples/` 下有多个独立 `main.go`（`order_flow`、`bdvoice_ws_client`、`llm_sse_client`、`order_status_sse_client`）。`default.pgo` 只对**它所在目录的 main 包**生效，即只优化根目录主程序。examples 是演示程序，**通常无需** PGO；若确有需要，各自目录单独放 `default.pgo`。
+`default.pgo` 只对**它所在目录的 main 包**生效。本仓当前只有根目录一个 main 包
+（`main.go`），因此根目录那份 `default.pgo` 就是全部。
+
+将来若新增独立的 main 包（工具、示例程序），它们不会被根目录的 `default.pgo` 影响；
+确有需要时各自目录单独放一份。
 
 ### 场景 H：多环境差异
 

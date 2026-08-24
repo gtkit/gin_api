@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# collect.sh —— 一键采集 pprof profile（CPU / heap / goroutine / allocs / block / mutex / trace）
+# collect.sh —— 一键采集 pprof profile
+#              （CPU / heap / goroutine / goroutineleak / allocs / block / mutex / trace）
 #
 # 用法：
 #   ./collect.sh <类型> [秒数]
 #
 #   <类型>  必填，可选值：
-#           cpu        采集 CPU profile（默认 30 秒，可被第 2 个参数覆盖）
-#           heap       采集当前堆内存快照（存活对象）
-#           allocs     采集累计内存分配（排查 GC 压力）
-#           goroutine  采集 goroutine 全栈（排查泄漏，附带人类可读文本）
-#           block      采集阻塞 profile（需服务端已设 BlockProfileRate>0）
-#           mutex      采集锁竞争 profile（需服务端已设 MutexProfileFraction>0）
-#           trace      采集执行跟踪（默认 5 秒，可被第 2 个参数覆盖）
-#           all        采集 cpu+heap+goroutine+allocs+block+mutex（trace 因开销大不含在内）
+#           cpu            采集 CPU profile（默认 30 秒，可被第 2 个参数覆盖）
+#           heap           采集当前堆内存快照（存活对象）
+#           allocs         采集累计内存分配（排查 GC 压力）
+#           goroutine      采集 goroutine 全栈（看当前都卡在哪）
+#           goroutineleak  只采**判定为泄漏**的 goroutine（Go 1.27 起内置）。
+#                          每次请求都会强制一次完整 GC，是排障工具，别接进周期性抓取。
+#           block          采集阻塞 profile（需服务端已设 BlockProfileRate>0）
+#           mutex          采集锁竞争 profile（需服务端已设 MutexProfileFraction>0）
+#           trace          采集执行跟踪（默认 5 秒，可被第 2 个参数覆盖）
+#           all            采集 cpu+heap+goroutine+allocs+block+mutex+goroutineleak
+#                          （trace 因开销大不含在内）
 #   [秒数]  可选，对 cpu / trace / all 生效，单位秒；必须是正整数
 #
 # 环境变量：
@@ -39,7 +43,12 @@ TS="$(date +%Y%m%d-%H%M%S)"
 
 # --- 打印用法 ---
 usage() {
-  grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,30p'
+  # 只打印文件**头部的连续注释块**，不按行号截断。
+  #
+  # 原先是 `grep '^#' | sed -n '2,30p'`：它先把全文的注释行拉平，再靠硬编码行号
+  # 截断。注释块一变长（本次新增 goroutineleak 说明就触发了），尾部立刻漏进
+  # 代码里的注释；反过来变短则会吞掉用法末尾。行号与内容耦合，改一处必错另一处。
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -122,6 +131,20 @@ case "${KIND}" in
     echo "    ${SCRIPT_DIR}/analyze.sh ${OUT_DIR}/goroutine-${TS}.pprof"
     echo "    less ${OUT_DIR}/goroutine-${TS}.txt"
     ;;
+  goroutineleak)
+    # 采二进制 + debug=1 文本。**刻意不采 debug=2**：那个档位会退化成打印
+    # 全部 goroutine 栈（见 runtime/pprof 的 writeGoroutineLeak），拿到的
+    # 不再是泄漏集合，反而会让"泄漏了 5000 个"这种误读发生。
+    #
+    # 判定口径是 GC 可达性：goroutine 阻塞在「从任何可运行 goroutine 都不可达」
+    # 的并发原语上才算泄漏。因此仍被全局变量或活跃 goroutine 持有的原语所阻塞
+    # 的泄漏不会出现在这里——空结果不等于"没有泄漏"。
+    fetch "goroutineleak" "${OUT_DIR}/goroutineleak-${TS}.pprof"
+    fetch "goroutineleak?debug=1" "${OUT_DIR}/goroutineleak-${TS}.txt"
+    echo "=== 采集结束。查看命令：==="
+    echo "    ${SCRIPT_DIR}/analyze.sh ${OUT_DIR}/goroutineleak-${TS}.pprof"
+    echo "    less ${OUT_DIR}/goroutineleak-${TS}.txt"
+    ;;
   block)
     fetch "block" "${OUT_DIR}/block-${TS}.pprof"
     echo "=== 采集结束。用以下命令分析（火焰图）==="
@@ -150,7 +173,13 @@ case "${KIND}" in
     try_fetch "allocs" "${OUT_DIR}/allocs-${TS}.pprof" || failures=$((failures + 1))
     try_fetch "block" "${OUT_DIR}/block-${TS}.pprof" || failures=$((failures + 1))
     try_fetch "mutex" "${OUT_DIR}/mutex-${TS}.pprof" || failures=$((failures + 1))
-    if [ "${failures}" -ge 7 ]; then
+    # goroutineleak **必须排在最后**：它强制一次完整 GC，而 heap profile 报告的是
+    # "最近一次完成的 GC 之后"的存活对象。放在 heap/allocs 之前会让同一批快照的
+    # 基准被自己扰动；放最后则那两份已经采完，互不影响。
+    try_fetch "goroutineleak" "${OUT_DIR}/goroutineleak-${TS}.pprof" || failures=$((failures + 1))
+    # 阈值 = 上面 try_fetch 的总数。新增一项就必须同步这里，
+    # 否则"全部失败"的判定永不触发，一次彻底采空会被当成部分成功放行。
+    if [ "${failures}" -ge 8 ]; then
       echo "✗ all 模式没有成功采集任何 profile，请检查服务与 PPROF_ADDR=${PPROF_ADDR}"
       exit 1
     fi

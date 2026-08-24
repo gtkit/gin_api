@@ -12,9 +12,9 @@
 | `README.md` | 本文件，导览 + 三分钟快速上手 |
 | `01-pprof性能调优指南.md` | **核心文档**：pprof 原理、如何在本项目接入、采集、分析、实战调优全流程 |
 | `02-PGO优化指南.md` | **PGO 文档**：是否需要 PGO 的判断、完整接入流程、CI 集成、注意事项 |
-| `scripts/collect.sh` | 一键采集各类 profile（CPU / heap / goroutine / allocs / block / mutex / trace） |
+| `scripts/collect.sh` | 一键采集各类 profile（CPU / heap / goroutine / goroutineleak / allocs / block / mutex / trace） |
 | `scripts/analyze.sh` | 启动 pprof Web UI（火焰图）分析指定 profile 文件或在线端点 |
-| `scripts/bench-profile.sh` | 用 Go benchmark 生成 CPU / 内存 profile，供离线分析或 PGO 使用（仓库当前没有 benchmark，需自行为热点包补 `func BenchmarkXxx`） |
+| `scripts/bench-profile.sh` | 用 Go benchmark 生成 CPU / 内存 profile，供离线分析或 PGO 使用（本仓暂无 benchmark，需先为热点包补 `func BenchmarkXxx`） |
 | `scripts/pgo-merge.sh` | 采集 / 合并多份 CPU profile 生成 `default.pgo`，并校验构建是否启用 PGO |
 | `scripts/doctor.sh` | 自检脚本：命令依赖、脚本语法、端点连通性、PGO、`.gitignore` 状态 |
 | `04-落地状态与后续建议.md` | 当前目录是否满足需求、源码接入状态、下一步建议 |
@@ -45,7 +45,10 @@ brew install graphviz
 # 3. 采集当前堆内存快照，排查内存占用
 ./pprof/scripts/collect.sh heap
 
-# 4. 一次性采集全部类型 profile（CPU/heap/goroutine/allocs/block/mutex）
+# 4. 只采"已经永久卡死"的 goroutine（Go 1.27+；会强制一次 GC，别高频跑）
+./pprof/scripts/collect.sh goroutineleak
+
+# 5. 一次性采集全部类型（CPU/heap/goroutine/allocs/block/mutex/goroutineleak）
 ./pprof/scripts/collect.sh all
 ```
 
@@ -59,9 +62,9 @@ brew install graphviz
 | --- | --- | --- |
 | 启动入口 | `main.go` → `cmd.Execute()` → `server` 子命令 | cobra 多命令 |
 | 服务装配 | `internal/bootstrap/`（`app.go` / `providers.go` / `http.go`） | HTTP server 在此构建 |
-| Gin engine 创建 | `internal/router/init.go` 的 `InitRouterWithVersionedModules` | `gin.New()` |
-| 附加路由注册范例 | `internal/router/health.go` 的 `RegisterHealthRoutes` | 接 pprof 到 Gin 时照此风格 |
-| 全局中间件栈 | `internal/middleware/init.go` 的 `InitMiddleware` | Recovery→ErrorHandler→Cors→requestid→Logger（**无全局超时、无全局鉴权**） |
+| Gin engine 创建 | `internal/router/init.go` 的 `New(envName, opt)` | 返回 `*gin.Engine` |
+| 健康探针路由 | `internal/router/init.go:349` 注册 `GET /health`，处理逻辑在 `internal/router/health.go` | 附加路由的写法可参照它 |
+| 全局中间件栈 | `internal/router/init.go:218` 起 | `GinRecovery`→`RequestID`→〔otelgin〕→`GinLogger`→`Metrics`→`SecurityHeaders`→`ErrorHandler`→〔`Cors`〕→`MaxBytesLimit`（**无全局超时、无全局鉴权**——两者都按路由组挂） |
 | 业务监听地址 | `config.App.Host` + `config.App.Port` | 由 `-c <env>` 选择的配置文件提供 |
 | 环境判断 | `config.Env`，`IsProd()`/`IsTest()`/`IsDev()` | 控制是否启用 pprof |
 | 开发启动 | `make dev` = `go run -tags="sonic" . server -c dev` | |
@@ -94,6 +97,7 @@ pprof 端点会暴露**内存内容、调用栈、命令行参数**等敏感信�
 
 ## 六、关于 `.gitignore`
 
-- 当前根 `.gitignore` 中的 Markdown 忽略规则是 `#*.md`（已注释），所以 `pprof/*.md` 文档可以被 git 跟踪。若以后恢复启用 `*.md`，需要额外放行 `!pprof/**/*.md`。
-- 采集到的 profile 产物（`*.pprof`、`*.prof`、`profiles/`）由本目录 `pprof/.gitignore` 忽略，不会误提交。
-- **例外**：PGO 的 `default.pgo` 必须放在**项目根目录**并**提交进仓库**（这是官方最佳实践，见 `02` 文档）。
+- `pprof/*.md` 与 `pprof/scripts/*.sh` 被 git 跟踪，随仓库分发（派生项目经 `gonew` 继承）。
+- 采集产物（`profiles/`、`*.pprof`、`*.prof`、`*.pb.gz`、`*.out`）由 `pprof/.gitignore` 忽略。
+- PGO 的 `default.pgo` 在**项目根目录**且**必须提交**（官方最佳实践，见 `02` 文档），
+  任何 `.gitignore` 都不该忽略它。

@@ -101,6 +101,18 @@ error_file="$(mktemp /tmp/pprof-doctor-error.XXXXXX)"
 if curl -fsS --max-time 3 "${BASE_URL}/" >"${index_file}" 2>"${error_file}"; then
   if grep -qi "profile" "${index_file}"; then
     ok "端点可访问：${BASE_URL}/"
+    # 索引页是否列出 goroutineleak，回答的是「**正在跑的这个二进制**是不是
+    # Go 1.27+ 构建的」——而不是本机工具链版本。
+    #
+    # 检查本机 `go version` 没有诊断价值：它由 go.mod 基线和 make check 保证，
+    # 版本不够根本构建不出来，那是一个必然通过的绿灯。真正会踩的是另一件事：
+    # 线上跑的二进制是升级前构建的，于是端点里没有这个 profile，而排障的人
+    # 正照着手册去请求它。
+    if grep -q "goroutineleak" "${index_file}"; then
+      ok "端点提供 goroutineleak（运行中的二进制由 Go 1.27+ 构建）"
+    else
+      warn "端点未列出 goroutineleak：正在运行的二进制不是 Go 1.27+ 构建的，泄漏排查只能退回 goroutine profile"
+    fi
   else
     warn "端点返回了内容，但不像 pprof 索引页：${BASE_URL}/"
   fi

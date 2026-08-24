@@ -13,7 +13,7 @@ profiles/
 trace.out
 
 # 注意：
-# 1) 当前项目根 .gitignore 中的 Markdown 忽略规则是 #*.md（已注释），
-#    所以 pprof/*.md 可以被跟踪。若以后恢复启用 *.md，再追加例外：!pprof/**/*.md
+# 1) 本目录的 *.md 文档与 scripts/*.sh 都被 git 跟踪，随仓库分发；
+#    这里忽略的只是采集产物。
 # 2) PGO 的 default.pgo 不在此目录，而在项目根目录，且必须提交进仓库，
 #    不要在这里或别处忽略它。

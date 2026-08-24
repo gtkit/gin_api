@@ -246,13 +246,15 @@ go tool pprof "http://127.0.0.1:8008/debug/pprof/profile?seconds=20"
 | 端点 | `seconds=N` 的行为 |
 | --- | --- |
 | cpu（`profile`）、`trace` | 按 N 秒**时长采集**（采样这段时间） |
-| heap、allocs、goroutine、block、mutex、threadcreate | 返回 **delta（增量）profile**，即「这 N 秒内的变化量」 |
+| heap、allocs、goroutine、goroutineleak、block、mutex、threadcreate | 返回 **delta（增量）profile**，即「这 N 秒内的变化量」 |
 
 所以有一个很实用的用法——**排查随时间增长**，不用手动采两次再 `-base` 对比，一条命令直接拿到增量：
 
 ```bash
 go tool pprof -http=localhost:8082 -seconds 30 "http://127.0.0.1:8008/debug/pprof/heap"
 go tool pprof -seconds 20 "http://127.0.0.1:8008/debug/pprof/goroutine"
+# 这 30 秒内**新增**的泄漏（排查"越跑越多"最直接）
+go tool pprof -seconds 30 "http://127.0.0.1:8008/debug/pprof/goroutineleak"
 ```
 
 补充三点：
@@ -322,6 +324,8 @@ go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/heap"
 go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/allocs"
 # goroutine
 go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/goroutine"
+# goroutineleak（Go 1.27+：只给泄漏集合；每次请求会强制一次完整 GC）
+go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/goroutineleak"
 # 阻塞 / 锁竞争（需服务端开了采样率）
 go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/block"
 go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/mutex"
@@ -330,10 +334,24 @@ go tool pprof -http=localhost:8082 "http://localhost:8008/debug/pprof/mutex"
 ### 5.2 Web UI 端口与绑定地址
 
 ```bash
-go tool pprof -http=:8082 cpu.pprof          # 监听所有网卡的 8082
-go tool pprof -http=localhost:8082 cpu.pprof # 只绑本地（更安全，推荐）
+go tool pprof -http=:8082 cpu.pprof          # 只给端口 → 仍然只绑 localhost（见下）
+go tool pprof -http=localhost:8082 cpu.pprof # 等价写法，意图更明确
 go tool pprof -http=127.0.0.1:0 cpu.pprof    # 端口写 0 = 随机空闲端口
+go tool pprof -http=0.0.0.0:8082 cpu.pprof   # 真要监听所有网卡，必须显式写地址
 ```
+
+**`-http=:8082` 不会监听所有网卡。** `go tool pprof` 在 host 为空时把它补成 `localhost`
+（依据是 Go 工具链自带的 pprof 源码：
+`$(go env GOROOT)/src/cmd/vendor/github.com/google/pprof/internal/driver/webui.go`），本机实测：`lsof` 显示
+监听的是 `127.0.0.1:8082`，从局域网 IP 访问连不上。而且当监听地址是回环时，它还会**拒绝
+非本机来源的请求**（返回 403），等于两层保护。
+
+Go 1.27 把 `go tool trace -http` 也对齐到了同一行为：只给端口时同样只绑 localhost，
+要监听所有网卡必须显式写地址。
+
+> 这条以前在本文里写反了（写成"监听所有网卡"）。写反的方向很坏：它会让人以为
+> 默认是暴露的、需要额外收紧，也会让人误以为 `-http=:port` 比 `localhost:port` 危险。
+> 实际两者等价。
 
 ### 5.3 不开网页，直接出结果（适合脚本 / 无图形界面的线上机）
 

@@ -3,7 +3,7 @@
 > 目标读者：需要定位本项目 CPU 热点、内存占用、goroutine 泄漏、锁竞争的开发者。
 > 本文所有接入代码都基于项目真实结构（`internal/bootstrap`、`internal/router`、`internal/platform/config`），可直接落地。
 > 当前源码状态：pprof 端点**已内置**，由 `pprof.enabled` 配置门控（默认关闭，
-> 只允许绑字面回环 IP）。第 3 节保留为原理与选型说明，落地只需改配置。
+> 只允许绑字面回环 IP）。第 3 节讲它的选型理由与你要动的配置，落地只需改配置。
 
 ---
 
@@ -11,7 +11,7 @@
 
 1. [pprof 是什么，能分析什么](#1-pprof-是什么能分析什么)
 2. [环境准备](#2-环境准备)
-3. [在本项目接入 pprof（重点）](#3-在本项目接入-pprof重点)
+3. [本项目的 pprof 端点](#3-本项目的-pprof-端点)
 4. [采集 profile](#4-采集-profile)
 5. [分析 profile](#5-分析-profile)
 6. [线上安全访问（SSH 端口转发）](#6-线上安全访问ssh-端口转发)
@@ -36,7 +36,8 @@
 | **CPU** | `/debug/pprof/profile?seconds=N` | CPU 时间花在哪些函数上？（找计算热点） | 采集期间有开销，采完即止 |
 | **heap（堆）** | `/debug/pprof/heap` | 当前**存活对象**占用了多少内存、在哪分配的？（找常驻内存大户） | 几乎无开销，瞬时快照 |
 | **allocs（分配）** | `/debug/pprof/allocs` | 程序启动以来**累计分配**了多少？（找高频分配、GC 压力源） | 几乎无开销 |
-| **goroutine** | `/debug/pprof/goroutine` | 当前有多少 goroutine、卡在哪？（找 goroutine 泄漏 / 阻塞） | 瞬时快照 |
+| **goroutine** | `/debug/pprof/goroutine` | 当前有多少 goroutine、分别卡在哪？ | 瞬时快照 |
+| **goroutineleak** | `/debug/pprof/goroutineleak` | 哪些 goroutine 已**永久卡死**、再也不可能被唤醒？（直接给出泄漏集合） | **每次请求强制一次完整 GC**，见 4.3 |
 | **block（阻塞）** | `/debug/pprof/block` | goroutine 在哪些同步原语上**阻塞**等待？（channel、锁等待） | 需开采样率，**有开销** |
 | **mutex（锁）** | `/debug/pprof/mutex` | 哪些互斥锁**竞争**激烈？ | 需开采样率，**有开销** |
 | **trace（执行跟踪）** | `/debug/pprof/trace?seconds=N` | 调度、GC、网络阻塞的时间线细节（最细粒度） | 采集期间开销较大 |
@@ -47,7 +48,7 @@
 > - 内存持续涨 / OOM → **heap**（看常驻）+ **allocs**（看高频分配）
 > - 内存正常但 GC 频繁、延迟抖动 → **allocs**
 > - 请求变慢但 CPU 不高 → **block** + **trace**（多半阻塞在 IO / 锁 / channel）
-> - goroutine 数量只增不减 → **goroutine**（泄漏）
+> - goroutine 数量只增不减 → **goroutineleak**（直接拿到泄漏集合）→ 再用 **goroutine** 看全体在等什么
 
 ---
 
@@ -68,236 +69,96 @@ go build -tags="sonic" ./...
 
 ---
 
-## 3. 在本项目接入 pprof（重点）
+## 3. 本项目的 pprof 端点
 
-### 3.1 三种接入方式对比
+> 端点**已经内置并接好生命周期**，位置是 `internal/bootstrap/pprof.go`，装配点在
+> `internal/bootstrap/app.go:164`。本节解释它为什么长这样、你要动哪些配置。
+>
+> 这里刻意**不再提供一份可照抄的实现代码**：实现就在上面那个文件里、30 行左右、带完整
+> 中文注释。文档里再放一份副本，只会在下一次实现改动后变成一份编译不过的过期代码——
+> 这件事已经发生过一次。
+
+### 3.1 为什么是独立端口
 
 | 方式 | 做法 | 优点 | 缺点 | 是否推荐 |
 | --- | --- | --- | --- | --- |
-| **A. 独立端口** | 另起一个只绑 `127.0.0.1` 的 `http.Server`，挂 `net/http/pprof` | 与业务端口物理隔离；不经过业务中间件；线上可用防火墙/SSH 管控 | 需新增一个文件 + 改 `app.go` 几行 | ✅ **推荐** |
-| B. 挂到 Gin | 仿照 `RegisterHealthRoutes` 把 pprof 注册到业务 engine 的 `/debug/pprof` | 不用新端口 | 与业务同端口，安全风险大；经过 `GinLogger` 产生噪音日志；需自己加鉴权 | ⚠️ 仅内网/测试环境临时用 |
+| **A. 独立端口** | 另起一个只绑 `127.0.0.1` 的 `http.Server`，挂 `net/http/pprof` | 与业务端口物理隔离；不经过业务中间件；线上可用防火墙/SSH 管控 | 多一个监听 | ✅ **本项目采用** |
+| B. 挂到 Gin | 把 pprof 注册到业务 engine 的 `/debug/pprof` | 不用新端口 | 与业务同端口，安全风险大；经过访问日志产生噪音；需自己加鉴权 | ⚠ 仅内网/测试环境临时用 |
 | C. 匿名 import | `import _ "net/http/pprof"` + 自己起 `http.ListenAndServe` | 代码最少 | 把 handler 注册进全局 `DefaultServeMux`，污染全局、易误暴露 | ❌ 不推荐 |
 
-> 为什么本项目首选 A：
-> 查 `internal/middleware/init.go`，全局中间件栈是 `Recovery → ErrorHandler → Cors → requestid → GinLogger`，**没有全局超时、没有全局鉴权**。这意味着若用方式 B，`/debug/pprof` 会完全裸奔（任何人可访问），且每次采集都会刷一条访问日志。独立端口能彻底规避这两点。
+选 A 的具体理由，对照 `internal/router/init.go:218` 起的全局中间件栈
+（`GinRecovery` → `RequestID` →〔可选 otelgin〕→ `GinLogger` → `Metrics` →
+`SecurityHeaders` → `ErrorHandler` →〔可选 `Cors`〕→ `MaxBytesLimit`）：
 
-### 3.2 第 1 步：新增配置项
+- 栈里**没有全局鉴权**——鉴权是按路由组挂的。方式 B 会让 `/debug/pprof` 裸奔。
+- 栈里有 `GinLogger` 与 `Metrics`——方式 B 的每次采集都会刷访问日志、打进业务指标。
+- 栈里有 `MaxBytesLimit`——它限制请求体，对 pprof 的 GET 无碍，但把调试端点放进业务
+  中间件链意味着任何一次中间件调整都可能意外影响采集。
 
-在 `internal/platform/config/types.go` 的 `Config` 结构体中追加一个字段（紧挨现有字段，保持风格一致）：
+独立端口把这三件事一次性规避。
 
-```go
-// Config 顶层结构（节选，仅展示新增部分）
-type Config struct {
-    Env Env       `mapstructure:"-"`
-    App AppConfig  `mapstructure:"application"`
-    // ... 其余现有字段保持不变 ...
-    Pprof PprofConfig `mapstructure:"pprof"` // 新增：性能剖析端点配置
-}
+### 3.2 实现的三个关键决定
 
-// PprofConfig 控制 pprof 调试端点。
-// 默认不启用；仅在需要排查性能问题时按环境打开。
-type PprofConfig struct {
-    // Enabled 是否启动独立的 pprof HTTP 端点。
-    Enabled bool `mapstructure:"enabled"`
-    // Host pprof 监听地址。强烈建议保持 127.0.0.1，线上通过 SSH 端口转发访问。
-    // 留空时代码内兜底为 "127.0.0.1"。
-    Host string `mapstructure:"host"`
-    // Port pprof 监听端口，留空时兜底为 "6060"。
-    Port string `mapstructure:"port"`
-    // BlockProfileRate block profile 采样率：每发生 N 纳秒阻塞采样一次，0 表示关闭。
-    // 典型排查值 10000（约每 10µs 阻塞采样），排查完应改回 0。
-    BlockProfileRate int `mapstructure:"block_profile_rate"`
-    // MutexProfileFraction mutex profile 采样比例：1/N 的锁竞争事件被采样，0 表示关闭。
-    // 典型排查值 100，排查完应改回 0。
-    MutexProfileFraction int `mapstructure:"mutex_profile_fraction"`
-}
-```
+读 `internal/bootstrap/pprof.go` 时，这几处是刻意为之，不要"顺手优化"掉：
 
-对应配置文件（本项目用 `-c <env>` 选择 `config/` 下的文件）里加一段，例如**仅在 dev / test 开启**：
+- **先 `net.Listen` 再 `Serve`**：绑定失败即启动失败。若放进后台 goroutine 只打日志，
+  就会出现"配置说开了、实际没监听"，排障的人对着一个不存在的地址反复重试。
+- **不设 `WriteTimeout`**：CPU 与 trace 采集是长连接（`profile?seconds=30` 会持续 30 秒），
+  写超时会把采集从中间掐断。只设 `ReadHeaderTimeout` 防慢连接。
+- **关停时把 block/mutex 采样率清零**：采样率是**进程全局状态**，端点没了却不清零，
+  等于让进程持续付出采样开销——而那笔开销在监控上只表现为"莫名其妙变慢"。
+
+端点用**独立 `http.ServeMux`**，且靠 `pprof.Index` **按名分发**全部内置 profile，
+而不是逐个显式注册。后者看起来更明确，实际会让 Go 新增的内置 profile 静默 404 ——
+`goroutineleak` 就是这么自动可用的。`TestPprofMuxServesEveryBuiltinProfile` 钉住这一点。
+
+### 3.3 你要动的配置
+
+配置结构是 `internal/platform/config/types.go` 的 `PprofConfig`，对应配置文件里的 `pprof:` 段：
 
 ```yaml
-# config/<env> 对应配置文件中新增（YAML 示例，键名与 mapstructure tag 对齐）
 pprof:
-  enabled: true            # 生产环境建议设为 false，需要时再临时打开
-  host: 127.0.0.1          # 只绑回环，外部无法直连
+  enabled: true              # 默认 false；生产按需临时打开
+  host: 127.0.0.1            # 只允许字面回环 IP；prod 下非回环会被配置校验拒绝
   port: "6060"
-  block_profile_rate: 0    # 排查锁/channel 阻塞时临时改为 10000
-  mutex_profile_fraction: 0 # 排查锁竞争时临时改为 100
+  block_profile_rate: 0      # 排查 channel/锁阻塞时临时设 10000（约每 10µs 阻塞采一次）
+  mutex_profile_fraction: 0  # 排查锁竞争时临时设 100（1/100 的竞争事件被采样）
 ```
 
-> 不确定本项目配置文件具体格式时，先打开 `config/` 目录里某个现有 env 文件照葫芦画瓢；键的层级以 `mapstructure` tag 为准。
+字段语义与安全边界：
 
-### 3.3 第 2 步：新增 `internal/bootstrap/pprof.go`
+- `enabled` 关闭时进程完全不监听，不是"监听了但拒绝访问"。
+- `host` 在 prod 环境只接受字面回环地址，这条由配置校验强制（`auth-input-pprof-hardening`
+  的 spec 要求），远程访问走第 6 节的 SSH 端口转发。
+- `block_profile_rate` / `mutex_profile_fraction` 是**有运行时开销**的采样，
+  默认 0（关闭）。排查完记得改回 0；端点关停时代码会把它们清零，但配置留着的话下次启动又会开。
 
-新建文件，内容如下（**已含详细中文注释**，可直接复制）：
-
-```go
-package bootstrap
-
-import (
-    "context"
-    "net"
-    "net/http"
-    "net/http/pprof"
-    "runtime"
-    "time"
-
-    "gin_api/internal/platform/config"
-
-    "github.com/gtkit/logger"
-)
-
-// pprofShutdownTimeout pprof 端点优雅关闭的等待上限。
-const pprofShutdownTimeout = 3 * time.Second
-
-// startPprofServer 根据配置启动一个独立的 pprof HTTP 端点。
-//
-// 设计要点：
-//  1. 使用独立的 http.ServeMux，不污染全局 DefaultServeMux（方式 C 的弊端）；
-//  2. 默认只绑 127.0.0.1，外部无法直连，线上通过 SSH 端口转发访问；
-//  3. 与业务 engine 完全隔离，不经过任何业务中间件（无日志噪音、无超时干扰）。
-//
-// 返回一个 shutdown 函数：调用它会优雅关闭 pprof 端点。
-// 当未启用（cfg.Enabled == false）时返回一个空操作函数，调用方无需做 nil 判断。
-func startPprofServer(cfg config.PprofConfig) (shutdown func(context.Context) error) {
-    // 空操作关闭函数：未启用时返回它，简化调用方逻辑。
-    noop := func(context.Context) error { return nil }
-
-    if !cfg.Enabled {
-        logger.Info("pprof endpoint disabled")
-        return noop
-    }
-
-    // 按需开启 block / mutex 采样。这两类采样有运行时开销，
-    // 因此默认关闭（采样率为 0），仅在配置显式打开时生效。
-    if cfg.BlockProfileRate > 0 {
-        runtime.SetBlockProfileRate(cfg.BlockProfileRate)
-        logger.Infof("pprof block profile enabled, rate=%d", cfg.BlockProfileRate)
-    }
-    if cfg.MutexProfileFraction > 0 {
-        runtime.SetMutexProfileFraction(cfg.MutexProfileFraction)
-        logger.Infof("pprof mutex profile enabled, fraction=%d", cfg.MutexProfileFraction)
-    }
-
-    // 兜底默认值：未配置时绑回环 + 6060。
-    host := cfg.Host
-    if host == "" {
-        host = "127.0.0.1"
-    }
-    port := cfg.Port
-    if port == "" {
-        port = "6060"
-    }
-    addr := net.JoinHostPort(host, port)
-
-    // 手动把 net/http/pprof 的 handler 注册到独立 mux。
-    // 注意：pprof.Index 会处理 /debug/pprof/ 下的 heap、goroutine、allocs、
-    // block、mutex、threadcreate 等子路径；而 profile/cmdline/symbol/trace
-    // 是特殊 handler，必须单独注册。
-    mux := http.NewServeMux()
-    mux.HandleFunc("/debug/pprof/", pprof.Index)
-    mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-    mux.HandleFunc("/debug/pprof/profile", pprof.Profile) // CPU profile
-    mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-    mux.HandleFunc("/debug/pprof/trace", pprof.Trace) // 执行跟踪
-
-    server := &http.Server{
-        Addr:    addr,
-        Handler: mux,
-        // 不要给 pprof server 设置 WriteTimeout！
-        // CPU/trace 采集是长连接（profile?seconds=30 会持续 30 秒），
-        // 设置写超时会导致采集被中途掐断。这也是不挂到业务 engine 的原因之一。
-        ReadHeaderTimeout: 5 * time.Second,
-    }
-
-    go func() {
-        logger.Infof("pprof endpoint starting on http://%s/debug/pprof/", addr)
-        // ListenAndServe 在 server 关闭时返回 http.ErrServerClosed，属正常关闭。
-        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            logger.Errorf("pprof endpoint exited: %v", err)
-        }
-    }()
-
-    // 返回优雅关闭函数：交给调用方在进程退出时调用。
-    return server.Shutdown
-}
-```
-
-### 3.4 第 3 步：在 `app.go` 的生命周期里接入
-
-只需在 `App.Run` 开头启动、退出前关闭。下面是基于现有 `internal/bootstrap/app.go` 的**最小改动**（用 `+` 标出新增行）：
-
-```go
-func (a *App) Run(ctx context.Context) error {
-    defer a.closeResources()
-
-+   // 启动独立 pprof 端点（按配置决定是否真正监听）。
-+   // 放在最前面，确保进程一启动就能采样；defer 保证退出时优雅关闭。
-+   pprofShutdown := startPprofServer(a.runtime.Config().Pprof)
-+   defer func() {
-+       shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pprofShutdownTimeout)
-+       defer cancel()
-+       if err := pprofShutdown(shutdownCtx); err != nil {
-+           logger.Errorf("shutdown pprof endpoint: %v", err)
-+       }
-+   }()
-
-    runCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-    defer stop()
-
-    // ... 其余代码保持不变 ...
-}
-```
-
-> 说明：`a.runtime` 是 `App` 已持有的字段（见 `app.go` 第 20 行），`Config()` 方法在 `runtime.go` 已存在，无需新增访问器。
-
-### 3.5 第 4 步：验证接入成功
+### 3.4 验证端点可用
 
 ```bash
 # 1) 以开发模式启动（确保对应 env 配置里 pprof.enabled = true）
-make dev          # 等价于 go run -tags="sonic" . server -c dev
+make dev
 
-# 2) 另开终端，访问 pprof 索引页，应返回 HTML 列表
+# 2) 索引页应列出全部 profile 类型
 curl -s http://127.0.0.1:6060/debug/pprof/ | head -20
 
-# 3) 用 go tool 拉一份 5 秒 CPU profile 并进入交互界面
-go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=5
-#   进入后输入 top 看占用，输入 quit 退出
+# 3) 一条命令确认"跑着的这个二进制"是否带 goroutineleak（Go 1.27+ 构建才有）
+curl -s http://127.0.0.1:6060/debug/pprof/ | grep -c goroutineleak
+
+# 4) 或直接跑自检脚本，它会把上面这些都查一遍
+./pprof/scripts/doctor.sh
 ```
 
-看到端点列表、`go tool pprof` 能进入交互界面，即接入成功。
+### 3.5 备选：临时挂到 Gin（仅内网）
 
-### 3.6 备选：挂到 Gin（方式 B，仅内网临时用）
+若确实不想开新端口（例如临时在内网测试机排查），可以把 `net/http/pprof` 的 handler 用
+`gin.WrapF` / `gin.WrapH` 适配后挂进一个**带访问保护**的路由组。两个必须注意的点：
 
-若确实不想开新端口（例如临时在内网测试机排查），可仿照 `internal/router/health.go` 的 `RegisterHealthRoutes`，新增一个注册函数并在 `providers.go` 调用。**务必加访问保护**，否则裸奔：
+- **务必加保护**（BasicAuth / IP 白名单），否则等于把内存内容与调用栈公开。
+- 本项目 `internal/router/init.go` 设了 `engine.RedirectTrailingSlash = false`，
+  而 `go tool pprof` 默认访问带尾斜杠的 `/debug/pprof/`，路径要写准确。
 
-```go
-// 放在 internal/router/ 下，例如 pprof.go
-package router
-
-import (
-    "net/http"
-    "net/http/pprof"
-
-    "github.com/gin-gonic/gin"
-)
-
-// RegisterPprofRoutes 把 pprof 端点挂到 Gin engine 的 /debug/pprof 分组。
-// guard 是访问保护中间件（如 BasicAuth / IP 白名单），生产环境必须传入有效保护。
-func RegisterPprofRoutes(engine *gin.Engine, guard ...gin.HandlerFunc) {
-    group := engine.Group("/debug/pprof", guard...)
-    // gin.WrapF / gin.WrapH 把标准库 handler 适配成 gin.HandlerFunc。
-    group.GET("/", gin.WrapF(pprof.Index))
-    group.GET("/cmdline", gin.WrapF(pprof.Cmdline))
-    group.GET("/profile", gin.WrapF(pprof.Profile))
-    group.GET("/symbol", gin.WrapF(pprof.Symbol))
-    group.GET("/trace", gin.WrapF(pprof.Trace))
-    // Index 内部会按子路径分发到 heap/goroutine/allocs/block/mutex 等。
-    group.GET("/:name", gin.WrapH(http.HandlerFunc(pprof.Index)))
-}
-```
-
-> ⚠️ 注意 Gin 路由的尾斜杠：本项目在 `init.go` 设了 `engine.RedirectTrailingSlash = false`，访问时路径要写准确。`go tool pprof` 默认访问 `/debug/pprof/`（带尾斜杠）。这类坑也是推荐独立端口的原因之一。
+这类细节正是推荐独立端口的原因之一。
 
 ---
 
@@ -312,8 +173,11 @@ func RegisterPprofRoutes(engine *gin.Engine, guard ...gin.HandlerFunc) {
 # 采集堆内存快照
 ./pprof/scripts/collect.sh heap
 
-# 采集 goroutine 快照（排查泄漏）
+# 采集 goroutine 快照（看全体卡在哪）
 ./pprof/scripts/collect.sh goroutine
+
+# 只采**判定为泄漏**的 goroutine（Go 1.27 起内置；会强制一次 GC，见 4.3）
+./pprof/scripts/collect.sh goroutineleak
 
 # 采集累计分配（排查 GC 压力）
 ./pprof/scripts/collect.sh allocs
@@ -321,7 +185,7 @@ func RegisterPprofRoutes(engine *gin.Engine, guard ...gin.HandlerFunc) {
 # 采集 5 秒 trace
 ./pprof/scripts/collect.sh trace 5
 
-# 一次性采全部（CPU/heap/goroutine/allocs/block/mutex）
+# 一次性采全部（CPU/heap/goroutine/allocs/block/mutex/goroutineleak）
 ./pprof/scripts/collect.sh all
 
 # 指定目标地址（默认 127.0.0.1:6060）
@@ -339,14 +203,64 @@ curl -o cpu.pprof "http://127.0.0.1:6060/debug/pprof/profile?seconds=30"
 # heap：瞬时快照
 curl -o heap.pprof "http://127.0.0.1:6060/debug/pprof/heap"
 
-# goroutine：?debug=2 可直接得到人类可读的全栈文本（排查泄漏极有用）
+# goroutine：?debug=2 可直接得到人类可读的全栈文本（看全体卡在哪）
 curl -o goroutine.txt "http://127.0.0.1:6060/debug/pprof/goroutine?debug=2"
+
+# goroutineleak：直接拿到泄漏集合（Go 1.27+，会强制一次 GC，见 4.3）
+curl -s "http://127.0.0.1:6060/debug/pprof/goroutineleak?debug=1"
 
 # trace
 curl -o trace.out "http://127.0.0.1:6060/debug/pprof/trace?seconds=5"
 ```
 
 > **采集 CPU profile 的关键**：采集期间服务必须处于**有代表性的负载**下，否则采到的全是 idle。线上用真实流量；本地用压测工具（如 `wrk`、`hey`、`ab`）对热点接口打流量，边打边采。
+
+### 4.3 goroutineleak：只看真正泄漏的 goroutine
+
+Go 1.27 起 `runtime/pprof` 内置 `goroutineleak`。它和 `goroutine` 的区别是**已经做完了判断**：
+`goroutine` 给你全部 goroutine 让你自己看谁不对，`goroutineleak` 只给出运行时判定为
+**永久卡死**的那些。
+
+```bash
+# 二进制形态（喂给 go tool pprof）
+curl -o goroutineleak.pprof "http://127.0.0.1:6060/debug/pprof/goroutineleak"
+
+# 人类可读形态：debug=1 打印泄漏点的调用栈与计数
+curl -s "http://127.0.0.1:6060/debug/pprof/goroutineleak?debug=1"
+
+# 只看这 N 秒内**新增**的泄漏（delta），排查"越跑越多"
+curl -o leak-delta.pprof "http://127.0.0.1:6060/debug/pprof/goroutineleak?seconds=30"
+```
+
+**判定口径（决定了你能信它什么）**：运行时用 GC 可达性分析——goroutine 阻塞在某个并发原语上，
+且该原语**从任何可运行 goroutine 都不可达**，则判定为泄漏（谁也不可能再唤醒它）。
+所以：
+
+- 报出来的**是**泄漏，实测精度很高：5000 个阻塞在「全局 channel + 有活跃发送方」的 worker
+  一个都没被误报，500 个真泄漏全部报出。
+- 反过来，仍被全局变量或活跃 goroutine 持有的原语所阻塞的泄漏**不在这份结果里**——
+  那种 goroutine 理论上还能被唤醒，只是实际没人唤醒。**空结果的含义是"没有不可达的卡死"，
+  不是"没有泄漏"**。这类要靠 `goroutine?debug=2` 人工看。
+
+**代价：每次请求都会强制一次完整 GC**，且这次 GC 的 STW 明显高于普通 GC。本机实测
+（129MB 堆、5504 goroutine、darwin/amd64，仅供量级参考）：
+
+| | STW 暂停 | 请求耗时 |
+| --- | --- | --- |
+| 普通强制 GC | 45–105µs | — |
+| 泄漏检测 GC | 790–950µs（约 17 倍） | 约 18ms |
+| 对照：`goroutine` profile | 无额外 GC | 约 10ms |
+
+**因此它是排障工具，不要接进 Prometheus 抓取或任何周期性轮询。** 需要长期观察泄漏趋势，
+就监控 goroutine 总数，等它异常时再来采这个 profile。
+
+**两个坑**：
+
+- `?debug=2` **不是**"更详细的泄漏栈"，它会退化成打印**全部** goroutine 栈（与
+  `goroutine?debug=2` 相同）。要可读的泄漏集合用 `debug=1`。
+- 端点是否存在取决于**构建这个二进制的 Go 版本**，不是你本机的 Go 版本。用 1.26 工具链
+  构建的二进制访问它只会得到 404。`./pprof/scripts/doctor.sh` 会直接告诉你跑着的这个
+  二进制有没有它。
 
 ---
 
@@ -405,6 +319,11 @@ go tool pprof -http=:8080 -base old.pprof new.pprof
 
 排查内存泄漏：间隔一段时间采两份 heap，用 `-base` 对比，**持续增长且不释放**的分配点就是嫌疑。
 
+> **跨 Go 版本对比时必须标注工具链版本**。Go 1.27 默认开启 size-specialized malloc，
+> 小对象（<80B）的分配成本比 1.26 低约 30%，分配密集的程序整体约快 1%。用 1.26 采的
+> profile 和 1.27 采的 profile 直接 `-base` 对比，会把这部分工具链收益记成自己优化的成果。
+> 归档 profile 时把 `go version` 一起记下来，对比前先确认两份来自同一版本。
+
 ---
 
 ## 6. 线上安全访问（SSH 端口转发）
@@ -421,6 +340,16 @@ go tool pprof -http=:8080 http://127.0.0.1:16060/debug/pprof/profile?seconds=30
 ```
 
 > 这样做的好处：pprof 端点永不暴露公网，访问权限完全由 SSH 登录权限控制，无需在应用层再写鉴权。
+
+### 另一条与脱敏有关的约束：goroutine 标签会进入 traceback
+
+Go 1.27 起（本项目 `go.mod` 已声明 1.27），traceback 的头行会包含 `runtime/pprof` 的
+goroutine 标签。也就是说，一旦代码里用 `pprof.Labels` / `pprof.Do` 给 goroutine 打了标签，
+标签内容就会随 **panic 栈和崩溃日志**一起输出，而崩溃日志的流向通常比 pprof 端点宽得多。
+
+- 本项目自身不调用 `pprof.Labels` / `pprof.Do`，当前无标签可泄露。
+- 若在派生项目里用标签承载租户 ID、用户标识这类信息，要么别把敏感值放进标签，
+  要么用 `GODEBUG=tracebacklabels=0` 关掉这个行为（该开关官方预期长期保留）。
 
 ---
 
@@ -450,7 +379,10 @@ go tool pprof -http=:8080 http://127.0.0.1:16060/debug/pprof/profile?seconds=30
 - **CPU 热点**：减少重复计算 / 加缓存；避免在循环里做正则编译、反射、JSON 反复编解码；高频路径换更快实现（本项目已用 `sonic` 加速 JSON）。
 - **内存 alloc 高**：用 `sync.Pool` 复用对象；预分配 slice/map 容量；避免不必要的 `[]byte`↔`string` 转换；减少闭包逃逸。
 - **block / mutex**：缩小锁粒度 / 临界区；读多写少用 `sync.RWMutex` 或 `sync.Map`；用分片锁；channel 缓冲区调优。
-- **goroutine 泄漏**：每个 goroutine 都要有明确退出路径；用 `context` 控制生命周期；`goroutine?debug=2` 看卡在哪一行。
+- **goroutine 泄漏**：每个 goroutine 都要有明确退出路径；用 `context` 控制生命周期。
+  排查顺序是**先 `goroutineleak` 拿到泄漏集合并定位到代码行，再用 `goroutine?debug=2`
+  看这些 goroutine 周围的上下文**（谁本该唤醒它们）。`goroutineleak` 为空不等于没有泄漏，
+  判定边界见 4.3。
 
 > 一条实测教训：service 层用 map 做本地缓存而未加锁，曾在并发下直接 panic。
 > 优化并发热点时，改完务必跑 `make test-race`（= `go test -race`）验证没引入数据竞争——
@@ -475,22 +407,20 @@ go test -run=^$ -bench=. -benchmem \
 go tool pprof -http=localhost:8080 cpu.pprof
 ```
 
-> 本项目已有 benchmark：`internal/pkg/encoding/encoding_test.go`、`internal/pkg/copier/copy_test.go`，可直接作为剖析与回归基准的样板。
+> 本仓目前没有 benchmark（`grep -rl "func Benchmark" --include=*_test.go .` 为空）。
+> 要用这条路径，先为目标热点包补一个 `func BenchmarkXxx(b *testing.B)`，再跑上面的命令。
+> 补哪个包应由性能工作本身决定——为了让文档成立而随便补一个基准，等于给自己造一条
+> 没人看的曲线。
 
 ---
 
 ## 9. .gitignore 与产物管理
 
-本目录已附带 `pprof/.gitignore`，忽略采集产物（`*.pprof`、`*.prof`、`profiles/` 等），防止误提交大文件。
-
-**关于文档本身能否提交**：当前根 `.gitignore` 中的 Markdown 忽略规则是 `#*.md`（已注释），所以本目录的 `.md` 文档可以被 git 跟踪。若以后恢复启用 `*.md`，需要在其后追加例外：
-
-```gitignore
-# 允许 pprof 目录下的 Markdown 文档纳入版本控制
-!pprof/**/*.md
-```
-
-> 只有在根 `.gitignore` 重新启用 `*.md` 时才需要这个例外。`default.pgo`（PGO 用）不受 Markdown 规则影响，正常可提交，详见 `02-PGO优化指南.md`。
+- `pprof/*.md` 与 `pprof/scripts/*.sh` 被 git 跟踪，随仓库分发（派生项目经 `gonew` 一并继承）。
+- 采集产物由 `pprof/.gitignore` 忽略：`profiles/` 目录，以及散落的 `*.pprof`、`*.prof`、
+  `*.pb.gz`、`*.out`。目的是防止把几十 MB 的 profile 误提交进仓库。
+- PGO 的 `default.pgo` **不在本目录**，而在项目根目录，且**必须提交**——详见
+  `02-PGO优化指南.md`。不要在任何 `.gitignore` 里忽略它。
 
 ---
 
@@ -501,6 +431,7 @@ go tool pprof -http=localhost:8080 cpu.pprof
 curl -o cpu.pprof "http://127.0.0.1:6060/debug/pprof/profile?seconds=30"  # CPU 30s
 curl -o heap.pprof "http://127.0.0.1:6060/debug/pprof/heap"               # 堆快照
 curl -o goroutine.txt "http://127.0.0.1:6060/debug/pprof/goroutine?debug=2" # goroutine 全栈
+curl -s "http://127.0.0.1:6060/debug/pprof/goroutineleak?debug=1"          # 泄漏集合（会强制 GC）
 curl -o trace.out "http://127.0.0.1:6060/debug/pprof/trace?seconds=5"     # trace 5s
 
 # ——— 分析 ———
@@ -510,7 +441,9 @@ go tool pprof -http=:8080 -base old new       # 两份对比
 go tool trace trace.out                       # trace 专用查看器
 
 # ——— 脚本 ———
-./pprof/scripts/collect.sh all                # 采全部类型
+./pprof/scripts/collect.sh all                # 采全部类型（含 goroutineleak，排最后）
+./pprof/scripts/collect.sh goroutineleak      # 只采泄漏集合
+./pprof/scripts/doctor.sh                     # 自检：含"端点是否提供 goroutineleak"
 ./pprof/scripts/analyze.sh <file|url>         # 打开 Web UI
 ./pprof/scripts/bench-profile.sh <包路径>     # benchmark 剖析
 
