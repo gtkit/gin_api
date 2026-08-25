@@ -1,5 +1,17 @@
 //go:build integration
 
+// 真实 MySQL 集成测试：注销记录的保留期清理。
+//
+// 覆盖的轴——**只有真实数据库能回答的那些**：列名与真实 schema 一致，
+// 以及 `RowsAffected` 是否等于实际删除行数——**分批循环的终止条件全靠它**。
+// mock 里那个返回值是测试自己写的，它证明不了真实驱动会那样回答。
+//
+// 安全设计：写入与删除都在事务内，结束时强制回滚，零持久化。
+//
+// 运行方式（DB 必须与本仓迁移状态一致，建议单开一个库，见 docs/testing.md）：
+//
+//	APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
+//	  go test -tags integration -run TestIntegration ./internal/repository/user_deactivation/
 package userdeactivation_test
 
 import (

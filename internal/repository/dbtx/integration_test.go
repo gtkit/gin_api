@@ -1,5 +1,18 @@
 //go:build integration
 
+// 真实 MySQL 集成测试：事务管理器的 context 绑定。
+//
+// 覆盖的轴——**只有真实数据库能回答的那个**：`BeginTx` 是否真的收到了调用方的 ctx。
+// mock 里"传了 ctx"与"BEGIN 受 ctx 约束"看起来一样；只有真实连接会在
+// ctx 已取消时让 BEGIN 立刻失败。绑定漏了的后果是半绑定的故障形态——
+// 请求侧已超时返回，goroutine 仍挂在连接池上堆积，而观测上看着像"超时正常生效"。
+//
+// 安全设计：回调内只做只读查询，不写任何业务表。
+//
+// 运行方式（DB 必须与本仓迁移状态一致，建议单开一个库，见 docs/testing.md）：
+//
+//	APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
+//	  go test -tags integration -run TestIntegration ./internal/repository/dbtx/
 package dbtx_test
 
 import (

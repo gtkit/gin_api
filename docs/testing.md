@@ -64,6 +64,21 @@ loopback 可用的完整跑更高。取下界保证两种环境的 `make check` 
 集成测试用真实 MySQL 验证 repository 与 schema 一致性（配置取自 `config/env/env.yml`），
 **事务内强制回滚、零持久化**，无 DB 时自动 SKIP。
 
+### 哪些包有集成测试
+
+不维护清单——列表会腐烂，而 grep 不会：
+
+```bash
+grep -rl '^//go:build integration' --include='*_test.go' internal pkg
+```
+
+`make test-integration` 用的就是这条反查，因此**在新包里加集成测试不需要改 Makefile**，
+也不会出现"加了但门禁跑不到"。反查出 0 个包时该目标直接失败：本仓必然有集成测试，
+扫到空只可能是枚举坏了，而那种坏法的表现是全绿。
+
+每个集成测试文件的头部都写明三件事：**覆盖的轴**（为什么这条断言只有真实依赖能回答）、
+**安全设计**（怎么做到零持久化/零残留）、**运行方式**。看文件头比看测试名快。
+
 ### 集成测试跑在哪个库上
 
 `make test-integration` 连的是 `config/env/env.yml` 里 `database.name` 指的那个库——
@@ -104,6 +119,34 @@ APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
 判断一条断言该不该放这一层，看它**能不能在别处成立**：列名与真实 schema 一致、
 影响行数、锁与事务的可见性、真实 collation 下的比较——这些 mock 与 DryRun 都回答不了。
 反过来，能用 mock 断言的就不要占用这一层，它需要环境、也跑得慢。
+
+### 真实 Redis 的那一批
+
+Redis 侧不走 `config.Load()`，用环境变量，默认值即可直接跑：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `REDIS_ITEST_ADDR` | `127.0.0.1:6379` | 地址 |
+| `REDIS_ITEST_PASSWORD` | 空 | 密码 |
+| `REDIS_ITEST_DB` | `15` | **专用 db**，不借业务库 |
+| `ALLOW_REDIS_SCRIPT_FLUSH` | 未设 | 见下 |
+
+两条不同于 MySQL 那批的理由：`pkg/ratelimit` 对外发布、禁止 import 本仓 internal，
+它取不到应用配置；而这批测试需要一个专用 db，应用配置的 `redis.dbs` 只声明业务用到的那几个。
+借业务 db 跑测试等于往真实数据里写测试键。
+
+键都带本次运行独占前缀，结束只删自己的键——**不用 `FLUSHDB`**：一次误配的 db 序号
+会让它清掉别人的数据，而那不可逆。
+
+`ALLOW_REDIS_SCRIPT_FLUSH=1` 打开的是「脚本缓存被清空后能否自愈」那几条用例。
+默认跳过，因为 `SCRIPT FLUSH` 是**服务器级**操作，会清掉同一实例上其它应用的脚本缓存。
+它用的是普通 `Skip` 而不是「环境不满足」那种——后者在 `REQUIRE_DB_INTEGRATION=1`
+下会变成失败，而这里是刻意的 opt-in，不是环境坏了。
+
+这几条值得单独说：仓内四个包各自实现了 `EVALSHA` + `NOSCRIPT` 重载，
+而那条分支此前只对着**手写替身**验过——替身返回的错误字符串是测试自己编的，
+证明不了真实 Redis 会那样回复。主从切换与 `SCRIPT FLUSH` 之后脚本缓存就是空的，
+那时这条分支是唯一的恢复通道。
 
 需要建表的用例优先用**会话级临时表**（`CREATE TEMPORARY TABLE`）：它随连接消亡，
 对目标库零写入、不需要迁移、也不必清理。代价是临时表只在本连接可见，

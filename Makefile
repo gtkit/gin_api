@@ -104,12 +104,23 @@ vet: ## Run go vet
 test-race: ## Run race-enabled tests
 	go test -tags $(GO_BUILD_TAGS) -race -count=1 -timeout=5m $(GO_TARGETS)
 
-test-integration: ## Run real-database integration tests locally (set REQUIRE_DB_INTEGRATION=1 to turn skips into failures)
-	## 连的是 config/env/env.yml 里 database.name 指的库，它必须与本仓迁移状态一致。
-	## 单开一个库更省事（建库 + 迁移 + 运行的完整命令见 docs/testing.md）：
+## 集成测试包由「带 integration 构建标记的 _test.go」反查得出，**不手工列举**。
+##
+## 手工列举会腐烂，而且腐烂得很安静：在一个新包里加了集成测试，本目标跑不到它，
+## 于是那条测试等于不在门禁里——而输出看起来一切正常。
+INTEGRATION_PKGS = $(sort $(patsubst %,./%,$(dir $(shell grep -rl '^//go:build integration' --include='*_test.go' internal pkg 2>/dev/null))))
+
+test-integration: ## Run real-dependency integration tests locally (set REQUIRE_DB_INTEGRATION=1 to turn skips into failures)
+	## MySQL 侧连的是 config/env/env.yml 里 database.name 指的库，它必须与本仓迁移状态一致；
+	## Redis 侧连 REDIS_ITEST_ADDR（默认 127.0.0.1:6379）的 REDIS_ITEST_DB（默认 15）。
+	## 单开一个 MySQL 库更省事（建库 + 迁移 + 运行的完整命令见 docs/testing.md）：
 	##   APP_DATABASE__NAME=gin_api_itest REQUIRE_DB_INTEGRATION=1 make test-integration
 	## 少一张表时报的是 "Table 'xxx' doesn't exist"，那条错误与真实缺陷长得一模一样。
-	go test -tags integration -race -count=1 -timeout=5m ./internal/repository/...
+	##
+	## 空集合即失败：本仓必然有集成测试，反查出 0 个只可能是枚举坏了，
+	## 而那种坏法的表现是"全绿"。
+	@ test -n "$(INTEGRATION_PKGS)" || { echo "FAIL: no integration-tagged test packages found; the discovery is broken"; exit 1; }
+	go test -tags integration -race -count=1 -timeout=5m $(INTEGRATION_PKGS)
 
 image: ## Build the Docker image locally, tagged with the current commit short sha (requires Docker; servers do not run Docker)
 	## APP_NAME 只决定 builder 阶段的产物名；容器内路径固定为 /app/bin/server（exec-form

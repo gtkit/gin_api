@@ -1,5 +1,18 @@
 //go:build integration
 
+// 真实 MySQL 集成测试：user 仓储与真实 schema 的一致性。
+//
+// 覆盖的轴——**只有真实数据库能回答的那个**：更新用的列名与真实 users 表对不对得上
+// （`nick_name` vs `nickname` 这类）。mock 按调用方给的列名回答，永远一致；
+// 真实 MySQL 会返回 Unknown column。
+//
+// 安全设计：所有写操作包在事务里并强制回滚，零持久化，不污染库数据；
+// 只开 MySQL、不拉 Redis；DB 连不上时 Skip 而非 panic。
+//
+// 运行方式（DB 必须与本仓迁移状态一致，建议单开一个库，见 docs/testing.md）：
+//
+//	APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
+//	  go test -tags integration -run TestIntegration ./internal/repository/user/
 package user_test
 
 import (

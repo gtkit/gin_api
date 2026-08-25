@@ -1,5 +1,17 @@
 //go:build integration
 
+// 真实 MySQL 集成测试：角色仓储与真实 schema 的一致性。
+//
+// 覆盖的轴——**只有真实数据库能回答的那个**：查询用的列名与真实 user_roles 表
+// 对不对得上（`user_id` vs `userid` 这类）。它同时是权威角色源的读路径，
+// 列名错了表现为"所有人都没有权限"，而那与"确实没配角色"在业务上无法区分。
+//
+// 安全设计：写操作包在事务里并强制回滚，零持久化，不污染库数据。
+//
+// 运行方式（DB 必须与本仓迁移状态一致，建议单开一个库，见 docs/testing.md）：
+//
+//	APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
+//	  go test -tags integration -run TestIntegration ./internal/repository/userrole/
 package userrole_test
 
 import (
