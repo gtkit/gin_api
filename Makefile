@@ -105,6 +105,10 @@ test-race: ## Run race-enabled tests
 	go test -tags $(GO_BUILD_TAGS) -race -count=1 -timeout=5m $(GO_TARGETS)
 
 test-integration: ## Run real-database integration tests locally (set REQUIRE_DB_INTEGRATION=1 to turn skips into failures)
+	## 连的是 config/env/env.yml 里 database.name 指的库，它必须与本仓迁移状态一致。
+	## 单开一个库更省事（建库 + 迁移 + 运行的完整命令见 docs/testing.md）：
+	##   APP_DATABASE__NAME=gin_api_itest REQUIRE_DB_INTEGRATION=1 make test-integration
+	## 少一张表时报的是 "Table 'xxx' doesn't exist"，那条错误与真实缺陷长得一模一样。
 	go test -tags integration -race -count=1 -timeout=5m ./internal/repository/...
 
 image: ## Build the Docker image locally, tagged with the current commit short sha (requires Docker; servers do not run Docker)

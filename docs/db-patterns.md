@@ -118,39 +118,6 @@ func (r *ChannelRepository) GetByCode(ctx context.Context, code string) (models.
 - 不参与 GORM 事务；需要原子性时用 Lua、SetNX、原子计数等介质自身能力。
 - 按职责/聚合组织，不强套「一表一 repo」。
 
-## 共享表租户隔离
-
-默认关闭。开启后，声明了判别列（默认 `tenant_id`）的表在 SELECT / UPDATE / DELETE 上
-被自动注入 `判别列 = 当前租户`，INSERT 的行被自动盖章。仓储代码不改一行——
-插件挂在底座连接上，`mdbCtx(ctx)` 的两条派生路径（`WithContext` 与 `Transaction`）都继承。
-
-### 启用顺序（反了会启动失败，不是静默失效）
-
-1. 受控表加判别列，并把它加进该表的**全局唯一索引**。共享表的唯一约束不含判别列时，
-   两个租户用同一个手机号注册会撞唯一键——那是隔离做对了、schema 没跟上。
-2. 模型声明该字段，并确认它在 `internal/models.Managed()` 里（完整性有枚举判据）。
-3. 实现 `middleware.TenantResolver` 并把 `middleware.TenantIsolation(resolve)` 挂在
-   **认证之后**的路由组。租户只从已认证身份派生，理由见 [`cache.md`](cache.md)。
-4. 配 `dataisolate.enabled: true` 与 `dataisolate.column`。
-
-装配期会核对判别列确实存在于某个受管模型上，以及豁免清单里的表名确实存在；
-对不上即启动失败。这两项在运行期都无法补救：列名写错时判定永不命中，
-于是零张表受控，隔离**静默消失**而一切看起来正常。
-
-### 使用约束
-
-- **裸 SQL 不在覆盖范围内**。`db.Raw` / `db.Exec` 那里没有可注入的结构，
-  因此架构传感器禁止数据访问层使用它们（见 [`architecture.md`](architecture.md) 禁止规则）。
-- **语句必须带模型元数据**。`db.Table("x")` 不带 `Model` 时无法判定受控性，一律拒绝——
-  放行才是危险的那个选择。
-- **无自身 WHERE 条件的 UPDATE / DELETE 一律拒绝**，租户条件不会成为唯一谓词。
-  GORM 自带的「缺少 WHERE 即拒绝」只检查 WHERE 是否存在且晚于注入执行，
-  不自行复现这道保护，一条今天会被拒绝的全表更新会变成「静默改掉该租户整张表」。
-- **插入时显式写了别的租户会被拒绝**，写同一个租户不受影响。
-- **缓存键必须含租户维度**，见 [`cache.md`](cache.md)。
-- 需要跨租户操作时用 `tenant.WithBypass(ctx)`，它只作用于**单次调用**，
-  且受 `dataisolate.allow_bypass` 门控（默认关闭）。更强的隔离是走一个未安装插件的连接。
-
 ## 防御性查询
 
 - WHERE 的用户输入必须参数化，禁止字符串拼接。

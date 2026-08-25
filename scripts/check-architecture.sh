@@ -104,20 +104,21 @@ check_no_match \
 
 # 数据访问层不得使用裸 SQL 执行入口。
 #
-# 这条规则是租户数据隔离的**能力边界的执行者**。隔离插件在 SQL 生成之前经 clause
-# 注入条件，覆盖 Create / Query / Update / Delete / Row 五条路径；而 db.Raw /
-# db.Exec 那里 Statement 里是调用方给的 SQL 文本，没有可注入的结构。
+# 两条各自独立成立的理由：
 #
-# 三种处置只有这一种诚实：
-#   放行            —— 留一个静默的越权入口，不报错、不进日志；
-#   检查 SQL 文本   —— 把正确性押在"判别列有没有出现在字符串里"，与插件
-#                      拒绝依赖括号启发式是同一个理由；
-#   判据挡在提交前  —— 把检测不到的洞变成写代码时就失败。
+#   绕过软删除 —— gorm.DeletedAt 的 `deleted_at IS NULL` 是在 clause 构建阶段
+#     加上的，而裸 SQL 整个跳过那个阶段。于是 Raw("SELECT * FROM users") 会把
+#     已软删的行一并返回，既不报错也不进日志。而 docs/db-patterns.md 要求
+#     软删除一律用 gorm.DeletedAt——这条规则是那条要求唯一的执行点。
+#
+#   绕过参数化与白名单 —— 同一份规范要求 WHERE 的用户输入必须参数化、
+#     动态字段名走白名单。在一个 ORM 项目里，裸 SQL 是**唯一**还能做字符串
+#     拼接的地方，也就是那两条规范唯一的失守点。
 #
 # 覆盖 repository 与 runtime 两处：它们是唯一既能 import gorm、又会做数据访问的层
 # （application / transport / worker 由上面的规则挡住 gorm）。platform/data 不在
 # 覆盖范围内——那里的裸 SQL 是启动期连接校验（读 vendor/时区/字符集），
-# 压根不碰业务表，且隔离插件也不装在它构造的迁移句柄上。
+# 压根不碰业务表，也不涉及软删除。
 #
 # 判据排除注释，与 ShouldBind / ClientIP 两条同款：规则的正文与文档都要能提及
 # 被禁的 API，若把注释算作违规，规则就永远为真而无法归零。
@@ -126,7 +127,7 @@ find internal/repository internal/runtime -type f -name '*.go' ! -name '*_test.g
   xargs -0 grep -nE '^[^/]*[^/[:space:]]\.(Raw|Exec)\(' 2>/dev/null |
   grep -v '^[^:]*:[0-9]*:[[:space:]]*//' >>"$rawsql_hits" || true
 if [ -s "$rawsql_hits" ]; then
-  echo "FAIL: data access must not use raw SQL entry points (tenant isolation cannot inject there)"
+  echo "FAIL: data access must not use raw SQL entry points (it bypasses soft delete and parameterisation)"
   cat "$rawsql_hits"
   fail=1
 fi

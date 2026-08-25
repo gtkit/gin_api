@@ -30,9 +30,6 @@ type Config struct {
 	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
 	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
 	Cache CacheConfig `mapstructure:"cache"`
-	// DataIsolate 是共享表租户隔离配置。默认关闭——开启前受控表必须已具备
-	// 判别列与含该列的唯一约束，否则开关打开的瞬间全部查询 fail-closed。
-	DataIsolate DataIsolateConfig `mapstructure:"dataisolate"`
 	// Telemetry 是 OpenTelemetry 导出配置。默认关闭，此时埋点仍在但走 no-op。
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。

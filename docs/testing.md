@@ -18,7 +18,7 @@ race 测试并生成聚合 coverage profile，最后校验全仓覆盖率不低�
 
 ```bash
 make test-race                          # 只跑 race 测试
-make test-integration                   # 真实 MySQL 的 repository 集成测试（无 DB 时自动 SKIP）
+make test-integration                   # 真实 MySQL 的集成测试（无 DB 时自动 SKIP；跑在哪个库见下）
 make check-coverage COVERAGE_MIN=75     # 临时提高覆盖率门禁试跑
 go test -run TestName -count=1 ./internal/...
 go test -bench=. -benchmem -count=3 ./...
@@ -63,6 +63,52 @@ loopback 可用的完整跑更高。取下界保证两种环境的 `make check` 
 
 集成测试用真实 MySQL 验证 repository 与 schema 一致性（配置取自 `config/env/env.yml`），
 **事务内强制回滚、零持久化**，无 DB 时自动 SKIP。
+
+### 集成测试跑在哪个库上
+
+`make test-integration` 连的是 `config/env/env.yml` 里 `database.name` 指的那个库——
+对多数人来说那是自己的主开发库。它必须是一个**迁移状态与本仓一致**的库，
+否则失败原因是环境而不是代码：少一张表就报 `Table 'xxx' doesn't exist`，
+而那条错误看起来和真实缺陷一模一样。
+
+因此推荐给集成测试单开一个库，用 `APP_` 覆盖指过去，不动主配置：
+
+一次性准备。建库这步怎么执行取决于 MySQL 怎么连（本机客户端、`docker exec`、GUI），
+因此这里只给 SQL：
+
+```sql
+CREATE DATABASE gin_api_itest DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+库默认值取 `utf8mb4` / `utf8mb4_unicode_ci`。迁移建的表**不依赖**它——那些表把
+`ENGINE/CHARSET/COLLATE` 逐张写死，刻意不继承服务器默认值。库默认值影响的是
+没有显式声明的表：goose 的版本表，以及集成测试自己建的临时表。让两者一致，
+就不会出现"同一个库里两种排序规则"这种只在跨表比较时才暴露的差异。
+
+```bash
+# 灌迁移（migrate 命令同样认 APP_ 覆盖）
+APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest make migrate-up dev
+
+# 每次跑
+APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
+  REQUIRE_DB_INTEGRATION=1 make test-integration
+```
+
+**必须是新库**：基线迁移 `20260731000001` 自己 `CREATE TABLE users`，
+灌进一个已经有 `users` 的库会直接撞表。一个只迁移过一部分的旧库同样不行——
+它比空库更难查，因为前几个用例会通过。
+
+`REQUIRE_DB_INTEGRATION=1` 把 SKIP 变成失败。不加它，一个连不上库的环境会给出全绿，
+而"绿灯里藏 SKIP"与"真的验过了"在输出上无法区分。
+
+判断一条断言该不该放这一层，看它**能不能在别处成立**：列名与真实 schema 一致、
+影响行数、锁与事务的可见性、真实 collation 下的比较——这些 mock 与 DryRun 都回答不了。
+反过来，能用 mock 断言的就不要占用这一层，它需要环境、也跑得慢。
+
+需要建表的用例优先用**会话级临时表**（`CREATE TEMPORARY TABLE`）：它随连接消亡，
+对目标库零写入、不需要迁移、也不必清理。代价是临时表只在本连接可见，
+因此必须把连接池钉成 1 条连接、并解除连接寿命上限，否则语句可能落到另一条
+连接上，表就"不存在"了。
 
 ## Table-Driven 的适用边界
 
