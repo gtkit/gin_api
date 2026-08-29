@@ -7,6 +7,8 @@
 
 ## 未发布
 
+## v0.3.0
+
 ### 变更
 
 - ⚠ **Go 基线由 1.26 升至 1.27**：`go.mod` 声明 `go 1.27`，builder 镜像与受限验证运行器同步为
@@ -38,6 +40,17 @@
 
   **升级动作**：绕过本仓入口、直接用 gouploader 原生 API 自行装配上传器的派生项目，需自行接上
   `WithOnBackgroundError`，否则升级后这些事件不再有任何出口。
+
+- **新增独立端口的 pprof 性能剖析端点**，默认关闭（`pprof.enabled: false`）。开启后以独立
+  `http.Server` 绑定回环地址（`pprof.host`/`pprof.port`），与业务 HTTP 端口和中间件栈完全隔离，
+  避免限流、鉴权等业务中间件干扰采样。`host` 强制为字面回环 IP（`netip.Addr.IsLoopback()` 判定，
+  不接受主机名，不分环境放宽）——远程排障走 SSH 端口转发。支持 `block_profile_rate` /
+  `mutex_profile_fraction` 采样率配置，默认关闭；端点生命周期接入 `App.Run`，随进程优雅启停并
+  复位采样率，绑定失败即报错，不会出现"配置了却没有监听"的假象。
+
+## v0.2.0
+
+### 变更
 
 - ⚠ **`redis.dbs` 必须包含库 0**（启用下列任一能力时）：使用 `store: redis` 的限流策略、
   `auth.mode: local`、`modules.user.deactivation_retention_days > 0`。缺失即启动失败。
