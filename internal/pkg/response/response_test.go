@@ -237,12 +237,12 @@ func TestPayloadTooLargeCarriesTheLimit(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", rec.Code)
 	}
-	if body := rec.Body.String(); !contains(body, "1.0 MB") {
+	if body := rec.Body.String(); !contains(body, "1.0 MiB") {
 		t.Errorf("the 413 response does not state the limit: %s", body)
 	}
 }
 
-// TestFormatBytes 覆盖各量级与边界。
+// TestFormatBytes 覆盖各量级、IEC 单位与负值边界。
 func TestFormatBytes(t *testing.T) {
 	t.Parallel()
 
@@ -250,13 +250,15 @@ func TestFormatBytes(t *testing.T) {
 		bytes int64
 		want  string
 	}{
+		{-1, "0 B"},
 		{0, "0 B"},
 		{1, "1 B"},
 		{1023, "1023 B"},
-		{1024, "1.0 KB"},
-		{1536, "1.5 KB"},
-		{1 << 20, "1.0 MB"},
-		{1 << 30, "1.0 GB"},
+		{1024, "1.0 KiB"},
+		{1536, "1.5 KiB"},
+		{1 << 20, "1.0 MiB"},
+		{10 << 20, "10 MiB"},
+		{1 << 30, "1.0 GiB"},
 	}
 
 	for _, tt := range tests {

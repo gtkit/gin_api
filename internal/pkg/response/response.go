@@ -3,12 +3,12 @@ package resp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"sync/atomic"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
 
+	"github.com/dustin/go-humanize"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/gtkit/goerr"
@@ -348,20 +348,15 @@ func payloadTooLargeFromBind(c *gin.Context, err error) bool {
 	return true
 }
 
-// FormatBytes 把字节数格式化为人类可读形式（B/KB/MB/…）。
+// FormatBytes 把字节数格式化为 IEC 单位（B / KiB / MiB / GiB）的人类可读值。
+//
+// 它是全仓 int64 字节数到 humanize 的唯一边界：调用方持有的上限都是 int64，
+// 负值在这里收敛为 0，转换只在这一处发生。
 func FormatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+	if bytes < 0 {
+		bytes = 0
 	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB",
-		float64(bytes)/float64(div),
-		"KMGTPE"[exp])
+	return humanize.IBytes(uint64(bytes))
 }
 
 func respJSON(c *gin.Context, httpCode int, data any) {

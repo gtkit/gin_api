@@ -270,7 +270,7 @@ func newProviders(
 	//    worker 健康指标的注销回调由 buildWorkers 追加进 inf.metricsCleanup，
 	//    按长度差把增量纳入回滚栈。
 	cleanupsBefore := len(inf.metricsCleanup)
-	workers, err := buildWorkers(ctx, &inf, svc)
+	workers, err := buildWorkers(&inf)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
 	}
@@ -577,9 +577,9 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 母版内置的业务 worker 只有一个：注销档案清理，且**按配置条件注册**——
 // 未设置保留期时它根本不存在（而不是注册一个空转的实例占着名字）。
-// 其余后台任务由使用者在 scaffold:module-workers 标记前追加一行 Worker 构造。
-// 形参 services 保持在位，使追加「需要 application service 的 worker」
-// 是纯追加式改动，无需改签名。
+// 其余后台任务由使用者在 scaffold:module-workers 标记前追加一行 Worker 构造；
+// 需要 application service 或装配期 ctx 时，在调用点把它们加进形参即可——
+// 调用点只有一处，签名跟着真实消费者走，不为尚不存在的 worker 预留。
 //
 // 集合为空不意味着 worker 机制多余——WorkerManager 配合 app.go 的分相关停
 // （停 producer → 等 LB 传播 → 关 HTTP → drain consumer）保证两类语义各自成立：
@@ -587,9 +587,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-// 形参 ctx 与 services 保持在位（当前未消费）：使追加「需要装配期 ctx 或
-// application service 的 worker」是纯追加式改动，无需改签名。
-func buildWorkers(_ context.Context, inf *infra, _ services) (_ *WorkerManager, err error) {
+func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任：
 	// defer 覆盖**全部**错误出口，而不只是末尾的构造校验——scaffold:module-workers
 	// 扩展段加入多个"构造 + 注册指标"块之后，任何中途 return 都不得让此前

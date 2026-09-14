@@ -31,6 +31,15 @@
 - [`../config/README.md`](../config/README.md)：配置字段说明
 - [`../scripts/README.md`](../scripts/README.md)：门禁脚本用法
 
+## 架构决策记录
+
+结构性选型的取舍记录在 [`adr/`](adr/)。规范文档回答「怎么做」，ADR 回答
+「当初为什么这么定、在什么条件下该重新定」。
+
+| 决策 | 内容 |
+|---|---|
+| [ADR-0001](adr/0001-module-boundaries-over-ddd-layering.md) | 按业务模块切分，不改为 DDD 技术分层 |
+
 ## 按任务查
 
 | 任务 | 先读 |

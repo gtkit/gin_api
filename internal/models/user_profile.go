@@ -2,10 +2,7 @@
 package models
 
 import (
-	"strconv"
 	"time"
-
-	"github.com/gtkit/json"
 )
 
 // UserProfile 用户扩展信息表。
@@ -42,19 +39,4 @@ type UserProfile struct {
 
 func (userProfile *UserProfile) TableName() string {
 	return "user_profiles"
-}
-
-// GetStringID 获取 ID 的字符串格式。
-func (userProfile *UserProfile) GetStringID() string {
-	return strconv.Itoa(int(userProfile.ID))
-}
-
-// MarshalBinary Marshal 序列化到 JSON。
-func (userProfile *UserProfile) MarshalBinary() ([]byte, error) {
-	return json.Marshal(userProfile)
-}
-
-// UnmarshalBinary Unmarshal 反序列化。
-func (userProfile *UserProfile) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, userProfile)
 }

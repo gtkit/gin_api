@@ -1,11 +1,6 @@
 package models
 
-import (
-	"strconv"
-	"time"
-
-	"github.com/gtkit/json"
-)
+import "time"
 
 // UserStatus 表示用户状态。
 type UserStatus int8
@@ -71,19 +66,4 @@ const (
 
 func (user *User) TableName() string {
 	return "users"
-}
-
-// GetStringID 返回字符串格式的 ID。
-func (user *User) GetStringID() string {
-	return strconv.Itoa(int(user.ID))
-}
-
-// MarshalBinary 将用户序列化为 JSON。
-func (user *User) MarshalBinary() ([]byte, error) {
-	return json.Marshal(user)
-}
-
-// UnmarshalBinary 将 JSON 反序列化为用户。
-func (user *User) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, user)
 }

@@ -7,6 +7,11 @@
 
 ## 未发布
 
+### 变更
+
+- 413 响应 `data.max_bytes_human` 改为 IEC 单位的人类可读值（如 `10 MiB`，此前为 `10.0 MB`），
+  由 `github.com/dustin/go-humanize` 产出。数值字段 `data.max_bytes` 不变，机器判定请使用它。
+
 ## v0.3.0
 
 ### 变更

@@ -1,9 +1,4 @@
-// Package user_deactivation 模型
 package models
-
-import (
-	"github.com/gtkit/json"
-)
 
 // UserDeactivation 用户注销记录表。
 //
@@ -32,14 +27,4 @@ type UserDeactivation struct {
 // TableName 指定表名。
 func (u *UserDeactivation) TableName() string {
 	return "user_deactivations"
-}
-
-// MarshalBinary 序列化到 JSON。
-func (u *UserDeactivation) MarshalBinary() ([]byte, error) {
-	return json.Marshal(u)
-}
-
-// UnmarshalBinary 反序列化。
-func (u *UserDeactivation) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, u)
 }

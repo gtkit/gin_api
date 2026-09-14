@@ -42,7 +42,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o "/out/${APP_
 # ============================================================================
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-RUN apk add --no-cache tzdata ca-certificates \
+# alpine:3.22 官方镜像标签尚未重新发布含 CVE-2026-14456（openssl QUIC DoS）修复的层，
+# apk 源已提供 3.5.8-r0，显式钉版本升级。
+RUN apk add --no-cache --upgrade libssl3=3.5.8-r0 libcrypto3=3.5.8-r0 \
+    && apk add --no-cache tzdata ca-certificates \
     && addgroup -S app && adduser -S -G app app
 
 WORKDIR /app

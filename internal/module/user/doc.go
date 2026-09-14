@@ -43,12 +43,16 @@
 // │   │   ├── deactivate.go           ← Deactivate 注销（事务编排）+ 领域 error
 // │   │   └── ports.go               ← UserRepository / DeactivationRecorder / TxManager 三个 port
 // │   ├── dto/user.go                 ← UserProfileResponse / UserUpdateRequest / UserDeactivateRequest
-// │   └── transport/http/
-// │       ├── handler.go              ← Handler：Get / Update / Deactivate + errMapper（领域 error→状态码）
-// │       └── router.go               ← UserModule 实现 router.Module，注册 /user 路由
-// │                                     （worker/ 为可选目录，母版未内置实例，见下「后台任务」）
+// │   ├── transport/http/
+// │   │   ├── handler.go              ← Handler：Get / Update / Deactivate + errMapper（领域 error→状态码）
+// │   │   └── router.go               ← Register(r, Deps)：在 /api/v1 组上用 gin 原生方式注册 /user 路由
+// │   └── worker/
+// │       └── deactivation_cleanup.go ← DeactivationCleanup：按保留期分批清理注销档案（纯业务，只认 port）
 // │
-// └── runtime/module/user/module.go   ← 装配 NewService(db)：注入 repo + dbtx.Manager 得到 application.Service（依赖不全即报错）
+// └── runtime/module/user/
+//
+//	├── module.go                   ← NewService(db)：注入 repo + dbtx.Manager 得到 application.Service（依赖不全即报错）
+//	└── cleanup.go                  ← NewDeactivationCleanup(db, cfg)：未配置保留期时返回 nil，不注册
 //
 // =====================================================================
 // application 应用层能力（Service）
@@ -76,14 +80,17 @@
 // 任一步失败整事务回滚；SQL 细节全部下沉到 repository，application 只做编排。
 //
 // =====================================================================
-// 后台任务：机制在 bootstrap；母版内置的业务实例只有注销档案清理（按配置条件注册）
+// 后台任务：机制在 bootstrap，业务在 worker/，两者经 runtime 与 bootstrap 的薄适配器相接
 // =====================================================================
 //
 // bootstrap 提供 Worker 接口（Name / Kind / Required / Lifecycle / Prepare / Run / Cleanup）
 // 与 WorkerManager（注册期校验声明、分阶段启动、Cleanup 恰好一次、按类别分相关停）。
-// buildWorkers 是装配的一个阶段：母版内置的业务实例只有注销档案清理（按配置
-// 条件注册，未配置保留期时不存在），其余经 scaffold:module-workers 标记接入——
-// 按业务需要在标记前追加一行 Worker 构造即可，无需改动函数签名。
+// 本模块的注销档案清理走这条链：worker/DeactivationCleanup 只含业务（RunOnce / Interval /
+// Health），runtime/module/user/cleanup.go 把 db + config 翻译成它，bootstrap 的
+// newDeactivationCleanupWorker 再套上单实例租约与 Kind / Required / Lifecycle 声明。
+// 未配置保留期时 runtime 返回 nil，bootstrap 据此不注册——禁用表现为"不存在"，
+// 而不是一个空转的实例。其余后台任务经 scaffold:module-workers 标记按同样的
+// 三段式接入，无需改动 buildWorkers 的签名。
 //
 // 新增 worker 遵守两条边界：放在 module/<m>/worker/ 下；只依赖 application，
 // 不直连 repository / gorm（scripts/check-architecture.sh 检查该规则）。
@@ -105,10 +112,11 @@
 //	     ▼（Deactivate 经 TxManager.Do 开事务）
 //	repository/{user,user_deactivation} ──▶ dbtx.DB(ctx, db)（mdbCtx 收口，事务内用事务句柄）
 //
-//	module/<m>/worker（如有）──▶ application/Service（不直连 repository）
+//	module/user/worker/DeactivationCleanup ──▶ port: DeactivationPurger（不直连 repository）
 //
-//	runtime/module/user.NewService(db) 负责把上述装配起来：
-//	  userrepo.New(db) + userdeactivation.New(db) + dbtx.NewManager(db) → application.NewService。
-//	bootstrap/providers.go 再经 userhttp.Register(v1, userhttp.Deps{...}) 注册 HTTP 路由；
-//	  后台任务经 buildWorkers 的 scaffold:module-workers 标记按需接入。
+//	runtime/module/user 负责把上述装配起来：
+//	  NewService(db)：userrepo.New(db) + userdeactivation.New(db) + dbtx.NewManager(db) → application.NewService；
+//	  NewDeactivationCleanup(db, cfg)：userdeactivation.New(db) → worker.DeactivationCleanup。
+//	bootstrap/providers.go 再经 userhttp.Register(v1, userhttp.Deps{...}) 注册 HTTP 路由，
+//	  经 buildWorkers 把清理任务包成单实例 Worker 交给 WorkerManager。
 package user

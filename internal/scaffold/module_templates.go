@@ -45,15 +45,10 @@ func validate{{.ConfigTypeName}}(c {{.ConfigTypeName}}) error {
 `
 
 const modelTemplate = `package models
-
-import (
-	"strconv"
 {{- if .NeedsModelTime }}
-	"time"
-{{- end }}
 
-	"github.com/gtkit/json"
-)
+import "time"
+{{- end }}
 
 type {{.StructName}} struct {
 	BaseID
@@ -67,18 +62,6 @@ type {{.StructName}} struct {
 
 func (*{{.StructName}}) TableName() string {
 	return "{{.TableName}}"
-}
-
-func (m *{{.StructName}}) GetStringID() string {
-	return strconv.FormatInt(m.ID, 10)
-}
-
-func (m *{{.StructName}}) MarshalBinary() ([]byte, error) {
-	return json.Marshal(m)
-}
-
-func (m *{{.StructName}}) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, m)
 }
 `
 

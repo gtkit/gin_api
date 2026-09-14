@@ -126,31 +126,46 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
-`internal/bootstrap/providers.go` 的 `newProviders` 按五个单一职责阶段编排，
-本函数只做顺序拼接与错误透传，不内联任何单个模块的装配细节：
+`internal/bootstrap/providers.go` 的 `newProviders` 按七个阶段顺序编排，本函数只做顺序拼接、
+错误透传与失败回滚（`rollbackStack` 逆序撤销已产生的进程级副作用），不内联任何单个模块的装配细节：
 
 ```
-resolveInfra → buildServices → buildMiddlewares → buildEngine → buildWorkers
+resolveInfra（基础设施与派生 HTTP 配置）
+  → 遥测导出 → 数据层追踪埋点 → 指标仪表          （telemetry.New / InstrumentTracing / metrics.New）
+  → 限流注册表 → 出站客户端 → 响应缓存 → 任务入队端   （buildRateLimits / httpclient / httpcache / tasks）
+  → buildServices（各模块 application service）
+  → buildMiddlewares（认证与授权中间件）
+  → buildWorkers（后台任务 + WorkerManager）
+  → buildEngine（路由引擎，含限流引用的 fail-closed 判定）
 ```
+
+顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、出站、缓存、
+任务入队必须先于 service（service 在构造时按名字取用它们，名字未登记属装配错误）；
+worker 必须先于路由（readiness 要读 worker 状态）。
 
 阶段间用三个聚合 struct 传递状态：`infra`（基础设施与派生配置）、`services`（各模块 application
 service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增基础设施时才往 `infra` 加字段，
 不提前占坑。
 
-模块生成器经七个稳定标记自动接线，新增模块只产生「追加字段/追加行」级改动，不重构阶段函数：
+模块生成器经 `providers.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
+不重构阶段函数。前四个是**注入型**（生成器在标记前插入接线行），后四个是**校验型**
+（生成器只断言标记存在；这些位置的内容是业务判断，由使用者手写）：
 
-| 标记 | 位置 |
-|---|---|
-| `scaffold:module-imports` | import 区 |
-| `scaffold:module-service-fields` | `services` struct 字段 |
-| `scaffold:module-services` | `buildServices` 构造 |
-| `scaffold:module-authorizers` | `buildAuthorizers` 具名授权注册 |
-| `scaffold:modules` | `buildEngine` 的 `v1Modules` 切片 |
-| `scaffold:task-handlers` | 任务队列处理器注册 |
-| `scaffold:module-workers` | `buildWorkers` 的 Worker 构造 |
+| 标记 | 位置 | 类型 |
+|---|---|---|
+| `scaffold:module-imports` | import 区 | 注入 |
+| `scaffold:module-service-fields` | `services` struct 字段 | 注入 |
+| `scaffold:module-services` | `buildServices` 构造 | 注入 |
+| `scaffold:modules` | `buildEngine` 的 `RegisterModules` 闭包 | 注入 |
+| `scaffold:module-authorizers` | `buildAuthorizers` 具名授权注册 | 校验 |
+| `scaffold:task-handlers` | `buildWorkers` 的队列消费者处理器参数表 | 校验 |
+| `scaffold:periodic-tasks` | `buildWorkers` 的周期任务调度器参数表 | 校验 |
+| `scaffold:module-workers` | `buildWorkers` 的 Worker 集合 | 校验 |
 
-改动 provider 结构时必须同步维护这些标记与 `internal/scaffold` 的插入逻辑及测试，
-避免标记与真实结构脱节导致自动接线失效。
+生成器另外注入 `internal/platform/config/modules.go`（`scaffold:module-config-fields` /
+`scaffold:module-config-validators`）、`config/env.yml.example`（`scaffold:module-config-example`）
+与 `cmd/migrate.go`（`scaffold:migrate-models`）。改动这些文件的结构时必须同步维护标记与
+`internal/scaffold` 的插入逻辑及测试，避免标记与真实结构脱节导致自动接线失效。
 
 ### 选择性 DDD 战术
 

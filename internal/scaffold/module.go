@@ -665,7 +665,7 @@ func providersMarkers() (imports, serviceFields, services, modules string) {
 // scaffold:module-workers 位于 buildWorkers 的 worker 集合内，是后台任务的注册锚点。
 // 它不参与注入：生成器不产出 worker 源码文件，且绝大多数模块不需要后台任务，
 // 自动注入只会给每个新模块塞进一个无实现的注册行或空转 ticker。
-// 但它仍须被生成器认领并校验，否则会退化成无人负责的裸注释——母版的五阶段结构
+// 但它仍须被生成器认领并校验，否则会退化成无人负责的裸注释——母版的分阶段装配结构
 // 被破坏时不会有任何信号，违反 scaffold-mother-integrity 的标记完整性要求。
 func providersValidateOnlyMarkers() []string {
 	return []string{
