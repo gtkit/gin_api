@@ -24,8 +24,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "execute cobra command: %v\n", err)
 		// 命令可以声明自己的退出码（doctor 用 0/2/1 区分"全通/仅降级/失败"）。
 		// 统一退成 1 会让脚本无法区分"这台机器少了一项可选能力"与"它根本不能干活"。
-		var coded interface{ ExitCode() int }
-		if errors.As(err, &coded) {
+		// 接口里要带上 error：errors.AsType 的类型参数约束是 error。
+		if coded, ok := errors.AsType[interface {
+			error
+			ExitCode() int
+		}](err); ok {
 			os.Exit(coded.ExitCode())
 		}
 		os.Exit(1)

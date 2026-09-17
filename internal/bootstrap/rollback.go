@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // rollbackStep 是一步可回滚的副作用：name 用于错误指认，fn 执行回滚动作。
@@ -31,9 +32,9 @@ func (r *rollbackStack) push(name string, fn func() error) {
 // 全部泄漏），错误聚合返回并指名失败步骤；执行后清空，重复调用不重复执行。
 func (r *rollbackStack) unwind() error {
 	var errs []error
-	for i := len(r.steps) - 1; i >= 0; i-- {
-		if err := r.steps[i].fn(); err != nil {
-			errs = append(errs, fmt.Errorf("rollback %s: %w", r.steps[i].name, err))
+	for _, v := range slices.Backward(r.steps) {
+		if err := v.fn(); err != nil {
+			errs = append(errs, fmt.Errorf("rollback %s: %w", v.name, err))
 		}
 	}
 	r.steps = nil

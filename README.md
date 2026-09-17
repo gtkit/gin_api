@@ -96,11 +96,27 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
-`user`：
+`ai`（仅当 `modules.ai.providers` 里至少有一家填了 `api_key` 时注册；一家都没填时
+这些端点整个不存在，启动日志会提示一次——"端点不存在"比"端点存在但每次都 503"
+更容易被判断成配置问题）：
 
-- `GET /api/v1/user`：查询当前登录用户资料。
-- `PUT /api/v1/user`：更新当前登录用户资料。
-- `POST /api/v1/user/deactivate`：注销当前登录用户。
+- `POST /api/v1/ai/chat`：一次性返回完整回复与 token 用量。
+- `POST /api/v1/ai/chat/stream`：SSE 流式增量输出，事件为 `delta` / `done` / `error`。
+- `GET /api/v1/ai/providers`：已启用的厂商与其生效默认模型。
+- `GET /api/v1/ai/conversations`：会话分页列表。
+- `GET /api/v1/ai/conversations/:id`：会话详情 + 消息分页。
+- `PATCH /api/v1/ai/conversations/:id`：改标题。
+- `DELETE /api/v1/ai/conversations/:id`：软删会话。
+
+全部端点要求认证，会话按用户归属（归属条件写在 SQL 的 WHERE 里，不靠取回后比对）。
+底层是 [`github.com/gtkit/go-llm-provider/v2`](https://github.com/gtkit/go-llm-provider)，
+配置驱动多厂商：DeepSeek、通义千问、智谱 GLM、Moonshot、火山方舟、百度千帆、硅基流动。
+每家厂商各带独立的连接池、熔断器与重试。
+
+**SSE 的注意事项**：认证中间件禁止 SSE 请求用 query 传令牌（query 会进访问日志、
+Referer 与浏览器历史），因此前端不能用原生 `EventSource`，要用 `fetch` + `Authorization` 头
+读流。流式路由不挂路由级超时中间件（那会掐断正常生成中的长流），整体预算由
+`modules.ai.stream_total_timeout` 给出，保活由 `heartbeat_interval` 控制。
 
 基础探针：
 

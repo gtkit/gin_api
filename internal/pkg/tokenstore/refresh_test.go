@@ -434,11 +434,9 @@ func TestConcurrentReuseHasASingleVerdictAndADeadFamily(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, racers)
 	for i := range racers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _, errs[i] = store.Consume(ctx, token)
-		}()
+		})
 	}
 	wg.Wait()
 

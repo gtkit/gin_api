@@ -266,16 +266,4 @@ func writeExclusive(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// syncDir fsync 目录项。
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open dir %s for sync: %w", dir, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync dir %s: %w", dir, err)
-	}
-	return nil
-}
+// syncDir fsync 目录项。实现按平台分流，见 syncdir_unix.go / syncdir_windows.go。

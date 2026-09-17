@@ -201,8 +201,11 @@ func TestDoctorDeepExitCodes(t *testing.T) {
 				t.Fatalf("Execute(--deep) returned nil, want a coded error (output: %s)", out.String())
 			}
 
-			var coded interface{ ExitCode() int }
-			if !errors.As(err, &coded) {
+			coded, ok := errors.AsType[interface {
+				error
+				ExitCode() int
+			}](err)
+			if !ok {
 				t.Fatalf("error %v does not carry an exit code", err)
 			}
 			if got := coded.ExitCode(); got != tc.wantCode {

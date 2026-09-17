@@ -55,8 +55,8 @@ func initProcessRuntime(cfg *config.Config) error {
 		return fmt.Errorf("init access logger: %w", err)
 	}
 
-	// 个人信息无保留期：配置注释承诺过会提示一次，此前只是承诺。
-	for _, w := range cfg.RetentionWarnings() {
+	// 一家 LLM 厂商都没配：AI 端点整个不注册，而那与"路由写错了"从外部看一样。
+	for _, w := range cfg.AIWarnings() {
 		logger.Warn(w)
 	}
 

@@ -26,7 +26,7 @@ type UserRepository interface {
 ## 数据访问统一经 `mdbCtx(ctx)`
 
 ```go
-// internal/repository/user/user_i.go
+// internal/repository/aiconversation/repository.go
 func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
     return dbtx.DB(ctx, r.db)
 }

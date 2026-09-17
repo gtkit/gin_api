@@ -94,6 +94,11 @@ make project-init NAME=your_project
 go run . jwt generate --kid k2026b --out-dir config/pem
 ```
 
+**产物权限在 Windows 上不成立**：生成逻辑给私钥 0600、公钥 0644，但 NTFS 的访问控制是
+ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限保护，`doctor` 的 `jwt_keys`
+也只能校验存在性（权限判定见 `internal/diagnostics/keyperm_windows.go`）。
+**生产用密钥请在 Linux 上生成**；Windows 上的生成能力只供本地开发。
+
 **轮换步骤**：
 
 1. 生成新 kid；
@@ -186,6 +191,22 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 
 逐项标注状态，避免"以为它已经在工作"或"以为它是示例可以删"两类误解。
 
+> **交付平台是 Linux 容器**（`Dockerfile` 与 `make build` 都固定 `GOOS=linux`），CI 也只跑
+> `ubuntu-latest`。Windows 与 macOS 是开发平台，下列能力里依赖 Unix 专有语义的部分在
+> Windows 上不成立：**文件权限位**（NTFS 用 ACL，Go 恒报 0666/0777）、**信号投递**
+> （`Process.Signal` 只支持 Kill）、**符号链接**（需特权）、**目录 fsync**
+> （`FlushFileBuffers` 不接受目录句柄）。
+>
+> 测试侧由 `internal/testutil` 的 `RequireUnixFilePerm` / `HasUnixFilePerm` /
+> `RequireSignalDelivery` / `RequireSymlink` 显式声明，不具备时以带理由的 SKIP 呈现，
+> 而不是让 `go test ./...` 在开发机上无故变红——那种红色会让整份测试输出失去信号价值。
+> 生产侧按平台分流（`internal/diagnostics/keyperm_*.go`、`cmd/syncdir_*.go`）。
+>
+> **首次 clone 后请确认工作区行尾是 LF**。仓库用 `.gitattributes` 固定 `eol=lf`；
+> 从更早版本升级的 clone 需执行一次 `git add --renormalize .`（先提交手头改动）。
+> CRLF 工作区会让 `make module` 生成器定位不到注入锚点、`golangci-lint` 报出数百条
+> 纯行尾的 gofmt 假阳性。
+
 ### 【默认开启】开箱即生效，无需接线
 
 | 能力 | 位置 | 说明 |
@@ -212,7 +233,8 @@ go run . jwt generate --kid k2026b --out-dir config/pem
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
 | 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
 | 数据库连接校验 | `internal/platform/data.OpenDB` | 实测 vendor/版本、会话时区/字符集/sql_mode |
-| 注销信息留存 | `user_deactivations` 表 | 明文保存注销前手机号/邮箱/昵称/IP 供申诉与风控；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见该表的迁移注释 |
+| AI 对话 | `internal/module/ai` + `modules.ai` 配置段 | 基于 `github.com/gtkit/go-llm-provider/v2`，配置驱动多厂商（DeepSeek / 通义千问 / 智谱 / Moonshot / 火山方舟 / 千帆 / 硅基流动）。**填了 api_key 的厂商才启用；一家都没填时整个模块不装配、路由不注册**（启动期提示一次）。含非流式与 SSE 流式两条对话路由、会话管理与厂商列表；每家厂商各带独立熔断与重试 |
+| 对话内容留存 | `ai_conversations` / `ai_messages` 表 | 明文保存用户提问与模型回复（可能含用户输入的个人信息）；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见 `internal/repository/aiconversation/README.md` 与该迁移的注释。`DELETE /ai/conversations/:id` 只软删会话头，不做物理清理 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
 | 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态与失败原因，错误详情截断至 256 字节；**响应体含内网地址与数据库账号名，该端点不得对公网开放**（见下节） |
 
@@ -379,12 +401,22 @@ runner, err := singleton.NewRunner(lease, func(ctx context.Context, held singlet
     Interval:   time.Hour,
     Guarantee:  singleton.GuaranteeIdempotent,
     MaxRuntime: 30 * time.Minute,
+    // Observer 别留空：零值是 nopObserver，任务会**完全静默**地跑——
+    // 续租失败导致的中止（LeaseLost）也不会有任何日志或指标。
+    // singletonObserver 已按事件性质分好级别：租约抢到/被别的实例持有记 Debug
+    // （多副本下每轮都发生，记 Warn 会让正常运行看起来像持续故障），
+    // 续租丢失与任务失败记 Warn 并计入 worker.runs 的 failure，
+    // 成功计入 success——成功数是失败数的分母，没有它"失败了 3 次"无从解读。
+    Observer: singletonObserver{recorder: inf.recorder},
 })
 ```
 
 再用 `newSingletonWorker` 包成 Worker 注册进 `buildWorkers`。它的 `Prepare`
 会在启动期用随机探测键真跑一遍抢锁/续租/释放——只 PING 不能证明当前 ACL
 能执行脚本，也不能证明锁键与 fence 键在同一个集群 slot。
+
+`singletonObserver` 的上述分级与计数由 `internal/bootstrap/singleton_observer_test.go`
+钉住（含 `recorder` 为 nil 时不 panic——未接指标是正常形态）。
 
 ### 接指标导出
 
@@ -457,12 +489,11 @@ telemetry:
 
 | 内容 | 说明 |
 |------|------|
-| `user` 模块 | 认证/参考起点，是 `sharedauth.UserVerifier` 的提供者。删除前需替换该提供者 |
-| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `entitlement.vip` authorizer 与 `VIPVerifier`（`internal/bootstrap/providers.go`）；③ dto 里对应的响应字段；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
+| `auth` 模块 | 本地认证（注册/登录/刷新/登出）。AI 对话按用户身份归属会话，删除它需要另行提供身份来源 |
+| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `entitlement.vip` authorizer 与 `VIPVerifier`（`internal/bootstrap/providers.go`）；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `providers.go` 里 `services.roles` 字段及其构造，并把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
-| 三张表的基线迁移 | 与 `user` 模块配套；替换业务模型时一并重做 |
-| 注销档案清理 worker | 与 `user` 模块配套的唯一内置业务 worker；未配置保留期时不注册。**它是单实例任务**（见下方「后台任务的单实例执行」），因此启用时 Redis 是硬依赖。删 `user` 模块时连同 `internal/module/user/worker` 与 `modules.user` 配置段一起删 |
+| `users` 表的基线迁移 | 与 `auth` 模块配套；替换身份模型时一并重做 |
 
 ### 【内部支撑包 — 不构成能力，无需接线】
 

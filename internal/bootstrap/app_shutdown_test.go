@@ -304,8 +304,7 @@ func TestLifecycleEntrypointsRejectReuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWorkerManager: %v", err)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		ctx := t.Context()
 
 		if err := m.Start(ctx); err != nil {
 			t.Fatalf("first Start: %v", err)
@@ -436,6 +435,10 @@ func TestSingleSignalNeverForces(t *testing.T) {
 // 翻译成关停请求；唯一监督者在 cmd 层，测试里没装，因此 App 必须毫无反应。
 func TestAppDoesNotRegisterSignalHandlers(t *testing.T) {
 	testutil.RequireLoopback(t)
+	// 被测语义是"App 不自己监听信号"，验证手段是真投递一个 SIGTERM。
+	// 投递不了的平台上这条断言无法成立——它的对偶断言在 cmd/signals_test.go，
+	// 那个文件整体带 !windows 约束。
+	testutil.RequireSignalDelivery(t)
 	server := newTestHTTPServer()
 	app := newTestApp(t, server)
 

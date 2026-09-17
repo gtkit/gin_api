@@ -15,7 +15,7 @@ import "errors"
 // 生成器把类型写进 internal/platform/config/module_<name>.go，
 // 字段与 mapstructure tag 都留在本包内。
 type ModuleConfigs struct {
-	User UserModuleConfig `mapstructure:"user"`
+	AI AIModuleConfig `mapstructure:"ai"`
 	// scaffold:module-config-fields
 }
 
@@ -31,7 +31,7 @@ type ModuleConfigs struct {
 func validateModuleConfigs(m ModuleConfigs) error {
 	var errs []error
 
-	errs = append(errs, m.User.Validate()...)
+	errs = append(errs, m.AI.Validate()...)
 	// scaffold:module-config-validators
 
 	return errors.Join(errs...)

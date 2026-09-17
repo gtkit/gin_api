@@ -60,12 +60,10 @@ func TestConcurrentScriptReloadIsRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// 结果必然是错误（脚本恒 NOSCRIPT），这里只关心并发访问的安全性。
 			_, _ = backend.check(context.Background(), policy, "subject")
-		}()
+		})
 	}
 	wg.Wait()
 

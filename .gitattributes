@@ -1,0 +1,38 @@
+# 行尾规范：库内一律 LF，工作区也一律 LF。
+#
+# 为什么需要它：没有本文件时，工作区的行尾由每个开发者的 core.autocrlf 决定。
+# Windows 的默认值 true 会把 checkout 出来的文件转成 CRLF，而库内 blob 仍是 LF——
+# 于是同一份代码在不同机器上是不同的字节，按字节工作的东西随之失效：
+#
+#   * internal/scaffold 的标记常量以 "\n" 结尾（见 providersMarkers），
+#     CRLF 工作区下 strings.Contains 必然失配。后果不只是
+#     TestProvidersMarkersPresentInRealProvidersFile 变红——`make module`
+#     生成器本身就无法定位注入锚点，脚手架的核心能力在该平台上是坏的。
+#   * go fix -diff 输出整文件 diff（改写器按 LF 输出），实质改动被淹没，
+#     check-modern 的失败信息变得无法阅读。
+#
+# eol=lf 让 checkout 与 commit 两侧都归一，行尾不再是每台机器的本地配置。
+* text=auto eol=lf
+
+# 显式声明二进制，避免 text=auto 的启发式判断出错后损坏内容。
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.pdf    binary
+*.zip    binary
+*.gz     binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+
+# 密钥与证书按二进制处理：任何行尾改写都会破坏 PEM 之外的编码，
+# 而这类文件出问题时的表现是"签名验不过"，排查成本远高于收益。
+*.pem    binary
+*.key    binary
+*.crt    binary
+
+# 快照与基线是逐字节比对的判据，不接受任何过滤器改写。
+database/schema/baseline.snapshot -text

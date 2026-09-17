@@ -1,3 +1,16 @@
+//go:build !windows
+
+// 本文件整体不在 Windows 上编译。
+//
+// 两个测试都靠 proc.Signal(syscall.SIGTERM) 向自身投递信号，而 Windows 的
+// os.Process.Signal 对 Kill 以外的信号一律返回 "not supported by windows"——
+// 那是平台缺少对应的运行时行为，不是测试写法的问题，加 t.Skip 只是把同一个
+// 事实换个地方表达。helper deliverSignal / waitFor 只被本文件使用，随文件
+// 一起排除不会留下悬空符号。
+//
+// 服务的部署目标是 Linux 容器（Dockerfile 与 make build 都固定 GOOS=linux），
+// 因此这两条断言在交付路径上始终被执行。
+
 package cmd
 
 import (

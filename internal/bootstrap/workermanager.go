@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,9 +178,7 @@ func (m *WorkerManager) Degraded() map[string]error {
 	defer m.runMu.Unlock()
 
 	out := make(map[string]error, len(m.degraded))
-	for k, v := range m.degraded {
-		out[k] = v
-	}
+	maps.Copy(out, m.degraded)
 	return out
 }
 
@@ -382,8 +382,7 @@ func (m *WorkerManager) recordTermination(err error) {
 // 状态上报一整套机制，属无现实消费者的功能。需要重试的 worker
 // 自己在 Run 内实现内部重试。
 func (m *WorkerManager) reportRunFailure(w Worker, err error) {
-	var panicErr *WorkerPanicError
-	if errors.As(err, &panicErr) {
+	if panicErr, ok := errors.AsType[*WorkerPanicError](err); ok {
 		logger.Errorf("worker %s panicked: %v\n%s", panicErr.Worker, panicErr.Value, panicErr.Stack)
 	}
 
@@ -553,17 +552,17 @@ func (m *WorkerManager) cleanupPrepared(ctx context.Context) error {
 	live := m.liveEntries()
 
 	var errs []error
-	for i := len(entries) - 1; i >= 0; i-- {
-		if _, running := live[entries[i]]; running {
+	for _, entrie := range slices.Backward(entries) {
+		if _, running := live[entrie]; running {
 			// Run 未返回的任务不清理：与 Run 并发执行 Cleanup 是数据竞争，
 			// 且先行标记"已清理"会让任务真正退出后的正常清理被跳过。
 			// 它的清理由 supervise 在 Run 返回后执行，或随进程退出回收。
 			logger.Warnf("skipping cleanup of worker %q: its Run has not returned",
-				entries[i].worker.Name())
+				entrie.worker.Name())
 			continue
 		}
-		if err := m.cleanupEntry(ctx, entries[i]); err != nil {
-			errs = append(errs, fmt.Errorf("cleanup worker %q: %w", entries[i].worker.Name(), err))
+		if err := m.cleanupEntry(ctx, entrie); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup worker %q: %w", entrie.worker.Name(), err))
 		}
 	}
 	return errors.Join(errs...)

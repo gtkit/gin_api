@@ -275,14 +275,12 @@ func TestNoKIDTokenRequiresExplicitCutoff(t *testing.T) {
 	// 手工签一个**不带 kid** 的令牌，模拟存量。
 	now := time.Now()
 	laravel := jwtv5.NewWithClaims(jwtv5.SigningMethodEdDSA, &claims.Claims{
-		RegisteredClaims: jwtv5.RegisteredClaims{
-			ID:        "abc",
-			IssuedAt:  jwtv5.NewNumericDate(now),
-			NotBefore: jwtv5.NewNumericDate(now),
-			ExpiresAt: jwtv5.NewNumericDate(now.Add(time.Hour)),
-		},
-		UserID:  9,
-		TokenID: "abc",
+		ID:        "abc",
+		IssuedAt:  jwtv5.NewNumericDate(now),
+		NotBefore: jwtv5.NewNumericDate(now),
+		ExpiresAt: jwtv5.NewNumericDate(now.Add(time.Hour)),
+		UserID:    9,
+		TokenID:   "abc",
 	})
 	token, err := laravel.SignedString(key.Private)
 	if err != nil {
@@ -542,10 +540,8 @@ func TestCacheDoesNotOutliveTokenExpiry(t *testing.T) {
 
 	// 直接往缓存里放一个已经过期的条目。
 	expired := &claims.Claims{
-		RegisteredClaims: jwtv5.RegisteredClaims{
-			ExpiresAt: jwtv5.NewNumericDate(time.Now().Add(-time.Minute)),
-		},
-		UserID: 1,
+		ExpiresAt: jwtv5.NewNumericDate(time.Now().Add(-time.Minute)),
+		UserID:    1,
 	}
 	parser.cache.put("token", expired)
 

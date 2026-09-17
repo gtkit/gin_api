@@ -69,9 +69,7 @@ func TestConcurrentLoadsAreCollapsed(t *testing.T) {
 	results := make([]string, concurrency)
 	errs := make([]error, concurrency)
 	for i := range concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			entered.Add(1)
 			results[i], errs[i] = c.GetOrLoad(context.Background(), "hot", func(context.Context) (string, error) {
 				loads.Add(1)
@@ -79,7 +77,7 @@ func TestConcurrentLoadsAreCollapsed(t *testing.T) {
 				<-release
 				return "value", nil
 			})
-		}()
+		})
 	}
 
 	// 等全部调用方都已进入 GetOrLoad，再放行第一个 load。
@@ -492,15 +490,13 @@ func TestInflightLoadsAreBounded(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, _ = c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
 			close(started)
 			<-release
 			return "a", nil
 		})
-	}()
+	})
 	<-started
 
 	var ran atomic.Bool

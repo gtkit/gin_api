@@ -558,10 +558,10 @@ func createProjectFixture(t *testing.T) string {
 
 import (
 	"github.com/gtkit/gin-api/internal/middleware"
-	userapp "github.com/gtkit/gin-api/internal/module/user/application"
-	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
+	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
+	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	"github.com/gtkit/gin-api/internal/router"
-	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
+	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
 	// scaffold:module-imports
 )
 
@@ -571,7 +571,7 @@ type infra struct {
 }
 
 type services struct {
-	user *userapp.Service
+	ai *aiapp.Service
 	// scaffold:module-service-fields
 }
 
@@ -581,14 +581,14 @@ type middlewares struct {
 
 func buildServices(inf infra) services {
 	var svc services
-	svc.user = userruntime.NewService(inf.mysqlDB)
+	svc.ai = airuntime.NewService(inf.mysqlDB)
 	// scaffold:module-services
 	return svc
 }
 
 func buildEngine(svc services, mw middlewares) {
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		userhttp.Register(v1, userhttp.Deps{Service: svc.user, Auth: mw.auth, RateLimit: rateLimitByID})
+		aihttp.Register(v1, aihttp.Deps{Service: svc.ai, Auth: mw.auth, RateLimit: rateLimitByID})
 		// scaffold:modules
 	}
 	_ = middleware.Auth

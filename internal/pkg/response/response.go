@@ -106,8 +106,9 @@ func bindErrResponse(c *gin.Context, err error) {
 	if payloadTooLargeFromBind(c, err) {
 		return
 	}
-	var verrs validator.ValidationErrors
-	if errors.As(err, &verrs) && validationTranslationReady.Load() {
+	// 短路顺序不能调换：翻译器未就绪时不得走 verify.StructErr——
+	// validator 首次校验即缓存字段名，早调用会让消息漏出 Go 字段名。
+	if _, ok := errors.AsType[validator.ValidationErrors](err); ok && validationTranslationReady.Load() {
 		if translated := verify.StructErr(err); translated != nil {
 			Err(c, translated)
 			return

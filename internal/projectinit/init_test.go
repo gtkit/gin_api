@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gtkit/gin-api/internal/testutil"
 )
 
 // --- ⓪ 输入校验 ---
@@ -144,9 +146,10 @@ func TestRunRefusesSpecialGitEntry(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		setup func(t *testing.T, root string)
-		force bool
+		name    string
+		require func(t *testing.T)
+		setup   func(t *testing.T, root string)
+		force   bool
 	}{
 		{
 			name: "linked worktree file without force",
@@ -164,6 +167,9 @@ func TestRunRefusesSpecialGitEntry(t *testing.T) {
 		},
 		{
 			name: "symlink with force",
+			// 造不出符号链接就构造不出被测场景。Windows 开启开发者模式后可以造，
+			// 因此判据是实际探测而不是看 GOOS。
+			require: testutil.RequireSymlink,
 			setup: func(t *testing.T, root string) {
 				target := t.TempDir()
 				if err := os.Symlink(target, filepath.Join(root, ".git")); err != nil {
@@ -176,6 +182,10 @@ func TestRunRefusesSpecialGitEntry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
+			if tt.require != nil {
+				tt.require(t)
+			}
 
 			root := newFixture(t, "example.com/newproj")
 			tt.setup(t, root)
@@ -396,7 +406,9 @@ func TestRunPreservesLocalExcludeAndItsEffect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat restored exclude: %v", err)
 	}
-	if info.Mode().Perm() != 0o640 {
+	// 用 if 而不是 Require：本测试的主判据是下面"哨兵目录没进首个提交"，
+	// 它与平台无关。在这里跳过整个测试会为了一条权限断言丢掉那条主判据。
+	if testutil.HasUnixFilePerm() && info.Mode().Perm() != 0o640 {
 		t.Fatalf("local exclude mode = %v, want 0640", info.Mode().Perm())
 	}
 
@@ -531,6 +543,10 @@ func TestSnapshotLivesOutsideProjectRoot(t *testing.T) {
 		t.Fatalf("stat snapshot dir: %v", err)
 	}
 	// 旧 .git 可能含凭据缓存与 hook 脚本，不能对同机其他用户可读。
+	//
+	// 位置断言（快照必须在项目根之外）在上面，不受平台影响；这里只有权限断言
+	// 需要 Unix 语义——Windows 上目录恒报 0777，断言无法表达被测意图。
+	testutil.RequireUnixFilePerm(t)
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("snapshot dir mode = %v, want 0700", info.Mode().Perm())
 	}

@@ -173,8 +173,7 @@ func TestTaskRunsImmediatelyOnStart(t *testing.T) {
 		t.Fatalf("NewRunner: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = runner.Run(ctx) }()
 
 	select {
@@ -230,8 +229,7 @@ func TestLosingTheLeaseCancelsTheTask(t *testing.T) {
 		t.Fatalf("NewRunner: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = runner.Run(ctx) }()
 
 	select {
@@ -302,8 +300,7 @@ func TestSecondInstanceSkipsInsteadOfRunning(t *testing.T) {
 		return nil
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _ = first.Run(ctx) }()
 
 	select {

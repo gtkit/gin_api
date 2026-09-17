@@ -46,12 +46,12 @@ type ResResult struct {
 模块的领域 error 集中映射，**不散落在各个 handler 分支里**：
 
 ```go
-// internal/module/user/transport/http/handler.go
+// internal/module/ai/transport/http/errmap.go
 var errMapper = resp.NewErrMapper(
     resp.ErrMapping{
-        Target:  application.ErrUserNotFound,
-        Status:  goerr.StatusNotFound(),
-        Message: "用户不存在或已注销",
+        Target:  application.ErrConversationNotFound,
+        Status:  goerr.StatusRecordNotFound(),
+        Message: "会话不存在",
     },
 )
 

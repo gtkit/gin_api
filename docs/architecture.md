@@ -96,11 +96,10 @@ git 历史——两者对派生项目都不存在正确用法。
 
 ```go
 // 单一产物、依赖简单：直接返回 service
-// internal/runtime/module/user/module.go
-func NewService(db *gorm.DB) (*userapp.Service, error)
+func NewService(db *gorm.DB) (*someapp.Service, error)
 
 // 多个产物或依赖较多：Deps 入参 + Assembly 出参
-// internal/runtime/module/auth/module.go
+// internal/runtime/module/auth/module.go、internal/runtime/module/ai/module.go 都是这一种
 type Deps struct {
     DB     *gorm.DB
     Redis  *redis.Client

@@ -391,12 +391,12 @@ const fixedRedisDB = 0
 // 为什么必须在配置层拦：资源层只打开 redis.dbs 声明过的库，取未声明的库得到
 // nil 客户端。而 nil 客户端与"Redis 启动期不可达"在装配处**无法区分**，于是
 // 缺库号的后果是指向错误方向的诊断——fail_open 的限流策略静默进入进程级永久
-// 降级、注销清理 worker 不注册、日志声称 "redis is configured but unreachable"，
-// 而 Redis 完全健康。运维会去查一个没有问题的 Redis。
+// 降级、本地认证的刷新令牌与撤销记录无处存放、日志声称 "redis is configured
+// but unreachable"，而 Redis 完全健康。运维会去查一个没有问题的 Redis。
 //
 // cache.redis_db 与 tasks.redis_db 早有同款校验，理由与此完全一致。
 //
-// 聚合成一条错误而不是逐项报：三项说的是同一件事，逐项会让运维看到三行
+// 聚合成一条错误而不是逐项报：各项说的是同一件事，逐项会让运维看到几行
 // 几乎相同的消息。
 func validateRedisDBZeroConsumers(c Config) error {
 	var consumers []string
@@ -409,9 +409,6 @@ func validateRedisDBZeroConsumers(c Config) error {
 	if c.Auth.LocalEnabled() {
 		consumers = append(consumers, "local authentication (refresh tokens and revocations)")
 	}
-	if c.Modules.User.DeactivationRetentionDays > 0 {
-		consumers = append(consumers, "deactivation archive cleanup (singleton lease)")
-	}
 
 	if len(consumers) == 0 || slices.Contains(c.Redis.DBs, fixedRedisDB) {
 		return nil
@@ -421,8 +418,8 @@ func validateRedisDBZeroConsumers(c Config) error {
 		"redis.dbs %v must include database %d because these enabled capabilities take it at "+
 			"assembly time: %s. Without it the resource layer hands them a nil client, which is "+
 			"indistinguishable from an unreachable Redis: rate limiting would silently degrade for "+
-			"the whole process and the cleanup worker would not register, while Redis itself is "+
-			"healthy. Fix it by adding %d to redis.dbs",
+			"the whole process and local authentication could not store refresh tokens, while "+
+			"Redis itself is healthy. Fix it by adding %d to redis.dbs",
 		c.Redis.DBs, fixedRedisDB, strings.Join(consumers, "; "), fixedRedisDB)
 }
 

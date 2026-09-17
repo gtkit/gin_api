@@ -196,8 +196,8 @@ func TestWorkerPanicBecomesRequiredFailure(t *testing.T) {
 
 	select {
 	case got := <-mgr.Errors():
-		var panicErr *WorkerPanicError
-		if !errors.As(got, &panicErr) {
+		panicErr, ok := errors.AsType[*WorkerPanicError](got)
+		if !ok {
 			t.Fatalf("error = %v, want a WorkerPanicError", got)
 		}
 		if panicErr.Worker != "boomer" {

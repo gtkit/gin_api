@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -308,8 +309,7 @@ func (r *Resources) Close() error {
 	r.closed = true
 
 	var errs []error
-	for i := len(r.closers) - 1; i >= 0; i-- {
-		c := r.closers[i]
+	for _, c := range slices.Backward(r.closers) {
 		if c.close == nil {
 			continue
 		}

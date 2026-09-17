@@ -1,0 +1,23 @@
+CREATE TABLE `ai_messages` (
+  `id` bigint AUTO_INCREMENT COMMENT '主键编码',
+  `conversation_id` bigint NOT NULL COMMENT '会话ID',
+  `user_id` bigint NOT NULL COMMENT '归属用户ID',
+  `role` tinyint(1) NOT NULL COMMENT '角色 1-system 2-user 3-assistant',
+  `content` mediumtext NOT NULL COMMENT '消息正文',
+  `reasoning` mediumtext COMMENT '推理过程',
+  `provider` varchar(32) NOT NULL DEFAULT '' COMMENT '厂商',
+  `model` varchar(64) NOT NULL DEFAULT '' COMMENT '模型',
+  `prompt_tokens` int NOT NULL DEFAULT 0 COMMENT '输入token',
+  `completion_tokens` int NOT NULL DEFAULT 0 COMMENT '输出token',
+  `total_tokens` int NOT NULL DEFAULT 0 COMMENT '总token',
+  `finish_reason` varchar(32) NOT NULL DEFAULT '' COMMENT '终止原因',
+  `created_at` datetime COMMENT '创建时间',
+  `updated_at` datetime COMMENT '最后更新时间',
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  INDEX `idx_ai_messages_conversation` (`conversation_id`,`id`),
+  INDEX `idx_ai_messages_user` (`user_id`),
+  INDEX `idx_ai_messages_created_at` (`created_at`),
+  INDEX `idx_ai_messages_updated_at` (`updated_at`),
+  INDEX `idx_ai_messages_deleted_at` (`deleted_at`)
+);

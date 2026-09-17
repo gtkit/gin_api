@@ -11,7 +11,11 @@ import (
 	"testing"
 )
 
-// TestJWTGenerateProducesUsableKeyPair 验证产物可用且权限正确。
+// TestJWTGenerateProducesUsableKeyPair 验证产物可用。
+//
+// 权限断言不在这里：Unix 权限位在 Windows 上没有对应语义（Go 恒报 0666），
+// 放在一起会让整条用例连同"密钥是否配对"这种跨平台断言一起失去覆盖。
+// 见 jwt_perm_unix_test.go。
 func TestJWTGenerateProducesUsableKeyPair(t *testing.T) {
 	t.Parallel()
 
@@ -19,23 +23,6 @@ func TestJWTGenerateProducesUsableKeyPair(t *testing.T) {
 	result, err := generateKeyPair("k2026a", dir)
 	if err != nil {
 		t.Fatalf("generateKeyPair: %v", err)
-	}
-
-	privInfo, err := os.Stat(result.privatePath)
-	if err != nil {
-		t.Fatalf("stat private key: %v", err)
-	}
-	// 私钥必须是 0600：group/other 可读意味着同机器上的任何进程都能签发令牌。
-	if perm := privInfo.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("private key mode = %04o, want 0600", perm)
-	}
-
-	pubInfo, err := os.Stat(result.publicPath)
-	if err != nil {
-		t.Fatalf("stat public key: %v", err)
-	}
-	if perm := pubInfo.Mode().Perm(); perm != 0o644 {
-		t.Fatalf("public key mode = %04o, want 0644", perm)
 	}
 
 	// 产物必须真的配对——不配对的一组密钥会让签发成功、验签全败。

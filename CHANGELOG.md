@@ -7,10 +7,105 @@
 
 ## 未发布
 
+### 新增
+
+- **AI 对话模块（`internal/module/ai`）**，基于 `github.com/gtkit/go-llm-provider/v2`。
+  配置驱动多厂商，`modules.ai.providers` 里**填了 `api_key` 的条目才启用**：DeepSeek、
+  通义千问（百炼）、智谱 GLM、Moonshot/Kimi、火山方舟/豆包、百度千帆、硅基流动。
+  一家都没填时整个模块不装配、路由不注册，启动期打一条 Warn——注册一组永远 503 的端点
+  比端点不存在更难排查。
+
+  端点（全部要求认证，会话按用户归属）：
+
+  | 方法 | 路径 | 说明 |
+  |---|---|---|
+  | POST | `/api/v1/ai/chat` | 非流式，一次性返回完整回复与 token 用量 |
+  | POST | `/api/v1/ai/chat/stream` | SSE 流式，事件为 `delta` / `done` / `error` |
+  | GET | `/api/v1/ai/providers` | 已启用厂商与其生效默认模型 |
+  | GET | `/api/v1/ai/conversations` | 会话分页列表 |
+  | GET | `/api/v1/ai/conversations/:id` | 会话详情 + 消息分页 |
+  | PATCH | `/api/v1/ai/conversations/:id` | 改标题 |
+  | DELETE | `/api/v1/ai/conversations/:id` | 软删会话 |
+
+  **SSE 的两条部署注意事项**：① 认证中间件禁止 SSE 请求用 query 传令牌，前端不能用原生
+  `EventSource`，要用 `fetch` + `Authorization` 头读流；② 流式路由不挂路由级超时中间件
+  （那会掐断正常生成中的长流），整体预算由 `modules.ai.stream_total_timeout` 给出，
+  保活由 `heartbeat_interval` 控制——模型思考期间可能几十秒不吐字，而代理按空闲断连时
+  不会有任何错误信息。
+
+  **成本相关的默认值请按自己的账单复核**：`retry_attempts` 默认 2，而重试是 at-least-once
+  （Chat 接口没有幂等键），厂商已处理但响应在回程丢失时会真实地再调一次；`history_messages`
+  默认 20，每一条历史在每一轮都会被重新计费成输入 token。
+
+- **新表 `ai_conversations` / `ai_messages`**（迁移 `20260901000001_create_ai_tables.sql`）。
+  ⚠ **它们明文保存用户提问与模型回复**，可能包含用户输入的个人信息。保留期限、到期清理与
+  库账号读取权限须由使用方按所在司法辖区确定后再上线；`DELETE /ai/conversations/:id` 只软删
+  会话头，不做物理清理。聚合边界见 `internal/repository/aiconversation/README.md`。
+
+- 新增依赖：`github.com/gtkit/go-llm-provider/v2`、`github.com/gtkit/ssex`
+  （SSE 写入器，它自己管连接级写 deadline）。
+
 ### 变更
 
 - 413 响应 `data.max_bytes_human` 改为 IEC 单位的人类可读值（如 `10 MiB`，此前为 `10.0 MB`），
   由 `github.com/dustin/go-humanize` 产出。数值字段 `data.max_bytes` 不变，机器判定请使用它。
+
+- ⚠ **删除 `user` 示例模块**：`GET|PUT /api/v1/user` 与 `POST /api/v1/user/deactivate` 三个端点、
+  `internal/module/user`、`internal/runtime/module/user`、`internal/repository/{user,user_deactivation}`、
+  模型 `UserProfile` / `UserDeactivation`、注销档案清理 worker，以及 `modules.user` 配置段一并移除。
+  基线迁移里的 `user_profiles` / `user_deactivations` 两张表也已删除。
+
+  **升级动作**：仍需要这些能力的项目从 v0.3.0 的 tag 取回对应目录；`config/env/env.yml` 里的
+  `modules.user` 段必须删掉——根层是严格解码，留着它会让进程启动即失败。
+
+- 鉴权链路的账号状态源改为 `internal/repository/useraccount`（`ValidateUser` / `ValidateVIP`）。
+  它此前由 `user` 模块的 application service 提供，而把鉴权依赖挂在一个业务模块上，会让
+  "删掉那个模块"连带打断鉴权链路。`sharedauth.UserVerifier` / `VIPVerifier` 两个接口不变。
+
+- `redis.dbs` 必须含库 0 的触发条件少了一项（注销清理任务已随 `user` 模块移除），
+  现为「任一 ratelimit 策略用 redis store」与「`auth.mode: local`」两项。
+
+- **依赖整体升至当前最新稳定版**。直接依赖含 `gtkit/go-llm-provider/v2` v2.15.0、`gtkit/gincache` v1.3.1、
+  `gtkit/asynqx` v1.6.0、`gtkit/msgbot` v1.4.0、`gtkit/httpc` v1.6.0、`gtkit/gojwt` v1.0.7、
+  `go-sql-driver/mysql` v1.10.1、`go-playground/validator/v10` v10.30.4；间接依赖含 OpenTelemetry 1.46.0、
+  `mongo-driver/v2` v2.9.1、`golang.org/x/crypto` v0.57.0 等 25 项。
+
+- **`make check` 新增子目标 `check-modern`**：`go fix -diff` 有输出即失败。此前"`go fix -diff`
+  无输出"只是工程约定，没有任何目标执行它——声明了却不执行等于没声明。
+  接入时一并落地了 18 个文件的现代写法（`slices.Backward`、`maps.Copy`、
+  `sync.WaitGroup.Go`、`min`、`strings.SplitSeq`、`strings.Cut`、`t.Context`、提升字段字面量），
+  以及 11 处 `errors.As` → `errors.AsType[T]` 的迁移。
+
+  **派生项目注意**：`go fix` 的 `errorsastype` 改写器对**匿名接口**目标会给出不可编译的代码
+  （`errors.AsType` 的类型参数约束是 `error`，而 `errors.As` 接受任意接口）。这类位置要手写成
+  嵌入 `error` 的接口，不能直接套用 `go fix` 的输出。
+
+### 修复
+
+- **依赖漏洞 GO-2026-6348**（gRPC HTTP/2 DATA 帧分片导致堆内存耗尽）。`govulncheck` 判定本仓代码
+  实际可达（`internal/pkg/tasks/scheduler.go` → `transport.NewHTTP2Client`）。`google.golang.org/grpc`
+  已随依赖升级到 v1.83.2（修复版为 v1.83.1）。
+
+- **`jwt generate` 在 Windows 上完全不可用**。`syncDir` 对目录句柄调用 `f.Sync()`，而 Windows 的
+  `FlushFileBuffers` 不接受目录句柄，恒返回 `Access is denied`。现按平台分流：Unix 保留目录 fsync，
+  Windows 为 no-op（NTFS 的目录项变更走文件系统日志，用户态没有更强的替代动作）。
+  普通文件的 `f.Sync()` 两个平台都保留。
+
+- **测试集在 Windows 上大面积失败**，而 CI 只跑 `ubuntu-latest`，这些失败从不暴露。根因是若干断言
+  建立在 Unix 专有语义上：文件权限位（NTFS 用 ACL，Go 恒报 0666/0777）、信号投递
+  （`Process.Signal` 只支持 Kill）、符号链接（需特权）、路径分隔符。现新增
+  `internal/testutil` 的平台能力声明（`RequireUnixFilePerm` / `HasUnixFilePerm` /
+  `RequireSignalDelivery` / `RequireSymlink`），与既有 `RequireLoopback` 同一形态；
+  跳过按**断言**而非按测试划分，跨平台成立的主判据一律保留执行。
+
+- **新增 `.gitattributes`，把文本文件的行尾固定为 LF**。此前工作区行尾由各人的 `core.autocrlf`
+  决定，Windows 默认值会 checkout 出 CRLF，而库内 blob 是 LF——于是按字节工作的东西全部失效：
+  `internal/scaffold` 的标记常量以 `\n` 结尾，CRLF 下 `strings.Contains` 必然失配，
+  **`make module` 生成器无法定位注入锚点**；`golangci-lint` 的 gofmt 检查会报出 300+ 条
+  全部源于行尾的假阳性，使 `make check` 的 lint 步骤在该平台不可用。
+
+  **升级动作**：已有 clone 在拉取本次变更后执行一次 `git add --renormalize .` 使工作区归一
+  （提交完手头改动再做，该命令会暂存全部受影响文件）。
 
 ## v0.3.0
 

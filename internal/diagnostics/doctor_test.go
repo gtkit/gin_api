@@ -316,9 +316,13 @@ func TestPoolConsistencyCrossValidation(t *testing.T) {
 	}
 }
 
-// TestJWTKeyPermissions 验证密钥文件的存在性与权限收紧。
+// TestJWTKeyPermissions 验证密钥文件齐备时通过、缺失时被检出。
 //
 // 只看元数据，绝不读内容：私钥一旦出现在任何一份日志或工单里就等于泄漏。
+//
+// "权限过宽应被检出"那一段不在这里，见 keyperm_unix_test.go：Unix 权限位在
+// Windows 上没有对应语义。整条用例加平台约束会让 Windows 连存在性检出也一起
+// 失去覆盖——而 checkJWTKeys 的注释记着，正是那一项曾经在密钥缺失时误报 pass。
 func TestJWTKeyPermissions(t *testing.T) {
 	t.Parallel()
 
@@ -341,17 +345,7 @@ func TestJWTKeyPermissions(t *testing.T) {
 		t.Fatalf("status = %q (%s), want pass for 0600 keys", got.Status, got.Detail)
 	}
 
-	// 放宽权限后必须被检出。
-	if err := os.Chmod(priv, 0o644); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	got := checkJWTKeys(cfg)
-	if got.Status != StatusFail || got.ErrorCode != CodeInsecurePerm {
-		t.Fatalf("status=%q code=%q, want fail/%s for a group-readable private key",
-			got.Status, got.ErrorCode, CodeInsecurePerm)
-	}
-
-	// 文件缺失同样必须被检出。
+	// 文件缺失必须被检出。
 	if err := os.Remove(priv); err != nil {
 		t.Fatalf("remove: %v", err)
 	}

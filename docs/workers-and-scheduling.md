@@ -154,7 +154,7 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 ```go
 tasks.PeriodicTask{
     Spec:      "0 3 * * *",              // 每天 03:00
-    TaskType:  "cleanup:deactivations",  // 必须有对应的已注册处理器
+    TaskType:  "cleanup:ai-conversations", // 必须有对应的已注册处理器
     Payload:   cleanupPayload{Scope: "expired"},
     Guarantee: singleton.GuaranteeIdempotent,
 },

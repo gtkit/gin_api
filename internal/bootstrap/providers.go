@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/middleware"
+	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
+	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
-	userapp "github.com/gtkit/gin-api/internal/module/user/application"
-	userhttp "github.com/gtkit/gin-api/internal/module/user/transport/http"
 	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
@@ -25,9 +26,10 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
+	"github.com/gtkit/gin-api/internal/repository/useraccount"
 	"github.com/gtkit/gin-api/internal/repository/userrole"
+	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
-	userruntime "github.com/gtkit/gin-api/internal/runtime/module/user"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 
 	// scaffold:module-imports
@@ -85,17 +87,28 @@ type infra struct {
 // services 聚合各模块的 application service，供中间件、路由、worker 三个阶段引用。
 // 新增模块时在此追加一个具名字段（scaffold 生成器经 module-service-fields 标记注入）。
 type services struct {
-	// user 是 user 模块的 application service。
+	// aiTimeouts 是 ai 对话两条路由的生效时长，由模块装配层补齐默认值后交出。
+	aiTimeouts aihttp.Timeouts
+	// ai 是 ai 对话模块的 application service；一家厂商都没配时为 nil。
 	//
-	// 名字对齐**模块**而不是它当下的某一项用途：叫 verifier 时，
-	// 每次给该 service 加一个与"校验"无关的能力，字段名就多错一分，
+	// 名字对齐**模块**而不是它当下的某一项用途：叫 chatter 时，
+	// 每次给该 service 加一个与"对话"无关的能力，字段名就多错一分，
 	// 而生成器给新模块产出的字段一律是 <模块名>Service。
-	user *userapp.Service
+	//
+	// nil 可用是有意的：没有密钥就没有可用的上游，而"端点不存在"比
+	// "端点存在但每次都 503"更容易被判断成配置问题。
+	ai *aiapp.Service
 	// auth 是本地认证模块的装配产物；auth.mode 为 external 时是零值。
 	//
 	// 零值可用是有意的：外部身份模式下这些端点不存在，而"不存在"应当表达为
 	// 一个不被注册的模块，不是一个注册了却永远报错的模块。
 	auth authruntime.Assembly
+	// accounts 是账号状态源：鉴权中间件每个带令牌的请求都要用它确认账号仍然可用，
+	// entitlement.vip 也从它读会员资格。
+	//
+	// 它是 port 的集合而非某个模块的 service：这两项判定没有业务规则，
+	// 而把它们挂在某个业务模块上，会让"删掉那个模块"连带打断鉴权链路。
+	accounts *useraccount.Repository
 	// roles 是权威角色源，供 role.admin 判定使用。
 	//
 	// **示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。它是 port 而非具体仓储：
@@ -352,13 +365,23 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, error) {
 	var svc services
 
-	// 创建 user 模块 application service，传递最小依赖。
+	// AI 对话模块按厂商密钥条件装配：一家都没配就整个不装配。
 	// 装配失败直接上抛：依赖不全的 service 不允许进入运行期。
-	userService, err := userruntime.NewService(inf.mysqlDB)
-	if err != nil {
-		return services{}, fmt.Errorf("build user service: %w", err)
+	if inf.cfg.Modules.AI.Enabled() {
+		assembly, aiErr := airuntime.New(airuntime.Deps{
+			DB:     inf.mysqlDB,
+			Config: inf.cfg.Modules.AI,
+		})
+		if aiErr != nil {
+			return services{}, fmt.Errorf("build ai module: %w", aiErr)
+		}
+		svc.ai = assembly.Service
+		svc.aiTimeouts = aihttp.Timeouts{
+			Request:     assembly.Timeouts.Request,
+			StreamTotal: assembly.Timeouts.StreamTotal,
+			Heartbeat:   assembly.Timeouts.Heartbeat,
+		}
 	}
-	svc.user = userService
 
 	// 本地认证按模式条件装配。
 	//
@@ -398,6 +421,10 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 		svc.auth = assembly
 	}
 
+	// 账号状态源。直接构造仓储而不经模块 application：这两项判定没有业务规则，
+	// 加一层 service 只会多一个纯转发。
+	svc.accounts = useraccount.New(inf.mysqlDB)
+
 	// 权威角色源。**示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。
 	//
 	// 直接构造仓储而不经模块 application：角色判定没有业务规则，
@@ -429,7 +456,7 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 	}
 
 	authOpts := middleware.AuthOptions{
-		Verifier:   svc.user,
+		Verifier:   svc.accounts,
 		Parser:     tokenParser,
 		Revocation: revocation,
 	}
@@ -471,7 +498,7 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 
 	// entitlement.vip 是共享的会员资格判定，供多个模块经 RouteSpec 引用，
 	// 不复制进任何模板——复制会让"会员判定"出现多份可能不一致的实现。
-	if err := reg.Register("entitlement.vip", newVIPAuthorizer(svc.user)); err != nil {
+	if err := reg.Register("entitlement.vip", newVIPAuthorizer(svc.accounts)); err != nil {
 		return nil, err
 	}
 
@@ -540,14 +567,22 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		userhttp.Register(v1, userhttp.Deps{
-			Service:   svc.user,
-			Auth:      mw.auth,
-			RateLimit: rateLimitStager,
-			// 响应缓存注入口（cache-preset spec）：路由显式挂载才生效，
-			// 关闭态是透传中间件，模块无需判空。
-			Cache: inf.cache.Middleware,
-		})
+		// AI 模块只在配了至少一家厂商密钥时注册。没有可用上游时这些端点
+		// 不存在，而不是注册一组永远 503 的路由。
+		if svc.ai != nil {
+			aihttp.Register(v1, aihttp.Deps{
+				Service:   svc.ai,
+				Auth:      mw.auth,
+				RateLimit: rateLimitStager,
+				Timeouts:  svc.aiTimeouts,
+				// 响应缓存注入口（cache-preset spec）：路由显式挂载才生效，
+				// 关闭态是透传中间件，模块无需判空。
+				//
+				// 本模块当前不挂：全部路由都要求身份，而带身份的请求在中间件内
+				// 一律绕过缓存，挂上等于没挂。字段保留是装配契约。
+				Cache: inf.cache.Middleware,
+			})
+		}
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
 		if svc.auth.Service != nil {
@@ -600,41 +635,6 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	}()
 	var workers []Worker
 
-	// 注销档案清理：未配置保留期时不注册。
-	//
-	// 这张表存的是个人信息（原手机号、邮箱、昵称、来源 IP），保留期必须由使用方
-	// 按所在司法辖区确定——各行业与各地对最长保留期、删除权响应时限的要求并不
-	// 一致，脚手架替使用者选一个数字只会让它在某些辖区是错的，而且是静默错的。
-	cleanup, err := userruntime.NewDeactivationCleanup(inf.mysqlDB, inf.cfg.Modules.User)
-	if err != nil {
-		return nil, err
-	}
-	w, err := newDeactivationCleanupWorker(cleanup, inf.resources.Rdb(0), inf.cfg.App.Name,
-		inf.recorder, inf.resources.RedisConfigured())
-	if err != nil {
-		return nil, err
-	}
-	if w != nil {
-		workers = append(workers, w)
-
-		// 健康状态走异步回调：连续失败数与最后成功时间都是**状态**，
-		// 而这个任务默认一天只跑一次。主动上报的话这两个指标一天只有一个
-		// 数据点，中间二十多小时没有值——告警规则拿不到数，只能配"无数据"
-		// 这种钝规则。异步回调则在每个采集周期读一次当前值。
-		unregister, regErr := inf.recorder.RegisterWorkerHealth(w.Name(),
-			func() metrics.WorkerHealth {
-				failures, lastSuccess := cleanup.Health()
-				return metrics.WorkerHealth{
-					ConsecutiveFailures: failures,
-					LastSuccess:         lastSuccess,
-				}
-			})
-		if regErr != nil {
-			return nil, fmt.Errorf("register cleanup worker metrics: %w", regErr)
-		}
-		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
-	}
-
 	// 队列消费者：未启用队列或未注册任何处理器时不注册。
 	//
 	// 处理器由使用者在下方标记处按 tasks.Registrar 追加。没有处理器就不注册
@@ -679,8 +679,8 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 func rollbackWorkerMetricCleanups(inf *infra, cleanupsBefore int) error {
 	added := inf.metricsCleanup[cleanupsBefore:]
 	var errs []error
-	for i := len(added) - 1; i >= 0; i-- {
-		if cerr := added[i](); cerr != nil {
+	for _, a := range slices.Backward(added) {
+		if cerr := a(); cerr != nil {
 			errs = append(errs, fmt.Errorf("unregister worker metrics during rollback: %w", cerr))
 		}
 	}

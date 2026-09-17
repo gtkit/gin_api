@@ -40,12 +40,6 @@ type User struct {
 	VipExpireAt *time.Time `gorm:"column:vip_expire_at;type:timestamp;comment:会员到期时间"`
 	Follow      int8       `gorm:"column:follow;type:tinyint(1);index;not null;default:0;comment:是否关注公众号 0-未关注 1-关注"`
 
-	// Profile 表示用户与扩展资料表的一对一关联。
-	// 外键实际落在 user_profiles.user_id，上层若需要联表读取，可直接：
-	// db.Preload("Profile").First(&user, id)
-	// 这里不向客户端直接暴露，避免接口层无意带出递归结构。
-	Profile *UserProfile `gorm:"foreignKey:UserID;references:ID" json:"-"`
-
 	BaseTimeField
 }
 

@@ -133,6 +133,6 @@ func isDuplicateKey(err error) bool {
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return true
 	}
-	var mysqlErr *mysql.MySQLError
-	return errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlDuplicateEntry
+	mysqlErr, ok := errors.AsType[*mysql.MySQLError](err)
+	return ok && mysqlErr.Number == mysqlDuplicateEntry
 }

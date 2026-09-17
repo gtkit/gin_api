@@ -712,7 +712,7 @@ func readGoModulePath(root string) (string, error) {
 		return "", fmt.Errorf("read go.mod: %w", err)
 	}
 
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "module ") {
 			continue

@@ -48,7 +48,7 @@ func TestEveryManagedModelIsRegisteredForDDL(t *testing.T) {
 
 	var missing []string
 	for _, name := range managed {
-		// 精确到 `&models.T{}`，避免 `User` 命中 `UserProfile` 这类前缀重叠。
+		// 精确到 `&models.T{}`，避免 `User` 命中 `UserRole` 这类前缀重叠。
 		if !strings.Contains(block, "&models."+name+"{}") {
 			missing = append(missing, name)
 		}
@@ -108,15 +108,15 @@ func ddlModelsBlock(t *testing.T) string {
 	src := string(body)
 
 	const marker = "migrate.WithDDLModels("
-	start := strings.Index(src, marker)
-	if start < 0 {
+	_, after, ok := strings.Cut(src, marker)
+	if !ok {
 		t.Fatal("migrate.go 里找不到 migrate.WithDDLModels(：判据的锚点没了，" +
 			"改名时必须同步改这里，否则判据会静默失效")
 	}
-	rest := src[start+len(marker):]
-	end := strings.Index(rest, "\n\t\t)")
-	if end < 0 {
+	rest := after
+	before0, _, ok0 := strings.Cut(rest, "\n\t\t)")
+	if !ok0 {
 		t.Fatal("找不到 WithDDLModels 实参块的结尾")
 	}
-	return rest[:end]
+	return before0
 }

@@ -51,10 +51,10 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() erro
 		// 新模块的模型，使用者以为生成器把迁移接好了，实际漏了这一层。
 		migrate.WithDDLModels(
 			&models.User{},
-			&models.UserProfile{},
-			&models.UserDeactivation{},
 			&models.UserRole{},
 			&models.OperationAudit{},
+			&models.AIConversation{},
+			&models.AIMessage{},
 			// scaffold:migrate-models
 		),
 		migrate.WithTimeout(5*time.Minute),

@@ -241,8 +241,15 @@ func checkConfig(cfg *config.Config) CheckResult {
 
 // countJoined 统计 errors.Join 聚合的错误数量。
 func countJoined(err error) int {
-	var joined interface{ Unwrap() []error }
-	if errors.As(err, &joined) {
+	// 接口里必须带上 error：errors.AsType 的类型参数约束是 error，
+	// 而 errors.As 接受任意接口。go fix 的 errorsastype 改写器在这里会给出
+	// 裸 interface{ Unwrap() []error }，那个版本编译不过
+	// （"does not satisfy error (missing method Error)"）。
+	// 两种写法语义一致：错误链上被遍历的每个元素本身都是 error。
+	if joined, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err); ok {
 		return len(joined.Unwrap())
 	}
 	return 1
@@ -283,8 +290,10 @@ func checkJWTKeys(cfg *config.Config) CheckResult {
 			missing++
 			continue
 		}
-		// 私钥对 group/other 可读即为过宽。公钥不适用，但一并收紧无害。
-		if info.Mode().Perm()&0o077 != 0 {
+		// 权限判定按平台分流（keyperm_unix.go / keyperm_windows.go）：
+		// Unix 权限位在 Windows 上没有对应语义，就地写 &0o077 会让该平台恒报过宽。
+		// 上面的存在性判定不分平台——它在任何平台上都成立。
+		if keyPermissionTooOpen(info) {
 			insecure++
 		}
 	}

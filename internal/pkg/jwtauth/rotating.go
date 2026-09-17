@@ -117,18 +117,16 @@ func (i *Issuer) Issue(_ context.Context, uid int64, roles ...string) (string, e
 
 	now := i.now()
 	c := &claims.Claims{
-		RegisteredClaims: jwtv5.RegisteredClaims{
-			Issuer:    i.opts.Issuer,
-			Audience:  slices.Clone(i.opts.Audiences),
-			Subject:   formatUID(uid),
-			ID:        tokenID,
-			IssuedAt:  jwtv5.NewNumericDate(now),
-			NotBefore: jwtv5.NewNumericDate(now),
-			ExpiresAt: jwtv5.NewNumericDate(now.Add(i.opts.TTL)),
-		},
-		UserID: uid,
-		Prv:    i.opts.Prv,
-		Roles:  slices.Clone(roles),
+		Issuer:    i.opts.Issuer,
+		Audience:  slices.Clone(i.opts.Audiences),
+		Subject:   formatUID(uid),
+		ID:        tokenID,
+		IssuedAt:  jwtv5.NewNumericDate(now),
+		NotBefore: jwtv5.NewNumericDate(now),
+		ExpiresAt: jwtv5.NewNumericDate(now.Add(i.opts.TTL)),
+		UserID:    uid,
+		Prv:       i.opts.Prv,
+		Roles:     slices.Clone(roles),
 		// 标准 jti 与业务 token_id 始终相等：两个字段并存是存量 shape，
 		// 让它们分叉会使"按 ID 撤销"这类操作出现两个都对不上的候选值。
 		TokenID: tokenID,

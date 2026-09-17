@@ -88,8 +88,7 @@ func logContextError(c *gin.Context, err error) {
 	}
 
 	// Step 2: 如果错误本身带有 goerr 语义，就按它的 HTTP 状态码区分日志级别。
-	var appErr goerr.Error
-	if errors.As(err, &appErr) {
+	if appErr, ok := errors.AsType[goerr.Error](err); ok {
 		fields = append(fields,
 			zap.Int("http_status", appErr.HTTPCode()),
 			zap.Int("error_code", int(appErr.Code())),

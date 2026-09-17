@@ -69,9 +69,16 @@ const (
 EOF
 
 if [ "${1:-}" = "--check" ]; then
-  if ! diff -u "$target" "$tmp" > /dev/null 2>&1; then
+  # --strip-trailing-cr：本脚本按 LF 生成，而工作区的行尾取决于 checkout 时的
+  # core.autocrlf。不忽略行尾的话，CRLF 工作区上每一次比对都报"整个文件不一致"，
+  # 而门禁想守的是**身份是否漂移**——CommandName / RuntimeName 的取值，
+  # 与行尾无关。报出来的 diff 还会是整文件，看不出哪个常量变了。
+  #
+  # 仓库已用 .gitattributes 把行尾固定为 LF，这里是对既有 clone 的兼容：
+  # 那些工作区在执行一次 git add --renormalize 之前仍是 CRLF。
+  if ! diff -u --strip-trailing-cr "$target" "$tmp" > /dev/null 2>&1; then
     echo "[gen-appmeta] FAIL: $target 与 $project_mk 的生成结果不一致，请运行 make gen-appmeta" >&2
-    diff -u "$target" "$tmp" >&2 || true
+    diff -u --strip-trailing-cr "$target" "$tmp" >&2 || true
     exit 1
   fi
   echo "check-appmeta OK: $target 与 $project_mk 一致"

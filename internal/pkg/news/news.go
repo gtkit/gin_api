@@ -224,8 +224,8 @@ func (n *Notifier) ErrRecord(msg string) {
 }
 
 func SendPicMsg(ctx context.Context, newsApp newslib.AppNewser, openids, shotname string) error {
-	openidSlice := strings.Split(openids, ",")
-	for _, openid := range openidSlice {
+	openidSlice := strings.SplitSeq(openids, ",")
+	for openid := range openidSlice {
 		openid = strings.TrimSpace(openid)
 		if openid == "" {
 			continue

@@ -101,6 +101,34 @@ tool: ## Lint Go code with the installed golangci-lint
 vet: ## Run go vet
 	go vet -tags $(GO_BUILD_TAGS) $(GO_TARGETS)
 
+check-modern: ## 现代写法门禁：go fix 有改写建议即失败
+	## 「go fix -diff 无输出」此前只是工程约定，没有任何目标执行它——声明了
+	## 却不执行等于没声明，与 `tool` 对工具版本用的是同一条理由。实测后果：
+	## errors.As 迁移到 errors.AsType 的工作漏了一处，而全绿的 `make check`
+	## 不会提到它。
+	##
+	## -tags 必须与 vet / test 一致：不带 scaffold 的话 internal/scaffold 与
+	## internal/projectinit 会静默退出检查范围，而那正是母版最不该失去保护的两个包。
+	##
+	## 判据是「有输出即失败」。go fix -diff 对合规代码输出为空，退出码恒为 0，
+	## 因此不能依赖退出码——必须看输出本身。
+	## 失败信息用 ASCII：Makefile 本身是 UTF-8，但 Windows 上 make 经 GBK 代码页
+	## 把配方行交给 sh 时会破坏非 ASCII 字节，连引号配对一起毁掉——那时报出来的
+	## 是一个 shell 语法错误，而不是这条门禁想说的话。中文解释留在上面的注释里，
+	## 注释不进 shell。
+	@ echo "go fix -diff (modern Go rewrites)"
+	@ out="$$(go fix -diff -tags $(GO_BUILD_TAGS) $(GO_TARGETS) 2>&1)"; \
+	if [ -n "$$out" ]; then \
+		echo "$$out" | grep '^--- ' | sed 's/^--- /  pending: /; s/ (old)$$//'; \
+		echo "FAIL: the files above still carry pre-modern constructs" >&2; \
+		echo "      apply: go fix -tags $(GO_BUILD_TAGS) $(GO_TARGETS)" >&2; \
+		echo "      exception: the errorsastype rewriter emits uncompilable code for" >&2; \
+		echo "      anonymous interface targets (the type parameter is constrained to" >&2; \
+		echo "      error); write those by hand with error embedded in the interface" >&2; \
+		exit 1; \
+	fi
+	@ echo "OK go fix -diff"
+
 test-race: ## Run race-enabled tests
 	go test -tags $(GO_BUILD_TAGS) -race -count=1 -timeout=5m $(GO_TARGETS)
 
@@ -282,7 +310,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-coverage ## Run all required pre-submit checks
+check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-modern check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 

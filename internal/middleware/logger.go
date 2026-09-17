@@ -165,10 +165,7 @@ type teeBody struct {
 func (t *teeBody) Read(p []byte) (int, error) {
 	n, err := t.ReadCloser.Read(p)
 	if n > 0 && len(t.captured) < t.limit {
-		room := t.limit - len(t.captured)
-		if n < room {
-			room = n
-		}
+		room := min(n, t.limit-len(t.captured))
 		t.captured = append(t.captured, p[:room]...)
 	}
 	return n, err

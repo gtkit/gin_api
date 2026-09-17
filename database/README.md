@@ -80,8 +80,9 @@ mysql -h<host> -u<user> -p <db> -e 'SHOW CREATE TABLE <table>\G'
 # 3. 由已注册的 GORM 模型生成严格 DDL
 go run . make ddl --all --force        # 产出到 database/ddl/
 
-# 4. 把 ddl/ 的 CREATE TABLE 按外键顺序拼进基线迁移，并补上表选项
-#    （users 必须先于 user_profiles，后者有指向前者的外键；回滚取逆序）
+# 4. 把 ddl/ 的 CREATE TABLE 拼进迁移，并补上表选项
+#    （有外键时按引用顺序建表，回滚取逆序；本仓当前的表之间无外键，
+#     ai_messages 与 ai_conversations 只做逻辑关联——理由见该迁移的注释）
 #    表选项：ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 
 # 5. 重新生成 schema 快照并跑验证

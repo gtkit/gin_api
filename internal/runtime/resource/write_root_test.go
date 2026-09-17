@@ -8,8 +8,13 @@ import (
 )
 
 func TestPickWriteRootAppRootWins(t *testing.T) {
-	if got := pickWriteRoot("/data/dynamic/app", "/somewhere/else"); got != "/data/dynamic/app" {
-		t.Fatalf("APP_ROOT 应有最高优先级，得到 %q", got)
+	// 期望值经 filepath.Clean 归一，不写死 Unix 分隔符：pickWriteRoot 返回的是
+	// Clean 的结果，在 Windows 上是 \data\dynamic\app。硬编码字面量会让这条
+	// 与分隔符无关的断言（APP_ROOT 优先级最高）在开发机上因为分隔符而失败。
+	const appRoot = "/data/dynamic/app"
+	want := filepath.Clean(appRoot)
+	if got := pickWriteRoot(appRoot, "/somewhere/else"); got != want {
+		t.Fatalf("APP_ROOT 应有最高优先级，期望 %q 得到 %q", want, got)
 	}
 }
 

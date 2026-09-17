@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/gofrs/flock"
 )
@@ -215,8 +216,7 @@ func firstMissingAncestor(dir string) string {
 // 已逐个移除，之后仍非空的目录只可能装着别人的东西，保留它不是回滚失败。
 func rollbackWrites(written []pendingWrite, createdDirs []string) error {
 	var errs []error
-	for i := len(written) - 1; i >= 0; i-- {
-		w := written[i]
+	for _, w := range slices.Backward(written) {
 		if w.existed {
 			if err := writeGeneratedFile(w.path, w.original, 0o644); err != nil {
 				errs = append(errs, fmt.Errorf("restore %s: %w", w.path, err))
@@ -227,9 +227,9 @@ func rollbackWrites(written []pendingWrite, createdDirs []string) error {
 			errs = append(errs, fmt.Errorf("remove %s: %w", w.path, err))
 		}
 	}
-	for i := len(createdDirs) - 1; i >= 0; i-- {
-		if err := removeEmptyDirTree(createdDirs[i]); err != nil {
-			errs = append(errs, fmt.Errorf("remove created dir %s: %w", createdDirs[i], err))
+	for _, createdDir := range slices.Backward(createdDirs) {
+		if err := removeEmptyDirTree(createdDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove created dir %s: %w", createdDir, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -255,13 +255,13 @@ func removeEmptyDirTree(root string) error {
 	}
 
 	// WalkDir 前序产出，倒序即先子后父。
-	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := os.Remove(dirs[i]); err == nil {
+	for _, dir := range slices.Backward(dirs) {
+		if err := os.Remove(dir); err == nil {
 			continue
-		} else if entries, readErr := os.ReadDir(dirs[i]); readErr == nil && len(entries) > 0 {
+		} else if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) > 0 {
 			continue // 装着非本次产物：保留是义务，不是失败。
 		} else {
-			return fmt.Errorf("remove %s: %w", dirs[i], err)
+			return fmt.Errorf("remove %s: %w", dir, err)
 		}
 	}
 	return nil

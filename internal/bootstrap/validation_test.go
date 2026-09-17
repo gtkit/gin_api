@@ -59,8 +59,8 @@ func TestValidationOptionsWiredIntoInit(t *testing.T) {
 		t.Fatal("verify.Struct() = nil, want custom rule to reject")
 	}
 	translated := verify.StructErr(verr)
-	var item goerr.Error
-	if !errors.As(translated, &item) {
+	item, ok := errors.AsType[goerr.Error](translated)
+	if !ok {
 		t.Fatalf("StructErr() = %T(%v), want goerr.Error", translated, translated)
 	}
 	if !strings.Contains(item.Message(), customMsg) {
@@ -101,8 +101,9 @@ func TestHTTPURLTagHasChineseMessage(t *testing.T) {
 		t.Fatal("verify.Struct() = nil, want http_url to reject a javascript: scheme")
 	}
 
-	var item goerr.Error
-	if translated := verify.StructErr(verr); !errors.As(translated, &item) {
+	translated := verify.StructErr(verr)
+	item, ok := errors.AsType[goerr.Error](translated)
+	if !ok {
 		t.Fatalf("StructErr() = %T(%v), want goerr.Error", translated, translated)
 	}
 	msg := item.Message()

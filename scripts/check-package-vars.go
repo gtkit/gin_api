@@ -179,8 +179,14 @@ func parseFindings(path string) ([]string, error) {
 				}
 				if pkgVars[ident.Name] && !shadowed[ident.Name] {
 					pos := fset.Position(ident.Pos())
+					// 路径归一为正斜杠：登记表里写的是可移植形式（cmd/registry.go），
+					// 而 filepath.Walk 在 Windows 上给出 cmd\registry.go。不归一的话
+					// 每一条登记在该平台都匹配不上，传感器把**已认领**的重绑定报成
+					// 未认领——失败信息指向登记表，而登记表看起来完全正确。
+					// 输出与匹配用同一份字符串，报出来的行可以直接抄进登记表。
 					findings = append(findings, fmt.Sprintf(
-						"%s:%d: %s is rebound in %s", path, pos.Line, ident.Name, describeFunc(fn)))
+						"%s:%d: %s is rebound in %s",
+						filepath.ToSlash(path), pos.Line, ident.Name, describeFunc(fn)))
 				}
 			}
 			return true
