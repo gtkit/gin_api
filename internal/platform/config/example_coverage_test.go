@@ -21,6 +21,7 @@ var exampleCoverageExemptions = map[string]string{
 	"application.writertimeout": "废弃键：同上",
 	"jwt.private_key_path":      "废弃键：单密钥形态已被 kid 密钥集取代，保留只为可读的迁移错误",
 	"jwt.public_key_path":       "废弃键：同上",
+	"modules.user":              "墓碑字段：v0.4.0 移除的 user 模块，保留只为给残留配置一条可读的迁移错误",
 }
 
 // TestExampleCoversConfigStruct 是「结构体 → 样例」方向的对齐门禁。

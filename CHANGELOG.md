@@ -56,7 +56,12 @@
   基线迁移里的 `user_profiles` / `user_deactivations` 两张表也已删除。
 
   **升级动作**：仍需要这些能力的项目从 v0.3.0 的 tag 取回对应目录；`config/env/env.yml` 里的
-  `modules.user` 段必须删掉——根层是严格解码，留着它会让进程启动即失败。
+  `modules.user` 段必须删掉。留着它会让进程启动即失败，错误信息写明了移除版本、取回方式与要删掉
+  的配置段——`modules.user` 作为墓碑字段保留在配置结构体里，正是为了给出这条错误，而不是严格解码
+  那句说不出所以然的"未知键"。**该字段不被任何运行时逻辑读取**，唯一消费者是配置校验器。
+
+  覆盖边界：`modules.user: {}` 与带内容的残留都会被拦；`modules.user:`（空值）在解析层就不产生
+  这个键，拦不住——它不携带任何被忽略的配置，不会让人误以为某项设置仍在生效。
 
 - 鉴权链路的账号状态源改为 `internal/repository/useraccount`（`ValidateUser` / `ValidateVIP`）。
   它此前由 `user` 模块的 application service 提供，而把鉴权依赖挂在一个业务模块上，会让
