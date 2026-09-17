@@ -67,9 +67,11 @@ GO_BUILD_TAGS ?= scaffold
 COVERAGE_PROFILE ?= .cache/coverage.out
 # 覆盖率门禁：取“任意环境都能复现的可移植地板”，只升不降。
 #
-# 两条路径的实测值（isolate-loopback-tests 后首次真实可复现）：
-#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：70.3%  ← 下界
-#   正常路径（loopback 可用）：                          74.1%
+# 两条路径的实测值（2026-09-17，AI 模块合入后重测）：
+#   受限路径 ALLOW_NO_LOOPBACK=1（强制跳过绑端口测试）：73.0%  ← 下界
+#   正常路径（loopback 可用）：                          79.5%
+#   历史测量：70.3% / 74.1%（isolate-loopback-tests 后首次可复现），
+#             72.4% / 79.2%（2026-09-14）。
 #
 # 此前注释里的“受限环境实测 62.5%”是**无效数字**：当时 test-coverage.sh 按测试名
 # 黑名单分组，而名单里的三个测试早已随代码删除，`grep -Ev` 一个都没排除掉——
@@ -77,7 +79,7 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 # testutil.RequireLoopback 在测试内部完成，标志在任意机器上都真正生效，
 # 上面两个数字因此可以被任何人重新测出来，而不是只能被声称。
 #
-# 门禁取 70.0。**每批新增依赖 Redis 的能力都会压低受限下界**：miniredis 要绑
+# 门禁取 72.5（受限实测 73.0 之下留 0.5 余量）。**每批新增依赖 Redis 的能力都会压低受限下界**：miniredis 要绑
 # 回环端口，受限路径整包跳过，于是新增代码抬高了分母却没抬高受限分子。
 # 认证、指标、单实例租约三批都遇到过这一点，每次都是靠补一套**不碰网络的
 # 手写替身测试**把受限覆盖率拉回来的（见 internal/pkg/{tokenstore,singleton}
@@ -88,7 +90,7 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 #
 # 下一次动这个数字之前必须先把受限实测抬上去，而不是直接改门禁。
 # 阶段目标：70 -> 75 -> 80；每次提高前必须先让代码在**受限路径**实际达标。
-COVERAGE_MIN ?= 70.0
+COVERAGE_MIN ?= 72.5
 tool: ## Lint Go code with the installed golangci-lint
 	## 版本必须与 security/toolchain.mk 声明一致。
 	## 声明了却不执行等于没声明：工具版本漂移会让同一份代码在不同机器上得到
