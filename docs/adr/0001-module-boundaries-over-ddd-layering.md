@@ -30,10 +30,10 @@
 
 | 判据 | 当前状态 | 证据 |
 |---|---|---|
-| 模块之间无直接引用 | `auth` 与 `user` 双向零 import | `grep -rn "internal/module/user" internal/module/auth/` 与其反向皆无匹配 |
+| 模块之间无直接引用 | `auth` 与 `ai` 双向零 import | `grep -rn "internal/module/ai" internal/module/auth/` 与其反向皆无匹配 |
 | 契约显式且属于消费方 | port 接口定义在 application 侧，实现由装配层注入 | `internal/module/auth/application/ports.go` |
 | 模型在边界处翻译 | `Credential` 在 application 层重新声明，不引用仓储包同名类型 | 同上文件内的类型注释 |
-| 数据不共享 | 仓储按模块独占：`internal/repository/authcredential/` 归 auth，`internal/repository/user/` 与 `internal/repository/user_deactivation/` 归 user | `internal/runtime/module/` 各模块装配入口 |
+| 数据不共享 | 仓储按模块独占：`internal/repository/authcredential/` 归 auth，`internal/repository/aiconversation/` 归 ai。`internal/repository/useraccount/` 不归任何模块，由装配层直接持有——它是鉴权链路的账号状态源，挂到业务模块上会让删那个模块连带打断鉴权 | `internal/runtime/module/` 各模块装配入口 |
 | 汇合点唯一 | 模块只被装配层引用，彼此不感知 | `internal/bootstrap/providers.go` |
 
 模块内部的分层方向由传感器强制，不靠自觉：`application imports gin / gorm / repository`
@@ -49,7 +49,7 @@
 四层结构把所有上下文的实体放进 domain 层的同一个 model 包。单上下文时两者
 差别不大；到第二个上下文出现时性质就变了：
 
-- 当前结构下，`auth` 想引用 `user` 的类型必须写一行 import，评审时看得见，
+- 当前结构下，`auth` 想引用 `ai` 的类型必须写一行 import，评审时看得见，
   且可以加一条传感器判据把它变成硬失败。
 - 四层结构下，两个上下文的实体在同一个包内，跨上下文引用连 import 都不需要，
   编译器与静态判据都没有着力点。
@@ -60,16 +60,16 @@
 
 ### 三、迁移成本与收益不成比例
 
-按实测行数（`find internal -name '*.go' -not -name '*_test.go'`）：
+按实测行数（`find . -name '*.go' -not -name '*_test.go'`，2026-09-17 重测）：
 
 | 范围 | 非测试行数 | 占比 |
 |---|---|---|
-| 业务模块 `internal/module/` | 1856 | 6% |
-| 数据访问 `internal/repository/` | 548 | 2% |
-| 全仓 | 30479 | 100% |
+| 业务模块 `internal/module/` | 2396 | 7% |
+| 数据访问 `internal/repository/` | 797 | 2% |
+| 全仓 | 32178 | 100% |
 
 母版的绝大部分代码是平台能力（配置、可观测性、中间件、门禁、脚手架生成器），
-真正会被重排进 `domain/` 的业务逻辑只有 6%。而重排要付的代价是确定的：
+真正会被重排进 `domain/` 的业务逻辑只有 7%。而重排要付的代价是确定的：
 
 - 传感器的每条判据按路径匹配目录（`internal/module/*/application` 这类），
   一级目录改名后全部失效，需重写并重新验证——门禁失效期间是无保护的。
@@ -92,7 +92,7 @@
 
 ### 五、领域事件的引入前提
 
-领域事件用于解耦跨上下文通信。当前 `auth` 与 `user` 双向零引用，
+领域事件用于解耦跨上下文通信。当前 `auth` 与 `ai` 双向零引用，
 模块间通信不经任何代码路径发生，事件机制没有消费者。
 
 真正出现跨模块通知需求时，异步承载已经就位：`internal/pkg/tasks/` 的
@@ -106,7 +106,7 @@ asynq 队列，其 worker 契约与关停顺序见
 新增模块经 `make module` 生成即符合边界；传感器判据与目录结构同构。
 
 **付出的：** 与四层 DDD 结构的通用词汇不对齐，熟悉那套目录的人需要一次对照说明——
-本 ADR 与 `internal/module/user/doc.go` 承担这个说明。
+本 ADR 与 `internal/module/ai/doc.go` 承担这个说明。
 
 **当前由约定而非判据维持的部分：** 传感器的横向规则挡的是下层引用模块
 （`repository` / `internal/pkg` 不得 import `internal/module/`），
@@ -118,4 +118,4 @@ asynq 队列，其 worker 契约与关停顺序见
 
 - [architecture.md](../architecture.md)：分层、依赖方向、装配边界的单一来源
 - [quality-gates.md](../quality-gates.md)：判据入口与新规则准入
-- `internal/module/user/doc.go`：模块内分层的具体落地样例
+- `internal/module/ai/doc.go`：模块内分层的具体落地样例
