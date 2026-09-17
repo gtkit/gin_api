@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"github.com/gtkit/json"
+)
 
 // UserStatus 表示用户状态。
 type UserStatus int8
@@ -66,4 +70,14 @@ const (
 
 func (user *User) TableName() string {
 	return "users"
+}
+
+// MarshalBinary 实现 encoding.BinaryMarshaler：go-redis 把 struct 作为命令参数时只接受该接口。
+func (user *User) MarshalBinary() ([]byte, error) {
+	return json.Marshal(user)
+}
+
+// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
+func (user *User) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, user)
 }

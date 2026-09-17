@@ -3,6 +3,8 @@ package models
 
 import (
 	"time"
+
+	"github.com/gtkit/json"
 )
 
 // UserProfile 用户扩展信息表。
@@ -39,4 +41,14 @@ type UserProfile struct {
 
 func (userProfile *UserProfile) TableName() string {
 	return "user_profiles"
+}
+
+// MarshalBinary 实现 encoding.BinaryMarshaler：go-redis 把 struct 作为命令参数时只接受该接口。
+func (userProfile *UserProfile) MarshalBinary() ([]byte, error) {
+	return json.Marshal(userProfile)
+}
+
+// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
+func (userProfile *UserProfile) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, userProfile)
 }

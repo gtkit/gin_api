@@ -1,5 +1,7 @@
 package models
 
+import "github.com/gtkit/json"
+
 // UserDeactivation 用户注销记录表。
 //
 // 注销采用方案 A：在 users 表上脱敏改写并将 status 置为 UserStatusDeleted，
@@ -27,4 +29,14 @@ type UserDeactivation struct {
 // TableName 指定表名。
 func (u *UserDeactivation) TableName() string {
 	return "user_deactivations"
+}
+
+// MarshalBinary 实现 encoding.BinaryMarshaler：go-redis 把 struct 作为命令参数时只接受该接口。
+func (u *UserDeactivation) MarshalBinary() ([]byte, error) {
+	return json.Marshal(u)
+}
+
+// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
+func (u *UserDeactivation) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, u)
 }

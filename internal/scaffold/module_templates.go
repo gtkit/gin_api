@@ -45,10 +45,14 @@ func validate{{.ConfigTypeName}}(c {{.ConfigTypeName}}) error {
 `
 
 const modelTemplate = `package models
-{{- if .NeedsModelTime }}
 
-import "time"
+import (
+{{- if .NeedsModelTime }}
+	"time"
+
 {{- end }}
+	"github.com/gtkit/json"
+)
 
 type {{.StructName}} struct {
 	BaseID
@@ -62,6 +66,16 @@ type {{.StructName}} struct {
 
 func (*{{.StructName}}) TableName() string {
 	return "{{.TableName}}"
+}
+
+// MarshalBinary 实现 encoding.BinaryMarshaler：go-redis 把 struct 作为命令参数时只接受该接口。
+func (m *{{.StructName}}) MarshalBinary() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
+func (m *{{.StructName}}) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, m)
 }
 `
 
