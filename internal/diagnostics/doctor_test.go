@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // validConfig 返回一份能通过严格校验的最小配置。
@@ -38,7 +39,7 @@ func configWithRealKeys(t *testing.T) *config.Config {
 
 func validConfig() *config.Config {
 	return &config.Config{
-		Env: config.EnvDev,
+		Env: env.Dev,
 		App: config.AppConfig{Name: "app_client", Host: "localhost", Port: "8008"},
 		// 认证模式没有默认值。取 external：它不要求 Redis，
 		// 不给这些与认证无关的用例强加一个依赖。

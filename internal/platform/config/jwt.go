@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 //
 // 全部在启动期完成：密钥配置错误的表现要么是"签出的令牌谁也验不了"，
 // 要么是"某类令牌被静默拒绝"，两者都只在真实流量上暴露。
-func validateJWTRotation(jwt JWTConfig, env Env) error {
+func validateJWTRotation(jwt JWTConfig, environment env.Env) error {
 	var errs []error
 
 	// 废弃键 fail-fast，并给出迁移方向。
@@ -91,7 +93,7 @@ func validateJWTRotation(jwt JWTConfig, env Env) error {
 			jwt.CacheMaxEntries))
 	}
 
-	errs = append(errs, validateJWTCutoffs(jwt, env)...)
+	errs = append(errs, validateJWTCutoffs(jwt, environment)...)
 
 	return errors.Join(errs...)
 }
@@ -101,7 +103,7 @@ func validateJWTRotation(jwt JWTConfig, env Env) error {
 // 两者**分别**校验、分别观测、分别删除：它们是不同的兼容维度
 // （缺 kid 的存量令牌 vs 不同算法族的 Laravel 令牌），
 // 共用一个开关会让其中一条的删除被另一条阻塞。
-func validateJWTCutoffs(jwt JWTConfig, _ Env) []error {
+func validateJWTCutoffs(jwt JWTConfig, _ env.Env) []error {
 	var errs []error
 
 	// 开启 Laravel 回退却不给终点，等于把过渡口做成永久的。

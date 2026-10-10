@@ -11,7 +11,7 @@ import (
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
-	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/shared/env"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
@@ -67,10 +67,10 @@ type Options struct {
 // New 创建 Gin engine 并装配全局中间件、系统探针与业务路由。
 //
 // 装配顺序就是 gin 的惯例：先 engine 级 Use，再分组注册。
-func New(envName string, opt Options) (*gin.Engine, error) {
+func New(environment env.Env, opt Options) (*gin.Engine, error) {
 	// SetMode 必须在 gin.New() **之前**：gin.New() 的第一件事就是按当时的 mode
 	// 决定构造期调试输出，构造后再设置对那部分输出无效。
-	gin.SetMode(ginModeFromEnv(envName))
+	gin.SetMode(ginModeFromEnv(environment))
 
 	engine := gin.New()
 	if err := configureEngine(engine, opt); err != nil {
@@ -102,13 +102,22 @@ func New(envName string, opt Options) (*gin.Engine, error) {
 //
 // 只处理生产环境是不够的：dev/test 会落在 gin 默认的 DebugMode，
 // 而 DebugMode 下 gin 自己往 stderr 打路由表与警告，绕过项目的结构化日志。
-func ginModeFromEnv(envName string) string {
-	switch config.Env(strings.ToLower(strings.TrimSpace(envName))) {
-	case config.EnvProd:
+//
+// **入参是类型化的环境值，且这里不做任何归一化**。配置层已经写死「只接受精确值
+// dev|test|prod，不归一化、不降级」，理由是未知值静默当作非生产会绕过 pprof 绑定
+// 限制、生产日志路径校验与 ReleaseMode 等全部生产保护。此前这里收 string 并做一次
+// ToLower+TrimSpace，等于把配置层拒绝的形态在装配层重新放行——那条路径没有任何判据
+// 守护，配置校验一旦放宽就会生效。
+//
+// default 保留回落 DebugMode：Env 底层仍是 string，零值与日后新增的常量都会落到这里，
+// 回落到限制更多的 DebugMode 是安全方向（ReleaseMode 会关掉框架自身的调试保护）。
+func ginModeFromEnv(environment env.Env) string {
+	switch environment {
+	case env.Prod:
 		return gin.ReleaseMode
-	case config.EnvTest:
+	case env.Test:
 		return gin.TestMode
-	case config.EnvDev:
+	case env.Dev:
 		return gin.DebugMode
 	default:
 		return gin.DebugMode

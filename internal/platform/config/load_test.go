@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 func TestLoadFromReader(t *testing.T) {
@@ -252,43 +254,43 @@ func TestValidateProdLogPathLocation(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		env         Env
+		env         env.Env
 		appRoot     string
 		logPath     string
 		wantErrText string
 	}{
 		{
 			name:    "prod relative path allowed without app root",
-			env:     EnvProd,
+			env:     env.Prod,
 			logPath: "./logs/app_client",
 		},
 		{
 			name:    "dev absolute path allowed without app root",
-			env:     EnvDev,
+			env:     env.Dev,
 			logPath: filepath.Join(outsideRoot, "logs", "app_client"),
 		},
 		{
 			name:    "prod absolute path under app root allowed",
-			env:     EnvProd,
+			env:     env.Prod,
 			appRoot: appRoot,
 			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
 			name:        "prod absolute path without app root rejected",
-			env:         EnvProd,
+			env:         env.Prod,
 			logPath:     filepath.Join(appRoot, "logs", "app_client"),
 			wantErrText: "APP_ROOT",
 		},
 		{
 			name:        "prod absolute path with relative app root rejected",
-			env:         EnvProd,
+			env:         env.Prod,
 			appRoot:     "relative-root",
 			logPath:     filepath.Join(appRoot, "logs", "app_client"),
 			wantErrText: "APP_ROOT must be absolute",
 		},
 		{
 			name:        "prod absolute path outside app root rejected",
-			env:         EnvProd,
+			env:         env.Prod,
 			appRoot:     appRoot,
 			logPath:     filepath.Join(outsideRoot, "logs", "app_client"),
 			wantErrText: "must be under APP_ROOT",
@@ -439,12 +441,12 @@ func TestValidateEnvWhitelist(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		env         Env
+		env         env.Env
 		wantErrText string
 	}{
-		{name: "dev passes", env: EnvDev},
-		{name: "test passes", env: EnvTest},
-		{name: "prod passes", env: EnvProd},
+		{name: "dev passes", env: env.Dev},
+		{name: "test passes", env: env.Test},
+		{name: "prod passes", env: env.Prod},
 		{name: "empty rejected", env: "", wantErrText: "env is required"},
 		{name: "production rejected", env: "production", wantErrText: "must be exactly one of dev|test|prod"},
 		{name: "prd rejected", env: "prd", wantErrText: "must be exactly one of dev|test|prod"},
@@ -572,7 +574,7 @@ func TestValidateLaravelJWTConfig(t *testing.T) {
 
 func validConfigForTest() *Config {
 	return &Config{
-		Env: EnvDev,
+		Env: env.Dev,
 		// 认证模式没有默认值，合法配置必须显式选一个。fixture 取 external：
 		// 它不要求 Redis，因此不会给无关的用例强加一个依赖。
 		Auth: AuthConfig{Mode: AuthModeExternal},

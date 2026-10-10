@@ -12,6 +12,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // TestGinModeFromEnv 锁住环境名 → gin 运行模式的映射。
@@ -23,21 +24,21 @@ func TestGinModeFromEnv(t *testing.T) {
 	t.Cleanup(func() { gin.SetMode(original) })
 
 	tests := []struct {
-		name string
-		env  string
-		want string
+		name        string
+		environment env.Env
+		want        string
 	}{
-		{name: "prod 用发布模式", env: "prod", want: gin.ReleaseMode},
-		{name: "test 用测试模式", env: "test", want: gin.TestMode},
-		{name: "dev 用调试模式", env: "dev", want: gin.DebugMode},
-		{name: "未知环境名回落调试模式", env: "staging", want: gin.DebugMode},
-		{name: "空环境名回落调试模式", env: "", want: gin.DebugMode},
+		{name: "prod 用发布模式", environment: env.Prod, want: gin.ReleaseMode},
+		{name: "test 用测试模式", environment: env.Test, want: gin.TestMode},
+		{name: "dev 用调试模式", environment: env.Dev, want: gin.DebugMode},
+		{name: "未知环境值回落调试模式", environment: env.Env("staging"), want: gin.DebugMode},
+		{name: "零值回落调试模式", environment: env.Env(""), want: gin.DebugMode},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ginModeFromEnv(tt.env); got != tt.want {
-				t.Fatalf("ginModeFromEnv(%q) = %q, want %q", tt.env, got, tt.want)
+			if got := ginModeFromEnv(tt.environment); got != tt.want {
+				t.Fatalf("ginModeFromEnv(%q) = %q, want %q", tt.environment, got, tt.want)
 			}
 		})
 	}

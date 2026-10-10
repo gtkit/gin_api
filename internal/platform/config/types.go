@@ -2,11 +2,13 @@ package config
 
 import (
 	"time"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // Config 是 v2 的 typed runtime config。
 type Config struct {
-	Env      Env            `mapstructure:"env"`
+	Env      env.Env        `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
 	Database DatabaseConfig `mapstructure:"database"`
 	// Email / SMS 是出站通知通道：host / provider 为空即不启用（不构造客户端），

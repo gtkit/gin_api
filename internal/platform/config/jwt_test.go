@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 func rotationConfig(mutate func(*JWTConfig)) JWTConfig {
@@ -113,7 +115,7 @@ func TestValidateJWTRotation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), EnvDev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)
@@ -182,7 +184,7 @@ func TestValidateJWTCutoffs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), EnvDev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)

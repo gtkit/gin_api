@@ -18,7 +18,7 @@ require (
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/go-llm-provider/v2 v2.15.0
-	github.com/gtkit/goerr v1.2.8
+	github.com/gtkit/goerr v1.4.0
 	github.com/gtkit/gojwt v1.0.7
 	github.com/gtkit/golimit/v2 v2.2.0
 	github.com/gtkit/gouploader v1.8.1
@@ -35,7 +35,7 @@ require (
 	github.com/gtkit/ssex v0.2.2
 	github.com/gtkit/stringx v1.1.6
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
-	github.com/gtkit/verify v1.2.4
+	github.com/gtkit/verify v1.2.5
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/env v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1

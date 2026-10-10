@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // TestValidatePprofConfig 覆盖 pprof 绑定地址与采样率的全部约束。
@@ -20,49 +22,49 @@ func TestValidatePprofConfig(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		env      Env
+		env      env.Env
 		pprof    PprofConfig
 		wantErr  bool
 		wantHint string
 	}{
-		{name: "disabled ignores everything", env: EnvProd, pprof: PprofConfig{Enabled: false, Host: "0.0.0.0"}},
-		{name: "empty host falls back to loopback", env: EnvProd, pprof: PprofConfig{Enabled: true}},
-		{name: "ipv4 loopback ok", env: EnvProd, pprof: PprofConfig{Enabled: true, Host: "127.0.0.1"}},
+		{name: "disabled ignores everything", env: env.Prod, pprof: PprofConfig{Enabled: false, Host: "0.0.0.0"}},
+		{name: "empty host falls back to loopback", env: env.Prod, pprof: PprofConfig{Enabled: true}},
+		{name: "ipv4 loopback ok", env: env.Prod, pprof: PprofConfig{Enabled: true, Host: "127.0.0.1"}},
 		{
 			// 127.0.0.0/8 整段都是回环，字符串白名单会误拒它。
-			name: "alternate ipv4 loopback ok", env: EnvProd,
+			name: "alternate ipv4 loopback ok", env: env.Prod,
 			pprof: PprofConfig{Enabled: true, Host: "127.0.0.2"},
 		},
-		{name: "ipv6 loopback ok", env: EnvProd, pprof: PprofConfig{Enabled: true, Host: "::1"}},
+		{name: "ipv6 loopback ok", env: env.Prod, pprof: PprofConfig{Enabled: true, Host: "::1"}},
 		{
-			name: "expanded ipv6 loopback ok", env: EnvProd,
+			name: "expanded ipv6 loopback ok", env: env.Prod,
 			pprof: PprofConfig{Enabled: true, Host: "0:0:0:0:0:0:0:1"},
 		},
 		{
-			name: "wildcard rejected", env: EnvProd,
+			name: "wildcard rejected", env: env.Prod,
 			pprof: PprofConfig{Enabled: true, Host: "0.0.0.0"}, wantErr: true, wantHint: "not a loopback",
 		},
 		{
-			name: "private ip rejected", env: EnvProd,
+			name: "private ip rejected", env: env.Prod,
 			pprof: PprofConfig{Enabled: true, Host: "10.0.0.5"}, wantErr: true, wantHint: "not a loopback",
 		},
 		{
 			// 关键回归：dev 上同样拒绝。旧实现只在 prod 校验。
-			name: "wildcard rejected in dev too", env: Env("dev"),
+			name: "wildcard rejected in dev too", env: env.Env("dev"),
 			pprof: PprofConfig{Enabled: true, Host: "0.0.0.0"}, wantErr: true, wantHint: "not a loopback",
 		},
 		{
 			// 关键回归：主机名一律拒绝，包括 localhost。
-			name: "hostname rejected", env: Env("dev"),
+			name: "hostname rejected", env: env.Env("dev"),
 			pprof: PprofConfig{Enabled: true, Host: "localhost"}, wantErr: true, wantHint: "not a hostname",
 		},
 		{
-			name: "negative block rate rejected", env: Env("dev"),
+			name: "negative block rate rejected", env: env.Env("dev"),
 			pprof:   PprofConfig{Enabled: true, Host: "127.0.0.1", BlockProfileRate: -1},
 			wantErr: true, wantHint: "block_profile_rate",
 		},
 		{
-			name: "negative mutex fraction rejected", env: Env("dev"),
+			name: "negative mutex fraction rejected", env: env.Env("dev"),
 			pprof:   PprofConfig{Enabled: true, Host: "127.0.0.1", MutexProfileFraction: -1},
 			wantErr: true, wantHint: "mutex_profile_fraction",
 		},

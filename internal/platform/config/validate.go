@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // signedNum 覆盖需要做数值区间校验的全部类型。
@@ -97,7 +99,7 @@ func (c *Config) Validate() error {
 	// 未知值（如 production/prd/Prod）若静默当作非生产，会整体绕过 pprof
 	// 绑定限制、生产日志路径校验与 gin ReleaseMode 等所有生产保护。
 	switch c.Env {
-	case EnvDev, EnvTest, EnvProd:
+	case env.Dev, env.Test, env.Prod:
 	case "":
 		errs = append(errs, errors.New("env is required"))
 	default:
@@ -260,7 +262,7 @@ func effectiveLaravelAlgorithm(normalizedAlg string) string {
 //     而白名单一旦被人"顺手扩充"，扩进一个非回环地址不会有任何提示。
 //
 // 远程排障走 SSH 端口转发。
-func validatePprofConfig(_ Env, pprof PprofConfig) error {
+func validatePprofConfig(_ env.Env, pprof PprofConfig) error {
 	if !pprof.Enabled {
 		return nil
 	}
@@ -574,7 +576,7 @@ func validateSMSConfig(sms SMSConfig) error {
 	return errors.Join(errs...)
 }
 
-func validateLogConfig(env Env, logCfg LogConfig, appRoot string) error {
+func validateLogConfig(environment env.Env, logCfg LogConfig, appRoot string) error {
 	var errs []error
 
 	if logCfg.Level == "" {
@@ -582,16 +584,16 @@ func validateLogConfig(env Env, logCfg LogConfig, appRoot string) error {
 	}
 	if logCfg.Path == "" {
 		errs = append(errs, errors.New("log.path is required"))
-	} else if err := validateLogPathLocation(env, logCfg.Path, appRoot); err != nil {
+	} else if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
 		errs = append(errs, err)
 	}
 
 	return errors.Join(errs...)
 }
 
-func validateLogPathLocation(env Env, logPath, appRoot string) error {
+func validateLogPathLocation(environment env.Env, logPath, appRoot string) error {
 	logPath = strings.TrimSpace(logPath)
-	if logPath == "" || !env.IsProd() || !filepath.IsAbs(logPath) {
+	if logPath == "" || !environment.IsProd() || !filepath.IsAbs(logPath) {
 		return nil
 	}
 

@@ -597,7 +597,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		// scaffold:modules
 	}
 
-	engine, err := router.New(string(cfg.Env), opt)
+	engine, err := router.New(cfg.Env, opt)
 	if err != nil {
 		return nil, err
 	}

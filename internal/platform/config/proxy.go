@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 // trustAllCIDRs 是等价于「信任所有代理」的两个写法。
@@ -18,8 +20,8 @@ var trustAllCIDRs = []string{"0.0.0.0/0", "::/0"}
 //
 // 与校验错误分开：非生产环境允许 0.0.0.0/0（本地常需要 curl -H 'X-Forwarded-For: ...'
 // 调试审计与限流，一刀切会逼开发者改代码绕过），但不能让它无声地被带到预发环境。
-func (c ProxyConfig) Warnings(env Env) []string {
-	if env == EnvProd {
+func (c ProxyConfig) Warnings(environment env.Env) []string {
+	if environment == env.Prod {
 		return nil // 生产由校验直接拒绝，不走告警路径。
 	}
 	var warnings []string
@@ -38,7 +40,7 @@ func isTrustAllCIDR(entry string) bool {
 }
 
 // validateProxyConfig 校验可信代理与转发头配置。
-func validateProxyConfig(proxy ProxyConfig, env Env) error {
+func validateProxyConfig(proxy ProxyConfig, environment env.Env) error {
 	var errs []error
 
 	for i, entry := range proxy.TrustedProxies {
@@ -56,7 +58,7 @@ func validateProxyConfig(proxy ProxyConfig, env Env) error {
 				continue
 			}
 		}
-		if env == EnvProd && isTrustAllCIDR(trimmed) {
+		if environment == env.Prod && isTrustAllCIDR(trimmed) {
 			errs = append(errs, fmt.Errorf(
 				"proxy.trusted_proxies[%d] %q trusts every peer and is rejected in production: "+
 					"it is equivalent to the unsafe default and lets any client forge X-Forwarded-For", i, trimmed))

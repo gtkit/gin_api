@@ -7,10 +7,11 @@ import (
 	"strings"
 
 	"github.com/gtkit/gin-api/internal/runtime/resource"
+	"github.com/gtkit/gin-api/internal/shared/env"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/env"
+	koanfenv "github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
@@ -80,7 +81,7 @@ func Load() (*Config, error) {
 	}
 	// 环境写在文件里，只能读完才知道是不是生产——校验因此后置：
 	// 发现问题时文件确实已被读过一次，但启动失败仍然把问题拦在服务对外之前。
-	if cfg.Env == EnvProd {
+	if cfg.Env == env.Prod {
 		if err := checkConfigFileSafety(configPath); err != nil {
 			return nil, err
 		}
@@ -131,7 +132,9 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	//
 	// parser 传 nil：env provider 通过 Read() 直接产出 map，不经字节解析
 	// （见 koanf.Load 对 nil parser 的分支）。
-	if err := k.Load(env.Provider(envPrefix, ".", envKeyToConfigPath), nil); err != nil {
+	// koanfenv 是取了别名的 koanf provider：它的包名也是 env，与本仓的 shared/env
+	// 撞名，而后者是本包 Config.Env 的类型来源，不为一个只用一次的 provider 让路。
+	if err := k.Load(koanfenv.Provider(envPrefix, ".", envKeyToConfigPath), nil); err != nil {
 		// 错误里只提前缀，不带任何变量值——这一层承载的正是密钥。
 		return nil, fmt.Errorf("load %s environment overrides: %w", envPrefix, err)
 	}
