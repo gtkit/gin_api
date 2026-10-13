@@ -268,7 +268,9 @@ type RateLimitPolicyConfig struct {
 
 // JWTKeyConfig 是一把带 kid 的密钥。
 //
-// active 需要私钥与公钥；previous 只需要公钥（它们只用于验签，
+// active 需要 Ed25519 PKCS#8 私钥（PRIVATE KEY，0600）与 PKIX 公钥（PUBLIC KEY）；
+// 路径必填，支持绝对路径或相对 APP_ROOT 的路径，不回落到默认密钥。
+// previous 只需要 PKIX 公钥（它们只用于验签，
 // 保留私钥意味着一把已经退役的密钥仍能签发新令牌——那正是轮换要终结的）。
 type JWTKeyConfig struct {
 	KID            string `mapstructure:"kid"`
@@ -310,7 +312,8 @@ type JWTConfig struct {
 	// "未知键"——后者不会告诉任何人该往哪改。
 	PrivateKeyPath string `mapstructure:"private_key_path"`
 	PublicKeyPath  string `mapstructure:"public_key_path"`
-	// TokenTTLHours 是签发 token 的有效期（小时）；<=0 时兜底为 720（30 天）。
+	// TokenTTLHours 是签发 token 的有效期（小时）；正值覆盖，<=0 按认证模式回落：
+	// local 为 1 小时，external 为 720 小时（30 天），见 EffectiveTokenTTL。
 	//
 	// 这是访问令牌寿命的**唯一来源**：认证模块的 expires_in 与撤销记录的
 	// 存活时间都从它推导，不另设一个可能与之漂移的副本。

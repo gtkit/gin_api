@@ -27,8 +27,8 @@ config/
 ├── env/
 │   └── env.yml
 └── pem/
-    ├── jwtpri.pem
-    └── jwtpub.pem
+    ├── <kid>.private.pem
+    └── <kid>.public.pem
 ```
 
 `config/env/env.yml` 和 `config/pem/*.pem` 均由本机或部署系统提供。
@@ -64,3 +64,22 @@ go run . doctor
 ```
 
 该命令只验证配置文件，不代表 MySQL、Redis 或第三方服务已连通。
+
+## JWT 标准密钥
+
+JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，0600），
+公钥为 PKIX PEM（`PUBLIC KEY`，0644），可由 Go `crypto/x509` 和 OpenSSL 读取。
+使用 `go run . jwt generate --kid <kid> --out-dir config/pem` 生成；目录须已存在，
+命令拒绝覆盖已有文件。完整命令见 [cmd/README.md](../cmd/README.md#jwt)。
+
+`jwt.active.kid` 和两条密钥路径必填，路径可为绝对路径或相对 `APP_ROOT` 的路径；
+无隐式默认密钥。现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
+`jwt.previous` 仅配置仍需验签的旧公钥（最多 8 个）；`issuer` 与 `audiences` 必填。
+
+`jwt.token_ttl_hours` 正值覆盖访问令牌寿命，<=0 时 `auth.mode=local` 默认 1 小时、
+`external` 默认 720 小时。`auth.refresh_ttl` 仍控制本地认证的独立刷新令牌，
+不受 gojwt 内部刷新窗口参数替代。gojwt 新签发令牌包含 `auth_time`，项目刷新入口仍
+通过轮换验签器验证后重新签发；`kid`、作用域与 `jti=token_id` 规则保持不变。
+
+旧 raw Ed25519 PEM 需在本地保持原密钥材料重编码；不要用生成命令覆盖原文件。
+重编码不使现有签名失效，生成新密钥则须走上述轮换流程。

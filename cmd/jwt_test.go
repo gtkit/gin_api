@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gtkit/gojwt"
 )
 
 // TestJWTGenerateProducesUsableKeyPair 验证产物可用。
@@ -26,6 +28,23 @@ func TestJWTGenerateProducesUsableKeyPair(t *testing.T) {
 	}
 
 	// 产物必须真的配对——不配对的一组密钥会让签发成功、验签全败。
+	for _, file := range []struct{ path, label string }{{result.privatePath, "PRIVATE KEY"}, {result.publicPath, "PUBLIC KEY"}} {
+		block, _ := pem.Decode(readFile(t, file.path))
+		if block == nil || block.Type != file.label {
+			t.Fatalf("unexpected PEM label for %s", file.path)
+		}
+	}
+	signer, err := gojwt.NewJwtEd25519(result.privatePath, result.publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := signer.GenerateToken(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.ParseToken(token); err != nil {
+		t.Fatalf("gojwt round trip: %v", err)
+	}
 	priv := readPrivateKey(t, result.privatePath)
 	pub := readPublicKey(t, result.publicPath)
 	derived, ok := priv.Public().(ed25519.PublicKey)

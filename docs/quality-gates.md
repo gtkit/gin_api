@@ -53,6 +53,9 @@ make hooks
 
 工具版本不在 workflow 里写死：Go 版本取自 `go.mod`，`golangci-lint` 版本从
 `security/toolchain.mk` 解析，二进制经**同版本**的官方 checksums 校验。
+当前固定 golangci-lint 2.14.0，其 x/tools v0.50.0 支持 Go 1.27 的 export data v5；
+2.13.2 的读取器只支持到 v4，清理缓存或用新版 Go 重建旧依赖不能修复格式不兼容。
+本地安装同一官方版本后运行 `make tool`；版本不符时门禁直接失败。
 解析不到版本时中止而非回落默认值——静默用另一个版本，检查的就是另一套规则集。
 
 第三方 action 按 commit SHA 固定，理由与 `toolchain.mk` 钉镜像摘要相同：tag 可变，

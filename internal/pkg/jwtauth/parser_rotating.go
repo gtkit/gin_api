@@ -267,7 +267,36 @@ func cloneClaims(c *claims.Claims) *claims.Claims {
 	cloned := *c
 	cloned.Audience = slices.Clone(c.Audience)
 	cloned.Roles = slices.Clone(c.Roles)
+	if c.AuthTime != nil {
+		cloned.AuthTime = new(*c.AuthTime)
+	}
+	if c.Ext != nil {
+		cloned.Ext = make(map[string]any, len(c.Ext))
+		for key, value := range c.Ext {
+			cloned.Ext[key] = cloneClaimValue(value)
+		}
+	}
 	return &cloned
+}
+
+// cloneClaimValue 复制从 JSON 解码得到的扩展字段，避免嵌套 map/slice 共享缓存内容。
+func cloneClaimValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(v))
+		for key, item := range v {
+			cloned[key] = cloneClaimValue(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(v))
+		for index, item := range v {
+			cloned[index] = cloneClaimValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 // 编译期确认实现满足接口。

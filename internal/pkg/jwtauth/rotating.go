@@ -10,6 +10,7 @@ import (
 	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
+	"github.com/gtkit/gojwt"
 	"github.com/gtkit/gojwt/claims"
 )
 
@@ -72,13 +73,12 @@ type RotatingTokenParser interface {
 
 // Issuer 实现 RotatingTokenIssuer。
 //
-// 直接用 jwtv5 签发而不是经上游 helper：后者不写 header 的 kid，
-// 而 kid 正是轮换的全部基础。
+// 使用 gojwt 签发，WithKeyID 将 active kid 写入令牌头；验签仍由轮换 parser 负责。
 type Issuer struct {
 	keys   *KeySet
 	opts   IssuerOptions
 	parser RotatingTokenParser
-	now    func() time.Time
+	signer *gojwt.JwtEd25519
 }
 
 // NewIssuer 构造签发器。
@@ -102,7 +102,18 @@ func NewIssuer(keys *KeySet, parser RotatingTokenParser, opts IssuerOptions) (*I
 		return nil, errors.Join(errs...)
 	}
 
-	return &Issuer{keys: keys, opts: opts, parser: parser, now: time.Now}, nil
+	public, _ := keys.PublicKeyFor(keys.ActiveKID())
+	signer, err := gojwt.NewJwtEd25519FromKeys(keys.SigningKey(), public,
+		gojwt.WithKeyID(keys.ActiveKID()),
+		gojwt.WithTokenDuration(opts.TTL),
+		// gojwt 要求刷新窗口不短于 token TTL；本项目的 Refresh 仍经轮换 parser 重签。
+		gojwt.WithRefreshDuration(opts.TTL),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build gojwt issuer: %w", err)
+	}
+	opts.Audiences = slices.Clone(opts.Audiences)
+	return &Issuer{keys: keys, opts: opts, parser: parser, signer: signer}, nil
 }
 
 // ActiveKID 返回签发用的 kid。
@@ -115,27 +126,15 @@ func (i *Issuer) Issue(_ context.Context, uid int64, roles ...string) (string, e
 		return "", err
 	}
 
-	now := i.now()
-	c := &claims.Claims{
-		Issuer:    i.opts.Issuer,
-		Audience:  slices.Clone(i.opts.Audiences),
-		Subject:   formatUID(uid),
-		ID:        tokenID,
-		IssuedAt:  jwtv5.NewNumericDate(now),
-		NotBefore: jwtv5.NewNumericDate(now),
-		ExpiresAt: jwtv5.NewNumericDate(now.Add(i.opts.TTL)),
-		UserID:    uid,
-		Prv:       i.opts.Prv,
-		Roles:     slices.Clone(roles),
-		// 标准 jti 与业务 token_id 始终相等：两个字段并存是存量 shape，
-		// 让它们分叉会使"按 ID 撤销"这类操作出现两个都对不上的候选值。
-		TokenID: tokenID,
-	}
-
-	token := jwtv5.NewWithClaims(jwtv5.SigningMethodEdDSA, c)
-	token.Header["kid"] = i.keys.ActiveKID()
-
-	signed, err := token.SignedString(i.keys.SigningKey())
+	// 保留现有 128-bit 十六进制 ID；gojwt 同步 jti 与 token_id。
+	signed, err := i.signer.GenerateToken(uid,
+		claims.WithIssuer(i.opts.Issuer),
+		claims.WithAudience(i.opts.Audiences...),
+		claims.WithSubject(formatUID(uid)),
+		claims.WithJwtID(tokenID),
+		claims.WithPrv(i.opts.Prv),
+		claims.WithRoles(roles...),
+	)
 	if err != nil {
 		return "", fmt.Errorf("sign token: %w", err)
 	}

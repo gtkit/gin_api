@@ -86,7 +86,7 @@ make project-init NAME=your_project
 
 ## JWT 密钥轮换操作手册
 
-母版的 JWT 是**带 kid 的多密钥**体系：轮换不再让存量令牌批量失效。
+母版的 JWT 由 `gojwt` 签发，使用**带 kid 的多密钥**体系。Ed25519 私钥采用 PKCS#8 PEM（`PRIVATE KEY`），公钥采用 PKIX PEM（`PUBLIC KEY`），支持 Go `crypto/x509` 与 OpenSSL。
 
 **生成一组新密钥**（kid 必须是新的——同 kid 会被无条件拒绝）：
 
@@ -106,7 +106,7 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 3. 把新 kid 设为 `jwt.active`；
 4. 重启进程。
 
-重叠窗口（previous 保留多久）必须**覆盖旧令牌的剩余 TTL**，否则轮换仍会造成批量失效。默认 TTL 是 30 天，所以旧公钥至少保留 30 天。活跃用户会在刷新时自然迁移到新 kid。
+重叠窗口（previous 保留多久）必须**覆盖旧令牌的剩余 TTL**，否则轮换仍会造成批量失效。`jwt.token_ttl_hours` 正值决定访问令牌寿命；<=0 时 local 默认 1 小时、external 默认 30 天。保留窗口须以旧令牌签发时的实际 TTL 为准。活跃用户会在刷新时自然迁移到新 kid。
 
 **几条硬约束**：
 

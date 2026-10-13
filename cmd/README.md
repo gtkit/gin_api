@@ -26,18 +26,30 @@ go run . doctor
 
 ## jwt
 
-生成 Ed25519 JWT 密钥：
+使用 gojwt 生成带 kid 的 Ed25519 标准 PEM 密钥（输出目录须已存在）：
 
 ```bash
-go run . jwt
+mkdir -p config/pem
+go run . jwt generate --kid dev-2026-10 --out-dir config/pem
 ```
 
-默认输出到：
+输出 `dev-2026-10.private.pem`（PKCS#8，`PRIVATE KEY`，0600）与
+`dev-2026-10.public.pem`（PKIX，`PUBLIC KEY`，0644）。`--kid` 必填，
+`--out-dir` 默认 `config/pem`；命令输出的配置片段写入 `jwt.active`，
+并设置必填的 `jwt.issuer` / `jwt.audiences`。
 
-- `config/pem/jwtpri.pem`
-- `config/pem/jwtpub.pem`
+已有文件会报错且保持不变；轮换时使用新 kid，把旧公钥配置到 `jwt.previous`。
+裸 `go run . jwt` 不生成密钥。命令不输出私钥内容，PEM 文件不进入 Git。
 
-PEM 文件已被 Git 忽略。
+标准格式可用 Go `crypto/x509` 或 OpenSSL 检查：
+
+```bash
+openssl pkey -in config/pem/dev-2026-10.private.pem -check -noout
+openssl pkey -pubin -in config/pem/dev-2026-10.public.pem -pubcheck -noout
+```
+
+仅将旧 Ed25519 原始 PEM 重编码为 PKCS#8 / PKIX 时，应保留同一密钥材料与 kid；
+重新生成则是密钥轮换。标准编码本身不改变 JWT 的签名算法（EdDSA）。
 
 ## module
 
