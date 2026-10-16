@@ -1,0 +1,104 @@
+package config
+
+import (
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+)
+
+func TestValidateCoreConfigBoundaries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input func(*Config)
+		want  []string
+	}{
+		{name: "valid baseline"},
+		{name: "database type empty", input: func(c *Config) { c.Database.DBType = "" }, want: []string{"database.dbtype"}},
+		{name: "database type blank", input: func(c *Config) { c.Database.DBType = " \t\n" }, want: []string{"database.dbtype"}},
+		{name: "database type unicode blank", input: func(c *Config) { c.Database.DBType = "\u2003" }, want: []string{"database.dbtype"}},
+		{name: "postgres rejected", input: func(c *Config) { c.Database.DBType = "postgres" }, want: []string{"database.dbtype"}},
+		{name: "mariadb rejected", input: func(c *Config) { c.Database.DBType = "mariadb" }, want: []string{"database.dbtype"}},
+		{name: "uppercase database type rejected", input: func(c *Config) { c.Database.DBType = "MYSQL" }, want: []string{"database.dbtype"}},
+		{name: "padded database type rejected", input: func(c *Config) { c.Database.DBType = " mysql " }, want: []string{"database.dbtype"}},
+		{name: "debug level", input: func(c *Config) { c.Log.Level = "debug" }},
+		{name: "info level", input: func(c *Config) { c.Log.Level = "info" }},
+		{name: "warn level", input: func(c *Config) { c.Log.Level = "warn" }},
+		{name: "error level", input: func(c *Config) { c.Log.Level = "error" }},
+		{name: "dpanic level", input: func(c *Config) { c.Log.Level = "dpanic" }},
+		{name: "panic level", input: func(c *Config) { c.Log.Level = "panic" }},
+		{name: "fatal level", input: func(c *Config) { c.Log.Level = "fatal" }},
+		{name: "padded log level preserved", input: func(c *Config) { c.Log.Level = " \tinfo\n" }},
+		{name: "log level empty", input: func(c *Config) { c.Log.Level = "" }, want: []string{"log.level"}},
+		{name: "log level spaces", input: func(c *Config) { c.Log.Level = "   " }, want: []string{"log.level"}},
+		{name: "log level tabs", input: func(c *Config) { c.Log.Level = "\t\n" }, want: []string{"log.level"}},
+		{name: "log level unicode blank", input: func(c *Config) { c.Log.Level = "\u2003" }, want: []string{"log.level"}},
+		{name: "uppercase log level rejected", input: func(c *Config) { c.Log.Level = "INFO" }, want: []string{"log.level"}},
+		{name: "warning is not warn", input: func(c *Config) { c.Log.Level = "warning" }, want: []string{"log.level"}},
+		{name: "unknown log level", input: func(c *Config) { c.Log.Level = "verbose" }, want: []string{"log.level"}},
+		{name: "log path empty", input: func(c *Config) { c.Log.Path = "" }, want: []string{"log.path"}},
+		{name: "log path spaces", input: func(c *Config) { c.Log.Path = "   " }, want: []string{"log.path"}},
+		{name: "log path tabs", input: func(c *Config) { c.Log.Path = "\t\n" }, want: []string{"log.path"}},
+		{name: "log path unicode blank", input: func(c *Config) { c.Log.Path = "\u2003" }, want: []string{"log.path"}},
+		{name: "padded log path preserved", input: func(c *Config) { c.Log.Path = " ./logs/app_client " }},
+		{name: "zero lifetime retains default", input: func(c *Config) { c.Database.MaxLifeSeconds = 0 }},
+		{name: "positive lifetime", input: func(c *Config) { c.Database.MaxLifeSeconds = 1 }},
+		{name: "negative lifetime diagnosed once", input: func(c *Config) { c.Database.MaxLifeSeconds = -1 }, want: []string{"database.maxlifeseconds"}},
+		{name: "minimum lifetime diagnosed once", input: func(c *Config) { c.Database.MaxLifeSeconds = -int(^uint(0)>>1) - 1 }, want: []string{"database.maxlifeseconds"}},
+		{name: "default open limit still permits idle clamp", input: func(c *Config) { c.Database.MaxIdleConn = 100 }},
+		{name: "default idle still permits small open limit", input: func(c *Config) { c.Database.MaxOpenConn = 2 }},
+		{name: "explicit conflicting pool limits still rejected", input: func(c *Config) {
+			c.Database.MaxOpenConn, c.Database.MaxIdleConn = 2, 3
+		}, want: []string{"database.maxidleconn"}},
+		{name: "redis db zero alone allowed", input: func(c *Config) { c.Redis.DBs = []int{0} }},
+		{name: "redis has no fixed consumer", input: func(c *Config) { c.Redis.DBs = []int{3} }},
+		{name: "aggregate all affected fields once", input: func(c *Config) {
+			c.Database.DBType = "postgres"
+			c.Database.MaxLifeSeconds = -1
+			c.Log.Level = "verbose"
+			c.Log.Path = "\t"
+		}, want: []string{"database.dbtype", "database.maxlifeseconds", "log.level", "log.path"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := validConfigForTest()
+			if tt.input != nil {
+				tt.input(cfg)
+			}
+			before := []string{cfg.Database.DBType, cfg.Log.Level, cfg.Log.Path}
+			err := cfg.Validate()
+			got := coreValidationFields(err)
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Validate fields = %v, want %v; error: %v", got, tt.want, err)
+			}
+			after := []string{cfg.Database.DBType, cfg.Log.Level, cfg.Log.Path}
+			if !slices.Equal(after, before) {
+				t.Fatalf("Validate changed configuration: got %q, want %q", after, before)
+			}
+		})
+	}
+}
+
+// coreValidationFields 只比较诊断的字段标识及次数，不绑定完整错误文案。
+func coreValidationFields(err error) []string {
+	if err == nil {
+		return nil
+	}
+	if group, ok := errors.AsType[interface {
+		error
+		Unwrap() []error
+	}](err); ok {
+		var fields []string
+		for _, cause := range group.Unwrap() {
+			fields = append(fields, coreValidationFields(cause)...)
+		}
+		return fields
+	}
+	return []string{strings.Fields(err.Error())[0]}
+}

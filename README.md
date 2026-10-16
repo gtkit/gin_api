@@ -51,6 +51,10 @@ make project-init NAME=your_project                  # 执行
 
 运行配置固定从 `config/env/env.yml` 读取。该文件和 `config/pem/*.pem` 已被 Git 忽略，不得提交真实密钥。
 
+核心配置在启动前校验：`database.dbtype` 只接受精确的 `mysql`；`log.level` 与 `log.path` 必填且拒绝纯空白，
+日志级别去除首尾空白后只接受 `debug/info/warn/error/dpanic/panic/fatal`；`database.maxlifeseconds` 必须非负，
+省略/0 仍使用默认 1800 秒。连接池和 Redis 的既有默认及消费方规则保持不变，详见 [配置说明](config/README.md#核心字段校验)。
+
 ## 架构
 
 ```text

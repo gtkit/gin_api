@@ -93,6 +93,7 @@ func Load() (*Config, error) {
 // 拒绝组/其他用户可写的权限位（任何本机进程都能改写安全开关与密钥引用），
 // 拒绝符号链接（文件可在校验与读取之间被替换指向）。
 func checkConfigFileSafety(path string) error {
+	// #nosec G703 -- path 仅由部署方的 APP_ROOT/固定 configFile 或运行时资源解析器构造；不接受请求输入，允许部署到任意绝对目录。
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("inspect config file %s: %w", path, err)

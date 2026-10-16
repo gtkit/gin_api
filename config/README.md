@@ -48,6 +48,19 @@ config/
 
 字段结构以 `internal/platform/config/types.go` 和 `config/env.yml.example` 为准。
 
+## 核心字段校验
+
+| 字段 | 用途与约束 | 默认或回落规则 |
+|---|---|---|
+| `database.dbtype` | 数据库类型标识，只接受精确的 `mysql`；其他类型、大小写变体及首尾空白均拒绝 | 必填，无默认值 |
+| `log.level` | 日志输出级别，去除首尾空白后仅接受 `debug/info/warn/error/dpanic/panic/fatal`，不转换大小写 | 必填，无配置默认值；空串或纯空白在配置阶段拒绝 |
+| `log.path` | 主日志路径，拒绝空串和纯空白；生产绝对路径必须位于绝对 `APP_ROOT` 下 | 必填，无配置默认值；消费时去除首尾空白 |
+| `database.maxlifeseconds` | 连接最大存活时间，单位秒；必须非负，负值只返回一条该字段诊断 | 省略/0 使用原有默认 1800 秒，正数按配置使用 |
+
+校验只检查配置，不修改原值；多项错误仍一次聚合返回。连接池与 Redis 规则保持原样：
+`maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
+两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
+
 ## 密钥规则
 
 - 数据库密码、Redis 密码、JWT 私钥、支付私钥、API Key 不得提交。
@@ -69,8 +82,11 @@ go run . doctor
 
 JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，0600），
 公钥为 PKIX PEM（`PUBLIC KEY`，0644），可由 Go `crypto/x509` 和 OpenSSL 读取。
-使用 `go run . jwt generate --kid <kid> --out-dir config/pem` 生成；目录须已存在，
-命令拒绝覆盖已有文件。完整命令见 [cmd/README.md](../cmd/README.md#jwt)。
+服务器使用 `APP_ROOT=/app /path/to/gin_api jwt generate`，默认读取该根目录下 config/env/env.yml 的 active 完整路径和 kid；未设 APP_ROOT 时基于当前工作目录，不依赖 bin 或源码位置。
+生成命令保留 APP_JWT__ACTIVE__* 环境覆盖及生产 env 权限校验。
+两条路径必填且不同，绝对路径保持，相对路径基于上述根目录，目标父目录须已存在且非软链接。
+显式 `--out-dir <dir> --kid <kid>` 优先，使用 kid.private.pem/kid.public.pem 且无需 env；相对显式目录基于当前工作目录。
+命令拒绝覆盖已有文件；完整命令见 [cmd/README.md](../cmd/README.md#jwt)。
 
 `jwt.active.kid` 和两条密钥路径必填，路径可为绝对路径或相对 `APP_ROOT` 的路径；
 无隐式默认密钥。现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
@@ -81,5 +97,7 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 不受 gojwt 内部刷新窗口参数替代。gojwt 新签发令牌包含 `auth_time`，项目刷新入口仍
 通过轮换验签器验证后重新签发；`kid`、作用域与 `jti=token_id` 规则保持不变。
 
-旧 raw Ed25519 PEM 需在本地保持原密钥材料重编码；不要用生成命令覆盖原文件。
-重编码不使现有签名失效，生成新密钥则须走上述轮换流程。
+旧 raw Ed25519 PEM 可用编译后二进制 `./bin/gin_api jwt reencode --private-key <旧私钥> --public-key <旧公钥> --out-dir <新目录>` 保持原材料转换，服务器无需安装 Go。
+新目录必须不存在，父目录须存在；固定输出 jwtpri.pem（0600）/jwtpub.pem（0644），原文件不改写。
+转换后只更新 active 的两条路径（或对应 previous 的公钥路径），保留原 kid、作用域和兼容截止值。
+重编码不使现有签名失效，但不延长过期或绕过吊销/截止规则；生成新密钥则须走上述轮换流程。

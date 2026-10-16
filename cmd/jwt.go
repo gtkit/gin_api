@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/gojwt"
 	"github.com/spf13/cobra"
@@ -35,7 +36,7 @@ func newJWTCmd(_ *rootOptions) *cobra.Command {
 			return fmt.Errorf("unknown jwt subcommand %q", args[0])
 		},
 	}
-	cmd.AddCommand(newJWTGenerateCmd())
+	cmd.AddCommand(newJWTGenerateCmd(), newJWTReencodeCmd())
 	return cmd
 }
 
@@ -54,10 +55,7 @@ func newJWTGenerateCmd() *cobra.Command {
 		// 退出码仍是 0，于是自动化脚本会当作成功继续往下走。
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := jwtauth.ValidateKID(kid); err != nil {
-				return commandError("generate jwt key", err)
-			}
-			result, err := generateKeyPair(kid, outDir)
+			result, err := generateConfiguredKeyPair(cmd, kid, outDir)
 			if err != nil {
 				return commandError("generate jwt key", err)
 			}
@@ -75,11 +73,31 @@ func newJWTGenerateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&kid, "kid", "", "key id (required); also used as the key file name prefix")
-	cmd.Flags().StringVar(&outDir, "out-dir", "config/pem", "directory to write the key pair into")
-	_ = cmd.MarkFlagRequired("kid")
+	cmd.Flags().StringVar(&kid, "kid", "", "key id; defaults to jwt.active.kid, required explicitly with --out-dir")
+	cmd.Flags().StringVar(&outDir, "out-dir", "", "override env key paths with <kid>.private.pem/<kid>.public.pem in an existing directory; if omitted, read jwt.active from APP_ROOT/config/env/env.yml (APP_ROOT defaults to cwd)")
 
 	return cmd
+}
+
+// generateConfiguredKeyPair 以显式目录参数优先，否则读取 env 的完整密钥路径。
+func generateConfiguredKeyPair(cmd *cobra.Command, kid, outDir string) (generateResult, error) {
+	if cmd.Flags().Changed("out-dir") {
+		if err := jwtauth.ValidateKID(kid); err != nil {
+			return generateResult{}, fmt.Errorf("--kid is required with --out-dir: %w", err)
+		}
+		return generateKeyPair(kid, outDir)
+	}
+	keys, err := config.LoadJWTKeyConfigForCommand()
+	if err != nil {
+		return generateResult{}, fmt.Errorf("load JWT generation paths: %w", err)
+	}
+	if !cmd.Flags().Changed("kid") {
+		kid = keys.KID
+	}
+	if validateErr := jwtauth.ValidateKID(kid); validateErr != nil {
+		return generateResult{}, fmt.Errorf("validate generation kid: %w", validateErr)
+	}
+	return generateKeyFiles(kid, keys.PrivateKeyPath, keys.PublicKeyPath)
 }
 
 // generateResult 是一次生成的产物路径。
@@ -98,8 +116,20 @@ func generateKeyPair(kid, outDir string) (generateResult, error) {
 		return generateResult{}, err
 	}
 
-	privatePath := filepath.Join(dir, kid+".private.pem")
-	publicPath := filepath.Join(dir, kid+".public.pem")
+	return generateKeyFiles(kid, filepath.Join(dir, kid+".private.pem"), filepath.Join(dir, kid+".public.pem"))
+}
+
+// generateKeyFiles 保留配置中的完整文件名和父目录，不重新推导密钥位置。
+func generateKeyFiles(kid, privatePath, publicPath string) (generateResult, error) {
+	dirs := []string{filepath.Dir(privatePath)}
+	if dir := filepath.Dir(publicPath); dir != dirs[0] {
+		dirs = append(dirs, dir)
+	}
+	for _, dir := range dirs {
+		if _, err := resolveOutDir(dir); err != nil {
+			return generateResult{}, err
+		}
+	}
 
 	// 友好报错：先看目标是否已存在。这不是安全边界（O_EXCL 才是），
 	// 但它能在真正动手之前给出一条清楚的信息。
@@ -107,7 +137,7 @@ func generateKeyPair(kid, outDir string) (generateResult, error) {
 		if _, statErr := os.Lstat(path); statErr == nil {
 			return generateResult{}, fmt.Errorf(
 				"%s already exists: a kid identifies one immutable key pair, so rotation means "+
-					"generating a new kid rather than replacing this one", path)
+					"generating a new kid rather than replacing this one: %w", path, os.ErrExist)
 		}
 	}
 
@@ -131,9 +161,11 @@ func generateKeyPair(kid, outDir string) (generateResult, error) {
 
 	// fsync 父目录，保证目录项本身落盘——否则崩溃后可能出现
 	// "文件内容在但目录里看不到"的状态。
-	if err := syncDir(dir); err != nil {
-		cleanup()
-		return generateResult{}, err
+	for _, dir := range dirs {
+		if err := syncDir(dir); err != nil {
+			cleanup()
+			return generateResult{}, err
+		}
 	}
 
 	return generateResult{kid: kid, privatePath: privatePath, publicPath: publicPath}, nil

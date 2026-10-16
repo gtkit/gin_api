@@ -89,8 +89,8 @@ func spanAttrsContain(spans []sdktrace.ReadOnlySpan, needle string) bool {
 
 // TestInstrumentGormSpansRedactBindVariables 钉住 spec「DB 查询产生链路 span 且
 // 绝不携带绑定参数」的两个场景：子 span 挂在父 trace 下；哨兵绑定参数不出现在
-// 任何属性中，db.statement 仅含占位符。若有人移除 WithoutQueryVariables，
-// 哨兵会出现在 db.statement（spike 已验证判别力），本测试即失败——这是反证形态。
+// 任何属性中，db.query.text 仅含占位符。若有人移除 WithoutQueryVariables，
+// 哨兵会出现在 db.query.text（spike 已验证判别力），本测试即失败——这是反证形态。
 func TestInstrumentGormSpansRedactBindVariables(t *testing.T) {
 	t.Parallel()
 
@@ -126,18 +126,18 @@ func TestInstrumentGormSpansRedactBindVariables(t *testing.T) {
 
 	stmt := ""
 	for _, a := range client.Attributes() {
-		if a.Key == "db.statement" {
+		if a.Key == "db.query.text" {
 			stmt = a.Value.String()
 		}
 	}
 	if stmt == "" {
-		t.Error("db.statement attribute missing: placeholder SQL should be present")
+		t.Error("db.query.text attribute missing: placeholder SQL should be present")
 	}
 	if !strings.Contains(stmt, "?") {
-		t.Errorf("db.statement %q lacks placeholder", stmt)
+		t.Errorf("db.query.text %q lacks placeholder", stmt)
 	}
 	if spanAttrsContain(spans, sentinelBind) {
-		t.Errorf("bind variable leaked into span attributes; db.statement=%q", stmt)
+		t.Errorf("bind variable leaked into span attributes; db.query.text=%q", stmt)
 	}
 }
 

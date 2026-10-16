@@ -348,6 +348,10 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 		mustNonNegative("database.maxlifeseconds", database.MaxLifeSeconds),
 	}
 
+	if strings.TrimSpace(database.DBType) != "" && database.DBType != "mysql" {
+		errs = append(errs, errors.New("database.dbtype must be mysql"))
+	}
+
 	// 连接池必须交叉校验，不能留到底层构造时才报错。
 	//
 	// 口径：未设置（零值）走 Effective* 的默认值，不算错误——否则省略这些键的存量部署
@@ -360,9 +364,6 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 		errs = append(errs, fmt.Errorf(
 			"database.maxidleconn (%d) must not exceed database.maxopenconn (%d)",
 			database.MaxIdleConn, database.MaxOpenConn))
-	}
-	if database.MaxLifeSeconds < 0 {
-		errs = append(errs, fmt.Errorf("database.maxlifeseconds must not be negative, got %d", database.MaxLifeSeconds))
 	}
 	errs = append(errs,
 		mustNonNegative("database.maxidletimeseconds", database.MaxIdleTimeSeconds))
@@ -577,14 +578,18 @@ func validateSMSConfig(sms SMSConfig) error {
 }
 
 func validateLogConfig(environment env.Env, logCfg LogConfig, appRoot string) error {
-	var errs []error
-
-	if logCfg.Level == "" {
-		errs = append(errs, errors.New("log.level is required"))
+	errs := []error{
+		mustNonEmpty("log.level", logCfg.Level),
+		mustNonEmpty("log.path", logCfg.Path),
 	}
-	if logCfg.Path == "" {
-		errs = append(errs, errors.New("log.path is required"))
-	} else if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
+
+	// 与日志消费者一致，仅在校验时去除首尾空白，不改写原配置。
+	switch strings.TrimSpace(logCfg.Level) {
+	case "", "debug", "info", "warn", "error", "dpanic", "panic", "fatal":
+	default:
+		errs = append(errs, errors.New("log.level must be one of debug, info, warn, error, dpanic, panic, fatal"))
+	}
+	if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
 		errs = append(errs, err)
 	}
 
