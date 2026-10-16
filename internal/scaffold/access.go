@@ -129,7 +129,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 
 // customAuthorizerID 由模块名派生确定性的 authorizer ID。
 //
-// 确定性很重要：ID 同时出现在 RouteSpec、registry 注册点与 metrics label 上，
+// 确定性很重要：ID 同时出现在模块路由、registry 注册点与 metrics label 上，
 // 随机或可变的 ID 会让三者对不上。
 func customAuthorizerID(moduleName string) string {
 	return "module." + moduleName + ".custom"

@@ -125,6 +125,11 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
+模块自建的客户端由模块 `Assembly.Close` 交出清理入口。模块构造失败时先自行释放
+已建立部分；`buildServices` 与 `newProviders` 在后续失败时逆序回滚。装配成功后，
+清理责任移交 `App`，在 HTTP 与 worker 收尾之后、关闭共享基础设施之前执行。
+仍有未退出 worker 时跳过模块清理并返回错误，避免关闭它正在使用的客户端。
+
 `internal/bootstrap/providers.go` 的 `newProviders` 按七个阶段顺序编排，本函数只做顺序拼接、
 错误透传与失败回滚（`rollbackStack` 逆序撤销已产生的进程级副作用），不内联任何单个模块的装配细节：
 

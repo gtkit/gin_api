@@ -114,6 +114,9 @@ func (c *Config) Validate() error {
 	if err := validateRedisConfig(c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateRedisCapabilities(*c); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateRedisDBZeroConsumers(*c); err != nil {
 		errs = append(errs, err)
 	}
@@ -427,12 +430,12 @@ func validateRedisDBZeroConsumers(c Config) error {
 }
 
 func validateRedisConfig(redis RedisConfig) error {
-	errs := []error{
-		mustNonEmpty("redis.addr", redis.Addr),
-		mustHostPort("redis.addr", redis.Addr),
+	var errs []error
+	if redis.Addr != "" {
+		errs = append(errs, mustHostPort("redis.addr", redis.Addr))
 	}
 
-	if len(redis.DBs) == 0 {
+	if redis.Addr != "" && len(redis.DBs) == 0 {
 		errs = append(errs, errors.New("redis.dbs must not be empty"))
 	}
 	if hasDuplicateInts(redis.DBs) {
@@ -449,6 +452,33 @@ func validateRedisConfig(redis RedisConfig) error {
 	errs = append(errs, validateRedisPool(redis)...)
 
 	return errors.Join(errs...)
+}
+
+// validateRedisCapabilities 拦截声明使用 Redis 却未配置地址的能力。
+// required/optional 决定故障策略；即便可降级的 Redis 能力也必须明确配置地址。
+func validateRedisCapabilities(c Config) error {
+	if strings.TrimSpace(c.Redis.Addr) != "" {
+		return nil
+	}
+	var consumers []string
+	if c.Auth.LocalEnabled() {
+		consumers = append(consumers, "local authentication")
+	}
+	if slices.ContainsFunc(c.RateLimit.Policies, func(p RateLimitPolicyConfig) bool {
+		return strings.TrimSpace(p.Store) == storeRedis
+	}) {
+		consumers = append(consumers, "redis rate limiting")
+	}
+	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis {
+		consumers = append(consumers, "redis response cache")
+	}
+	if c.Tasks.Enabled {
+		consumers = append(consumers, "task queue")
+	}
+	if len(consumers) == 0 {
+		return nil
+	}
+	return fmt.Errorf("redis.addr is required by enabled capabilities: %s", strings.Join(consumers, ", "))
 }
 
 // validateRedisPool 做池与超时的**交叉**校验。

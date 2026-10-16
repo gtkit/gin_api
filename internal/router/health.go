@@ -37,6 +37,7 @@ const ()
 // 用来判定的，取值一旦随错误文本浮动，消费者就只能改用前缀匹配。
 const (
 	statusOK          = "ok"
+	statusSkipped     = "skipped"
 	statusDegraded    = "degraded"
 	statusUnavailable = "unavailable"
 )
@@ -161,6 +162,9 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 			{name: "database", required: true, ping: checker.PingDB},
 			{name: "redis", required: redisRequired, ping: checker.PingRedis},
 		}
+		if configured, ok := checker.(interface{ RedisConfigured() bool }); ok && !configured.RedisConfigured() && !redisRequired {
+			deps[1].ping = nil
+		}
 
 		results, anyRequiredFailed, anyOptionalFailed := runDependencyChecks(
 			c.Request.Context(), deps, limiter)
@@ -237,6 +241,10 @@ func runDependencyChecks(
 
 	for i, dep := range deps {
 		group.Go(func() error {
+			if dep.ping == nil {
+				outcomes[i] = depOutcome{name: dep.name, status: statusSkipped}
+				return nil
+			}
 			depCtx, cancelDep := boundedTimeout(groupCtx, readyDepTimeout)
 			defer cancelDep()
 

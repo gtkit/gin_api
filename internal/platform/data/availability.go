@@ -18,7 +18,7 @@ type AvailabilityState uint8
 const (
 	// AvailabilityUnspecified 是零值，非法。
 	//
-	// 与 RouteSpec 的策略零值同一原则：零值若被解释成"健康"，
+	// 健康状态必须显式确认：零值若被解释成"健康"，
 	// 忘记初始化的字段就会伪装成一个通过的检查。
 	AvailabilityUnspecified AvailabilityState = iota
 	// AvailabilityHealthy 表示最近的观测结果为成功。

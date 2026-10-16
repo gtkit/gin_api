@@ -855,11 +855,13 @@ type {{.StructName}}ListResponse struct {
 }
 `
 
-const migrationUpTemplate = `-- Scaffold generated UP migration for {{.StructName}}
+const migrationTemplate = `-- Scaffold generated migration for {{.StructName}}
 -- Module path: {{.ProjectModulePath}}
 -- Table: {{.TableName}}
 -- REVIEW REQUIRED: verify indexes, constraints, defaults, comments, data volume, and rollback before execution.
 
+-- +goose NO TRANSACTION
+-- +goose Up
 CREATE TABLE IF NOT EXISTS ` + "`{{.TableName}}`" + ` (
   ` + "`id`" + ` bigint NOT NULL AUTO_INCREMENT,
 {{- range .Fields }}
@@ -871,11 +873,8 @@ CREATE TABLE IF NOT EXISTS ` + "`{{.TableName}}`" + ` (
   PRIMARY KEY (` + "`id`" + `),
   KEY ` + "`idx_{{.TableName}}_deleted_at`" + ` (` + "`deleted_at`" + `)
 ) ENGINE=InnoDB DEFAULT CHARSET={{.Charset}} COLLATE={{.Collation}};
-`
 
-const migrationDownTemplate = `-- Scaffold generated DOWN migration for {{.StructName}}
--- Module path: {{.ProjectModulePath}}
--- Table: {{.TableName}}
+-- +goose Down
 -- REVIEW REQUIRED: confirm destructive rollback is acceptable before execution.
 
 DROP TABLE IF EXISTS ` + "`{{.TableName}}`" + `;

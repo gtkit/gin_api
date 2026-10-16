@@ -27,6 +27,10 @@ access 实例（缓冲）。
 
 ## 指标
 
+业务 recovery 位于访问日志、指标和 trace 的内层，先形成最终响应再完成观测后处理；
+最外层另保留 recovery，兜住基础中间件自身异常。业务 handler 的 panic 必须记录
+一次访问日志和一次 HTTP 请求指标；响应已提交时保留实际提交的状态。
+
 新增外部调用、worker、缓存关键路径时考虑埋：
 
 - 请求/任务总数：success / error / timeout / canceled

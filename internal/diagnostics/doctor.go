@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -206,7 +207,7 @@ func runCheck(parent context.Context, chk check, timeout time.Duration) CheckRes
 	result.LatencyMS = time.Since(start).Milliseconds()
 
 	// 超时统一归一到固定错误码，便于下游按码聚合。
-	if result.Status == StatusFail && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if (result.Status == StatusFail || result.Status == StatusDegraded) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.ErrorCode = CodeTimeout
 	}
 	return result
@@ -222,6 +223,9 @@ func buildChecks(cfg *config.Config, opts Options) []check {
 			return checkProbe(ctx, opts, opts.Probes.PingDB, true)
 		}},
 		{name: "redis", run: func(ctx context.Context) CheckResult {
+			if !opts.RedisRequired && strings.TrimSpace(cfg.Redis.Addr) == "" {
+				return CheckResult{Status: StatusSkipped, ErrorCode: CodeCapabilityOff, Detail: "redis is not configured"}
+			}
 			return checkProbe(ctx, opts, opts.Probes.PingRedis, opts.RedisRequired)
 		}},
 	}

@@ -10,6 +10,18 @@ import (
 	"github.com/gtkit/redisx"
 )
 
+// ProbeRedis 在调用方预算内复用运行期建连校验，并在检查完成后关闭连接。
+func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
+	client, err := openRedis(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("close redis probe: %w", err)
+	}
+	return nil
+}
+
 // openRedis 建立多 DB Redis 客户端并在 ctx 预算内完成一次连通性校验。
 //
 // 与旧实现的两处关键差异：

@@ -149,9 +149,8 @@ func NewResources(
 	//
 	//	**未配置**（addr 为空）→ 不建客户端，永久降级。依赖它的能力按配置
 	//	矛盾处理（"声明用 redis 却没给地址"是配置错误，不是运行期故障）。
-	//	**已配置但暂不可达** → 保留客户端并挂可探测的 tracker。客户端惰性
-	//	连接、自带重连，Redis 恢复后无需重启进程；限流的降级启动与 optional
-	//	worker 的降级都依赖它非空才可达。
+	//	**已配置但暂不可达** → optional 时保持永久降级至重启；
+	//	底层构造器已回收失败连接，不能返回可自愈客户端。required 时启动失败。
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		res.redisState = NewPermanentlyDegradedTracker("redis")
 		if req.Redis {

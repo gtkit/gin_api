@@ -44,11 +44,12 @@ const defaultWorkerShutdownTimeout = 30 * time.Second
 
 // App owns the process lifecycle and assembled runtime dependencies.
 type App struct {
-	runtime    *Runtime
-	httpConfig HTTPConfig
-	httpServer httpServer
-	workers    *WorkerManager
-	shutdown   *ShutdownCoordinator
+	moduleCleanup func() error
+	runtime       *Runtime
+	httpConfig    HTTPConfig
+	httpServer    httpServer
+	workers       *WorkerManager
+	shutdown      *ShutdownCoordinator
 	// rateLimits 持有限流注册表；关停时必须关闭它，否则每条本地策略的
 	// 后台清理 goroutine 会一直活到进程退出。
 	rateLimits rateLimitAssembly
@@ -101,6 +102,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	runtime.SetDrainInterrupt(providers.shutdown.ForcedCh())
 
 	return &App{
+		moduleCleanup:  providers.moduleCleanup,
 		runtime:        runtime,
 		httpConfig:     providers.httpConfig,
 		httpServer:     providers.httpServer,
@@ -284,7 +286,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
 }
 
-// closeExtensions 释放所有权在 App 的扩展产物：限流注册表与指标注销回调。
+// closeExtensions 释放所有权在 App 的模块客户端、限流、出站、缓存、入队与遥测产物。
 //
 // 幂等（CAS 保证恰好一次）：gracefulShutdown 在正常序列的正确位置调用它，
 // Run 的 defer 兜住全部提前返回——两处共用，不存在只被一条路径覆盖的释放。
@@ -293,6 +295,7 @@ func (a *App) closeExtensions(ctx context.Context) error {
 		return nil
 	}
 	errs := []error{
+		a.closeModules(),
 		closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close(),
 		// 入队端排在消费者停掉之后（worker 关停在前）：反过来会让正在收尾的
 		// 处理器无法再入队后续任务。用 Shutdown 而不是 Close：后者等在途投递
@@ -306,6 +309,17 @@ func (a *App) closeExtensions(ctx context.Context) error {
 		errs = append(errs, unregister())
 	}
 	return errors.Join(errs...)
+}
+
+// closeModules 排在共享依赖之前；仍存活的 worker 可能使用模块客户端，不能提前关闭。
+func (a *App) closeModules() error {
+	if a.moduleCleanup == nil {
+		return nil
+	}
+	if live := a.workers.LiveWorkers(); len(live) > 0 {
+		return fmt.Errorf("skipping module cleanup while workers are running: %w", ErrWorkerNotExited)
+	}
+	return a.moduleCleanup()
 }
 
 // alertExitError 对非 nil 的退出错误发出一次进程级告警。
@@ -421,8 +435,8 @@ func (a *App) gracefulShutdown(
 	//     失败以零退出码结束。必须在全部 StopKind 与兜底清理之后执行。
 	collect(a.workers.TerminationErrors())
 
-	// 7. 释放扩展产物：限流注册表（每条本地策略一个后台清理 goroutine）
-	//    与指标注销回调。排在 HTTP 与 worker 之后：在飞请求可能仍要做限流
+	// 7. 释放扩展产物：模块客户端、限流注册表及出站/缓存/入队/遥测资源。
+	//    排在 HTTP 与 worker 之后：在飞请求可能仍要做限流
 	//    判定，worker 停掉之前采集到的指标仍是有效状态。
 	//    与 Run 的 defer 共用同一个幂等入口，启动失败的提前返回同样被兜住。
 	collect(a.closeExtensions(base))

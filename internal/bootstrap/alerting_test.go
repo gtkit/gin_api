@@ -150,7 +150,7 @@ func TestDrainLogsAbandonedByForcedSignal(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	inst := loggerv2.MustNew(
-		loggerv2.WithConsole(false),
+		loggerv2.WithConsole(true),
 		loggerv2.WithFile(false),
 		loggerv2.WithMessager(block),
 		loggerv2.WithReplaceGlobals(false),

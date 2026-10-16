@@ -4,12 +4,14 @@ package scaffold
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/format"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -504,24 +506,61 @@ func (g *ModuleGenerator) generatedFiles(data moduleTemplateData) []generatedFil
 
 func (g *ModuleGenerator) generatedMigrationFiles(data moduleTemplateData) ([]generatedFile, error) {
 	migrationsDir := filepath.Join(g.root, "database", "migrations")
-	pattern := filepath.Join(migrationsDir, "*_create_"+data.TableName+"_table.up.sql")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("glob migration file: %w", err)
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read migration directory: %w", err)
 	}
-
-	var basePath string
-	if len(matches) > 0 {
-		slices.Sort(matches)
-		basePath = strings.TrimSuffix(matches[len(matches)-1], ".up.sql")
-	} else {
+	suffix := "_create_" + data.TableName + "_table"
+	var existing string
+	var highest int64
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		if strings.HasSuffix(name, suffix+".up.sql") || strings.HasSuffix(name, suffix+".down.sql") {
+			return nil, fmt.Errorf("legacy split migration %s: manually reconcile it with the executed history and convert to one goose SQL file before regenerating; existing files were not changed", name)
+		}
+		if strings.HasSuffix(name, suffix+".sql") {
+			if existing != "" {
+				return nil, fmt.Errorf("multiple create migrations for table %s; reconcile migration history before regenerating", data.TableName)
+			}
+			existing = filepath.Join(migrationsDir, name)
+		}
+		prefix, _, _ := strings.Cut(name, "_")
+		version, parseErr := strconv.ParseInt(prefix, 10, 64)
+		if parseErr != nil || version <= 0 {
+			return nil, fmt.Errorf("invalid migration version in %s: expected a positive int64 prefix", name)
+		}
+		highest = max(highest, version)
+	}
+	if existing == "" {
+		if highest == math.MaxInt64 {
+			return nil, fmt.Errorf("migration version exhausted: cannot increment %d", highest)
+		}
 		now := time.Now
 		if g.now != nil {
 			now = g.now
 		}
-
-		fileName := now().Format("2006_01_02_150405") + "_create_" + data.TableName + "_table"
-		basePath = filepath.Join(migrationsDir, fileName)
+		version, parseErr := strconv.ParseInt(now().UTC().Format("20060102150405"), 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf("build migration timestamp: %w", parseErr)
+		}
+		if version <= highest {
+			latest, timeErr := time.Parse("20060102150405", strconv.FormatInt(highest, 10))
+			if timeErr != nil {
+				return nil, fmt.Errorf("parse latest migration timestamp: %w", timeErr)
+			}
+			next := latest.Add(time.Second)
+			if next.Year() > 9999 {
+				return nil, fmt.Errorf("migration timestamp exhausted after %s", latest)
+			}
+			version, parseErr = strconv.ParseInt(next.Format("20060102150405"), 10, 64)
+			if parseErr != nil {
+				return nil, fmt.Errorf("build next migration timestamp: %w", parseErr)
+			}
+		}
+		existing = filepath.Join(migrationsDir, strconv.FormatInt(version, 10)+suffix+".sql")
 	}
 
 	// 迁移不可变（module-scaffold-wiring spec）：迁移是按序执行过的历史，
@@ -529,14 +568,8 @@ func (g *ModuleGenerator) generatedMigrationFiles(data moduleTemplateData) ([]ge
 	// 失配，而且无从发现。因此 force 也不覆盖；schema 变更走新的 alter migration。
 	return []generatedFile{
 		{
-			path:      basePath + ".up.sql",
-			template:  migrationUpTemplate,
-			formatGo:  false,
-			immutable: true,
-		},
-		{
-			path:      basePath + ".down.sql",
-			template:  migrationDownTemplate,
+			path:      existing,
+			template:  migrationTemplate,
 			formatGo:  false,
 			immutable: true,
 		},

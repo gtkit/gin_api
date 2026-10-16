@@ -495,6 +495,8 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 			app := newTestApp(t, server, tt.workers...)
 
 			var unregisterCalls atomic.Int32
+			var moduleCalls atomic.Int32
+			app.moduleCleanup = func() error { moduleCalls.Add(1); return nil }
 			app.metricsCleanup = []func() error{
 				func() error { unregisterCalls.Add(1); return nil },
 			}
@@ -515,6 +517,9 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 				t.Fatal("Run did not return")
 			}
 
+			if got := moduleCalls.Load(); got != 1 {
+				t.Fatalf("module cleanup calls = %d, want exactly 1", got)
+			}
 			if got := unregisterCalls.Load(); got != 1 {
 				t.Fatalf("metrics unregister calls = %d, want exactly 1", got)
 			}
@@ -580,6 +585,7 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 	if err := initProcessRuntime(&config.Config{
 		Env: "test",
 		App: config.AppConfig{Timezone: "Asia/Shanghai"},
+		Log: config.LogConfig{ConsoleStdout: 1},
 	}); err != nil {
 		t.Fatalf("initProcessRuntime returned error: %v", err)
 	}

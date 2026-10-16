@@ -9,7 +9,9 @@ package ai
 import (
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	llm "github.com/gtkit/go-llm-provider/v2/provider"
@@ -34,6 +36,8 @@ type Deps struct {
 // 调用点就再也读不出哪个是哪个，而类型相同的两个参数写反不会有编译错误。
 type Assembly struct {
 	Service *aiapp.Service
+	// Close 释放本模块自建的客户端，由 bootstrap 接入回滚与关停。
+	Close func() error
 	// Timeouts 是 transport 层需要的两个预算与心跳间隔。
 	//
 	// 由装配层交出来而不是让 transport 自己读配置：transport 拿到的应该是
@@ -85,6 +89,7 @@ func New(deps Deps) (Assembly, error) {
 		aiapp.WithTemperature(cfg.Temperature),
 	)
 	if err != nil {
+		_ = client.Close()
 		return Assembly{}, fmt.Errorf("ai: build service: %w", err)
 	}
 
@@ -92,6 +97,7 @@ func New(deps Deps) (Assembly, error) {
 
 	return Assembly{
 		Service: service,
+		Close:   client.Close,
 		Timeouts: Timeouts{
 			Request:     cfg.EffectiveRequestTimeout(),
 			StreamTotal: cfg.EffectiveStreamTotalTimeout(),
@@ -102,6 +108,22 @@ func New(deps Deps) (Assembly, error) {
 
 // buildClient 按配置逐家构造 provider，并包上重试与熔断。
 func buildClient(cfg config.AIModuleConfig) (*llmClient, error) {
+	return buildClientWithFactory(cfg, newHTTPClient)
+}
+
+func buildClientWithFactory(cfg config.AIModuleConfig, create func() *http.Client) (_ *llmClient, err error) {
+	var clients []*http.Client
+	closeClients := sync.OnceValue(func() error {
+		for _, client := range slices.Backward(clients) {
+			client.CloseIdleConnections()
+		}
+		return nil
+	})
+	defer func() {
+		if err != nil {
+			_ = closeClients()
+		}
+	}()
 	presets := llm.AllPresets()
 	enabled := cfg.EnabledProviders()
 
@@ -127,7 +149,9 @@ func buildClient(cfg config.AIModuleConfig) (*llmClient, error) {
 			baseURL = preset.BaseURL
 		}
 
-		base, err := newProvider(llm.ProviderName(name), pc.APIKey, baseURL, model)
+		client := create()
+		clients = append(clients, client)
+		base, err := newProvider(llm.ProviderName(name), pc.APIKey, baseURL, model, client)
 		if err != nil {
 			return nil, fmt.Errorf("ai: build provider %q: %w", name, err)
 		}
@@ -152,6 +176,7 @@ func buildClient(cfg config.AIModuleConfig) (*llmClient, error) {
 		providers:   providers,
 		defaultName: defaultName,
 		names:       sortedNames(providers),
+		close:       closeClients,
 	}, nil
 }
 
@@ -163,34 +188,33 @@ func buildClient(cfg config.AIModuleConfig) (*llmClient, error) {
 // switch 分支不能省，即便当前配置的都是 OpenAI 兼容平台：Claude 与 Gemini 走
 // **各自的原生协议**，用 OpenAI 兼容路径构造它们会得到一个能启动、能发请求、
 // 但每次都被对端拒绝的 provider——而错误信息指向的是"上游返回了 404"。
-func newProvider(name llm.ProviderName, apiKey, baseURL, model string) (llm.Provider, error) {
+func newProvider(name llm.ProviderName, apiKey, baseURL, model string, client *http.Client) (llm.Provider, error) {
 	switch name {
 	case llm.ProviderAnthropic:
 		return llm.NewAnthropicProvider(llm.NativeProviderConfig{
-			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: newHTTPClient(),
+			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client,
 		})
 	case llm.ProviderGemini:
 		return llm.NewGeminiProvider(llm.NativeProviderConfig{
-			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: newHTTPClient(),
+			APIKey: apiKey, BaseURL: baseURL, Model: model, HTTPClient: client,
 		})
 	case llm.ProviderOllama:
 		// 本地推理不需要密钥；本仓用非空 api_key 作为"启用"开关，
 		// 因此接入 Ollama 时填任意占位值即可，这里不把它传下去。
 		return llm.NewOllamaProvider(llm.OllamaProviderConfig{
-			BaseURL: baseURL, Model: model, HTTPClient: newHTTPClient(),
+			BaseURL: baseURL, Model: model, HTTPClient: client,
 		})
 	default:
 		return llm.NewProvider(llm.ProviderConfig{
-			Name: name, BaseURL: baseURL, APIKey: apiKey, Model: model, HTTPClient: newHTTPClient(),
+			Name: name, BaseURL: baseURL, APIKey: apiKey, Model: model, HTTPClient: client,
 		})
 	}
 }
 
 // harden 给 provider 包上重试与熔断。
 //
-// 顺序是契约：**熔断在内、重试在外**。反过来的话，一次重试的每次尝试都会
-// 被熔断器各记一笔失败，于是一个偶发抖动就能把连续失败计数直接推过阈值——
-// 熔断变成了对重试的惩罚，而不是对故障上游的保护。
+// 熔断在外、重试在内：整轮请求只统计一次最终结果，避免单次请求的
+// 多次尝试消耗掉整个失败阈值。已经熔断时不进入重试与退避。
 //
 // 用 TryWithRetry / TryWithBreaker 而不是 WithRetry / WithBreaker：后者在输入
 // 非法时返回一个"每次调用都报同一个错"的 provider，于是装配错误变成运行期
@@ -201,24 +225,23 @@ func harden(p llm.Provider, name string, cfg config.AIModuleConfig) (llm.Provide
 		FailureThreshold: cfg.EffectiveBreakerFailures(),
 		OpenDuration:     cfg.EffectiveBreakerOpenTimeout(),
 	})
-	guarded, err := llm.TryWithBreaker(p, breaker)
-	if err != nil {
-		return nil, fmt.Errorf("attach breaker: %w", err)
-	}
-
 	attempts := cfg.EffectiveRetryAttempts()
 	if attempts <= 1 {
-		return guarded, nil
+		return llm.TryWithBreaker(p, breaker)
 	}
 
 	// 全抖动退避：不加抖动时，一批同时失败的请求会在同一时刻一起重试，
 	// 把刚缓过来的上游再次打垮。
-	retried, err := llm.TryWithRetry(guarded, llm.RetryOptions{
+	retried, err := llm.TryWithRetry(p, llm.RetryOptions{
 		MaxAttempts: attempts,
 		Backoff:     llm.ExponentialBackoffWithJitter(200*time.Millisecond, 2*time.Second),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attach retry: %w", err)
 	}
-	return retried, nil
+	guarded, err := llm.TryWithBreaker(retried, breaker)
+	if err != nil {
+		return nil, fmt.Errorf("attach breaker: %w", err)
+	}
+	return guarded, nil
 }

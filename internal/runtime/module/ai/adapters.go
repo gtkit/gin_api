@@ -34,6 +34,15 @@ type llmClient struct {
 	defaultName string
 	// names 是有序厂商名，避免每次 Providers() 都重新排序。
 	names []string
+	close func() error
+}
+
+// Close 释放本模块自建的出站连接池；清理动作由构造期绑定。
+func (c *llmClient) Close() error {
+	if c == nil || c.close == nil {
+		return nil
+	}
+	return c.close()
 }
 
 // Providers 返回已启用的厂商列表（按名字有序）。

@@ -14,8 +14,9 @@ type rollbackStep struct {
 
 // rollbackStack 收集装配过程中产生的进程级副作用，失败时逆序回滚。
 //
-// 仅供 newProviders 的失败路径使用：成功路径 discard——副作用的释放所有权
-// 移交给 App 的关停序列；失败路径 unwind。不做成导出抽象，消费者只有一处。
+// newProviders 在失败时 unwind、成功时 discard 并把所有权移交 App；
+// buildServices 用独立栈登记模块资源，失败时 unwind，成功时交出清理函数。
+// 仅用于 bootstrap 内部的装配与资源释放。
 type rollbackStack struct {
 	steps []rollbackStep
 }

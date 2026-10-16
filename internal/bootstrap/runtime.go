@@ -111,6 +111,9 @@ func closeRuntimeOnFailure(
 // "某个能力从进程启动起就没工作过"会长期无人察觉——
 // 而它表现出来的症状（某类请求一直失败）看起来像业务 bug。
 func logResourceStates(resources *data.Resources) {
+	if resources == nil || !resources.RedisConfigured() {
+		return
+	}
 	state := resources.RedisAvailability()
 	if state == nil || state.State() == data.AvailabilityHealthy {
 		return

@@ -61,8 +61,7 @@ internal/runtime/module/admin/module.go
 internal/repository/admin/repository.go
 internal/repository/admin/repository_util.go
 internal/models/admin.go
-database/migrations/<timestamp>_create_admins_table.up.sql
-database/migrations/<timestamp>_create_admins_table.down.sql
+database/migrations/<version>_create_admins_table.sql
 ```
 
 默认还会通过以下稳定标记更新 `internal/bootstrap/providers.go`（分阶段装配结构，四个注入点）：
@@ -98,6 +97,11 @@ database/migrations/<timestamp>_create_admins_table.down.sql
 - down 文件包含 `DROP TABLE IF EXISTS`。
 
 SQL 文件是可执行草稿，必须人工检查索引、唯一约束、默认值、comment、数据规模和回滚影响。生成器只落盘、不执行 SQL；执行走 `migrate` 子命令（最小装配：配置 + 日志 + 数据库，经 gtkit/migratex 按 `database/migrations` 目录迁移）。
+
+每个模块生成一个 goose SQL 文件，包含 Up、Down 和 NO TRANSACTION 注解。
+版本使用 UTC 数字时间戳；同秒生成或时钟回拨时取已有最大版本的下一秒，确保合法且唯一。
+已有迁移在 force 下也不会覆盖；发现旧的拆分 up.sql/down.sql 时会在落盘前报错，
+须人工核对已执行历史后转换，生成器不自动改写迁移历史。
 
 **迁移文件不可变**：已存在的 migration 与模板产出不一致时一律跳过并提示，`--force` 也不覆盖——迁移是按序执行过的历史，schema 变更请另建 alter migration。
 

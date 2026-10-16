@@ -398,7 +398,7 @@ func TestGeneratorKeepsProjectBaselineConsistent(t *testing.T) {
 
 	// 排序规则对齐 database.collation 的项目基线：同一份 SQL 在不同默认
 	// collation 的实例上，比较与排序结果会不同。
-	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	upSQL := filepath.Join(root, "database", "migrations", "20260324090807_create_admins_table.sql")
 	assertFileContains(t, upSQL, "COLLATE=utf8mb4_unicode_ci")
 	assertFileNotContains(t, upSQL, "utf8mb4_0900_ai_ci")
 }

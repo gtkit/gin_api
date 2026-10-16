@@ -23,10 +23,8 @@ func TestValidateRedisConfig(t *testing.T) {
 	}{
 		{name: "valid minimal config", mutate: func(*RedisConfig) {}},
 		{
-			name:     "addr required",
-			mutate:   func(c *RedisConfig) { c.Addr = "" },
-			wantErr:  true,
-			wantHint: "redis.addr",
+			name:   "addr may be omitted without consumers",
+			mutate: func(c *RedisConfig) { c.Addr = "" },
 		},
 		{
 			name:     "dbs required",

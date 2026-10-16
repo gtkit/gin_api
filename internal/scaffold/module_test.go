@@ -39,8 +39,7 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"), "type Service struct")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"), "maxListPageSize     = 100")
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service_test.go"), "func TestServiceList")
-	// 生成的模块必须产出 RouteSpec，而不是自行注册路由——
-	// 后者会绕过访问策略与超时预算，也不会出现在双向契约测试里。
+	// 生成的模块经 Gin 原生路由注册，并显式挂载访问策略与超时。
 	routerFile := filepath.Join(root, "internal", "module", "admin", "transport", "http", "router.go")
 	assertFileContains(t, routerFile, "func Register(r *gin.RouterGroup, deps Deps) {")
 	assertFileContains(t, routerFile, `r.Group("/admin")`)
@@ -55,8 +54,8 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "dto", "admin.go"), "type AdminResponse struct")
 	// 排序键的绑定层白名单：缺它意味着非法键静默回退而不是 422。
 	assertFileContains(t, filepath.Join(root, "internal", "module", "admin", "dto", "admin.go"), `oneof=id created_at`)
-	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql"), "CREATE TABLE IF NOT EXISTS `admins`")
-	assertFileContains(t, filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.down.sql"), "DROP TABLE IF EXISTS `admins`")
+	assertFileContains(t, filepath.Join(root, "database", "migrations", "20260324090807_create_admins_table.sql"), "CREATE TABLE IF NOT EXISTS `admins`")
+	assertFileContains(t, filepath.Join(root, "database", "migrations", "20260324090807_create_admins_table.sql"), "DROP TABLE IF EXISTS `admins`")
 
 	// 配置能力注册的**四处**必须同批产出。缺任一处的后果都很具体：
 	//   缺类型      → runtime 装配引用一个不存在的类型，编译不过；
@@ -159,12 +158,12 @@ func TestModuleGeneratorGenerateIsIdempotentAndPreservesExistingModel(t *testing
 		t.Fatalf("expected single admin service field, got %d", count)
 	}
 
-	migrationMatches, err := filepath.Glob(filepath.Join(root, "database", "migrations", "*_create_admins_table.*.sql"))
+	migrationMatches, err := filepath.Glob(filepath.Join(root, "database", "migrations", "*_create_admins_table.sql"))
 	if err != nil {
 		t.Fatalf("Glob returned error: %v", err)
 	}
-	if len(migrationMatches) != 2 {
-		t.Fatalf("expected paired admin migration files, got %d", len(migrationMatches))
+	if len(migrationMatches) != 1 {
+		t.Fatalf("expected one admin migration file, got %d", len(migrationMatches))
 	}
 }
 
@@ -781,7 +780,7 @@ func TestMigrationsAreImmutableUnderForce(t *testing.T) {
 	}
 
 	// 人工修改迁移，模拟"已执行过的历史"与模板产出分叉。
-	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	upSQL := filepath.Join(root, "database", "migrations", "20260324090807_create_admins_table.sql")
 	edited := "-- executed in production\nCREATE TABLE IF NOT EXISTS `admins` (id BIGINT);\n"
 	if err := os.WriteFile(upSQL, []byte(edited), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -836,7 +835,7 @@ func TestMigrationCharsetCollationComeFromOptions(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	upSQL := filepath.Join(root, "database", "migrations", "2026_03_24_090807_create_admins_table.up.sql")
+	upSQL := filepath.Join(root, "database", "migrations", "20260324090807_create_admins_table.sql")
 	assertFileContains(t, upSQL, "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;")
 	assertFileNotContains(t, upSQL, "utf8mb4_unicode_ci")
 }

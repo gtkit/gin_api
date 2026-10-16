@@ -211,6 +211,8 @@ func noMethod(c *gin.Context) {
 //	                  一条访问记录），因此必须排在它们之前。
 //	Metrics           同理：它要统计的同样是全部请求，包括被后续中间件直接
 //	                  拒掉的与未匹配路由的。
+//	业务 Recovery     位于观测内层，先把业务 panic 转成最终响应，日志与指标
+//	                  再完成后处理。外层 Recovery 仍兜住基础中间件自身异常。
 //	SecurityHeaders   必须在任何可能写响应体的中间件之前：body 一开始写，
 //	                  响应头就已发出，之后设置 header 不生效且**不会报错**。
 //	ErrorHandler      统一把 c.Errors 转成响应格式。
@@ -238,6 +240,9 @@ func useGlobalMiddleware(engine *gin.Engine, opt Options) error {
 		LogResponseBody: opt.LogResponseBody,
 	}))
 	engine.Use(middleware.Metrics(opt.Metrics))
+	// 内层恢复先写最终状态，外侧日志、指标与 trace 才能完成后处理。
+	// 最外层恢复继续兜住这些基础中间件自身的异常。
+	engine.Use(middleware.GinRecovery(true))
 	engine.Use(middleware.SecurityHeaders())
 	engine.Use(middleware.ErrorHandler())
 	if len(opt.AllowedOrigins) > 0 {

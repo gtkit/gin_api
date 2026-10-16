@@ -9,6 +9,7 @@ import (
 	"github.com/gtkit/gin-api/internal/bootstrap"
 	"github.com/gtkit/gin-api/internal/diagnostics"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 
 	"github.com/spf13/cobra"
 )
@@ -20,7 +21,7 @@ type configLoader func() (*config.Config, error)
 //
 // 参数化便于测试：deep 路径要建真实连接，测试里必须能换掉它，
 // 否则这条路径要么测不到、要么依赖一台真库。
-type probeBuilder func(ctx context.Context) (diagnostics.Probes, func() error, error)
+type probeBuilder func(ctx context.Context, cfg *config.Config) (diagnostics.Probes, func() error, error)
 
 func init() {
 	RegisterRootCommand(newDoctorCmd)
@@ -72,7 +73,7 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 				RedisRequired: bootstrap.RedisRequired(cfg),
 			}
 			if deep && buildProbes != nil {
-				probes, release, probeErr := buildProbes(cmd.Context())
+				probes, release, probeErr := buildProbes(cmd.Context(), cfg)
 				if probeErr != nil {
 					// 连不上正是 deep 检查要报告的结论本身，不该让命令直接崩掉。
 					// 必须显式告知诊断层"探测能力没建起来"：只把 Probes 留空的话，
@@ -155,22 +156,19 @@ func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics
 	}
 }
 
-// buildRuntimeProbes 建立 deep 检查所需的真实连接。
-//
-// 复用 bootstrap 的资源装配，而不是在诊断代码里另写一份建连逻辑——
-// 另写一份就意味着 doctor 检查的连接与服务实际使用的连接可能采用不同的
-// 版本校验、会话语义与超时，于是"doctor 通过"不再说明服务能起来。
-func buildRuntimeProbes(ctx context.Context) (diagnostics.Probes, func() error, error) {
-	rt, err := bootstrap.NewRuntime(ctx, bootstrap.Options{})
-	if err != nil {
-		return diagnostics.Probes{}, func() error { return nil }, err
-	}
-
-	resources := rt.Resources()
+// buildRuntimeProbes 只绑定已加载配置，不做 I/O 或初始化完整 Runtime。
+// 各探针在 diagnostics 的独立预算内建连、校验和释放；一项失败不抹掉其他结果。
+func buildRuntimeProbes(_ context.Context, cfg *config.Config) (diagnostics.Probes, func() error, error) {
 	return diagnostics.Probes{
-		PingDB:    resources.PingDB,
-		PingRedis: resources.PingRedis,
-	}, rt.Close, nil
+		PingDB: func(ctx context.Context) error {
+			client, err := data.OpenDB(ctx, cfg.Database, cfg.Database.RuntimeCredentials(), nil)
+			if err != nil {
+				return err
+			}
+			return client.Close()
+		},
+		PingRedis: func(ctx context.Context) error { return data.ProbeRedis(ctx, cfg.Redis) },
+	}, func() error { return nil }, nil
 }
 
 // enabledLabel 把布尔开关渲染为人类可读的 "enabled"/"disabled" 文案，用于自检输出。

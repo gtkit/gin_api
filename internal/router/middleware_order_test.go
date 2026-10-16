@@ -28,6 +28,7 @@ var wantMiddlewareOrder = []string{
 	"RequestID",
 	"GinLogger",
 	"Metrics",
+	"GinRecovery",
 	"SecurityHeaders",
 	"ErrorHandler",
 	"Cors",
