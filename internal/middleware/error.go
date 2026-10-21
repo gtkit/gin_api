@@ -8,9 +8,8 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
 )
 
 // ErrorHandler captures errors and returns a consistent JSON error response.
@@ -42,7 +41,7 @@ func ErrorHandler() gin.HandlerFunc {
 		// "客户端走了"记成一次服务端错误，污染错误率指标。
 		if IsClientGone(err) {
 			logger.Debug("client disconnected before the response was written",
-				zap.String("path", requestPath(c)))
+				logger.String("path", requestPath(c)))
 			return
 		}
 
@@ -69,9 +68,9 @@ func ErrorHandler() gin.HandlerFunc {
 // logContextError 统一记录 ErrorHandler 捕获到的错误。
 // 对于 5xx 错误使用 error 级别，4xx / 业务错误使用 warn，便于告警时做级别区分。
 func logContextError(c *gin.Context, err error) {
-	fields := []zap.Field{
-		zap.String("path", requestPath(c)),
-		zap.Error(err),
+	fields := []logger.Field{
+		logger.String("path", requestPath(c)),
+		logger.Err(err),
 	}
 
 	// Step 1: 对请求体超限这种明确的客户端错误单独降级为 warn，
@@ -79,9 +78,9 @@ func logContextError(c *gin.Context, err error) {
 	// （http.MaxBytesReader 超限时 Read 返回 *http.MaxBytesError）。
 	if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		fields = append(fields,
-			zap.Int("http_status", http.StatusRequestEntityTooLarge),
-			zap.Int32("error_code", resp.PayloadTooLargeCode),
-			zap.Int64("max_bytes", maxBytesErr.Limit),
+			logger.Int("http_status", http.StatusRequestEntityTooLarge),
+			logger.Int32("error_code", resp.PayloadTooLargeCode),
+			logger.Int64("max_bytes", maxBytesErr.Limit),
 		)
 		logger.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 		return
@@ -90,8 +89,8 @@ func logContextError(c *gin.Context, err error) {
 	// Step 2: 如果错误本身带有 goerr 语义，就按它的 HTTP 状态码区分日志级别。
 	if appErr, ok := errors.AsType[goerr.Error](err); ok {
 		fields = append(fields,
-			zap.Int("http_status", appErr.HTTPCode()),
-			zap.Int("error_code", int(appErr.Code())),
+			logger.Int("http_status", appErr.HTTPCode()),
+			logger.Int("error_code", int(appErr.Code())),
 		)
 		if isServerSideAppError(appErr) {
 			logger.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)

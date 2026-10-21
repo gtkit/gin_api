@@ -1,7 +1,8 @@
-package dao
+package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 // ProbeRedis 在调用方预算内复用运行期建连校验，并在检查完成后关闭连接。
 func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
-	client, err := openRedis(ctx, cfg)
+	client, err := OpenRedis(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -56,11 +57,6 @@ func OpenRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, err
 	return client, nil
 }
 
-// openRedis 保留给本包已有调用点；新插件通过导出的 OpenRedis 注入默认实现。
-func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
-	return OpenRedis(ctx, cfg)
-}
-
 // buildRedisOptions 把配置翻译成 redisx 选项。
 //
 // 池与超时项只在**显式配置**时才传递：留空表示采用 redisx 自身的默认值，
@@ -91,4 +87,11 @@ func buildRedisOptions(cfg config.RedisConfig) []redisx.Option {
 	}
 
 	return opts
+}
+
+func closeAndWrap(closer func() error, cause error) error {
+	if err := closer(); err != nil {
+		return errors.Join(cause, fmt.Errorf("close half-open connection: %w", err))
+	}
+	return cause
 }

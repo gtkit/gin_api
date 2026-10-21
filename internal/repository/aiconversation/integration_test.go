@@ -27,12 +27,13 @@ import (
 	"os"
 	"testing"
 
+	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+
 	"github.com/gtkit/ormx"
 	"gorm.io/gorm"
 
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/pkg/paging"
-	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/repository/aiconversation"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 )
@@ -52,7 +53,7 @@ func skipOrFail(t *testing.T, format string, args ...any) {
 func openDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	cfg, err := config.Load()
+	cfg, err := defaultconfig.Load()
 	if err != nil {
 		skipOrFail(t, "config load failed (set APP_ROOT to repo root): %v", err)
 		return nil

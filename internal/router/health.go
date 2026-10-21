@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
+
 	"golang.org/x/sync/errgroup"
 )
 
@@ -341,7 +341,7 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 
 	if err == nil {
 		if st.lastCategory != "" {
-			logger.Info("readiness dependency recovered", zap.String("dependency", name))
+			logger.Info("readiness dependency recovered", logger.String("dependency", name))
 			st.lastCategory = ""
 			st.lastLoggedAt = time.Time{}
 		}
@@ -355,7 +355,7 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 	}
 
 	logger.Error("readiness dependency check failed",
-		zap.String("dependency", name), zap.Error(err))
+		logger.String("dependency", name), logger.Err(err))
 	st.lastCategory = category
 	st.lastLoggedAt = now
 }

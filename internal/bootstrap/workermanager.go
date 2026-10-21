@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
 )

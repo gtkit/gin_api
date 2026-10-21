@@ -6,8 +6,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/platform/config"
+	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
 	"github.com/gtkit/gin-api/internal/testutil"
 
 	loggerv2 "github.com/gtkit/logger/v2"
@@ -47,11 +49,8 @@ func withCaptureMessager(t *testing.T) (*captureMessager, func()) {
 		loggerv2.WithMessager(capture),
 		loggerv2.WithReplaceGlobals(false),
 	)
-	prev := loggerv2.Default()
-	loggerv2.SetDefault(inst)
-	t.Cleanup(func() { loggerv2.SetDefault(prev) })
-
-	return capture, func() { inst.Sync() }
+	drain := installTestLogger(t, inst)
+	return capture, drain
 }
 
 // countContaining 统计包含子串的消息条数。
@@ -107,76 +106,35 @@ func (b *blockingMessager) Send(string) {
 
 func (b *blockingMessager) SendTo(_, msg string) { b.Send(msg) }
 
-// TestSyncLoggerWithBudgetAbandonsStuckDrain 钉住告警排空的总预算
-// （outbound-notification spec）：单条消息卡死通道时，进程结束的日志
-// 收尾必须在预算内返回，不得被排空无界阻塞。
-//
-// SetDefault 是进程级状态：本测试不并行。
-func TestSyncLoggerWithBudgetAbandonsStuckDrain(t *testing.T) {
-	block := &blockingMessager{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	inst := loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithMessager(block),
-		loggerv2.WithReplaceGlobals(false),
-	)
-	prev := loggerv2.Default()
-	loggerv2.SetDefault(inst)
-	t.Cleanup(func() {
-		loggerv2.SetDefault(prev)
-		close(block.release) // 放行被放弃的排空协程，不在测试进程里残留阻塞
-	})
-
-	loggerv2.HErrorf("stuck alert")
-	waitClosed(t, block.entered, "messager did not receive the alert")
-
-	start := time.Now()
-	drainLogsWithBudget(100*time.Millisecond, nil)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("drainLogsWithBudget took %v; the drain budget did not bound a stuck channel", elapsed)
-	}
-}
-
-// TestDrainLogsAbandonedByForcedSignal 钉住强制信号能提前放弃日志排空。
-//
-// 排空是进程的最后一段等待；"第二个信号取消各阶段剩余等待"的契约
-// 若贯通不到这里，卡住的告警通道仍能把强制退出扣住整个预算。
-func TestDrainLogsAbandonedByForcedSignal(t *testing.T) {
-	block := &blockingMessager{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	inst := loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithMessager(block),
-		loggerv2.WithReplaceGlobals(false),
-	)
-	prev := loggerv2.Default()
-	loggerv2.SetDefault(inst)
-	t.Cleanup(func() {
-		loggerv2.SetDefault(prev)
+// TestSDKDrainWaitsForItsOwner records the SDK's cooperative limitation: Runtime
+// does not hide an unfinished Sync in an abandoned goroutine. Release and join
+// the test's blocking sender before finishing.
+func TestSDKDrainWaitsForItsOwner(t *testing.T) {
+	block := &blockingMessager{entered: make(chan struct{}), release: make(chan struct{})}
+	inst := loggerv2.MustNew(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithMessager(block), loggerv2.WithReplaceGlobals(false))
+	drain := installTestLogger(t, inst)
+	defer drain()
+	applog.HErrorf("stuck alert")
+	waitClosed(t, block.entered, "messager did not receive alert")
+	runtime := &Runtime{drain: func(context.Context) error { drain(); return nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	entered, done := make(chan struct{}), make(chan error, 1)
+	go func() { close(entered); done <- runtime.DrainLogs(ctx) }()
+	<-entered
+	select {
+	case err := <-done:
 		close(block.release)
-	})
-
-	loggerv2.HErrorf("stuck alert")
-	waitClosed(t, block.entered, "messager did not receive the alert")
-
-	forced := make(chan struct{})
-	close(forced)
-
-	start := time.Now()
-	drainLogsWithBudget(time.Hour, forced)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("drainLogsWithBudget took %v; the forced signal did not cut the drain", elapsed)
+		t.Fatalf("SDK drain finished before sender release: %v", err)
+	default:
+	}
+	close(block.release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled drain = %v", err)
 	}
 }
 
-// TestAppRunAlertsOnErrorExit 钉住进程级退出告警：Run 以错误结束时，
-// 告警在日志刷写之前入队恰好一次；正常信号关停零告警。
+// TestAppRunAlertsOnErrorExit verifies exit alerts precede owner drain.
 func TestAppRunAlertsOnErrorExit(t *testing.T) {
 	testutil.RequireLoopback(t)
 
@@ -223,4 +181,24 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+type loggingTestConfiguration struct{}
+
+func (loggingTestConfiguration) Value() (*config.Config, error) { return &config.Config{}, nil }
+func installTestLogger(t *testing.T, inst *loggerv2.Logger) func() {
+	t.Helper()
+	p := defaultlogging.New(defaultlogging.Options{Configuration: loggingTestConfiguration{}, MainFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) { return inst, nil }, AccessFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) {
+		return loggerv2.New(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithReplaceGlobals(false))
+	}})
+	if err := p.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	drain := func() {
+		if err := p.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(drain)
+	return drain
 }

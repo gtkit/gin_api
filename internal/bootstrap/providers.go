@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
@@ -21,11 +21,11 @@ import (
 	"github.com/gtkit/gin-api/internal/router"
 	"go.opentelemetry.io/otel"
 
-	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
+	"github.com/gtkit/gin-api/internal/plugin"
 	"github.com/gtkit/gin-api/internal/repository/useraccount"
 	"github.com/gtkit/gin-api/internal/repository/userrole"
 	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
@@ -48,7 +48,7 @@ type providerSet struct {
 	// outbound 是具名出站执行入口（客户端 + 熔断）；未声明 clients 时为空入口。
 	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
-	cache *httpcache.Stager
+	cache plugin.ResponseCache
 	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端，供各模块注入。
@@ -70,7 +70,8 @@ type infra struct {
 	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
 	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
-	cache *httpcache.Stager
+	cache      plugin.ResponseCache
+	middleware plugin.MiddlewareBuilder
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端；未启用时 Enqueue 报 ErrDisabled。
@@ -135,6 +136,14 @@ type middlewares struct {
 func newProviders(
 	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator,
 ) (_ *providerSet, err error) {
+	budget := &rollbackBudget{force: shutdown.ForcedCh()}
+	defer budget.Close()
+	return newProvidersWithBudget(ctx, runtime, shutdown, budget)
+}
+
+func newProvidersWithBudget(
+	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator, budget *rollbackBudget,
+) (_ *providerSet, err error) {
 	// 失败回滚：装配已产生的进程级副作用（指标回调、限流注册表）逆序撤销。
 	// 只关 Runtime 是不够的——指标回调挂在进程级 MeterProvider 上持有已关闭
 	// 连接池的引用，限流执行体的后台 goroutine 仍在运行。
@@ -142,6 +151,7 @@ func newProviders(
 	rb := &rollbackStack{}
 	defer func() {
 		if err != nil {
+			budget.Context(ctx)
 			err = errors.Join(err, rb.unwind())
 		}
 	}()
@@ -169,7 +179,7 @@ func newProviders(
 		return nil, fmt.Errorf("build telemetry: %w", err)
 	}
 	inf.telemetry = telemetryProvider
-	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(ctx) })
+	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(budget.Context(ctx)) })
 	if telemetryProvider.Enabled() {
 		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
@@ -228,10 +238,10 @@ func newProviders(
 	//     必须先于路由装配：模块在注册只读路由时就要挂上它。Redis 已配置
 	//     但启动期不可达时的禁用降级由插件完成，避免 providers 重复构造和关闭 Store。
 	cachePlugin := runtime.CachePlugin()
-	if cachePlugin == nil || cachePlugin.Stager() == nil {
+	if cachePlugin == nil {
 		return nil, errors.New("response cache plugin is not initialized")
 	}
-	responseCache := cachePlugin.Stager()
+	responseCache := cachePlugin
 	inf.cache = responseCache
 	if cachePlugin.Enabled() {
 		logger.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
@@ -247,10 +257,10 @@ func newProviders(
 		return nil, fmt.Errorf("build task producer: %w", err)
 	}
 	inf.tasksProducer = tasksProducer
-	rb.push("task producer", tasksProducer.Close)
+	rb.push("task producer", func() error { return tasksProducer.Shutdown(budget.Context(ctx)) })
 
 	// 4. Service：各模块的业务逻辑。
-	svc, err := buildServices(ctx, inf, runtime)
+	svc, err := buildServicesWithBudget(ctx, inf, runtime, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -336,16 +346,24 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 		cfg:        cfg,
 		mysqlDB:    mysqlDB,
 		httpConfig: newHTTPConfig(cfg),
+		middleware: runtime.middleware,
 	}, nil
 }
 
 // buildServices 把基础设施翻译成各模块的 application service，传递最小依赖。
 // 新增模块时在此追加一行 service 构造（scaffold 生成器经 module-services 标记注入）。
 func buildServices(ctx context.Context, inf infra, runtime *Runtime) (_ services, err error) {
+	budget := &rollbackBudget{}
+	defer budget.Close()
+	return buildServicesWithBudget(ctx, inf, runtime, budget)
+}
+
+func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, budget *rollbackBudget) (_ services, err error) {
 	var svc services
 	modules := &rollbackStack{}
 	defer func() {
 		if err != nil {
+			budget.Context(ctx)
 			err = errors.Join(err, modules.unwind())
 		}
 	}()
@@ -526,13 +544,9 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
 
-	opt := router.Options{
-		AllowedOrigins:  cfg.CORS.AllowedOrigins,
-		TracingEnabled:  cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
-		ServiceName:     cfg.App.Name,
-		LogRequestBody:  cfg.Log.AccessRequestBody,
-		LogResponseBody: cfg.Log.AccessResponseBody,
-		MaxBodyBytes:    cfg.App.MaxBodyBytes,
+	opt := router.Options{Middleware: inf.middleware,
+		TracingEnabled: cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
+		ServiceName:    cfg.App.Name,
 		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,

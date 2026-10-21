@@ -94,8 +94,8 @@ telemetry:
 
 ### 关停
 
-flush 用**独立预算**（`context.WithoutCancel` + 超时）：关停末期传进来的 ctx 很可能已被
-强制取消，而此时仍应尽量把已采集的数据送出；超时保证它不会反过来拖住关停。
+App 在必要收尾边界建立独立 context；telemetry.Shutdown 以自己的 flush 上限收紧它，
+保留父 deadline 和强制取消。装配失败时，遥测与后续插件清理共享 30 秒回滚预算。
 
 顺序上先关 tracer 再关 meter——指标下个周期还会再来，span 丢了就没了。
 遥测 flush 排在扩展释放的最后一步：前面几步还会产出指标（关闭计数、错误），
@@ -157,3 +157,19 @@ news:
 
 `platform` 留空必须与该字段引入之前的行为一致（按飞书处理），否则一次升级就会让所有
 存量部署的告警发不出去。有测试钉住这条。
+
+## 日志插件的所有权
+
+`cmd/plugins.go` 选择并注册日志插件，配置 Init 在其之前完成。业务、数据层和中间件经
+`internal/pkg/log` 的事件门面转发给所选实例；默认 gtkit/logger/v2 实现在 builtin/logging，
+main/access 共用一个生命周期 owner。HTTP 中间件在最终 metrics 仪表就绪后 Build。
+
+`http.Server.ErrorLog` 要求 `*log.Logger`。经用户于 2026-10-21 明确允许，
+`internal/bootstrap/http.go` 仅保留 `log.New(httpErrorWriter{}, "", 0)` 这个类型桥，
+把 net/http 内部错误转发到所选日志插件；它不创建独立日志后端。该例外不扩大到其他
+标准库 log 或 slog 用法，项目其他日志继续遵守现有日志规则。
+
+正常由注册器在缓存/连接之后 Stop 日志插件，先停止接收新写入，等待已接收写入，再 Sync
+access/main。若 worker 未退出，只执行同一 owner 的 Drain，并返回资源未关闭错误。
+回滚/停止总预算各 30 秒，第二信号取消剩余合作式等待；SDK Sync 没有 context 或 error 返回，
+不能承诺在阻塞 I/O 上硬中断，也不能把 void Sync 当作日志已成功送达的证据。

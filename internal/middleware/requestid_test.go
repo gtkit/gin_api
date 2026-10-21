@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // requestIDPattern 是定长小写十六进制的判据，长度直接取自导出的契约常量——

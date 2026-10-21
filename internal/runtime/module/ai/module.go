@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	llm "github.com/gtkit/go-llm-provider/v2/provider"
-	logger "github.com/gtkit/logger/v2"
 	"gorm.io/gorm"
 
 	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"

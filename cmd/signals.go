@@ -9,7 +9,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // signalSupervisor 是进程内**唯一**的 OS 信号监督者
@@ -51,12 +51,14 @@ func newSignalSupervisor(parent context.Context) *signalSupervisor {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	sup.stop = func() {
 		signal.Stop(signals)
 		close(done)
+		<-exited
 	}
 
-	go sup.watch(signals, done)
+	go func() { defer close(exited); sup.watch(signals, done) }()
 	return sup
 }
 

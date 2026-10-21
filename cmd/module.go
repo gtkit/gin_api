@@ -4,7 +4,7 @@ package cmd
 
 import (
 	"github.com/gtkit/gin-api/internal/appmeta"
-	"github.com/gtkit/gin-api/internal/platform/config"
+	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
 	"github.com/gtkit/gin-api/internal/scaffold"
 
 	"github.com/spf13/cobra"
@@ -59,7 +59,7 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 			// 而静默吞掉会让使用者配的 collation 悄悄没生效，生成的迁移与项目
 			// 基线不一致，差异只在数据量上来后才暴露。
 			var charset, collation string
-			if cfg, cfgErr := config.Load(); cfgErr == nil {
+			if cfg, cfgErr := defaultconfig.Load(); cfgErr == nil {
 				charset = cfg.Database.EffectiveCharset()
 				collation = cfg.Database.EffectiveCollation()
 			} else {

@@ -1,26 +1,16 @@
-// Package plugin contains the built-in compile-time plugin implementations.
+// Package plugin defines the replaceable capabilities consumed by the scaffold.
 package plugin
 
 import (
-	"context"
-	"database/sql"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gtkit/gin-api/internal/core"
-	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/gorm"
 )
 
-// DatabasePlugin is the typed capability exposed by a MySQL plugin.
-type DatabasePlugin interface {
-	core.Plugin
-	DB() *gorm.DB
-	SQLDB() *sql.DB
-	PingContext(context.Context) error
-}
+// DatabaseProvider exposes borrowed database handles, never lifecycle ownership.
+type DatabaseProvider = data.DatabaseHandle
 
 // RedisClientProvider is the narrow Redis capability needed by cache and
 // other compile-time adapters. It intentionally has no Close method: the Redis
@@ -31,20 +21,15 @@ type RedisClientProvider interface {
 	Configured() bool
 }
 
-// RedisLifecyclePlugin is the typed Redis capability exposed to the bootstrap layer.
-type RedisLifecyclePlugin interface {
-	core.Plugin
+// RedisProvider combines borrowed handles and observation, without lifecycle
+// ownership or a required concrete availability tracker.
+type RedisProvider interface {
 	RedisClientProvider
 	data.RedisHandle
-	Availability() *data.AvailabilityTracker
-	Ping(context.Context) error
 }
 
-// CacheLifecyclePlugin is the typed response-cache capability exposed to router
-// assembly. The stager remains owned by the plugin.
-type CacheLifecyclePlugin interface {
-	core.Plugin
-	Stager() *httpcache.Stager
+// ResponseCache provides explicit route middleware without exposing store ownership.
+type ResponseCache interface {
 	Enabled() bool
 	Middleware(time.Duration) gin.HandlerFunc
 }

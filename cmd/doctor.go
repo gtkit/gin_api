@@ -6,15 +6,18 @@ import (
 	"net"
 	"time"
 
+	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	defaultmysql "github.com/gtkit/gin-api/internal/plugin/builtin/mysql"
+	defaultredis "github.com/gtkit/gin-api/internal/plugin/builtin/redis"
+
 	"github.com/gtkit/gin-api/internal/bootstrap"
 	"github.com/gtkit/gin-api/internal/diagnostics"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
 
 	"github.com/spf13/cobra"
 )
 
-// configLoader 抽象配置加载动作，便于测试注入桩替换 config.Load。
+// configLoader 抽象配置加载动作，便于测试注入桩替换 defaultconfig.Load。
 type configLoader func() (*config.Config, error)
 
 // probeBuilder 构造 deep 检查所需的真实探测能力，并返回释放函数。
@@ -27,9 +30,9 @@ func init() {
 	RegisterRootCommand(newDoctorCmd)
 }
 
-// newDoctorCmd 构造 doctor 子命令，默认使用 config.Load 与真实资源探测。
+// newDoctorCmd 构造 doctor 子命令，默认使用 defaultconfig.Load 与真实资源探测。
 func newDoctorCmd(_ *rootOptions) *cobra.Command {
-	return newDoctorCmdWithDeps(config.Load, buildRuntimeProbes)
+	return newDoctorCmdWithDeps(defaultconfig.Load, buildRuntimeProbes)
 }
 
 // newDoctorCmdWithDeps 构造 doctor 子命令：不启动任何服务，只做部署前自检。
@@ -161,13 +164,13 @@ func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics
 func buildRuntimeProbes(_ context.Context, cfg *config.Config) (diagnostics.Probes, func() error, error) {
 	return diagnostics.Probes{
 		PingDB: func(ctx context.Context) error {
-			client, err := data.OpenDB(ctx, cfg.Database, cfg.Database.RuntimeCredentials(), nil)
+			client, err := defaultmysql.OpenDB(ctx, cfg.Database, cfg.Database.RuntimeCredentials(), nil)
 			if err != nil {
 				return err
 			}
 			return client.Close()
 		},
-		PingRedis: func(ctx context.Context) error { return data.ProbeRedis(ctx, cfg.Redis) },
+		PingRedis: func(ctx context.Context) error { return defaultredis.ProbeRedis(ctx, cfg.Redis) },
 	}, func() error { return nil }, nil
 }
 

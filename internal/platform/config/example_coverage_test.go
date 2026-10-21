@@ -12,6 +12,9 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 )
 
+// shippedExamplePath is the schema coverage fixture, resolved from this package.
+const shippedExamplePath = "../../../config/env.yml.example"
+
 // exampleCoverageExemptions 是「结构体有、样例刻意不列」的豁免清单。
 // 每项必须给理由；测试同时钉住豁免本身不腐化：
 // 路径必须仍存在于结构体（防钉死无效豁免），且不得出现在样例里

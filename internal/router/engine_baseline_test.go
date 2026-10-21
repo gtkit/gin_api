@@ -53,7 +53,7 @@ func TestEngineBaselineFields(t *testing.T) {
 	original := gin.Mode()
 	t.Cleanup(func() { gin.SetMode(original) })
 
-	engine, err := New("test", Options{})
+	engine, err := newRouterForTest("test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestEngineBaselineFields(t *testing.T) {
 func newBaselineEngine(t *testing.T) *gin.Engine {
 	t.Helper()
 
-	engine, err := New("test", Options{
+	engine, err := newRouterForTest("test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/ping", func(c *gin.Context) { c.Status(http.StatusOK) })
 		},
@@ -252,7 +252,7 @@ func TestContextWithFallbackPropagatesDeadline(t *testing.T) {
 
 	var sawDeadline bool
 
-	engine, err := New("test", Options{
+	engine, err := newRouterForTest("test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/deadline",
 				middleware.Timeout(time.Second, 100*time.Millisecond),

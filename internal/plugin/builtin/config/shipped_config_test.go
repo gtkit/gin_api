@@ -14,7 +14,7 @@ import (
 // 直接失败——文件根本不存在。
 //
 // 交付给使用者的是这份 example，因此它才是需要被门禁盯住的那个。
-const shippedExamplePath = "../../../config/env.yml.example"
+const shippedExamplePath = "../../../../config/env.yml.example"
 
 // deploymentPlaceholders 是 example 里刻意留空、必须由部署方填写的字段。
 //

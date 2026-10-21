@@ -22,10 +22,11 @@ import (
 	"testing"
 	"time"
 
+	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+
 	"github.com/gtkit/ormx"
 
 	"github.com/gtkit/gin-api/internal/models"
-	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 	"github.com/gtkit/gin-api/internal/repository/useraccount"
 )
@@ -40,7 +41,7 @@ func skipOrFail(t *testing.T, format string, args ...any) {
 
 // TestIntegrationAccountStateAgainstRealSchema 验证账号状态与会员判定的读路径。
 func TestIntegrationAccountStateAgainstRealSchema(t *testing.T) {
-	cfg, err := config.Load()
+	cfg, err := defaultconfig.Load()
 	if err != nil {
 		skipOrFail(t, "config load failed (set APP_ROOT to repo root): %v", err)
 		return

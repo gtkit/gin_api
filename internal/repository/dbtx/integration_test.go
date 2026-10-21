@@ -21,7 +21,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/platform/config"
+	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 
 	"github.com/gtkit/ormx"
@@ -40,7 +41,7 @@ func skipOrFail(t *testing.T, format string, args ...any) {
 func openTestDB(t *testing.T) *ormx.Client {
 	t.Helper()
 
-	cfg, err := config.Load()
+	cfg, err := defaultconfig.Load()
 	if err != nil {
 		skipOrFail(t, "config load failed (set APP_ROOT to repo root): %v", err)
 		return nil

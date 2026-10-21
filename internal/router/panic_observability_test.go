@@ -17,6 +17,7 @@ import (
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
 )
 
 func TestPanicRequestObservability(t *testing.T) {
@@ -31,14 +32,17 @@ func TestPanicRequestObservability(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := applog.InitAccessLog(&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "request"), Level: "info", FileStdout: 1}}); err != nil {
+			logging := defaultlogging.New(defaultlogging.Options{Configuration: middlewareConfiguration{&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "request"), Level: "info", FileStdout: 1}}}})
+			t.Cleanup(func() {
+				if err := logging.Stop(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+			if err := logging.Init(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
 				applog.SyncAccessLog()
-				if err := applog.InitAccessLog(&config.Config{Log: config.LogConfig{ConsoleStdout: 1}}); err != nil {
-					t.Error(err)
-				}
 			})
 			reader := sdkmetric.NewManualReader()
 			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -47,7 +51,7 @@ func TestPanicRequestObservability(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine, err := New("test", Options{Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
+			engine, err := newRouterForTest("test", Options{Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
 				v1.GET("/observe", func(c *gin.Context) {
 					if tc.name == "success" {
 						c.String(http.StatusOK, "ok")

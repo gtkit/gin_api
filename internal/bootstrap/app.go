@@ -9,25 +9,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
+	"github.com/gtkit/gin-api/internal/plugin"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // Options defines runtime startup options.
 // 配置改为从固定 config/env.yml 读取后，启动不再需要环境名参数。
 type Options struct {
-	// UseMigrationCredentials 让本次装配的数据库连接优先使用迁移专用凭据。
-	//
-	// 只有 migrate 子命令置 true；server 永远为 false，因此运行账号不会因为配置了
-	// 迁移凭据而改变自身连接身份。迁移凭据未配置时回退运行凭据并告警（不失败，
-	// 避免破坏尚未配置迁移凭据的存量部署）。
-	UseMigrationCredentials bool
-
 	// Shutdown 是进程级关停协调器，由**唯一的信号监督者**（cmd 层）构造并注入：
 	// 信号在 NewApp 之前就可能到达，协调器因此必须比 App 更早存在。
 	//
@@ -35,8 +28,7 @@ type Options struct {
 	Shutdown *ShutdownCoordinator
 
 	// RegisterPlugins lets the process entry point choose concrete compile-time
-	// implementations. Nil keeps the scaffold defaults for existing commands
-	// and tests; no runtime discovery is performed.
+	// implementations. It is required; registration performs no component I/O.
 	RegisterPlugins PluginRegistrar
 }
 
@@ -63,7 +55,7 @@ type App struct {
 	outbound *httpclient.Downstreams
 	// cache 是 Runtime Cache 插件提供的 typed view；关闭权属于插件注册器。
 	// App 只保留它以兼容现有装配结构，不直接调用 Close。
-	cache *httpcache.Stager
+	cache plugin.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端；关停时释放它的连接。
@@ -87,7 +79,12 @@ type App struct {
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
-	runtime, err := NewRuntime(ctx, options)
+	if options.Shutdown == nil {
+		options.Shutdown = NewShutdownCoordinator()
+	}
+	budget := &rollbackBudget{force: options.forceSignal()}
+	defer budget.Close()
+	runtime, err := newRuntime(ctx, options, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -98,14 +95,10 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	//
 	// （此处曾用 context.Background() 并注释成"装配阶段不做任何 I/O"。
 	//   那句话对 buildMiddlewares 成立，对限流不成立。）
-	providers, err := newProviders(ctx, runtime, options.Shutdown)
+	providers, err := newProvidersWithBudget(ctx, runtime, options.Shutdown, budget)
 	if err != nil {
-		return nil, errors.Join(err, runtime.Close(context.WithoutCancel(ctx)))
+		return nil, errors.Join(err, runtime.Close(budget.Context(ctx)))
 	}
-
-	// 日志排空是进程的最后一段等待，同样受"第二个信号取消剩余等待"约束。
-	// 在进入请求并发阶段之前安装一次（见 SetDrainInterrupt 的约束）。
-	runtime.SetDrainInterrupt(providers.shutdown.ForcedCh())
 
 	return &App{
 		moduleCleanup:  providers.moduleCleanup,
@@ -160,11 +153,11 @@ func (a *App) Run(ctx context.Context) (err error) {
 	// 排空告警队列，之后入队的消息被静默丢弃。资源关闭阶段自身的错误因此
 	// 物理上无法再经告警通道送出，它们只进返回值与日志。
 	defer func() {
-		// 用 WithoutCancel：这条 defer 也覆盖 ctx 已被取消的提前返回，
-		// 而遥测 flush 与限流回收此时仍要执行（各自带独立预算）。
-		err = errors.Join(err, a.closeExtensions(context.WithoutCancel(ctx)))
+		stopCtx, finish := cleanupContext(context.WithoutCancel(ctx), a.shutdown.ForcedCh())
+		defer finish()
+		err = errors.Join(err, a.closeExtensions(stopCtx))
 		alertExitError(err)
-		err = errors.Join(err, a.closeResources(context.WithoutCancel(ctx)))
+		err = errors.Join(err, a.closeResources(stopCtx))
 	}()
 
 	// pprof 绑定失败即启动失败：一个"配置说开了但实际没监听"的端点
@@ -393,15 +386,8 @@ func (a *App) gracefulShutdown(
 	// 但接入强制信号：契约是"第二个信号取消**各阶段**剩余等待"，而尾段
 	// （worker 兜底清理、扩展释放、telemetry flush、pprof）此前不在覆盖
 	// 范围里——各自的预算串行叠加后，"再按一次立即退出"实际要等数十秒。
-	base, cancelOnForce := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelOnForce()
-	go func() {
-		select {
-		case <-a.shutdown.ForcedCh():
-			cancelOnForce()
-		case <-base.Done():
-		}
-	}()
+	base, finish := forceContext(context.WithoutCancel(ctx), a.shutdown.ForcedCh())
+	defer finish()
 	var errs []error
 	collect := func(err error) {
 		if err != nil {
@@ -469,13 +455,8 @@ func (a *App) gracefulShutdown(
 func (a *App) stopKindWithBudget(base context.Context, kind WorkerKind) error {
 	stopCtx, cancel := context.WithTimeout(base, defaultWorkerShutdownTimeout)
 	defer cancel()
-	go func() {
-		select {
-		case <-a.shutdown.ForcedCh():
-			cancel()
-		case <-stopCtx.Done():
-		}
-	}()
+	stopCtx, finish := forceContext(stopCtx, a.shutdown.ForcedCh())
+	defer finish()
 	return a.workers.StopKind(stopCtx, kind)
 }
 
@@ -489,16 +470,8 @@ func (a *App) shutdownHTTP(base context.Context) error {
 		return a.httpServer.Close()
 	}
 
-	shutdownCtx, cancel := context.WithCancel(base)
-	defer cancel()
-	// 强制信号在 Shutdown 等待期间到达时，立刻取消等待并改用 Close。
-	go func() {
-		select {
-		case <-a.shutdown.ForcedCh():
-			cancel()
-		case <-shutdownCtx.Done():
-		}
-	}()
+	shutdownCtx, finish := forceContext(base, a.shutdown.ForcedCh())
+	defer finish()
 
 	if err := shutdownHTTPServer(shutdownCtx, a.httpServer, a.httpConfig); err != nil {
 		logger.Warnf("graceful http shutdown failed (%v); closing listeners", err)
@@ -549,14 +522,13 @@ func (a *App) closeResources(ctx context.Context) error {
 		// 连接不关，**但日志照排空**：两者是不同的事，共用一个开关会让
 		// "现在不能关连接"顺带把退出告警与错误日志一起丢掉——而这条
 		// 异常退出路径恰恰是最需要留痕的那条。
-		a.runtime.DrainLogs()
-		return fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
-			len(live), strings.Join(live, ", "), ErrWorkerNotExited)
+		return errors.Join(fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
+			len(live), strings.Join(live, ", "), ErrWorkerNotExited), a.runtime.DrainLogs(ctx))
 	}
 	if a.runtime == nil {
 		return nil
 	}
-	return a.runtime.Close(context.WithoutCancel(ctx))
+	return a.runtime.Close(ctx)
 }
 
 // forceSignal 返回注入协调器的强制关停信号；未注入时为 nil（排空只受预算约束）。

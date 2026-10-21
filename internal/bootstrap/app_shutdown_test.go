@@ -344,12 +344,9 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 	}
 
 	// 排空计数：连接不能关时日志仍必须排空（两者已解耦，见 Runtime.DrainLogs）。
-	originalDrain := drainProcessLogs
-	t.Cleanup(func() { drainProcessLogs = originalDrain })
 	var drains int
-	drainProcessLogs = func(time.Duration, <-chan struct{}) { drains++ }
+	app := &App{workers: mgr, runtime: &Runtime{drain: func(context.Context) error { drains++; return nil }}, shutdown: NewShutdownCoordinator()}
 
-	app := &App{workers: mgr, runtime: &Runtime{}, shutdown: NewShutdownCoordinator()}
 	// 返回 ErrWorkerNotExited 即证明关闭被跳过：该错误只在跳过分支产生，
 	// 而那个分支在触碰 runtime 之前就 return 了。
 	if err := app.closeResources(context.Background()); !errors.Is(err, ErrWorkerNotExited) {

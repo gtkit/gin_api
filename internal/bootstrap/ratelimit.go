@@ -8,9 +8,8 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
-	"go.uber.org/zap"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // rateLimitAssembly 是限流的装配产物。
@@ -271,7 +270,7 @@ type rateLimitObserver struct{}
 // 低基数事件，每次都记：它是排查"限流为什么突然放宽或收紧"的第一手线索。
 func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
 	logger.Warn("rate limit backend phase changed",
-		zap.String("from", from.String()), zap.String("to", to.String()))
+		logger.String("from", from.String()), logger.String("to", to.String()))
 }
 
 // FellBackToLocal 在首次降级到本地影子桶时记录一次。
@@ -280,5 +279,5 @@ func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
 func (rateLimitObserver) FellBackToLocal(policyID string) {
 	logger.Warn("rate limit fell back to the local shadow bucket; "+
 		"the model is the same but the state is not carried over, so up to one burst may pass through",
-		zap.String("policy", policyID))
+		logger.String("policy", policyID))
 }

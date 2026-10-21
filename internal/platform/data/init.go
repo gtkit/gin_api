@@ -1,39 +1,121 @@
 package dao
 
 import (
-	"github.com/gtkit/gin-api/internal/platform/config"
+	"context"
+	"errors"
+	"time"
 
-	logger "github.com/gtkit/logger/v2"
-	"github.com/gtkit/ormx/zlogger"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/platform/config"
+	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
-// NewGormLogger 构造进程共用的 GORM 日志实现。
-//
-// 导出它而不是让各调用点自己拼 zlogger 选项：参数化查询是一条安全属性
-// （日志里绝不出现手机号、邮箱等真实绑定值），复制一份选项就意味着
-// 迟早有一份忘了开。server 与 migrate 两条路径共用同一个构造。
+const slowTime = 200 * time.Millisecond
+
+// NewGormLogger uses the selected project logger. Parameters are always omitted
+// at every SQL log level, including errors and slow queries.
 func NewGormLogger(cfg *config.Config) gormlogger.Interface {
-	return zlogger.New(gormLoggerOptions(cfg)...)
+	level := gormlogger.Warn
+	if cfg != nil && cfg.Log.SQL != 0 {
+		level = gormlogger.Info
+	}
+	return &gormLogger{logLevel: level}
 }
 
-// gormLoggerOptions 构造 GORM zlogger 选项。
-// WithParameterizedQueries 无条件开启：zlogger 默认级别为 Warn，即使 log.sql=0，
-// 错误与慢查询日志也会输出 SQL，参数化保证任何级别都不落真实绑定参数
-// （手机号、邮箱等敏感值）。log.sql 只控制是否逐条输出 SQL（Info 级）。
-func gormLoggerOptions(cfg *config.Config) []zlogger.Option {
-	opts := []zlogger.Option{
-		zlogger.WithLogger(logger.Default().Zap()),
-		// SQL 日志携带与访问/业务日志同源的 requestId（字段名 trace_id），串联单请求全链路。
-		zlogger.WithTraceIDExtractor(logger.RequestIDFromContext),
-		// record not found 属正常业务分支（如查无待支付订单），不应打成 ERROR。
-		zlogger.WithIgnoreRecordNotFoundError(true),
-		zlogger.WithParameterizedQueries(true),
+type gormLogger struct{ logLevel gormlogger.LogLevel }
+
+var _ gormlogger.Interface = (*gormLogger)(nil)
+
+// LogMode 返回一个使用指定日志级别的副本，原 logger 不受影响。
+func (l *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	clone := *l
+	clone.logLevel = level
+	return &clone
+}
+
+// Info 在日志级别不低于 Info 时按 Printf 风格输出 Info 日志，附带 source 调用位置。
+func (l *gormLogger) Info(ctx context.Context, msg string, data ...any) {
+	if l.logLevel < gormlogger.Info {
+		return
 	}
-	if cfg.Log.SQL != 0 {
-		// ormx/zlogger 移除了 WithSqlLog，Info 级别等价于旧版逐条输出 SQL。
-		opts = append(opts, zlogger.WithLogLevel(gormlogger.Info))
+	l.emit(ctx, applog.LevelInfo, msg, data)
+}
+
+// Warn 在日志级别不低于 Warn 时按 Printf 风格输出 Warn 日志，附带 source 调用位置。
+func (l *gormLogger) Warn(ctx context.Context, msg string, data ...any) {
+	if l.logLevel < gormlogger.Warn {
+		return
+	}
+	l.emit(ctx, applog.LevelWarn, msg, data)
+}
+
+// Error 在日志级别不低于 Error 时按 Printf 风格输出 Error 日志，附带 source 调用位置。
+func (l *gormLogger) Error(ctx context.Context, msg string, data ...any) {
+	if l.logLevel < gormlogger.Error {
+		return
+	}
+	l.emit(ctx, applog.LevelError, msg, data)
+}
+
+// Trace 记录一次 SQL 执行：出错时（除被忽略的 gorm.ErrRecordNotFound 外）输出 Error 日志；
+// 慢查询阈值非 0 且耗时超过阈值时输出 Warn 慢查询日志；级别为 Info 时输出普通查询日志；
+// 级别为 Silent 时不输出。日志字段包含调用位置、耗时、SQL、影响行数及可选的 trace_id。
+// 无需输出日志时不会调用 fc，避免正常快查询产生 SQL 格式化开销。
+func (l *gormLogger) Trace(
+	ctx context.Context, begin time.Time,
+	fc func() (sql string, rowsAffected int64), err error,
+) {
+	if l.logLevel <= gormlogger.Silent {
+		return
 	}
 
-	return opts
+	elapsed := time.Since(begin)
+	recordNotFoundIgnored := errors.Is(err, gorm.ErrRecordNotFound)
+
+	switch {
+	case err != nil && l.logLevel >= gormlogger.Error && !recordNotFoundIgnored:
+		sql, rows := fc()
+		fields := l.traceFields(ctx, elapsed, sql, rows)
+		applog.Log(ctx, applog.LogEntry{Level: applog.LevelError, Message: "gorm query error", Fields: append(fields, applog.Err(err)), CallerSkip: 1})
+	case slowTime != 0 && elapsed > slowTime && l.logLevel >= gormlogger.Warn:
+		sql, rows := fc()
+		fields := l.traceFields(ctx, elapsed, sql, rows)
+		applog.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "gorm slow query", Fields: append(fields, applog.Duration("slow_threshold", slowTime)), CallerSkip: 1})
+	case l.logLevel == gormlogger.Info:
+		sql, rows := fc()
+		fields := l.traceFields(ctx, elapsed, sql, rows)
+		applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "gorm query", Fields: fields, CallerSkip: 1})
+	}
+}
+
+// ParamsFilter prevents real bound values from entering SQL diagnostics.
+func (*gormLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string, []any) {
+	return sql, nil
+}
+
+func (l *gormLogger) emit(ctx context.Context, level applog.Level, message string, args []any) {
+	fields := []applog.Field{applog.String("source", callerSource())}
+	if id := applog.RequestIDFromContext(ctx); id != "" {
+		fields = append(fields, applog.String("trace_id", id))
+	}
+	applog.Log(ctx, applog.LogEntry{Level: level, Message: message, Format: true, Args: args, Fields: fields, CallerSkip: 2})
+}
+
+// traceFields 组装 Trace 日志的公共字段。
+func (l *gormLogger) traceFields(ctx context.Context, elapsed time.Duration, sql string, rows int64) []applog.Field {
+	const maxTraceFields = 6
+	fields := make([]applog.Field, 0, maxTraceFields)
+	fields = append(fields,
+		applog.String("source", callerSource()),
+		applog.Duration("elapsed", elapsed),
+		applog.String("sql", sql),
+	)
+	if rows >= 0 {
+		fields = append(fields, applog.Int64("rows", rows))
+	}
+	if traceID := applog.RequestIDFromContext(ctx); traceID != "" {
+		fields = append(fields, applog.String("trace_id", traceID))
+	}
+	return fields
 }

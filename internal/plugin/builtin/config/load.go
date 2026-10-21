@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	schema "github.com/gtkit/gin-api/internal/platform/config"
+
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 	"github.com/gtkit/gin-api/internal/shared/env"
 
@@ -68,7 +70,7 @@ func envKeyToConfigPath(name string) string {
 
 // Load 从磁盘固定路径 config/env/env.yml 读取 typed config。
 // 找不到文件直接报错（fail-fast）：部署须显式提供该文件（参照 config/env.yml.example）。
-func Load() (*Config, error) {
+func Load() (*schema.Config, error) {
 	configPath := resource.ResolvePath(configFile)
 	k := koanf.New(".")
 	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
@@ -111,7 +113,7 @@ func checkConfigFileSafety(path string) error {
 }
 
 // loadFromReader 从内存字节流加载配置，供测试以内联 YAML 驱动（不依赖磁盘文件）。
-func loadFromReader(r io.Reader) (*Config, error) {
+func loadFromReader(r io.Reader) (*schema.Config, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("read config bytes: %w", err)
@@ -125,7 +127,7 @@ func loadFromReader(r io.Reader) (*Config, error) {
 	return decode(k)
 }
 
-func decode(k *koanf.Koanf) (*Config, error) {
+func decode(k *koanf.Koanf) (*schema.Config, error) {
 	// 环境变量覆盖层：在 YAML 之后加载，同名键以环境变量为准。
 	//
 	// 放在 decode 里而不是各调用点：Load（读磁盘）与 loadFromReader（读字节流）
@@ -134,13 +136,13 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	// parser 传 nil：env provider 通过 Read() 直接产出 map，不经字节解析
 	// （见 koanf.Load 对 nil parser 的分支）。
 	// koanfenv 是取了别名的 koanf provider：它的包名也是 env，与本仓的 shared/env
-	// 撞名，而后者是本包 Config.Env 的类型来源，不为一个只用一次的 provider 让路。
+	// 撞名，而后者是本包 schema.Config.Env 的类型来源，不为一个只用一次的 provider 让路。
 	if err := k.Load(koanfenv.Provider(envPrefix, ".", envKeyToConfigPath), nil); err != nil {
 		// 错误里只提前缀，不带任何变量值——这一层承载的正是密钥。
 		return nil, fmt.Errorf("load %s environment overrides: %w", envPrefix, err)
 	}
 
-	var cfg Config
+	var cfg schema.Config
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。
 	//

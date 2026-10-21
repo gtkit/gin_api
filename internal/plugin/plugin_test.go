@@ -1,305 +1,263 @@
-package plugin
+package plugin_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/core"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/ormx"
-	"github.com/gtkit/redisx"
+	"github.com/gtkit/gin-api/internal/plugin"
+	"github.com/gtkit/gin-api/internal/router"
 	"github.com/redis/go-redis/v9"
-	gormlogger "gorm.io/gorm/logger"
+	"go.opentelemetry.io/otel"
+	"gorm.io/gorm"
 )
 
-func TestMySQLPluginLifecycle(t *testing.T) {
-	t.Parallel()
+// Each alternative has its own lifecycle and capability; none imports builtin
+// constructors or concrete gtkit SDKs. All resources in this test are offline.
+type lifecycle struct {
+	name        string
+	events      *[]string
+	initialized bool
+}
 
-	sqlDB, _, err := sqlmock.New()
+func (p *lifecycle) Name() string { return p.name }
+func (p *lifecycle) Init(context.Context) error {
+	*p.events = append(*p.events, "init "+p.name)
+	p.initialized = true
+	return nil
+}
+func (p *lifecycle) Start(context.Context) error {
+	*p.events = append(*p.events, "start "+p.name)
+	return nil
+}
+func (p *lifecycle) Stop(context.Context) error {
+	*p.events = append(*p.events, "stop "+p.name)
+	return nil
+}
+
+type alternateConfiguration struct {
+	lifecycle
+	cfg *config.Config
+}
+
+func (p *alternateConfiguration) Value() (*config.Config, error) {
+	if !p.initialized {
+		return nil, plugin.ErrConfigurationUnavailable
+	}
+	return p.cfg, nil
+}
+
+type alternateLogging struct {
+	lifecycle
+	entries []applog.LogEntry
+	release func()
+}
+
+func (p *alternateLogging) Init(ctx context.Context) error {
+	if err := p.lifecycle.Init(ctx); err != nil {
+		return err
+	}
+	release, err := applog.Install(p, nil)
+	p.release = release
+	return err
+}
+func (p *alternateLogging) Log(_ context.Context, entry applog.LogEntry) {
+	entry.Fields = slices.Clone(entry.Fields)
+	entry.Args = slices.Clone(entry.Args)
+	p.entries = append(p.entries, entry)
+}
+func (p *alternateLogging) Stop(ctx context.Context) error {
+	if p.release != nil {
+		p.release()
+	}
+	return p.lifecycle.Stop(ctx)
+}
+
+type alternateDatabase struct {
+	lifecycle
+	db    *gorm.DB
+	pings int
+}
+
+func (p *alternateDatabase) DB() *gorm.DB                      { return p.db }
+func (*alternateDatabase) SQLDB() *sql.DB                      { return nil }
+func (p *alternateDatabase) PingContext(context.Context) error { p.pings++; return nil }
+
+type alternateRedis struct {
+	lifecycle
+	client *redis.Client
+	pings  int
+}
+
+func (p *alternateRedis) Client(db int) *redis.Client {
+	if db == 7 {
+		return p.client
+	}
+	return nil
+}
+func (p *alternateRedis) GetClient(db int) (*redis.Client, bool) {
+	client := p.Client(db)
+	return client, client != nil
+}
+func (p *alternateRedis) DefaultClient() *redis.Client      { return p.client }
+func (*alternateRedis) Configured() bool                    { return true }
+func (p *alternateRedis) HealthCheck(context.Context) error { p.pings++; return nil }
+func (p *alternateRedis) PoolStats() map[int]*redis.PoolStats {
+	return map[int]*redis.PoolStats{7: p.client.PoolStats()}
+}
+func (p *alternateRedis) Stop(ctx context.Context) error {
+	return errors.Join(p.lifecycle.Stop(ctx), p.client.Close())
+}
+
+type alternateCache struct {
+	lifecycle
+	requests int
+}
+
+func (*alternateCache) Enabled() bool { return true }
+func (p *alternateCache) Middleware(time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) { p.requests++; c.Header("Selected-Cache", "alternative"); c.Next() }
+}
+
+type alternateHTTP struct {
+	lifecycle
+	deps  plugin.MiddlewareDeps
+	built bool
+}
+
+func (p *alternateHTTP) Build(deps plugin.MiddlewareDeps) ([]gin.HandlerFunc, error) {
+	if p.built {
+		return nil, plugin.ErrMiddlewareAlreadyBuilt
+	}
+	p.built = true
+	p.deps = deps
+	return []gin.HandlerFunc{func(c *gin.Context) { c.Header("Selected-HTTP", "alternative"); c.Next() }}, nil
+}
+
+var (
+	_ plugin.ConfigurationProvider = (*alternateConfiguration)(nil)
+	_ plugin.Logger                = (*alternateLogging)(nil)
+	_ plugin.DatabaseProvider      = (*alternateDatabase)(nil)
+	_ plugin.RedisProvider         = (*alternateRedis)(nil)
+	_ plugin.ResponseCache         = (*alternateCache)(nil)
+	_ plugin.MiddlewareBuilder     = (*alternateHTTP)(nil)
+)
+
+func TestSixCapabilitiesCanBeReplacedWithoutCoreChanges(t *testing.T) {
+	var events []string
+	life := func(name string) lifecycle { return lifecycle{name: name, events: &events} }
+	cfg := &alternateConfiguration{lifecycle: life("config-alternative"), cfg: &config.Config{}}
+	logging := &alternateLogging{lifecycle: life("logging-alternative")}
+	database := &alternateDatabase{lifecycle: life("database-alternative"), db: &gorm.DB{}}
+	redisPlugin := &alternateRedis{lifecycle: life("redis-alternative"), client: redis.NewClient(&redis.Options{Addr: "offline.invalid:6379", DB: 7})}
+	cache := &alternateCache{lifecycle: life("cache-alternative")}
+	httpPlugin := &alternateHTTP{lifecycle: life("middleware-alternative")}
+	registry := core.NewPluginRegistry()
+	t.Cleanup(func() {
+		if err := registry.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, entry := range []struct {
+		plugin       core.Plugin
+		dependencies []string
+	}{
+		{cfg, nil}, {logging, []string{cfg.Name()}}, {database, []string{logging.Name()}}, {redisPlugin, []string{logging.Name()}}, {cache, []string{redisPlugin.Name()}}, {httpPlugin, []string{logging.Name(), cache.Name()}},
+	} {
+		if err := registry.Register(entry.plugin, entry.dependencies...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(events) != 0 {
+		t.Fatal("registration performed lifecycle work")
+	}
+	if _, err := cfg.Value(); !errors.Is(err, plugin.ErrConfigurationUnavailable) {
+		t.Fatal("configuration was loaded during registration")
+	}
+	if err := registry.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cfg.Value(); err != nil || got != cfg.cfg {
+		t.Fatal("selected configuration unavailable")
+	}
+	applog.Infof("selected logger %s", "alternative")
+	if len(logging.entries) != 1 || logging.entries[0].Text() != "selected logger alternative" {
+		t.Fatal("facade bypassed selected logger")
+	}
+	view, err := data.ResourcesFromClients(database, redisPlugin, true)
 	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	client, err := ormx.OpenWithDB(t.Context(), sqlDB,
-		ormx.WithSkipInitializeWithVersion(true),
-		ormx.WithServerVersion("8.0.36"),
-		ormx.WithStartupPing(false),
-	)
+	if view.Mdb() != database.db || view.Rdb(7) != redisPlugin.client || view.Rdb(0) != nil {
+		t.Fatal("borrowed capabilities changed handles")
+	}
+	if err := view.PingDB(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.PingRedis(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if database.pings != 1 || redisPlugin.pings != 1 {
+		t.Fatal("view bypassed selected health methods")
+	}
+	recorder, err := metrics.New(otel.Meter("replacement-contract"))
 	if err != nil {
-		t.Fatalf("ormx.OpenWithDB: %v", err)
+		t.Fatal(err)
 	}
-
-	called := false
-	plugin := NewMySQLPlugin(MySQLOptions{
-		Open: func(context.Context, config.DatabaseConfig, config.DBCredentials, gormlogger.Interface) (*ormx.Client, error) {
-			called = true
-			return client, nil
-		},
-	})
-	if err := plugin.Init(t.Context()); err != nil {
-		t.Fatalf("Init: %v", err)
+	engine, err := router.New("test", router.Options{Middleware: httpPlugin, Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
+		v1.GET("/cached", cache.Middleware(time.Second), func(c *gin.Context) { c.Status(http.StatusOK) })
+		v1.GET("/plain", func(c *gin.Context) { c.Status(http.StatusOK) })
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !called || plugin.DB() == nil || plugin.SQLDB() == nil {
-		t.Fatalf("plugin did not publish the injected client: called=%v db=%v sql=%v", called, plugin.DB(), plugin.SQLDB())
+	if httpPlugin.deps.Metrics != recorder {
+		t.Fatal("Build captured an earlier instrument")
 	}
-	if err := plugin.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
+	for _, path := range []string{"/api/v1/cached", "/api/v1/plain"} {
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || response.Header().Get("Selected-HTTP") != "alternative" {
+			t.Fatal("selected HTTP middleware did not run")
+		}
+		if (response.Header().Get("Selected-Cache") != "") == strings.HasSuffix(path, "/plain") {
+			t.Fatal("cache was not explicitly mounted")
+		}
 	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if cache.requests != 1 {
+		t.Fatal("response cache bypassed selected implementation")
 	}
-	if plugin.DB() != nil || plugin.SQLDB() != nil {
-		t.Fatal("Stop left the owned client published")
+	beforeClose := len(events)
+	if err := view.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("second Stop: %v", err)
+	if len(events) != beforeClose {
+		t.Fatal("borrower stopped owners")
 	}
-}
-
-func TestMySQLPluginRejectsNilAndPropagatesOpenError(t *testing.T) {
-	t.Parallel()
-
-	openErr := errors.New("open failed")
-	plugin := NewMySQLPlugin(MySQLOptions{
-		Open: func(context.Context, config.DatabaseConfig, config.DBCredentials, gormlogger.Interface) (*ormx.Client, error) {
-			return nil, openErr
-		},
-	})
-	if err := plugin.Init(t.Context()); !errors.Is(err, openErr) {
-		t.Fatalf("Init error = %v, want open error", err)
+	if err := registry.Stop(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-
-	nilPlugin := NewMySQLPlugin(MySQLOptions{
-		Open: func(context.Context, config.DatabaseConfig, config.DBCredentials, gormlogger.Interface) (*ormx.Client, error) {
-			return nil, nil
-		},
-	})
-	if err := nilPlugin.Init(t.Context()); err == nil {
-		t.Fatal("Init accepted a nil client")
+	want := []string{"stop middleware-alternative", "stop cache-alternative", "stop redis-alternative", "stop database-alternative", "stop logging-alternative", "stop config-alternative"}
+	if !slices.Equal(events[len(events)-6:], want) {
+		t.Fatalf("cleanup=%v", events)
 	}
-}
-
-func TestMySQLPluginZeroValueAndCancellationContracts(t *testing.T) {
-	t.Parallel()
-
-	plugin := NewMySQLPlugin(MySQLOptions{})
-	if plugin.Name() != "mysql" {
-		t.Fatalf("Name() = %q, want mysql", plugin.Name())
+	count := len(events)
+	if err := registry.Stop(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-	if err := plugin.Start(t.Context()); err == nil {
-		t.Fatal("Start accepted an uninitialized plugin")
-	}
-	if err := plugin.PingContext(t.Context()); err == nil {
-		t.Fatal("PingContext accepted an uninitialized plugin")
-	}
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	if err := plugin.Init(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Init error = %v, want context.Canceled", err)
-	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("Stop without a client: %v", err)
-	}
-}
-
-func TestRedisPluginOptionalFailureDegrades(t *testing.T) {
-	t.Parallel()
-
-	openErr := errors.New("redis unavailable")
-	plugin := NewRedisPlugin(RedisOptions{
-		Config:   config.RedisConfig{Addr: "redis:6379"},
-		Required: false,
-		Open: func(context.Context, config.RedisConfig) (*redisx.Client, error) {
-			return nil, openErr
-		},
-	})
-	if err := plugin.Init(t.Context()); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	if !plugin.Configured() || plugin.DefaultClient() != nil {
-		t.Fatal("optional failure did not preserve configured/degraded state")
-	}
-	if plugin.Availability() == nil || plugin.Availability().State() != data.AvailabilityDegraded {
-		t.Fatalf("availability = %v, want degraded", plugin.Availability())
-	}
-	if err := plugin.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-}
-
-func TestRedisPluginRequiredFailureIsReturned(t *testing.T) {
-	t.Parallel()
-
-	openErr := errors.New("redis unavailable")
-	plugin := NewRedisPlugin(RedisOptions{
-		Config:   config.RedisConfig{Addr: "redis:6379"},
-		Required: true,
-		Open: func(context.Context, config.RedisConfig) (*redisx.Client, error) {
-			return nil, openErr
-		},
-	})
-	if err := plugin.Init(t.Context()); !errors.Is(err, openErr) {
-		t.Fatalf("Init error = %v, want open error", err)
-	}
-	if err := plugin.Start(t.Context()); err == nil {
-		t.Fatal("Start accepted a required plugin without a client")
-	}
-}
-
-func TestRedisPluginUnavailableAccessorsAreSafe(t *testing.T) {
-	t.Parallel()
-
-	plugin := NewRedisPlugin(RedisOptions{})
-	if plugin.Name() != "redis" {
-		t.Fatalf("Name() = %q, want redis", plugin.Name())
-	}
-	if plugin.Client(0) != nil {
-		t.Fatal("Client returned a handle before Init")
-	}
-	if client, ok := plugin.GetClient(0); client != nil || ok {
-		t.Fatalf("GetClient = (%v, %t), want (nil, false)", client, ok)
-	}
-	if plugin.PoolStats() != nil {
-		t.Fatal("PoolStats returned data before Init")
-	}
-	if plugin.DefaultClient() != nil {
-		t.Fatal("DefaultClient returned a handle before Init")
-	}
-	if err := plugin.HealthCheck(t.Context()); err == nil {
-		t.Fatal("HealthCheck accepted an unavailable plugin")
-	}
-	if err := plugin.Ping(t.Context()); err == nil {
-		t.Fatal("Ping accepted an unavailable plugin")
-	}
-	if plugin.Configured() {
-		t.Fatal("unconfigured plugin reported Configured")
-	}
-	if plugin.Availability() != nil {
-		t.Fatal("uninitialized plugin published availability")
-	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("Stop without a client: %v", err)
-	}
-}
-
-func TestRedisPluginUnconfiguredRequiredAndCanceled(t *testing.T) {
-	t.Parallel()
-
-	required := NewRedisPlugin(RedisOptions{Required: true})
-	if err := required.Init(t.Context()); err == nil {
-		t.Fatal("required unconfigured Redis accepted")
-	}
-	if required.Availability() == nil {
-		t.Fatal("required unconfigured Redis did not publish degraded state")
-	}
-
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	optional := NewRedisPlugin(RedisOptions{})
-	if err := optional.Init(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Init error = %v, want context.Canceled", err)
-	}
-}
-
-type cacheRedisProvider struct {
-	configured bool
-}
-
-func (p cacheRedisProvider) Client(int) *redis.Client { return nil }
-
-func (p cacheRedisProvider) DefaultClient() *redis.Client { return nil }
-
-func (p cacheRedisProvider) Configured() bool { return p.configured }
-
-func TestCachePluginMemoryLifecycle(t *testing.T) {
-	t.Parallel()
-
-	plugin := NewCachePlugin(CacheOptions{
-		Config: config.CacheConfig{
-			Enabled:  true,
-			Store:    config.CacheStoreMemory,
-			MaxBytes: 1 << 20,
-		},
-		AppName: "test",
-	})
-	if err := plugin.Init(t.Context()); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	if !plugin.Enabled() || plugin.Stager() == nil {
-		t.Fatal("cache plugin is not enabled after Init")
-	}
-	if err := plugin.Start(t.Context()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if plugin.Stager() != nil || plugin.Enabled() {
-		t.Fatal("Stop left a closed cache stager published")
-	}
-	if err := plugin.Stop(t.Context()); err != nil {
-		t.Fatalf("second Stop: %v", err)
-	}
-}
-
-func TestCachePluginRedisFailureDegrades(t *testing.T) {
-	t.Parallel()
-
-	plugin := NewCachePlugin(CacheOptions{
-		Config: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis},
-		Redis:  cacheRedisProvider{configured: true},
-	})
-	if err := plugin.Init(t.Context()); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	if plugin.Stager() == nil || plugin.Enabled() {
-		t.Fatal("cache plugin did not disable itself after optional Redis degradation")
-	}
-}
-
-func TestCachePluginZeroValueAndMiddlewareContracts(t *testing.T) {
-	t.Parallel()
-
-	var nilPlugin *CachePlugin
-	if nilPlugin.Name() != "cache" {
-		t.Fatalf("Name() = %q, want cache", nilPlugin.Name())
-	}
-	if err := nilPlugin.Init(t.Context()); err == nil {
-		t.Fatal("nil cache plugin accepted Init")
-	}
-	if err := nilPlugin.Start(t.Context()); err == nil {
-		t.Fatal("nil cache plugin accepted Start")
-	}
-	if err := nilPlugin.Stop(t.Context()); err != nil {
-		t.Fatalf("nil cache plugin Stop: %v", err)
-	}
-
-	plugin := NewCachePlugin(CacheOptions{})
-	if err := plugin.Start(t.Context()); err == nil {
-		t.Fatal("Start accepted a cache plugin before Init")
-	}
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	plugin.Middleware(time.Second)(c)
-	if !c.IsAborted() {
-		// The disabled middleware is a pass-through; reaching this point proves
-		// the returned handler executed without touching a nil stager.
-		return
-	}
-	t.Fatal("disabled cache middleware unexpectedly aborted the request")
-}
-
-func TestCachePluginRejectsRedisStoreWithoutProvider(t *testing.T) {
-	t.Parallel()
-
-	plugin := NewCachePlugin(CacheOptions{
-		Config: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis},
-	})
-	if err := plugin.Init(t.Context()); err == nil {
-		t.Fatal("Redis cache accepted a missing provider")
+	if len(events) != count {
+		t.Fatal("registry stopped alternatives twice")
 	}
 }

@@ -27,7 +27,7 @@ func newTestEngine(checker HealthChecker) *gin.Engine {
 
 func newTestEngineWith(opts Options) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	engine, err := New("test", opts)
+	engine, err := newRouterForTest("test", opts)
 	if err != nil {
 		panic(err)
 	}

@@ -3,86 +3,48 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
+	"reflect"
 
 	"github.com/gtkit/gin-api/internal/core"
-	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/plugin"
 )
 
-// PluginRegistrationOptions carries compile-time registration inputs selected
-// by the process entry point. It contains values, not a service locator.
-type PluginRegistrationOptions struct {
-	// DatabaseCredentials are selected by the caller for the database plugin.
-	DatabaseCredentials config.DBCredentials
-}
-
-// PluginSet is the typed capability set required by the bootstrap layer.
-// Every value must also be registered in the supplied PluginRegistry.
+// PluginSet contains borrowed capabilities selected and registered by the entry point.
+// Every capability must belong to a plugin in the supplied registry.
 type PluginSet struct {
-	Database plugin.DatabasePlugin
-	Redis    plugin.RedisLifecyclePlugin
-	Cache    plugin.CacheLifecyclePlugin
+	Configuration plugin.ConfigurationProvider
+	Logging       plugin.Logger
+	Database      plugin.DatabaseProvider
+	Redis         plugin.RedisProvider
+	Cache         plugin.ResponseCache
+	Middleware    plugin.MiddlewareBuilder
+	// DrainLogs must use the same logging owner as registry Stop. It is used only
+	// when a live worker prevents stopping the remaining plugins.
+	DrainLogs func(context.Context) error
 }
 
-// PluginRegistrar lets a business main choose the concrete compile-time
-// implementations while core lifecycle orchestration remains unchanged.
-type PluginRegistrar func(
-	context.Context,
-	*config.Config,
-	*core.PluginRegistry,
-	PluginRegistrationOptions,
-) (PluginSet, error)
+// PluginRegistrar selects implementations at compile time. Registration must not
+// read configuration or create resources; those operations belong to Plugin.Init.
+type PluginRegistrar func(*core.PluginRegistry) (PluginSet, error)
 
-// RegisterDefaultPlugins registers the scaffold's built-in MySQL, Redis and
-// response-cache implementations. A business entry point may pass this
-// function explicitly or provide another registrar with the same typed set.
-func RegisterDefaultPlugins(
-	_ context.Context,
-	cfg *config.Config,
-	registry *core.PluginRegistry,
-	options PluginRegistrationOptions,
-) (PluginSet, error) {
-	if cfg == nil {
-		return PluginSet{}, errors.New("register plugins: config is required")
+func (s PluginSet) validate() error {
+	if nilCapability(s.Configuration) || nilCapability(s.Logging) || nilCapability(s.Database) ||
+		nilCapability(s.Redis) || nilCapability(s.Cache) || nilCapability(s.Middleware) || s.DrainLogs == nil {
+		return errors.New("register plugins: configuration, logging, database, redis, cache, middleware and logging drain are required")
 	}
-	if registry == nil {
-		return PluginSet{}, errors.New("register plugins: registry is required")
-	}
+	return nil
+}
 
-	mysqlPlugin := plugin.NewMySQLPlugin(plugin.MySQLOptions{
-		Config:      cfg.Database,
-		Credentials: options.DatabaseCredentials,
-		GormLogger:  data.NewGormLogger(cfg),
-	})
-	redisPlugin := plugin.NewRedisPlugin(plugin.RedisOptions{
-		Config:   cfg.Redis,
-		Required: resourceRequirements(cfg).Redis,
-	})
-	cachePlugin := plugin.NewCachePlugin(plugin.CacheOptions{
-		Config:  cfg.Cache,
-		Redis:   redisPlugin,
-		AppName: cfg.App.Name,
-	})
-	if err := registry.Register(mysqlPlugin); err != nil {
-		return PluginSet{}, fmt.Errorf("register mysql plugin: %w", err)
+// nilCapability handles typed nils at the registration boundary, never on request paths.
+func nilCapability(value any) bool {
+	if value == nil {
+		return true
 	}
-	if err := registry.Register(redisPlugin); err != nil {
-		return PluginSet{}, fmt.Errorf("register redis plugin: %w", err)
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
 	}
-	cacheDependencies := []string(nil)
-	if cfg.Cache.Enabled && strings.TrimSpace(cfg.Cache.Store) == config.CacheStoreRedis {
-		cacheDependencies = []string{redisPlugin.Name()}
-	}
-	if err := registry.Register(cachePlugin, cacheDependencies...); err != nil {
-		return PluginSet{}, fmt.Errorf("register cache plugin: %w", err)
-	}
-
-	return PluginSet{
-		Database: mysqlPlugin,
-		Redis:    redisPlugin,
-		Cache:    cachePlugin,
-	}, nil
 }

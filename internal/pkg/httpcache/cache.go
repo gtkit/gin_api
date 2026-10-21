@@ -20,12 +20,11 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/gin-gonic/gin"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gincache"
 	"github.com/gtkit/gincache/persist"
 	"github.com/gtkit/gincache/persist/ristrettoadapter"
-	logger "github.com/gtkit/logger/v2"
 	"github.com/redis/go-redis/v9"
-	"go.uber.org/zap"
 )
 
 // Stager 按配置产出响应缓存中间件。
@@ -190,19 +189,19 @@ func auditResponse(c *gin.Context) {
 	if len(header.Values("Set-Cookie")) > 0 {
 		logger.Warn("cached route produced a Set-Cookie response; admission rejected it, "+
 			"so this route is effectively uncached and probably should not mount the cache middleware",
-			zap.String("path", c.FullPath()))
+			logger.String("path", c.FullPath()))
 	}
 	if cc := header.Get("Cache-Control"); cc != "" && containsNoStoreOrPrivate(cc) {
 		logger.Warn("cached route declared a non-shareable Cache-Control; admission rejected it, "+
 			"so this route is effectively uncached",
-			zap.String("path", c.FullPath()), zap.String("cache_control", cc))
+			logger.String("path", c.FullPath()), logger.String("cache_control", cc))
 	}
 	if v := header.Get("Vary"); v != "" && !varyIsCacheable(header) {
 		// 只报真正被拒的：CORS 的 Vary: Origin 是可缓存的（见 varyIsCacheable），
 		// 对它告警会让每个请求都产出一条日志——噪音本身就是一次故障。
 		logger.Warn("cached route declared a Vary the cache key cannot honor, so this route "+
 			"is effectively uncached",
-			zap.String("path", c.FullPath()), zap.String("vary", v))
+			logger.String("path", c.FullPath()), logger.String("vary", v))
 	}
 }
 

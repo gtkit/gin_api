@@ -1,0 +1,84 @@
+package dao
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/platform/config"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+)
+
+type queryLogCapture struct{ entries []applog.LogEntry }
+
+func (c *queryLogCapture) Log(_ context.Context, e applog.LogEntry) { c.entries = append(c.entries, e) }
+func TestGormLoggerUsesSelectedImplementation(t *testing.T) {
+	sink := &queryLogCapture{}
+	release, err := applog.Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx := applog.ContextWithRequestID(t.Context(), "sql-request")
+	for _, tc := range []struct {
+		name      string
+		level     gormlogger.LogLevel
+		elapsed   time.Duration
+		queryErr  error
+		rows      int64
+		message   string
+		wantLevel applog.Level
+	}{
+		{"silent", gormlogger.Silent, time.Second, errors.New("hidden"), 1, "", 0},
+		{"fast warn", gormlogger.Warn, 0, nil, 1, "", 0},
+		{"not found", gormlogger.Warn, 0, gorm.ErrRecordNotFound, 0, "", 0},
+		{"error", gormlogger.Warn, 0, errors.New("query failure"), -1, "gorm query error", applog.LevelError},
+		{"slow", gormlogger.Warn, time.Second, nil, 2, "gorm slow query", applog.LevelWarn},
+		{"slow not found", gormlogger.Warn, time.Second, gorm.ErrRecordNotFound, 0, "gorm slow query", applog.LevelWarn},
+		{"verbose", gormlogger.Info, 0, nil, 1, "gorm query", applog.LevelInfo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink.entries = nil
+			called := 0
+			NewGormLogger(&config.Config{}).LogMode(tc.level).Trace(ctx, time.Now().Add(-tc.elapsed), func() (string, int64) { called++; return "SELECT ?", tc.rows }, tc.queryErr)
+			if tc.message == "" {
+				if called != 0 || len(sink.entries) != 0 {
+					t.Fatal("formatted a suppressed query")
+				}
+				return
+			}
+			if called != 1 || len(sink.entries) != 1 {
+				t.Fatalf("fc=%d events=%d", called, len(sink.entries))
+			}
+			event := sink.entries[0]
+			if event.Message != tc.message || event.Level != tc.wantLevel || event.Alert {
+				t.Fatalf("event=%+v", event)
+			}
+			fields := map[string]any{}
+			for _, field := range event.Fields {
+				fields[field.Key] = field.Value
+			}
+			if fields["sql"] != "SELECT ?" || fields["trace_id"] != "sql-request" || !strings.Contains(fields["source"].(string), "gorm_logger_contract_test.go:") {
+				t.Fatalf("fields=%v", fields)
+			}
+			_, hasRows := fields["rows"]
+			if hasRows != (tc.rows >= 0) {
+				t.Fatal("changed unknown row semantics")
+			}
+		})
+	}
+	verbose := NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
+	silent := verbose.LogMode(gormlogger.Silent)
+	sink.entries = nil
+	silent.Info(ctx, "hidden")
+	verbose.Info(ctx, "info %d", 1)
+	verbose.Warn(ctx, "warn %d", 2)
+	verbose.Error(ctx, "error %d", 3)
+	if len(sink.entries) != 3 || sink.entries[0].Text() != "info 1" || sink.entries[1].Text() != "warn 2" || sink.entries[2].Text() != "error 3" {
+		t.Fatalf("printf forwarding=%+v", sink.entries)
+	}
+}

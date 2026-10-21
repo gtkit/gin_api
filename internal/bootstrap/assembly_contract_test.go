@@ -1,10 +1,16 @@
 package bootstrap
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gtkit/gin-api/internal/core"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	defaulthttp "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
+	"go.opentelemetry.io/otel"
 
 	"gorm.io/gorm"
 
@@ -46,6 +52,7 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	inf := infra{cfg: cfg, resources: resources, mysqlDB: &gorm.DB{}, rateLimits: limits, cache: cache}
+	installMiddlewareFixture(t, &inf)
 	runtime := &Runtime{config: cfg, resources: resources, jwt: jwt}
 	svc, err := buildServices(t.Context(), inf, runtime)
 	if err != nil {
@@ -89,7 +96,8 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	}
 	// 同一个模块的缺失限流引用必须仍使装配失败，不能因 Redis 可选而放宽。
 	inf.rateLimits = rateLimitAssembly{}
-	if _, err := buildEngine(inf, svc, mw, nil); err == nil {
+	installMiddlewareFixture(t, &inf)
+	if _, err := buildEngine(inf, svc, mw, nil); err == nil || !strings.Contains(err.Error(), "rate limit policy") {
 		t.Fatal("missing route policies accepted")
 	}
 }
@@ -133,3 +141,30 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 		}
 	}
 }
+
+func installMiddlewareFixture(t *testing.T, inf *infra) {
+	t.Helper()
+	builder := defaulthttp.New(defaulthttp.Options{Configuration: loadedConfiguration{inf.cfg}})
+	registry := core.NewPluginRegistry()
+	if err := registry.Register(builder); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := registry.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	inf.middleware = builder
+	recorder, err := metrics.New(otel.Meter("assembly-contract"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inf.recorder = recorder
+}
+
+type loadedConfiguration struct{ cfg *config.Config }
+
+func (c loadedConfiguration) Value() (*config.Config, error) { return c.cfg, nil }
