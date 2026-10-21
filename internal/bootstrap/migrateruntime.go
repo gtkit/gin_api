@@ -2,15 +2,19 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	logger "github.com/gtkit/logger/v2"
 	"github.com/gtkit/ormx"
 
+	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/plugin"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // openDBForMigration 是注入点，便于测试断言迁移路径只建数据库连接、不碰其他基础设施。
@@ -31,10 +35,13 @@ const defaultMigrationStartupTimeout = 15 * time.Second
 // 而迁移恰恰是故障恢复时最需要能执行的操作。此前 migrate 走完整 Runtime，
 // 而 Redis 连不上会直接 panic，于是"Redis 挂了 ⇒ 无法迁移数据库"。
 type MigrationRuntime struct {
-	cfg    *config.Config
-	client *ormx.Client
-	// closed 保证日志刷写恰好一次（Close 在 defer 路径上可能被多次调用）。
-	closed atomic.Bool
+	cfg     *config.Config
+	client  *ormx.Client
+	plugins *core.PluginRegistry
+	// closeOnce 保证插件停止、连接关闭和日志刷写恰好一次（Close 在 defer
+	// 路径上可能被多次调用，也可能与命令错误路径并发到达）。
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewMigrationRuntime 装配迁移运行时。
@@ -56,16 +63,55 @@ func NewMigrationRuntime(ctx context.Context) (*MigrationRuntime, error) {
 	defer cancel()
 
 	creds := resolveDBCredentials(cfg, Options{UseMigrationCredentials: true})
-	client, err := openDBForMigration(openCtx, cfg.Database, creds, data.NewGormLogger(cfg))
-	if err != nil {
-		// 日志已就绪：失败必须先刷写再返回（resource-lifecycle spec），
-		// 否则"迁移为什么起不来"既不落盘也不告警。
+	registry := core.NewPluginRegistry()
+	var client *ormx.Client
+	mysqlPlugin := plugin.NewMySQLPlugin(plugin.MySQLOptions{
+		Config:      cfg.Database,
+		Credentials: creds,
+		GormLogger:  data.NewGormLogger(cfg),
+		Open: func(
+			ctx context.Context,
+			cfg config.DatabaseConfig,
+			creds config.DBCredentials,
+			gormLogger gormlogger.Interface,
+		) (*ormx.Client, error) {
+			opened, openErr := openDBForMigration(ctx, cfg, creds, gormLogger)
+			if openErr == nil {
+				client = opened
+			}
+			return opened, openErr
+		},
+	})
+	if err := registry.Register(mysqlPlugin); err != nil {
 		closeProcessRuntime(nil)
-		return nil, fmt.Errorf("open database for migration: %w", err)
+		return nil, fmt.Errorf("register migration mysql plugin: %w", err)
+	}
+	if err := registry.Init(openCtx); err != nil {
+		return nil, closeMigrationRegistryOnFailure(registry,
+			fmt.Errorf("init migration mysql plugin: %w", err), openCtx)
+	}
+	if err := registry.Start(openCtx); err != nil {
+		return nil, closeMigrationRegistryOnFailure(registry,
+			fmt.Errorf("start migration mysql plugin: %w", err), openCtx)
+	}
+	if client == nil {
+		return nil, closeMigrationRegistryOnFailure(registry,
+			errors.New("migration mysql plugin initialized without a client"), openCtx)
 	}
 
 	logger.Infof("migration runtime initialized with env=%s", cfg.Env)
-	return &MigrationRuntime{cfg: cfg, client: client}, nil
+	return &MigrationRuntime{cfg: cfg, client: client, plugins: registry}, nil
+}
+
+func closeMigrationRegistryOnFailure(
+	registry *core.PluginRegistry, cause error, ctx context.Context,
+) error {
+	var stopErr error
+	if registry != nil {
+		stopErr = registry.Stop(context.WithoutCancel(ctx))
+	}
+	closeProcessRuntime(nil)
+	return errors.Join(cause, stopErr)
 }
 
 // Config 返回迁移运行时的配置。
@@ -80,19 +126,26 @@ func (r *MigrationRuntime) DB() *ormx.Client { return r.client }
 // 会让一次带故障的收尾表现成正常退出，而命令的退出码正是 CI 与部署脚本
 // 唯一看的东西。日志刷写不可省：迁移进程通常在 Close 后立即退出，不刷写
 // 则迁移期间的错误日志与告警随进程一起消失——而迁移失败最需要留痕。
-func (r *MigrationRuntime) Close() error {
+func (r *MigrationRuntime) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	var err error
-	if r.client != nil {
-		if closeErr := r.client.Close(); closeErr != nil {
-			err = fmt.Errorf("close migration database connection: %w", closeErr)
-			logger.Errorf("%v", err)
+	r.closeOnce.Do(func() {
+		if r.plugins != nil {
+			if err := r.plugins.Stop(context.WithoutCancel(ctx)); err != nil {
+				r.closeErr = fmt.Errorf("close migration plugin registry: %w", err)
+			}
+		} else if r.client != nil {
+			// 保留手工构造 MigrationRuntime 的兼容路径；正常构造始终走
+			// PluginRegistry，避免迁移连接出现第二个关闭责任。
+			if err := r.client.Close(); err != nil {
+				r.closeErr = fmt.Errorf("close migration database connection: %w", err)
+			}
 		}
-	}
-	if r.closed.CompareAndSwap(false, true) {
+		if r.closeErr != nil {
+			logger.Errorf("%v", r.closeErr)
+		}
 		closeProcessRuntime(nil)
-	}
-	return err
+	})
+	return r.closeErr
 }

@@ -60,10 +60,10 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() erro
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {
-		return nil, nil, errors.Join(err, rt.Close())
+		return nil, nil, errors.Join(err, rt.Close(context.WithoutCancel(ctx)))
 	}
 
-	return cmds, rt.Close, nil
+	return cmds, func() error { return rt.Close(context.WithoutCancel(ctx)) }, nil
 }
 
 // firstToken 返回第一个非 flag 参数（用于判断子命令名，如 up/down/status/make）；

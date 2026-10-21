@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/gtkit/gin-api/internal/core"
 	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/plugin"
 
 	logger "github.com/gtkit/logger/v2"
 )
@@ -20,6 +22,8 @@ import (
 type Runtime struct {
 	config    *config.Config
 	resources *data.Resources
+	plugins   *core.PluginRegistry
+	cache     plugin.CacheLifecyclePlugin
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt *jwtauth.Assembly
 	// drained 保证日志排空恰好一次。它**只管排空**，与连接关闭分开计数：
@@ -60,12 +64,34 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, err
 	}
 
-	resources, err := data.NewResources(
-		ctx, cfg, resolveDBCredentials(cfg, opts), resourceRequirements(cfg), data.DefaultBudget(),
-	)
+	registry := core.NewPluginRegistry()
+	registrar := opts.RegisterPlugins
+	if registrar == nil {
+		registrar = RegisterDefaultPlugins
+	}
+	pluginSet, err := registrar(ctx, cfg, registry, PluginRegistrationOptions{
+		DatabaseCredentials: resolveDBCredentials(cfg, opts),
+	})
 	if err != nil {
 		closeProcessRuntime(interrupt)
-		return nil, fmt.Errorf("open resources: %w", err)
+		return nil, fmt.Errorf("register plugins: %w", err)
+	}
+	if pluginSet.Database == nil || pluginSet.Redis == nil || pluginSet.Cache == nil {
+		closeProcessRuntime(interrupt)
+		return nil, errors.New("register plugins: database, redis and cache capabilities are required")
+	}
+	if err := registry.Init(ctx); err != nil {
+		return nil, closePluginRegistryOnFailure(registry, interrupt, fmt.Errorf("init plugins: %w", err), ctx)
+	}
+	if err := registry.Start(ctx); err != nil {
+		return nil, closePluginRegistryOnFailure(registry, interrupt, fmt.Errorf("start plugins: %w", err), ctx)
+	}
+
+	resources, err := data.ResourcesFromClients(pluginSet.Database, pluginSet.Redis,
+		pluginSet.Redis.Configured(), pluginSet.Redis.Availability())
+	if err != nil {
+		return nil, closePluginRegistryOnFailure(registry, interrupt,
+			fmt.Errorf("build resource view: %w", err), ctx)
 	}
 
 	logResourceStates(resources)
@@ -75,10 +101,12 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	// 已经被移除的密钥验出"这种无法解释的状态。轮换通过重启完成。
 	jwtAssembly, err := initJWTWithConfig(cfg)
 	if err != nil {
-		return nil, closeRuntimeOnFailure(resources, interrupt, fmt.Errorf("init jwt: %w", err))
+		return nil, closeRuntimeOnFailure(registry, resources, interrupt,
+			fmt.Errorf("init jwt: %w", err), ctx)
 	}
 	if jwtAssembly == nil {
-		return nil, closeRuntimeOnFailure(resources, interrupt, errors.New("jwt assembly is nil"))
+		return nil, closeRuntimeOnFailure(registry, resources, interrupt,
+			errors.New("jwt assembly is nil"), ctx)
 	}
 	logger.Infof("jwt active kid=%s, previous keys=%d",
 		jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
@@ -86,6 +114,8 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	return &Runtime{
 		config:         cfg,
 		resources:      resources,
+		plugins:        registry,
+		cache:          pluginSet.Cache,
 		jwt:            jwtAssembly,
 		drainInterrupt: interrupt,
 	}, nil
@@ -96,13 +126,32 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 // 根因用 %w 保留可 errors.Is/As，清理错误只作附加信息——
 // 反过来会让调用方拿不到真正的失败原因。
 func closeRuntimeOnFailure(
-	resources *data.Resources, interrupt <-chan struct{}, cause error,
+	registry *core.PluginRegistry, resources *data.Resources,
+	interrupt <-chan struct{}, cause error, ctx context.Context,
 ) error {
-	closeProcessRuntime(interrupt)
-	if err := resources.Close(); err != nil {
-		return errors.Join(cause, fmt.Errorf("close resources after failure: %w", err))
+	var errs []error
+	if registry != nil {
+		errs = append(errs, registry.Stop(context.WithoutCancel(ctx)))
 	}
-	return cause
+	closeProcessRuntime(interrupt)
+	if resources != nil {
+		if err := resources.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close resources after failure: %w", err))
+		}
+	}
+	return errors.Join(append([]error{cause}, errs...)...)
+}
+
+func closePluginRegistryOnFailure(
+	registry *core.PluginRegistry,
+	interrupt <-chan struct{}, cause error, ctx context.Context,
+) error {
+	var cleanupErr error
+	if registry != nil {
+		cleanupErr = registry.Stop(context.WithoutCancel(ctx))
+	}
+	closeProcessRuntime(interrupt)
+	return errors.Join(cause, cleanupErr)
 }
 
 // logResourceStates 在启动完成时把非健康的资源状态打印一次。
@@ -138,6 +187,14 @@ func (r *Runtime) Resources() *data.Resources {
 	return r.resources
 }
 
+// CachePlugin returns the response-cache lifecycle adapter for provider assembly.
+func (r *Runtime) CachePlugin() plugin.CacheLifecyclePlugin {
+	if r == nil {
+		return nil
+	}
+	return r.cache
+}
+
 // TokenIssuer 返回轮换签发器。
 func (r *Runtime) TokenIssuer() jwtauth.RotatingTokenIssuer {
 	if r == nil || r.jwt == nil {
@@ -159,18 +216,21 @@ func (r *Runtime) TokenParser() jwtauth.TokenParser {
 // 关闭错误必须返回而不是只记日志：吞掉它会让进程在资源关闭失败时仍报告
 // "正常退出"，编排器与脚本据此做出错误判断。重复调用返回与首次相同的结果，
 // 幂等由 Resources 自身保证（其内部记录首次关闭结果）；日志刷写仅执行一次。
-func (r *Runtime) Close() error {
+func (r *Runtime) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
 
-	var err error
+	var errs []error
+	if r.plugins != nil {
+		errs = append(errs, r.plugins.Stop(context.WithoutCancel(ctx)))
+	}
 	if r.resources != nil {
-		err = r.resources.Close()
+		errs = append(errs, r.resources.Close())
 	}
 	r.DrainLogs()
-	if err != nil {
-		return fmt.Errorf("close resources: %w", err)
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("close runtime: %w", err)
 	}
 	return nil
 }

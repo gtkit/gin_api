@@ -22,7 +22,7 @@ func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
 	return nil
 }
 
-// openRedis 建立多 DB Redis 客户端并在 ctx 预算内完成一次连通性校验。
+// OpenRedis 建立多 DB Redis 客户端并在 ctx 预算内完成一次连通性校验。
 //
 // 与旧实现的两处关键差异：
 //
@@ -41,7 +41,7 @@ func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
 // 不可达时本函数无法交出一个"稍后能自愈"的客户端，探测失败即关闭并返回 nil。
 // 消费方要区分"未配置"与"已配置但不可达"，用 Resources.RedisConfigured()
 // 而不是客户端指针的非空性——见那里的注释。
-func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
+func OpenRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
 	client, err := redisx.NewClientContext(ctx, buildRedisOptions(cfg)...)
 	if err != nil {
 		return nil, fmt.Errorf("init redis client: %w", err)
@@ -54,6 +54,11 @@ func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, err
 	}
 
 	return client, nil
+}
+
+// openRedis 保留给本包已有调用点；新插件通过导出的 OpenRedis 注入默认实现。
+func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
+	return OpenRedis(ctx, cfg)
 }
 
 // buildRedisOptions 把配置翻译成 redisx 选项。

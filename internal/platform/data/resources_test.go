@@ -2,12 +2,14 @@ package dao
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestBudgetNormalize(t *testing.T) {
@@ -239,6 +241,82 @@ func TestNewResourcesRejectsInconsistentBudget(t *testing.T) {
 	}
 	if res != nil {
 		t.Fatal("NewResources returned resources alongside an error")
+	}
+}
+
+func TestResourcesFromClientsDoesNotOwnPluginClient(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newSQLMockOrmxClient(t)
+	res, err := ResourcesFromClients(client, nil, false, nil)
+	if err != nil {
+		t.Fatalf("ResourcesFromClients: %v", err)
+	}
+	if res.Mdb() == nil {
+		t.Fatal("ResourcesFromClients returned a view without the MySQL handle")
+	}
+	if err := res.Close(); err != nil {
+		t.Fatalf("view Close: %v", err)
+	}
+	if client.DB() == nil {
+		t.Fatal("view Close cleared the plugin-owned client")
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("client.Close: %v", err)
+	}
+}
+
+type fakeRedisHandle struct {
+	clients   map[int]*redis.Client
+	stats     map[int]*redis.PoolStats
+	healthErr error
+}
+
+func (h fakeRedisHandle) GetClient(db int) (*redis.Client, bool) {
+	client, ok := h.clients[db]
+	return client, ok
+}
+
+func (h fakeRedisHandle) PoolStats() map[int]*redis.PoolStats { return h.stats }
+
+func (h fakeRedisHandle) HealthCheck(context.Context) error { return h.healthErr }
+
+func (h fakeRedisHandle) DB() *sql.DB { return nil }
+
+func TestResourcesFromClientsBuildsRedisViewAndProbesIt(t *testing.T) {
+	t.Parallel()
+
+	mysql, _ := newSQLMockOrmxClient(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: "redis.invalid:6379"})
+	redisView := fakeRedisHandle{
+		clients:   map[int]*redis.Client{0: redisClient},
+		stats:     map[int]*redis.PoolStats{0: redisClient.PoolStats()},
+		healthErr: errors.New("redis unavailable"),
+	}
+	resources, err := ResourcesFromClients(mysql, redisView, true, nil)
+	if err != nil {
+		t.Fatalf("ResourcesFromClients: %v", err)
+	}
+	if !resources.RedisConfigured() || resources.RedisAvailability() == nil {
+		t.Fatal("Redis view did not preserve configured state and availability tracker")
+	}
+	if resources.Rdb(0) != redisClient || resources.Rdb(1) != nil {
+		t.Fatal("Rdb did not expose only initialized logical DBs")
+	}
+	if err := resources.PingRedis(t.Context()); !errors.Is(err, redisView.healthErr) {
+		t.Fatalf("PingRedis error = %v, want health error", err)
+	}
+	if err := resources.PingDB(t.Context()); err == nil {
+		t.Fatal("PingDB unexpectedly succeeded without a sqlmock expectation")
+	}
+	if err := resources.Close(); err != nil {
+		t.Fatalf("view Close: %v", err)
+	}
+	if err := redisClient.Close(); err != nil {
+		t.Fatalf("redis client Close: %v", err)
+	}
+	if err := mysql.Close(); err != nil {
+		t.Fatalf("mysql client Close: %v", err)
 	}
 }
 

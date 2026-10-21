@@ -33,6 +33,11 @@ type Options struct {
 	//
 	// 为 nil 时 App 自建一个（单测与不接信号的命令走这条路），行为不变。
 	Shutdown *ShutdownCoordinator
+
+	// RegisterPlugins lets the process entry point choose concrete compile-time
+	// implementations. Nil keeps the scaffold defaults for existing commands
+	// and tests; no runtime discovery is performed.
+	RegisterPlugins PluginRegistrar
 }
 
 // defaultWorkerShutdownTimeout 是 worker drain 的独立预算。
@@ -56,7 +61,8 @@ type App struct {
 	// outbound 持有出站 HTTP 客户端；关停时释放空闲连接，否则它们会一直
 	// 挂到对端超时——滚动重启时旧实例仍占着下游的连接配额。
 	outbound *httpclient.Downstreams
-	// cache 持有响应缓存的本地 store；关停时释放它的后台 goroutine。
+	// cache 是 Runtime Cache 插件提供的 typed view；关闭权属于插件注册器。
+	// App 只保留它以兼容现有装配结构，不直接调用 Close。
 	cache *httpcache.Stager
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
 	telemetry *telemetry.Provider
@@ -94,7 +100,7 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	//   那句话对 buildMiddlewares 成立，对限流不成立。）
 	providers, err := newProviders(ctx, runtime, options.Shutdown)
 	if err != nil {
-		return nil, errors.Join(err, runtime.Close())
+		return nil, errors.Join(err, runtime.Close(context.WithoutCancel(ctx)))
 	}
 
 	// 日志排空是进程的最后一段等待，同样受"第二个信号取消剩余等待"约束。
@@ -158,7 +164,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 		// 而遥测 flush 与限流回收此时仍要执行（各自带独立预算）。
 		err = errors.Join(err, a.closeExtensions(context.WithoutCancel(ctx)))
 		alertExitError(err)
-		err = errors.Join(err, a.closeResources())
+		err = errors.Join(err, a.closeResources(context.WithoutCancel(ctx)))
 	}()
 
 	// pprof 绑定失败即启动失败：一个"配置说开了但实际没监听"的端点
@@ -296,7 +302,7 @@ func (a *App) closeExtensions(ctx context.Context) error {
 	}
 	errs := []error{
 		a.closeModules(),
-		closeRateLimits(a.rateLimits), a.outbound.Close(), a.cache.Close(),
+		closeRateLimits(a.rateLimits), a.outbound.Close(),
 		// 入队端排在消费者停掉之后（worker 关停在前）：反过来会让正在收尾的
 		// 处理器无法再入队后续任务。用 Shutdown 而不是 Close：后者等在途投递
 		// 时不看任何 ctx，第二个信号切不断它。
@@ -538,7 +544,7 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 // 此时跳过关闭、返回可判别错误，回收交给进程退出。判定放在这里而不是
 // gracefulShutdown：defer 路径在关闭那一刻查询实时状态，天然覆盖 Run 的
 // 全部提前返回分支。
-func (a *App) closeResources() error {
+func (a *App) closeResources(ctx context.Context) error {
 	if live := a.workers.LiveWorkers(); len(live) > 0 {
 		// 连接不关，**但日志照排空**：两者是不同的事，共用一个开关会让
 		// "现在不能关连接"顺带把退出告警与错误日志一起丢掉——而这条
@@ -550,7 +556,7 @@ func (a *App) closeResources() error {
 	if a.runtime == nil {
 		return nil
 	}
-	return a.runtime.Close()
+	return a.runtime.Close(context.WithoutCancel(ctx))
 }
 
 // forceSignal 返回注入协调器的强制关停信号；未注入时为 nil（排空只受预算约束）。

@@ -223,29 +223,17 @@ func newProviders(
 		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
-	// 3c. 响应缓存。默认关闭；关闭时产出透传中间件，调用方不必判空。
-	//     必须先于路由装配：模块在注册只读路由时就要挂上它。
-	//
-	//     Redis 已配置但启动期不可达时按禁用降级，而不是阻断启动：
-	//     缓存运行期本就 fail-open（后端出错即穿透执行 handler），
-	//     一次无害降级不该换掉进程的可启动性——那会恰好堵死 Redis 故障
-	//     期间的滚动重启（资源契约见 resources.go：可降级的能力应当降级）。
-	//     "Redis 根本没配置却启用 redis 后端"仍在配置校验期失败，不进这里。
-	cacheCfg := inf.cfg.Cache
-	cacheClient := inf.resources.Rdb(cacheCfg.RedisDB)
-	if responseCacheShouldDegrade(cacheCfg, cacheClient == nil, inf.resources.RedisConfigured()) {
-		logger.Warnf("response cache disabled for this process lifetime: redis (db %d) is configured "+
-			"but unreachable during startup; restart after redis recovers to re-enable it",
-			cacheCfg.RedisDB)
-		cacheCfg.Enabled = false
+	// 3c. 响应缓存。Runtime 的 Cache 插件已按 Redis 可达性完成初始化；
+	//     这里仅取得它的 typed view，默认关闭时仍产出透传中间件。
+	//     必须先于路由装配：模块在注册只读路由时就要挂上它。Redis 已配置
+	//     但启动期不可达时的禁用降级由插件完成，避免 providers 重复构造和关闭 Store。
+	cachePlugin := runtime.CachePlugin()
+	if cachePlugin == nil || cachePlugin.Stager() == nil {
+		return nil, errors.New("response cache plugin is not initialized")
 	}
-	responseCache, err := httpcache.New(cacheCfg, cacheClient, inf.cfg.App.Name)
-	if err != nil {
-		return nil, fmt.Errorf("build response cache: %w", err)
-	}
+	responseCache := cachePlugin.Stager()
 	inf.cache = responseCache
-	rb.push("response cache", responseCache.Close)
-	if responseCache.Enabled() {
+	if cachePlugin.Enabled() {
 		logger.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
 			"explicitly mount the middleware, and requests carrying identity always bypass it",
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
@@ -328,17 +316,6 @@ func newProviders(
 		status:         status,
 		metricsCleanup: inf.metricsCleanup,
 	}, nil
-}
-
-// responseCacheShouldDegrade 判定响应缓存是否按禁用降级：redis 后端、
-// 客户端缺失、且 Redis **已配置**——即"配置了但启动期不可达"。
-// 缓存运行期本就 fail-open（后端出错即穿透），一次无害降级不该换掉
-// 进程的可启动性；"根本没配置却启用 redis 后端"在配置校验期已失败，
-// 不会走到这里（redisConfigured 为假时不降级，让装配错误如实暴露）。
-func responseCacheShouldDegrade(cfg config.CacheConfig, clientMissing, redisConfigured bool) bool {
-	return cfg.Enabled &&
-		strings.TrimSpace(cfg.Store) == config.CacheStoreRedis &&
-		clientMissing && redisConfigured
 }
 
 // resolveInfra 从 Runtime 取出基础设施连接与派生的 HTTP 配置。

@@ -11,6 +11,8 @@
 ```
 cmd/                         → CLI 入口与子命令，只做参数解析与启动
 internal/
+  core/                      → 编译期插件契约与依赖注册器，不持有具体基础设施实现
+  plugin/                    → MySQL/Redis/响应缓存等内置插件实现
   appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
@@ -35,6 +37,22 @@ internal/
   projectinit/               → 项目实例化器（同上门控）
 pkg/                         → 对外可复用包（可被仓库外项目 import）
 ```
+
+### 编译期插件与资源所有权
+
+`internal/core` 只定义四方法 `Plugin` 契约（`Name`、`Init`、`Start`、`Stop`）和
+`PluginRegistry`。业务入口在编译期显式调用 `Register(plugin, dependencies...)`；注册器
+在初始化前校验重复名称、缺失依赖和循环依赖，按稳定拓扑顺序初始化/启动，按逆序停止并聚合
+错误。回调不在注册器锁内执行，重复停止是幂等的。
+
+`internal/plugin` 提供默认 MySQL、Redis 和响应缓存实现。MySQL/Redis 的 opener 通过具名
+函数注入，替换实现只需在业务装配点选择另一个编译期实现，不使用 Go `plugin` 包、动态
+`.so`、反射扫描或运行期发现。插件拥有自己创建的连接和缓存 Store；`platform/data.Resources`
+只保存不带 `Close` 的 typed view，避免多个层重复关闭同一资源。
+
+配置加载、进程级日志、Gin middleware 和 WorkerManager 保持现有专用生命周期：它们分别
+受启动先后、全局一次性设置、请求链顺序和 Producer/HTTP/Consumer 多阶段关停约束，当前没有
+第二种实现，不伪装成普通插件。当前也不预留消息队列插件接口。
 
 ### `internal/pkg/` 与根 `pkg/` 的区别
 

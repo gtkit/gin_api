@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -14,10 +15,25 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/ormx"
-	"github.com/gtkit/redisx"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
+
+// DatabaseHandle is the narrow database capability consumed by Resources.
+// It deliberately has no Close method; the lifecycle plugin owns closure.
+type DatabaseHandle interface {
+	DB() *gorm.DB
+	SQLDB() *sql.DB
+	PingContext(context.Context) error
+}
+
+// RedisHandle is the narrow Redis capability consumed by Resources.
+// It deliberately has no Close method; the lifecycle plugin owns closure.
+type RedisHandle interface {
+	GetClient(int) (*redis.Client, bool)
+	PoolStats() map[int]*redis.PoolStats
+	HealthCheck(context.Context) error
+}
 
 // Requirements 声明本次装配对**可选**资源的必需性。
 //
@@ -84,8 +100,13 @@ type namedCloser struct {
 // "谁负责关闭"就不再有唯一答案，而这正是资源泄漏的来源。
 // 外部只能经方法拿到用于执行查询的句柄，关闭权只属于本类型。
 type Resources struct {
-	mysql *ormx.Client
-	redis *redisx.Client
+	// mysql is retained for the legacy self-owning NewResources path.
+	mysql     *ormx.Client
+	mysqlView DatabaseHandle
+	redis     RedisHandle
+	// pluginOwned 表示连接由独立插件负责关闭；Resources 只提供 typed view。
+	// 旧 NewResources 路径保持 false 并继续由 Resources 自己关闭。
+	pluginOwned bool
 
 	// redisConfigured 记录配置里是否给了 Redis 地址（见 RedisConfigured）。
 	redisConfigured bool
@@ -196,6 +217,43 @@ func NewResources(
 	return res, nil
 }
 
+// ResourcesFromClients creates a non-owning view over plugin-managed clients.
+//
+// The view is used by existing bootstrap and repository assembly code so the
+// refactor does not widen business dependencies. MySQL and Redis remain owned
+// by their respective lifecycle plugins and are not closed by this value.
+func ResourcesFromClients(
+	mysql DatabaseHandle,
+	redis RedisHandle,
+	redisConfigured bool,
+	redisState *AvailabilityTracker,
+) (*Resources, error) {
+	if mysql == nil || mysql.DB() == nil {
+		return nil, errors.New("resources: mysql client is required")
+	}
+	if redisState == nil {
+		if redis == nil {
+			redisState = NewPermanentlyDegradedTracker("redis")
+		} else {
+			tracker, err := NewAvailabilityTracker(
+				"redis", DefaultAvailabilityPolicy(),
+				redis.HealthCheck,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("resources: build redis availability tracker: %w", err)
+			}
+			redisState = tracker
+		}
+	}
+	return &Resources{
+		mysqlView:       mysql,
+		redis:           redis,
+		redisConfigured: redisConfigured,
+		redisState:      redisState,
+		pluginOwned:     true,
+	}, nil
+}
+
 // resourceContext 返回单资源的执行 ctx：取 min(PerResource, 总预算剩余)。
 //
 // 不能只用 PerResource：总预算已经快耗尽时，再给单个资源一个完整的
@@ -217,7 +275,13 @@ func (b Budget) resourceContext(parent context.Context) (context.Context, contex
 
 // Mdb 返回 GORM 句柄。
 func (r *Resources) Mdb() *gorm.DB {
-	if r == nil || r.mysql == nil {
+	if r == nil {
+		return nil
+	}
+	if r.mysqlView != nil {
+		return r.mysqlView.DB()
+	}
+	if r.mysql == nil {
 		return nil
 	}
 	return r.mysql.DB()
@@ -276,6 +340,9 @@ func (r *Resources) PingRedis(ctx context.Context) error {
 
 // PingDB 执行一次数据库探活。
 func (r *Resources) PingDB(ctx context.Context) error {
+	if r != nil && r.mysqlView != nil {
+		return r.mysqlView.PingContext(ctx)
+	}
 	mdb := r.Mdb()
 	if mdb == nil {
 		return errors.New("mysql connection is not available")
@@ -297,6 +364,9 @@ func (r *Resources) PingDB(ctx context.Context) error {
 // 全部错误聚合返回。
 func (r *Resources) Close() error {
 	if r == nil {
+		return nil
+	}
+	if r.pluginOwned {
 		return nil
 	}
 
