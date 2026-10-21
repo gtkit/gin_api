@@ -1,79 +1,108 @@
 package bootstrap
 
 import (
+	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/gtkit/gin-api/internal/core"
 )
 
-// TestMigrationRuntimeDoesNotWireUnrelatedInfra 守住最小装配的边界。
-//
-// 这条契约有真实来由：迁移原本走完整 Runtime，而 Redis 连不上会直接 panic，
-// 于是"Redis 挂了 ⇒ 数据库迁移也跑不了"——两个无关依赖被绑死，
-// 而迁移恰恰是故障恢复时最需要能执行的操作。
-//
-// 用源码断言而非运行时断言：装配路径的依赖是编译期事实，
-// 运行时用例要么需要真库、要么只能靠 mock 掩盖真实调用链。
 func TestMigrationRuntimeDoesNotWireUnrelatedInfra(t *testing.T) {
-	t.Parallel()
-
 	src := readSourceFile(t, "migrateruntime.go")
-
-	// 迁移路径不该出现的装配调用。每一项都对应一个"与迁移无关、却会阻断迁移"的依赖。
-	forbidden := []struct {
-		symbol string
-		why    string
-	}{
-		{"NewResources", "Resources 会连带建立 Redis 等与迁移无关的连接"},
-		{"initJWTWithConfig", "令牌签发器与迁移无关"},
-		{"initProcessRuntime", "完整装配会连带初始化全部进程级设施"},
-		{"NewRuntime", "完整 Runtime 正是此前阻断迁移的原因"},
-		{"initFileWithConfig", "文件能力与迁移无关"},
-		{"initNewsWithConfig", "通知能力与迁移无关"},
-	}
-	for _, f := range forbidden {
-		t.Run(f.symbol, func(t *testing.T) {
-			t.Parallel()
-			if strings.Contains(src, f.symbol) {
-				t.Fatalf("migration runtime must not wire %s: %s", f.symbol, f.why)
-			}
-		})
+	for _, symbol := range []string{"NewResources", "initJWTWithConfig", "initProcessRuntime", "NewRuntime(", "initFileWithConfig", "initNewsWithConfig", "plugin/builtin/"} {
+		if strings.Contains(src, symbol) {
+			t.Fatalf("migration wired unrelated %s", symbol)
+		}
 	}
 }
 
-// TestMigrationRuntimeWiresRequiredParts 反向锁住：最小装配确实包含它该有的三件事。
-//
-// 只断言"不含 X"是不够的——一个空实现也能通过那些断言。
 func TestMigrationRuntimeWiresRequiredParts(t *testing.T) {
-	t.Parallel()
-
-	src := readSourceFile(t, "migrateruntime.go")
-
-	required := []struct {
-		symbol string
-		what   string
-	}{
-		{"config.Load", "配置"},
-		{"initLogWithConfig", "日志"},
-		{"openDBForMigration", "数据库"},
-		{"UseMigrationCredentials: true", "迁移凭据优先"},
+	f := newLifecycleFixture(t)
+	runtime, err := NewMigrationRuntime(t.Context(), MigrationOptions{RegisterPlugins: f.migration})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, r := range required {
-		t.Run(r.what, func(t *testing.T) {
-			t.Parallel()
-			if !strings.Contains(src, r.symbol) {
-				t.Fatalf("migration runtime must wire %s (%s)", r.symbol, r.what)
-			}
-		})
+	if runtime.Config() != f.components[0].cfg || runtime.DB() != f.components[2].db {
+		t.Fatal("migration did not borrow selected config/database")
+	}
+	if len(f.events) != 6 {
+		t.Fatalf("unexpected components: %v", f.events)
+	}
+	if err := runtime.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	f.assertStopped(t, "database", "logging", "config")
+}
+
+func TestMigrationRejectsMissingAndInvalidCapabilities(t *testing.T) {
+	if _, err := NewMigrationRuntime(t.Context(), MigrationOptions{}); err == nil {
+		t.Fatal("missing registrar accepted")
+	}
+	f := newLifecycleFixture(t)
+	_, err := NewMigrationRuntime(t.Context(), MigrationOptions{RegisterPlugins: func(r *core.PluginRegistry) (MigrationPluginSet, error) {
+		set, err := f.migration(r)
+		set.Database = (*lifecycleComponent)(nil)
+		return set, err
+	}})
+	if err == nil || len(f.events) != 0 {
+		t.Fatalf("typed nil accepted or callbacks ran: %v %v", err, f.events)
 	}
 }
 
-// readSourceFile 读取本包内的源文件，供装配边界断言使用。
+func TestMigrationStartupUsesFifteenSecondsAndFreshRollback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		// Core limits one startup callback to 10s. Two 8s callbacks demonstrate
+		// that migration's aggregate 15s budget is shared, not reset per callback.
+		f.components[0].init = func(ctx context.Context) error { time.Sleep(8 * time.Second); return ctx.Err() }
+		f.components[1].init = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+		var cleanupDeadline time.Time
+		f.components[1].stop = func(ctx context.Context) error {
+			if ctx.Err() != nil {
+				t.Error("startup cancellation leaked into rollback")
+			}
+			cleanupDeadline, _ = ctx.Deadline()
+			return nil
+		}
+		begin := time.Now()
+		_, err := NewMigrationRuntime(t.Context(), MigrationOptions{RegisterPlugins: f.migration})
+		if !errors.Is(err, context.DeadlineExceeded) || time.Since(begin) != 15*time.Second {
+			t.Fatalf("startup=%v elapsed=%v", err, time.Since(begin))
+		}
+		if time.Until(cleanupDeadline) != 30*time.Second {
+			t.Fatalf("rollback remaining=%v", time.Until(cleanupDeadline))
+		}
+		f.assertStopped(t, "logging", "config")
+	})
+}
+
+func TestMigrationClosePreservesCanceledParent(t *testing.T) {
+	f := newLifecycleFixture(t)
+	r, err := NewMigrationRuntime(t.Context(), MigrationOptions{RegisterPlugins: f.migration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := r.Close(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stop cancellation lost: %v", err)
+	}
+	f.assertStopped(t, "database", "logging", "config")
+}
+
 func readSourceFile(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)
 	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+		t.Fatal(err)
 	}
 	return string(b)
 }

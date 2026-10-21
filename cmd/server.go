@@ -128,7 +128,10 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 			// 上层取消（含 cobra 的 ExecuteContext）才能同时作用于资源建立与运行阶段。
 			ctx := cmd.Context()
 
-			app, err := bootstrap.NewApp(ctx, bootstrap.Options{Shutdown: shutdown})
+			app, err := bootstrap.NewApp(ctx, bootstrap.Options{
+				Shutdown:        shutdown,
+				RegisterPlugins: registerServerPlugins,
+			})
 			if err != nil {
 				// 装配期收到信号：**纯取消**的错误树是中止的现象而非故障，
 				// 按信号语义静默退出（与启动屏障的取消语义一致）；混入

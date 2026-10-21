@@ -11,10 +11,9 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
-	logger "github.com/gtkit/logger/v2"
 	"github.com/gtkit/verify"
-	"go.uber.org/zap"
 )
 
 // ResResult 统一响应信封。
@@ -217,17 +216,17 @@ func logError(c *gin.Context, item goerr.Error, httpCode int) {
 		return
 	}
 
-	fields := []zap.Field{}
+	fields := []logger.Field{}
 	if c.Request != nil {
 		fields = append(fields,
-			zap.String("method", c.Request.Method),
-			zap.String("path", c.Request.URL.Path),
+			logger.String("method", c.Request.Method),
+			logger.String("path", c.Request.URL.Path),
 		)
 	}
 	fields = append(fields,
-		zap.Int("http_status", httpCode),
-		zap.Int("error_code", int(item.Code())),
-		zap.String("error", item.Error()),
+		logger.Int("http_status", httpCode),
+		logger.Int("error_code", int(item.Code())),
+		logger.String("error", item.Error()),
 	)
 
 	if httpCode >= http.StatusInternalServerError {

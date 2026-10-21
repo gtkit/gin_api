@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/platform/config"
+	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
 	"github.com/gtkit/gouploader"
-	logger "github.com/gtkit/logger/v2"
 )
 
 // plainHashStore 只实现 HashStore，**不**实现 UserScopedHashStore。
@@ -57,27 +59,10 @@ func newAdvisoryTriggeringUploader(t *testing.T, extra ...gouploader.Option) *go
 func TestBackgroundErrorsReachRepoLogger(t *testing.T) {
 	// 不并行：要临时替换进程级默认 logger。
 	logDir := t.TempDir()
-	l, err := logger.New(
-		logger.WithConsole(false),
-		logger.WithFile(true),
-		logger.WithPath(filepath.Join(logDir, "upload")),
-		logger.WithLevel("debug"),
-		logger.WithBuffered(false),
-		// 不替换 zap 全局：本测试只关心本仓 logger 的落盘输出。
-		logger.WithReplaceGlobals(false),
-	)
-	if err != nil {
-		t.Fatalf("logger.New() = %v", err)
-	}
-
-	prev := logger.Default()
-	logger.SetDefault(l)
-	t.Cleanup(func() {
-		logger.SetDefault(prev)
-	})
+	initUploadTestLogging(t, logDir)
 
 	newAdvisoryTriggeringUploader(t)
-	l.Sync()
+	applog.Sync()
 
 	logged := readAllLogs(t, logDir)
 	if !strings.Contains(logged, "UserScopedHashStore") {
@@ -103,29 +88,13 @@ func TestBackgroundErrorsReachRepoLogger(t *testing.T) {
 func TestCallerCanReplaceBackgroundErrorSink(t *testing.T) {
 	// 不并行：同样要替换默认 logger，以便断言默认出口**没有**收到事件。
 	logDir := t.TempDir()
-	l, err := logger.New(
-		logger.WithConsole(false),
-		logger.WithFile(true),
-		logger.WithPath(filepath.Join(logDir, "upload")),
-		logger.WithLevel("debug"),
-		logger.WithBuffered(false),
-		logger.WithReplaceGlobals(false),
-	)
-	if err != nil {
-		t.Fatalf("logger.New() = %v", err)
-	}
-
-	prev := logger.Default()
-	logger.SetDefault(l)
-	t.Cleanup(func() {
-		logger.SetDefault(prev)
-	})
+	initUploadTestLogging(t, logDir)
 
 	var captured []string
 	newAdvisoryTriggeringUploader(t, gouploader.WithOnBackgroundError(func(err error) {
 		captured = append(captured, err.Error())
 	}))
-	l.Sync()
+	applog.Sync()
 
 	if len(captured) == 0 {
 		t.Fatal("装配方注入的回调未收到启动期安全建议")
@@ -163,4 +132,20 @@ func readAllLogs(t *testing.T, dir string) string {
 		sb.Write(b)
 	}
 	return sb.String()
+}
+
+type uploadLoggingConfiguration struct{ cfg *config.Config }
+
+func (c uploadLoggingConfiguration) Value() (*config.Config, error) { return c.cfg, nil }
+func initUploadTestLogging(t *testing.T, dir string) {
+	t.Helper()
+	logging := defaultlogging.New(defaultlogging.Options{Configuration: uploadLoggingConfiguration{&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "upload"), Level: "debug", FileStdout: 1}}}})
+	t.Cleanup(func() {
+		if err := logging.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := logging.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 }

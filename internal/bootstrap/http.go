@@ -8,15 +8,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 const (
@@ -136,12 +135,14 @@ func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 // 访问日志里没有它们的痕迹；不接管的话唯一的第一现场落在裸 stderr 上，
 // 采集、告警与脱敏对它全部失效。
 func httpServerErrorLog() *log.Logger {
-	std, err := zap.NewStdLogAt(logger.Default().Sugar().Desugar(), zapcore.ErrorLevel)
-	if err != nil {
-		// ErrorLevel 是合法级别，此路径实际不可达；防御性回退到 net/http 默认（stderr）。
-		return nil
-	}
-	return std
+	return log.New(httpErrorWriter{}, "", 0)
+}
+
+type httpErrorWriter struct{}
+
+func (httpErrorWriter) Write(message []byte) (int, error) {
+	logger.Error(strings.TrimSuffix(string(message), "\n"))
+	return len(message), nil
 }
 
 // defaultMaxHeaderBytes 是请求头（含请求行）的总上限。

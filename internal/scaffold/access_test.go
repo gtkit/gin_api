@@ -65,7 +65,7 @@ func TestResolveAccessChoiceMapsEveryMode(t *testing.T) {
 			wantExpr: `g.Use(deps.Auth, deps.Authorize("role.admin"))`,
 		},
 		{
-			// custom 的 ID 必须由模块名确定性派生：它同时出现在 RouteSpec、
+			// custom 的 ID 必须由模块名确定性派生：它同时出现在 模块路由、
 			// registry 注册点与 metrics label 上，随机 ID 会让三者对不上。
 			name: "custom", access: AccessOptionCustom,
 			wantExpr: `g.Use(deps.Auth, deps.Authorize("module.demo.custom"))`,

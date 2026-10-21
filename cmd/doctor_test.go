@@ -61,7 +61,7 @@ func configWithRealKeysForDoctor(t *testing.T) *config.Config {
 }
 
 // noProbes 明确表示本次不接线 deep 探测。
-func noProbes(context.Context) (diagnostics.Probes, func() error, error) {
+func noProbes(context.Context, *config.Config) (diagnostics.Probes, func() error, error) {
 	return diagnostics.Probes{}, func() error { return nil }, nil
 }
 
@@ -189,7 +189,7 @@ func TestDoctorDeepExitCodes(t *testing.T) {
 
 			cmd := newDoctorCmdWithDeps(
 				func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil },
-				func(context.Context) (diagnostics.Probes, func() error, error) {
+				func(context.Context, *config.Config) (diagnostics.Probes, func() error, error) {
 					return tc.probes, func() error { return nil }, nil
 				})
 			var out bytes.Buffer
@@ -223,7 +223,7 @@ func TestDoctorDeepProbeBuildFailureIsReported(t *testing.T) {
 
 	cmd := newDoctorCmdWithDeps(
 		func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil },
-		func(context.Context) (diagnostics.Probes, func() error, error) {
+		func(context.Context, *config.Config) (diagnostics.Probes, func() error, error) {
 			return diagnostics.Probes{}, func() error { return nil }, errors.New("cannot open resources")
 		})
 	var out bytes.Buffer

@@ -52,7 +52,7 @@ func validateRateLimitConfig(cfg RateLimitConfig) error {
 	return errors.Join(errs...)
 }
 
-// 枚举的字符串取值。与 routespec 的 String() 一一对应，
+// 枚举的字符串取值。与限流执行层的字符串枚举保持一致，
 // 配置里写的就是日志与错误里看到的那个词。
 const (
 	scopeIP     = "ip"

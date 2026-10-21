@@ -66,7 +66,7 @@ config/
 - 数据库密码、Redis 密码、JWT 私钥、支付私钥、API Key 不得提交。
 - 多行 PEM 和证书使用文件挂载，不写入受版本控制的 YAML。
 - `config/env.yml.example` 只保留空值或安全示例。
-- 当前 loader 只读取 YAML；部署时应直接挂载最终配置文件，不要依赖尚未实现的环境变量覆盖。
+- 配置从外置 YAML 加载，并支持 `APP_` 前缀环境变量覆盖，双下划线分层，例如 `APP_REDIS__ADDR`。
 
 ## 配置自检
 
@@ -76,7 +76,9 @@ config/
 go run . doctor
 ```
 
-该命令只验证配置文件，不代表 MySQL、Redis 或第三方服务已连通。
+默认只校验配置和文件元数据；`doctor --deep --check-timeout 3s` 才分别建连检查 MySQL、Redis，并在单项预算内释放连接，不初始化 JWT。未配置的可选 Redis 记为 skipped。
+
+Redis 的地址无默认值。启用本地认证、任何 Redis 存储限流、Redis 响应缓存或任务队列时必须提供 `redis.addr`（host:port）和非空、非负、不重复的 `redis.dbs`；库号还须包含对应能力使用的 DB。无上述能力时，两项可省略或留空，启动和探针均不连接 Redis。
 
 ## JWT 标准密钥
 

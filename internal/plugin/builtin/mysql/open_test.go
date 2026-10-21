@@ -1,4 +1,4 @@
-package dao
+package mysql
 
 import (
 	"context"
@@ -11,6 +11,29 @@ import (
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
+
+func TestPublicOpenRejectsInvalidMinimumVersionBeforeDial(t *testing.T) {
+	t.Parallel()
+
+	for _, migration := range []bool{false, true} {
+		t.Run(map[bool]string{false: "server", true: "migration"}[migration], func(t *testing.T) {
+			t.Parallel()
+
+			open := OpenDB
+			if migration {
+				open = OpenMigrationDB
+			}
+			client, err := open(t.Context(), config.DatabaseConfig{MinVersion: "invalid"}, config.DBCredentials{}, nil)
+			if client != nil {
+				_ = client.Close()
+				t.Fatal("invalid minimum version published a client")
+			}
+			if err == nil || !strings.Contains(err.Error(), "invalid database.min_version") {
+				t.Fatalf("configuration must fail before dialing: %v", err)
+			}
+		})
+	}
+}
 
 // TestCloseAndWrapClosesExactlyOnce 守住最容易泄漏的那条路径：
 // OpenDB 在 return 成功之前仍然拥有连接，post-open 校验失败时若直接 return，

@@ -10,9 +10,8 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
 )
 
 const (
@@ -191,22 +190,22 @@ func buildRecoveryLogFields(
 	dumpErr error,
 	recoveryCode int32,
 	includeStack bool,
-) []zap.Field {
-	fields := []zap.Field{
-		zap.Int32("recovery_code", recoveryCode),
-		zap.String("path", requestPath(c)),
-		zap.Error(panicErr),
-		zap.Any("panic_value", recovered),
+) []logger.Field {
+	fields := []logger.Field{
+		logger.Int32("recovery_code", recoveryCode),
+		logger.String("path", requestPath(c)),
+		logger.Err(panicErr),
+		logger.Any("panic_value", recovered),
 	}
 
 	if requestDump != "" {
-		fields = append(fields, zap.String("request", requestDump))
+		fields = append(fields, logger.String("request", requestDump))
 	}
 	if dumpErr != nil {
-		fields = append(fields, zap.NamedError("request_dump_error", dumpErr))
+		fields = append(fields, logger.NamedError("request_dump_error", dumpErr))
 	}
 	if includeStack {
-		fields = append(fields, zap.Stack("stack"))
+		fields = append(fields, logger.Stack("stack"))
 	}
 
 	return fields

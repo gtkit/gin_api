@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"time"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"golang.org/x/sync/semaphore"
 

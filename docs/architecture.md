@@ -9,8 +9,10 @@
 ## 目录结构
 
 ```
-cmd/                         → CLI 入口与子命令，只做参数解析与启动
+cmd/                         → CLI 入口、默认插件选择和显式注册
 internal/
+  core/                      → 编译期插件契约与依赖注册器，不持有具体基础设施实现
+  plugin/                    → 六类能力接口；builtin/ 下为内置默认实现
   appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
@@ -26,8 +28,8 @@ internal/
   middleware/                → Gin 中间件
   router/                    → 路由聚合、版本化模块注册、健康检查路由
   platform/
-    config/                  → 配置加载与校验
-    data/                    → 基础设施连接管理（DB/Redis）
+    config/                  → 配置结构、默认值与校验（加载在 builtin/config）
+    data/                    → DB/Redis 借用视图、健康和追踪工具
     telemetry/               → OTel 导出装配
   pkg/                       → 项目内部共享包（仅本仓可 import）
   shared/                    → 跨模块共享的轻量语义
@@ -35,6 +37,36 @@ internal/
   projectinit/               → 项目实例化器（同上门控）
 pkg/                         → 对外可复用包（可被仓库外项目 import）
 ```
+
+### 编译期插件与资源所有权
+
+`internal/core` 只定义四方法 `Plugin` 契约（`Name`、`Init`、`Start`、`Stop`）和
+`PluginRegistry`。业务入口在编译期显式调用 `Register(plugin, dependencies...)`；注册器
+在初始化前校验重复名称、缺失依赖和循环依赖，按稳定拓扑顺序初始化/启动，按逆序停止并聚合
+错误。回调不在注册器锁内执行，重复停止是幂等的。
+
+`internal/plugin` 定义配置、日志、数据库、Redis、响应缓存和 HTTP 中间件六类能力，
+`internal/plugin/builtin/` 提供默认实现。`cmd/plugins.go` 是默认选择的组合根：只构造和注册，
+配置读取、连接和日志实例创建都在 `Init`。Bootstrap 必须收到显式 registrar，消费具名能力，
+不回落到默认实现。替换只修改业务入口注册，不修改 Core；不使用 Go `plugin` 包、动态 `.so`
+或运行期发现。
+
+默认依赖图为 config→logging→mysql/redis，cache 依赖 config/logging/redis，HTTP 中间件依赖
+config/logging。配置在 Init 才加载，因此图静态声明 cache→redis（已获准）；内存/禁用缓存
+仍不访问 Redis，required/optional Redis 规则按启用功能推导。迁移只注册 config/logging/mysql，
+选择迁移凭据和 OpenMigrationDB，保留 DDL 的命令超时。doctor/JWT/module 保持各自最小装配。
+
+插件独占自己创建的连接和缓存 Store；`platform/data.Resources` 只保存不带 `Close` 权限的
+借用视图。HTTP 链由所选 builder 在最终 metrics 就绪后构建，保留外层 Recovery 到请求体限制
+的原有顺序。WorkerManager、遥测、时区、校验器和 JSON 是固定骨架/工具，不新增插件或 MQ 接口。
+
+插件回滚、停止总预算各 30 秒。Runtime.Close 保留父取消和更短 deadline；App/命令只在必要
+收尾边界建立独立预算并接第二信号。模块/扩展失败与插件回滚共享一个 30 秒截止时间。
+HTTP/worker 先分阶段退出，再逆序停止插件；日志最后由同一个 owner 排空。仍存活的 worker
+使共享插件停止被跳过，返回 ErrWorkerNotExited，仅尝试该 logger owner 的独立 Drain。
+
+context 需要实现合作：默认日志 SDK 的 void Sync、部分无 context 的 Close 无法硬中断。
+不以可遗弃 goroutine 隐藏未完成关闭，不把预算或 race 测试解释为任意插件隔离或永不 OOM。
 
 ### `internal/pkg/` 与根 `pkg/` 的区别
 
@@ -124,6 +156,11 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 可选行为放 option 让默认值成为正常路径。
 
 ### bootstrap 的分阶段装配
+
+模块自建的客户端由模块 `Assembly.Close` 交出清理入口。模块构造失败时先自行释放
+已建立部分；`buildServices` 与 `newProviders` 在后续失败时逆序回滚。装配成功后，
+清理责任移交 `App`，在 HTTP 与 worker 收尾之后、关闭共享基础设施之前执行。
+仍有未退出 worker 时跳过模块清理并返回错误，避免关闭它正在使用的客户端。
 
 `internal/bootstrap/providers.go` 的 `newProviders` 按七个阶段顺序编排，本函数只做顺序拼接、
 错误透传与失败回滚（`rollbackStack` 逆序撤销已产生的进程级副作用），不内联任何单个模块的装配细节：

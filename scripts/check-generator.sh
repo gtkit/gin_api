@@ -74,6 +74,9 @@ run_gate() {
   echo "[check-generator] 生成临时模块 $probe"
   go run -tags scaffold . module "$probe" --public --field title:string >/dev/null
 
+  echo "[check-generator] migration format"
+  bash scripts/check-migration-files.sh database/migrations
+
   echo "[check-generator] go build ./..."
   go build ./...
 

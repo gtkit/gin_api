@@ -1,4 +1,4 @@
-package dao
+package mysql
 
 import (
 	"context"
@@ -27,7 +27,7 @@ var strictSQLModes = []string{"STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"}
 
 // OpenDB 建立一个数据库连接并完成启动期校验。
 //
-// 它是数据库连接的唯一建立入口，资源生命周期批次的 NewResources 直接复用它，不再另写一份。
+// 它是数据库连接的唯一建立入口，默认 MySQL 插件、迁移与诊断复用它，不再另写一份。
 //
 // 三个设计要点：
 //
@@ -104,14 +104,24 @@ func openAndVerify(
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// 自此起本函数拥有 client，任何失败路径都必须先关闭它。
-	if err := verifyServerVersion(ctx, client, minVersion); err != nil {
-		return nil, closeAndWrap(client.Close, err)
-	}
-	if err := verifySessionSemantics(ctx, client, dbCfg); err != nil {
-		return nil, closeAndWrap(client.Close, err)
+	if err := verifyOpenedClient(ctx, client, dbCfg, minVersion); err != nil {
+		return nil, err
 	}
 	return client, nil
+}
+
+// verifyOpenedClient retains ownership until every post-open check succeeds.
+func verifyOpenedClient(ctx context.Context, client Client, dbCfg config.DatabaseConfig, minVersion serverVersion) error {
+	if err := verifyServerVersion(ctx, client, minVersion); err != nil {
+		return closeAndWrap(client.Close, err)
+	}
+	if err := verifySessionSemantics(ctx, client, dbCfg); err != nil {
+		return closeAndWrap(client.Close, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return closeAndWrap(client.Close, err)
+	}
+	return nil
 }
 
 // serverIOTimeoutCap 是服务进程路径的驱动 I/O deadline 上限。
@@ -189,7 +199,7 @@ func buildOpenOptions(
 }
 
 // verifyServerVersion 实测数据库的 vendor 与版本。
-func verifyServerVersion(ctx context.Context, client *ormx.Client, minVersion serverVersion) error {
+func verifyServerVersion(ctx context.Context, client Client, minVersion serverVersion) error {
 	var row struct {
 		Version string
 		Comment string
@@ -222,7 +232,7 @@ func verifyServerVersion(ctx context.Context, client *ormx.Client, minVersion se
 //
 // 这些值即使在 DSN 里声明过也必须回读确认：服务端可能因权限、代理层或版本差异
 // 未按声明生效，而不匹配的后果（时间偏移、排序差异、静默截断）都是静默的。
-func verifySessionSemantics(ctx context.Context, client *ormx.Client, dbCfg config.DatabaseConfig) error {
+func verifySessionSemantics(ctx context.Context, client Client, dbCfg config.DatabaseConfig) error {
 	var row struct {
 		TimeZone  string
 		Charset   string
@@ -287,7 +297,7 @@ func slicesContainsFold(haystack []string, needle string) bool {
 // 反过来会让调用方拿不到真正的失败原因。
 func closeAndWrap(closer func() error, cause error) error {
 	if closeErr := closer(); closeErr != nil {
-		return fmt.Errorf("%w (additionally, closing the half-open connection failed: %v)", cause, closeErr)
+		return errors.Join(cause, fmt.Errorf("close half-open connection: %w", closeErr))
 	}
 	return cause
 }

@@ -8,7 +8,7 @@ import (
 
 // vipAuthorizer 把 VIP 资格判定适配成 Authorizer。
 //
-// 它是**共享实现**：多个模块经 RouteSpec 引用同一个 ID，而不是各自复制一份。
+// 它是**共享实现**：多个模块路由引用同一个 ID，而不是各自复制一份。
 // 复制会让"会员判定"出现多份可能不一致的实现，且改动时极易漏掉其中之一。
 type vipAuthorizer struct {
 	verifier sharedauth.VIPVerifier

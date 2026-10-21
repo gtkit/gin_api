@@ -24,7 +24,7 @@ make project-init NAME=your_project                  # 执行
    cp config/env.yml.example config/env/env.yml
    ```
 
-2. 填写 MySQL、Redis、JWT 等本机配置。
+2. 填写 MySQL、JWT 等本机配置。Redis 在本地认证、Redis 限流、Redis 响应缓存或任务队列启用时必须配置；无相关能力时地址与库号可留空。
 
    Redis 需 5.0 及以上：分布式限流的 Lua 脚本用 `TIME` 取时间基准，
    该调用要求 effect replication（Redis 5.0 起为默认）。
@@ -191,8 +191,7 @@ make hooks
 ```
 
 它把 `scripts/git-hooks/pre-push` 装到 `.git/hooks/`，推送前自动跑 `make check-ci`。
-门禁存在不等于门禁被执行——CI 侧不承载质量 job，本地这一道就是代码进入共享历史前
-唯一的自动检查点。
+本地钩子在推送前检查，GitHub Actions 在推送和 PR 时执行同一门禁；GitLab 专属部署流水线保持独立。
 
 挂 pre-push 而不是 pre-commit：门禁是分钟级的，挂在每次提交上的结果必然是被
 `--no-verify` 长期绕过。确需跳过用 `SKIP_GATE=1 git push`，跳过时会在错误输出留痕。
@@ -205,8 +204,8 @@ make hooks
 发布物是在目标机通过 `go build` 生成的**版本化静态二进制**；GitLab CI 只负责调用部署脚本
 （质量门禁走「质量门禁」一节的两条执行点，不在这条部署流水线上），进程由 Supervisor 托管。
 环境边界：服务器无 Docker、不跑本机 MySQL/Redis（应用连接远程实例，配置在 `env.yml`）；
-数据库 schema 由外部维护，项目当前不含迁移 runtime（模块生成器产出的 `.up.sql`/`.down.sql`
-草稿仅供 DBA 审阅后手工执行）。
+数据库 schema 由外部维护；项目提供 `migrate` 命令的最小运行时（配置、日志、数据库），
+模块生成器产出 goose 单文件迁移草稿，经 DBA 审阅后再显式执行。
 
 ### 生产发布
 
@@ -270,6 +269,6 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 
 - 配置说明：`config/README.md`
 - pprof 默认关闭；启用后使用独立回环地址端点。
-- 模块生成器生成可审阅的 `.up.sql` / `.down.sql` 草稿。执行走内置的 `migrate` CLI
+- 模块生成器生成含 Up/Down 区段的 goose 单文件 SQL 草稿。执行走内置的 `migrate` CLI
   （`make migrate-up` / `migrate-status`，连库验证见 `make migrate-verify`），
   上线前须经 DBA 审阅。

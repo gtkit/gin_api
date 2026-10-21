@@ -2,13 +2,15 @@
 package router
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
-
+	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/plugin"
+
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/shared/env"
@@ -17,15 +19,8 @@ import (
 
 // Options 是装配 engine 所需的进程级配置与依赖。
 type Options struct {
-	AllowedOrigins []string
-	// LogRequestBody / LogResponseBody 控制访问日志是否记录（脱敏后的）请求/响应体。
-	LogRequestBody  bool
-	LogResponseBody bool
-	// MaxBodyBytes 是全局请求体上限（字节）；<=0 时中间件兜底默认 10MB。
-	//
-	// 它是**兜底**，覆盖 404/405 这类不进任何路由组的请求——那些路径同样
-	// 会被灌大 body。路由级的 JSONBody 只表达"这条比全局更严"。
-	MaxBodyBytes int64
+	// Middleware supplies the selected global chain; Router never selects a default.
+	Middleware plugin.MiddlewareBuilder
 	// TrustedProxies 是可信代理的 CIDR/IP 列表。**空 = 不信任任何代理**，
 	// 此时 ClientIP 只取真实 TCP peer 地址，客户端伪造的转发头一律忽略。
 	TrustedProxies []string
@@ -48,7 +43,7 @@ type Options struct {
 	RateLimits *ratelimit.Registry
 	// RateLimitKeys 生成限流键。有 RateLimits 就必须有它。
 	RateLimitKeys *ratelimit.KeyBuilder
-	// Metrics 记录请求量、时延与状态码；为 nil 时不记录。
+	// Metrics 是在遥测 provider 就绪后创建的最终仪表，传给所选中间件。
 	Metrics *metrics.Recorder
 	// TracingEnabled 决定是否挂 OTel 的 HTTP 埋点中间件。
 	//
@@ -77,7 +72,14 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 		return nil, err
 	}
 
-	if err := useGlobalMiddleware(engine, opt); err != nil {
+	if opt.Middleware == nil {
+		return nil, errors.New("router: HTTP middleware capability is required")
+	}
+	chain, err := opt.Middleware.Build(plugin.MiddlewareDeps{Metrics: opt.Metrics, TracingEnabled: opt.TracingEnabled, ServiceName: opt.ServiceName})
+	if err != nil {
+		return nil, fmt.Errorf("build global HTTP middleware: %w", err)
+	}
+	if err := installGlobalMiddleware(engine, chain); err != nil {
 		return nil, err
 	}
 
@@ -200,51 +202,24 @@ func noMethod(c *gin.Context) {
 	resp.NotAllowedMethod(c, "method not allowed")
 }
 
-// useGlobalMiddleware 按**固定顺序**装配全局中间件。
-//
-// 顺序是契约，不是实现细节。每一处相对位置都有具体理由：
-//
-//	Recovery          最外层。先注册 = 最外层，其 defer recover() 才能兜住
-//	                  后续所有中间件与业务 handler 的 panic。
-//	RequestID         紧随其后。它之后的每一条日志、每一个错误响应都要带上 ID。
-//	Logger            要覆盖到后续中间件产生的响应（413/403/404/405 都必须有
-//	                  一条访问记录），因此必须排在它们之前。
-//	Metrics           同理：它要统计的同样是全部请求，包括被后续中间件直接
-//	                  拒掉的与未匹配路由的。
-//	SecurityHeaders   必须在任何可能写响应体的中间件之前：body 一开始写，
-//	                  响应头就已发出，之后设置 header 不生效且**不会报错**。
-//	ErrorHandler      统一把 c.Errors 转成响应格式。
-//	Cors              先于 MaxBytesLimit：跨源预检必须拿到 CORS 头，
-//	                  而预检请求没有 body，不该被体积限制影响。
-//	MaxBytesLimit     最后，紧贴业务路由——这样即便开启 body 日志，
-//	                  logger 的读取也被同一上限约束。
-func useGlobalMiddleware(engine *gin.Engine, opt Options) error {
-	generator, err := middleware.NewRequestIDGenerator()
-	if err != nil {
-		return err
+// installGlobalMiddleware validates the complete chain before mutating the engine.
+func installGlobalMiddleware(engine *gin.Engine, chain []gin.HandlerFunc) error {
+	if len(engine.Handlers) > 0 {
+		return fmt.Errorf("router global middleware already installed: %w", core.ErrPluginContractViolation)
 	}
-
-	engine.Use(middleware.GinRecovery(true))
-	engine.Use(middleware.RequestID(generator))
-	if opt.TracingEnabled {
-		// 尽量靠前：span 要覆盖后续全部处理，挂在日志/指标之后会让它们
-		// 的耗时落在 span 之外，而那部分正是排查时最先被怀疑的。
-		// 放在 Recovery/RequestID 之后是有意的——panic 必须先被兜住，
-		// 且 span 属性里要能带上已生成的请求 ID。
-		engine.Use(otelgin.Middleware(opt.ServiceName))
+	// Gin requires a combined chain < 63; reserve one final endpoint handler.
+	if len(chain) > 61 {
+		return fmt.Errorf("router global middleware chain exceeds Gin capacity: %w", core.ErrPluginContractViolation)
 	}
-	engine.Use(middleware.GinLogger(middleware.AccessLogOptions{
-		LogRequestBody:  opt.LogRequestBody,
-		LogResponseBody: opt.LogResponseBody,
-	}))
-	engine.Use(middleware.Metrics(opt.Metrics))
-	engine.Use(middleware.SecurityHeaders())
-	engine.Use(middleware.ErrorHandler())
-	if len(opt.AllowedOrigins) > 0 {
-		engine.Use(middleware.Cors(opt.AllowedOrigins))
+	if len(chain) == 0 {
+		return fmt.Errorf("router empty middleware chain: %w", core.ErrPluginContractViolation)
 	}
-	engine.Use(middleware.MaxBytesLimit(middleware.MaxBytesLimitConfig{MaxBytes: opt.MaxBodyBytes}))
-
+	for i, handler := range chain {
+		if handler == nil {
+			return fmt.Errorf("router middleware %d is nil: %w", i, core.ErrPluginContractViolation)
+		}
+	}
+	engine.Use(chain...)
 	return nil
 }
 

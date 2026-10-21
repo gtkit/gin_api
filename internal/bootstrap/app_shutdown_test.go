@@ -344,15 +344,12 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 	}
 
 	// 排空计数：连接不能关时日志仍必须排空（两者已解耦，见 Runtime.DrainLogs）。
-	originalDrain := drainProcessLogs
-	t.Cleanup(func() { drainProcessLogs = originalDrain })
 	var drains int
-	drainProcessLogs = func(time.Duration, <-chan struct{}) { drains++ }
+	app := &App{workers: mgr, runtime: &Runtime{drain: func(context.Context) error { drains++; return nil }}, shutdown: NewShutdownCoordinator()}
 
-	app := &App{workers: mgr, runtime: &Runtime{}, shutdown: NewShutdownCoordinator()}
 	// 返回 ErrWorkerNotExited 即证明关闭被跳过：该错误只在跳过分支产生，
 	// 而那个分支在触碰 runtime 之前就 return 了。
-	if err := app.closeResources(); !errors.Is(err, ErrWorkerNotExited) {
+	if err := app.closeResources(context.Background()); !errors.Is(err, ErrWorkerNotExited) {
 		t.Fatalf("closeResources = %v, want it to carry ErrWorkerNotExited", err)
 	}
 	// 关键回归：连接跳过关闭，但退出告警与错误日志不能跟着一起丢。
@@ -364,7 +361,7 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 	close(release)
 	eventually(t, 2*time.Second, func() bool { return len(mgr.LiveWorkers()) == 0 },
 		"worker stayed in LiveWorkers after it exited")
-	if err := app.closeResources(); err != nil {
+	if err := app.closeResources(context.Background()); err != nil {
 		t.Fatalf("closeResources after workers exited: %v", err)
 	}
 	// 排空幂等：正常关闭路径不再重复排空。
@@ -377,15 +374,15 @@ func TestCloseResourcesSkipsWhileWorkerAlive(t *testing.T) {
 // nil 接收者与零值 Runtime 均安全，重复调用返回与首次相同的结果。
 func TestRuntimeCloseIsNilSafeAndRepeatable(t *testing.T) {
 	var nilRuntime *Runtime
-	if err := nilRuntime.Close(); err != nil {
+	if err := nilRuntime.Close(context.Background()); err != nil {
 		t.Fatalf("nil runtime Close: %v", err)
 	}
 
 	r := &Runtime{}
-	if err := r.Close(); err != nil {
+	if err := r.Close(context.Background()); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
-	if err := r.Close(); err != nil {
+	if err := r.Close(context.Background()); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
 }

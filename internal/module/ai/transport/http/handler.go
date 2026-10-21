@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/ginx"
-	logger "github.com/gtkit/logger/v2"
 	"github.com/gtkit/ssex"
 
 	"github.com/gtkit/gin-api/internal/models"

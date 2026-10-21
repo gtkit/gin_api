@@ -106,7 +106,7 @@ func (c AIProviderConfig) Enabled() bool {
 
 // AIBreakerConfig 是 LLM 出站熔断的阈值。
 type AIBreakerConfig struct {
-	// ConsecutiveFailures 连续失败达到该值即熔断；<=0 取默认（5）。
+	// ConsecutiveFailures 连续失败请求达到该值即熔断；整轮重试计一次，<=0 取默认（5）。
 	ConsecutiveFailures int `mapstructure:"consecutive_failures"`
 	// OpenTimeout 是熔断后到半开探测的等待；<=0 取默认（60s）。
 	OpenTimeout time.Duration `mapstructure:"open_timeout"`

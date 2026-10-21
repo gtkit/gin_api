@@ -24,10 +24,10 @@ import (
 // 任何一步失败都返回错误、由装配链上抛而不降级：埋点缺失是静默的观测盲区，
 // 等到需要看链路的那天才会被发现，比启动失败难查得多。
 func (r *Resources) InstrumentTracing(dbName string) error {
-	if r == nil || r.mysql == nil {
+	if r == nil || r.Mdb() == nil {
 		return errors.New("instrument tracing: mysql connection is not initialized")
 	}
-	if err := instrumentGorm(r.mysql.DB(), dbName, nil); err != nil {
+	if err := instrumentGorm(r.Mdb(), dbName, nil); err != nil {
 		return fmt.Errorf("instrument gorm tracing: %w", err)
 	}
 

@@ -2,11 +2,39 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 )
+
+type unconfiguredRedisChecker struct {
+	stubChecker
+	called bool
+}
+
+func (*unconfiguredRedisChecker) RedisConfigured() bool { return false }
+func (c *unconfiguredRedisChecker) PingRedis(context.Context) error {
+	c.called = true
+	return errors.New("must not probe unconfigured redis")
+}
+
+func TestReadinessSkipsUnconfiguredRedis(t *testing.T) {
+	checker := &unconfiguredRedisChecker{}
+	engine := newTestEngine(checker)
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	var body ReadinessResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || body.Status != statusOK || checker.called || body.Checks["redis"].Status != statusSkipped {
+		t.Fatalf("status=%d body=%+v probed=%v", w.Code, body, checker.called)
+	}
+}
 
 // TestRunDependencyChecksRunConcurrently 钉住并发执行。
 //

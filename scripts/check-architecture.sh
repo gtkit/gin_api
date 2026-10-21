@@ -50,6 +50,34 @@ check_no_match() {
   rm -f "$tmp"
 }
 
+# Compile-time plugin boundaries: only entry points select built-in adapters.
+check_no_match \
+  "bootstrap / business consumers select built-in plugins" \
+  "${MOD}/internal/plugin/builtin/" \
+  internal/bootstrap internal/module internal/router internal/platform internal/pkg internal/repository internal/runtime
+
+check_no_match \
+  "core imports a project or third-party package" \
+  '^[[:space:]]*([[:alnum:]_]+[[:space:]]+)?"[^"]*\.[^"]*"' \
+  internal/core
+
+check_no_match \
+  "core imports an internal project package" \
+  "${MOD}/internal/" \
+  internal/core
+
+# Check only the capability package, not builtin descendants.
+capability_imports="$(go list -f '{{join .Imports "\n"}}' ./internal/plugin)" || { echo "FAIL: cannot enumerate plugin capability imports" >&2; exit 1; }
+if printf '%s\n' "$capability_imports" | grep -qE "^${MOD}/internal/plugin/builtin/"; then
+  echo "FAIL: capability package imports a built-in implementation" >&2
+  fail=1
+fi
+
+check_no_match \
+  "dynamic plugin loading is forbidden" \
+  '^[[:space:]]*([[:alnum:]_]+[[:space:]]+)?"plugin"' \
+  internal cmd
+
 check_no_match \
   "application imports gin / gorm / repository" \
   "gorm\.io/gorm|${MOD}/internal/repository/|github\.com/gin-gonic/gin" \

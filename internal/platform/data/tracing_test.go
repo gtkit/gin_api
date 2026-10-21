@@ -58,7 +58,7 @@ func newSQLMockGorm(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 // newSQLMockOrmxClient 构造以 sqlmock 为连接的 *ormx.Client，供直接拼装 Resources。
 func newSQLMockOrmxClient(t *testing.T) (*ormx.Client, sqlmock.Sqlmock) {
 	t.Helper()
-	sqlDB, mock, err := sqlmock.New()
+	sqlDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestInstrumentTracingCoversAllRedisDBs(t *testing.T) {
 	t.Cleanup(func() { _ = rx.Close() })
 
 	client, mock := newSQLMockOrmxClient(t)
-	res := &Resources{mysql: client, redis: rx}
+	res := &Resources{mysqlView: client, redis: rx}
 
 	tp, rec := newRecorder()
 	prev := otel.GetTracerProvider()
@@ -251,7 +251,7 @@ func TestInstrumentTracingRegistersNoPoolMetrics(t *testing.T) {
 	t.Cleanup(func() { otel.SetMeterProvider(prev) })
 
 	client, _ := newSQLMockOrmxClient(t)
-	res := &Resources{mysql: client}
+	res := &Resources{mysqlView: client}
 
 	if err := res.InstrumentTracing("app"); err != nil {
 		t.Fatalf("InstrumentTracing: %v", err)

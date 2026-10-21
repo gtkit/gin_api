@@ -218,10 +218,14 @@ type LogConfig struct {
 }
 
 type RedisConfig struct {
+	// Addr 为 Redis host:port，无默认值；没有 Redis 消费能力时允许留空。
+	// 本地认证、Redis 限流、Redis 响应缓存或队列启用时必须配置。
 	Addr     string `mapstructure:"addr"`
 	Password string `mapstructure:"password"`
-	DBs      []int  `mapstructure:"dbs"`
-	Prefix   string `mapstructure:"prefix"`
+	// DBs 为需要初始化的逻辑库号；配置地址时必填且非负、不重复。
+	// 无 Redis 消费能力且地址为空时可省略；须包含各启用能力使用的库号。
+	DBs    []int  `mapstructure:"dbs"`
+	Prefix string `mapstructure:"prefix"`
 
 	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，
 	// 不在本层复制一份可能与上游漂移的默认值。填了就必须自洽（见 validateRedisConfig）。

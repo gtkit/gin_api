@@ -2,23 +2,7 @@ package bootstrap
 
 import (
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
 )
-
-// resourceRequirements 由**已启用的能力集合**推导本进程对可选资源的必需性。
-//
-// 为什么不用一个独立的 `redis.required` 配置项：那个开关必然与真实依赖漂移。
-// 有人打开了一个依赖 Redis 的能力却忘了同步打开开关，于是 Redis 挂掉时
-// 进程照常报告 ready，而那个能力已经不工作了；反过来把开关一直开着，
-// 又会让不用 Redis 的部署因为一个用不到的依赖而起不来。
-//
-// 判据只能来自"谁真的要用它"。新增依赖 Redis 的能力时，在下面的表里加一行——
-// 这也是唯一需要改的地方。
-func resourceRequirements(cfg *config.Config) data.Requirements {
-	return data.Requirements{
-		Redis: RedisRequired(cfg),
-	}
-}
 
 // RedisRequired 报告当前配置下是否存在必须依赖 Redis 的已启用能力。
 //

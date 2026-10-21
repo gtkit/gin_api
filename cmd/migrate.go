@@ -23,9 +23,9 @@ func init() {
 // ctx 由调用方（cobra 命令）传入而不是用背景上下文：中断信号因此能覆盖数据库
 // 初始化——否则 Ctrl+C 之后进程还会停在建连上，直到它自己的超时到点。
 //
-// UseMigrationCredentials：迁移是唯一需要 DDL 权限的路径，配置了迁移专用账号时用它，
+// 迁移凭据：迁移是唯一需要 DDL 权限的路径，配置了迁移专用账号时用它，
 // 未配置则回退运行凭据并告警（不失败，避免破坏尚未配置迁移凭据的存量部署）。
-func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() error, error) {
+func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoordinator) (*migrate.Commands, func() error, error) {
 	// module path 必须先解析：解析失败时不该先把数据库连上再报错。
 	modulePath, err := resolveModulePath()
 	if err != nil {
@@ -35,13 +35,18 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() erro
 	// 最小装配：只要配置 + 日志 + 数据库。
 	// 此前走完整 NewRuntime，而 Redis 连不上会直接 panic——于是"Redis 挂了 ⇒ 数据库迁移也跑不了"，
 	// 两个无关依赖被绑死，而迁移恰恰是故障恢复时最需要能执行的操作。
-	rt, err := bootstrap.NewMigrationRuntime(ctx)
+	rt, err := bootstrap.NewMigrationRuntime(ctx, bootstrap.MigrationOptions{RegisterPlugins: registerMigrationPlugins, Shutdown: shutdown})
 	if err != nil {
 		return nil, nil, err
 	}
 
+	closeRuntime := func() error {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return rt.Close(stopCtx)
+	}
 	cmds, err := migrate.NewCommands(
-		rt.DB().DB(),
+		rt.DB(),
 		// 必须是**当前项目自己的** module path：它是生成代码的 import 路径，
 		// 硬编码母版路径会让派生项目静默生成 import 母版的代码。
 		migrate.WithProjectName(modulePath),
@@ -60,10 +65,10 @@ func buildMigrationCommands(ctx context.Context) (*migrate.Commands, func() erro
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {
-		return nil, nil, errors.Join(err, rt.Close())
+		return nil, nil, errors.Join(err, closeRuntime())
 	}
 
-	return cmds, rt.Close, nil
+	return cmds, closeRuntime, nil
 }
 
 // firstToken 返回第一个非 flag 参数（用于判断子命令名，如 up/down/status/make）；
@@ -79,30 +84,27 @@ func firstToken(args []string) string {
 
 // runMigratexSubtree 把参数转发给 migratex 内层命令；帮助或无参时不连库。
 func runMigratexSubtree(
-	cmd *cobra.Command, args []string, pick func(*migrate.Commands) *cobra.Command, action string,
+	cmd *cobra.Command, args []string, shutdown *bootstrap.ShutdownCoordinator, pick func(*migrate.Commands) *cobra.Command, action string,
 ) (err error) {
 	if tok := firstToken(args); tok == "" || tok == "help" {
 		return cmd.Help()
 	}
 
-	cmds, closeRuntime, err := buildMigrationCommands(cmd.Context())
+	cmds, closeRuntime, err := buildMigrationCommands(cmd.Context(), shutdown)
 	if err != nil {
 		return commandError("bootstrap runtime", err)
 	}
-	// 收尾错误进返回值：连接关闭失败是本次命令的退出事实，只记日志会让
-	// 一次带故障的收尾表现成成功，而 CI 与部署脚本只看退出码。
-	defer func() {
-		if closeErr := closeRuntime(); closeErr != nil && err == nil {
-			err = commandError("close migration runtime", closeErr)
-		}
-	}()
+	return executeMigrationCommand(cmd.Context(), pick(cmds), args, closeRuntime, action)
+}
 
-	sub := pick(cmds)
+// executeMigrationCommand keeps command cancellation and both execution/cleanup
+// errors. It performs no default selection or additional runtime construction.
+func executeMigrationCommand(ctx context.Context, sub *cobra.Command, args []string, closeRuntime func() error, action string) (err error) {
+	defer func() { err = errors.Join(err, commandError("close migration runtime", closeRuntime())) }()
 	sub.SilenceUsage = true
 	sub.SilenceErrors = true
 	sub.SetArgs(args)
-
-	return commandError(action, sub.Execute())
+	return commandError(action, sub.ExecuteContext(ctx))
 }
 
 // newMigrateCmd 构造 migrate 子命令：执行数据库迁移（up/down/status/lint/pretend）。
@@ -114,7 +116,7 @@ func newMigrateCmd(opts *rootOptions) *cobra.Command {
 		Short:              "Run database migrations (up/down/status/lint/pretend)",
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMigratexSubtree(cmd, args,
+			return runMigratexSubtree(cmd, args, migrationShutdown(opts),
 				func(c *migrate.Commands) *cobra.Command { return c.Migrate }, "run migrate")
 		},
 	}
@@ -128,8 +130,15 @@ func newMakeCmd(opts *rootOptions) *cobra.Command {
 		Short:              "Generate migration files from GORM models",
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMigratexSubtree(cmd, args,
+			return runMigratexSubtree(cmd, args, migrationShutdown(opts),
 				func(c *migrate.Commands) *cobra.Command { return c.Make }, "run make")
 		},
 	}
+}
+
+func migrationShutdown(opts *rootOptions) *bootstrap.ShutdownCoordinator {
+	if opts != nil && opts.signals != nil {
+		return opts.signals.shutdown
+	}
+	return nil
 }

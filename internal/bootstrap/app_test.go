@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,7 +17,6 @@ import (
 
 	"github.com/gtkit/verify"
 
-	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
@@ -495,6 +496,8 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 			app := newTestApp(t, server, tt.workers...)
 
 			var unregisterCalls atomic.Int32
+			var moduleCalls atomic.Int32
+			app.moduleCleanup = func() error { moduleCalls.Add(1); return nil }
 			app.metricsCleanup = []func() error{
 				func() error { unregisterCalls.Add(1); return nil },
 			}
@@ -515,6 +518,9 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 				t.Fatal("Run did not return")
 			}
 
+			if got := moduleCalls.Load(); got != 1 {
+				t.Fatalf("module cleanup calls = %d, want exactly 1", got)
+			}
 			if got := unregisterCalls.Load(); got != 1 {
 				t.Fatalf("metrics unregister calls = %d, want exactly 1", got)
 			}
@@ -559,63 +565,57 @@ func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
 }
 
 func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
+	// time.Local is process-global; a prior HTTP test may still be finishing a
+	// connection goroutine. Test startup's global mutation in a fresh process.
+	const childEnv = "GIN_API_TEST_TIMEZONE_PROCESS"
+	if os.Getenv(childEnv) != "1" {
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, executable, "-test.run=^TestInitProcessRuntimeAppliesConfiguredTimezone$", "-test.count=1", "-test.v")
+		command.Env = append(os.Environ(), childEnv+"=1")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("isolated timezone test: %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "--- PASS: TestInitProcessRuntimeAppliesConfiguredTimezone") {
+			t.Fatalf("isolated process did not execute the timezone assertion:\n%s", output)
+		}
+		t.Log("isolated timezone initialization passed")
+		return
+	}
+
 	originalLocal := time.Local
-	originalInitLog := initLogWithConfig
-	originalInitJWT := initJWTWithConfig
 	originalVerify := initVerify
 	originalJSONCheck := checkJSONRuntime
 	defer func() {
 		time.Local = originalLocal
-		initLogWithConfig = originalInitLog
-		initJWTWithConfig = originalInitJWT
 		initVerify = originalVerify
 		checkJSONRuntime = originalJSONCheck
 	}()
 
-	initLogWithConfig = func(*config.Config) error { return nil }
-	initJWTWithConfig = func(*config.Config) (*jwtauth.Assembly, error) { return nil, nil }
 	initVerify = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}
 
-	if err := initProcessRuntime(&config.Config{
-		Env: "test",
-		App: config.AppConfig{Timezone: "Asia/Shanghai"},
-	}); err != nil {
-		t.Fatalf("initProcessRuntime returned error: %v", err)
-	}
+	ApplyRuntimeTimezone(&config.Config{App: config.AppConfig{Timezone: "Asia/Shanghai"}})
 	if got := time.Local.String(); got != "Asia/Shanghai" {
 		t.Fatalf("time.Local = %q, want Asia/Shanghai", got)
 	}
 }
 
-// TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail 钉住"先刷写再返回"
-// （resource-lifecycle spec）：主 logger 就绪后校验器初始化失败，
-// 已缓冲的日志与告警必须在错误返回前排空——装配失败恰是最需要告警送达的时刻。
+// TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail verifies the outer Runtime
+// failure path, including the selected logging owner and original validator error.
 func TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail(t *testing.T) {
-	originalInitLog := initLogWithConfig
 	originalVerify := initVerify
-	originalJSONCheck := checkJSONRuntime
-	originalDrain := drainProcessLogs
-	defer func() {
-		initLogWithConfig = originalInitLog
-		initVerify = originalVerify
-		checkJSONRuntime = originalJSONCheck
-		drainProcessLogs = originalDrain
-	}()
-
-	initLogWithConfig = func(*config.Config) error { return nil }
-	initVerify = func(...verify.Option) error { return errors.New("validator exploded") }
-	checkJSONRuntime = func() {}
-
-	var drains int
-	drainProcessLogs = func(time.Duration, <-chan struct{}) { drains++ }
-
-	err := initProcessRuntime(&config.Config{Env: "test"})
-	if err == nil {
-		t.Fatal("initProcessRuntime succeeded despite the validator failure")
+	t.Cleanup(func() { initVerify = originalVerify })
+	failure := errors.New("validator exploded")
+	initVerify = func(...verify.Option) error { return failure }
+	fixture := newLifecycleFixture(t)
+	if _, err := NewRuntime(t.Context(), Options{RegisterPlugins: fixture.register}); !errors.Is(err, failure) {
+		t.Fatalf("validator failure lost: %v", err)
 	}
-	if drains != 1 {
-		t.Fatalf("logs were drained %d times before returning, want 1: a startup failure "+
-			"must not leave the alert queue unflushed", drains)
-	}
+	fixture.assertStopped(t, "middleware", "cache", "redis", "database", "logging", "config")
 }

@@ -1,90 +1,26 @@
-# 日志系统
+# 日志事件门面
 
-项目使用双 Logger 架构，将 HTTP 访问日志与业务日志分离，各自使用不同的写入策略。
-
-## 架构总览
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        日志系统                                 │
-├───────────────────────────┬────────────────────────────────────┤
-│       globalLog (v1)      │         accessLog (v2)             │
-│  github.com/gtkit/logger     │  github.com/gtkit/logger/v2            │
-├───────────────────────────┼────────────────────────────────────┤
-│  WriteSyncer（同步写入）    │  BufferedWriteSyncer（缓冲写入）    │
-│  每条日志立即落盘           │  缓冲区 256KB / 30s 定时刷盘        │
-├───────────────────────────┼────────────────────────────────────┤
-│  业务逻辑、数据层、Worker   │  仅 HTTP 中间件访问日志              │
-│  错误处理、通知推送         │  ZapLogger() / GinLogger()         │
-│  Channel 日志              │                                    │
-├───────────────────────────┼────────────────────────────────────┤
-│  ./logs/app_client-*.log  │  ./logs/app_client_access-*.log    │
-└───────────────────────────┴────────────────────────────────────┘
-```
-
-## 设计边界
-
-### globalLog — 业务日志（默认 WriteSyncer）
-
-- **写入方式**: 同步写入，每条日志立即 syscall 落盘
-- **适用场景**: 业务逻辑、错误处理、数据层、Worker、通知推送、Channel 日志
-- **可靠性**: 进程崩溃不丢日志
-- **使用方式**: 通过 `github.com/gtkit/logger` v1 的包级函数直接调用
+本包定义项目日志事件并转发给已安装的 Logger，不创建或关闭 SDK 实例。业务、数据层和
+HTTP 中间件沿用 Info/Warn/Error、结构化字段、request_id/trace_id 与告警调用；替换日志
+实现只修改入口注册。JSON 实现和版本不受此边界影响。
 
 ```go
-import "github.com/gtkit/logger"
+import applog "github.com/gtkit/gin-api/internal/pkg/log"
 
-logger.Info("user created", zap.Int("uid", uid))
-logger.Error("db query failed", zap.Error(err))
-logger.Warn("rate limit hit", zap.String("ip", ip))
+applog.Info("user created", applog.Int("uid", uid))
+applog.Error("db query failed", applog.Err(err))
 ```
 
-### accessLog — HTTP 访问日志（BufferedWriteSyncer）
+`cmd/plugins.go` 显式注册配置、日志及依赖插件。默认 `builtin/logging.Plugin` 在 Init 内
+构造 gtkit/logger/v2 的 main/access 两个实例，通过 Install 绑定事件门面；构造和注册不做 I/O。
+main 使用同步文件写入，access 使用 SDK 缓冲写入，路径和保留策略沿用配置及 SDK 原默认值。
+access 的路径在 log.path 非空时追加 `_access`，未配置时使用原默认 `./logs/access`。
 
-- **写入方式**: 缓冲写入，日志先写入 256KB 内存缓冲区，满或每 30s 批量刷盘
-- **适用场景**: 仅用于 `internal/middleware/logger.go` 中的 `ZapLogger()` 和 `GinLogger()`
-- **性能收益**: 高 QPS 下显著减少 syscall 次数，降低请求延迟
-- **代价**: 进程被 `kill -9` 时可能丢失缓冲区中未刷写的访问日志（最多 256KB）
-- **使用方式**: 通过 `internal/pkg/log.AccessLog()` 获取 `*loggerv2.Logger` 实例
+普通调用方只拿 Log 能力，不取得 SDK 或关闭权。Install 的释放函数校验绑定归属；旧 owner
+的清理不会移除后续绑定。正常停止归注册器：先关缓存及数据库/Redis，再停止日志插件。
+同一 owner 的 Stop/Drain 共用一次关闭，先拒绝新写入、等待已接收写入，再 Sync access/main。
 
-```go
-import applog "gin_api/internal/pkg/log"
-
-accessLogger := applog.AccessLog()
-accessLogger.Info("/api/v1/users", zap.Int("status", 200))
-accessLogger.Warn("/api/v1/orders 404", zap.Duration("latency", d))
-```
-
-## 初始化与生命周期
-
-初始化顺序在 `internal/bootstrap/providers.go` 的 `initLegacyRuntime` 中：
-
-```
-1. initLogWithConfig(cfg)      → 初始化 globalLog (v1)
-2. legacylog.InitAccessLog(cfg) → 初始化 accessLog (v2, BufferedWriteSyncer)
-```
-
-关闭顺序在 `closeLegacyRuntime` 中：
-
-```
-1. legacylog.SyncAccessLog()   → 先 flush accessLog 缓冲区并关闭文件
-2. legacydao.DBClose()         → 关闭数据库连接
-3. logger.Sync()               → flush globalLog
-```
-
-> accessLog 必须在 globalLog 之前 Sync，确保缓冲区数据完整落盘。
-
-## 日志文件
-
-| Logger    | 文件路径示例                          | 切割方式 |
-|-----------|--------------------------------------|---------|
-| globalLog | `./logs/app_client-info.log`         | daily   |
-| accessLog | `./logs/app_client_access-info.log`  | daily   |
-
-路径前缀由配置 `log.path` 决定，accessLog 自动追加 `_access` 后缀。
-
-## 注意事项
-
-- 除 middleware 访问日志外，**所有其他地方**（包括 Channel）都使用 globalLog（同步写入）
-- accessLog 创建后会调用 `Undo()` 撤销 `zap.ReplaceGlobals`，确保全局 logger 始终由 v1 管理
-- 不要在 middleware 以外的地方使用 `applog.AccessLog()`
+Runtime.DrainLogs 只用于 worker 存活、共享资源不能关闭的异常路径。并发调用共享结果，
+等待者取消只结束自己的等待。默认 SDK 的 Sync 无 context/error 返回，真实刷盘失败由 SDK
+输出，无法据 void 返回证明送达，也无法硬中断阻塞的 SDK I/O。回滚和插件停止预算各 30 秒，
+取消需要实现合作；不创建超时后遗弃的关闭 goroutine。

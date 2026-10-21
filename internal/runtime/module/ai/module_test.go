@@ -147,13 +147,13 @@ func TestNewProviderPicksTheNativePathForNonOpenAIVendors(t *testing.T) {
 	presets := llm.AllPresets()
 
 	openaiCompatible, err := newProvider(llm.ProviderDeepSeek, "k",
-		presets[llm.ProviderDeepSeek].BaseURL, presets[llm.ProviderDeepSeek].DefaultModel)
+		presets[llm.ProviderDeepSeek].BaseURL, presets[llm.ProviderDeepSeek].DefaultModel, newHTTPClient())
 	if err != nil {
 		t.Fatalf("newProvider(deepseek): %v", err)
 	}
 
 	native, err := newProvider(llm.ProviderAnthropic, "k",
-		presets[llm.ProviderAnthropic].BaseURL, presets[llm.ProviderAnthropic].DefaultModel)
+		presets[llm.ProviderAnthropic].BaseURL, presets[llm.ProviderAnthropic].DefaultModel, newHTTPClient())
 	if err != nil {
 		t.Fatalf("newProvider(anthropic): %v", err)
 	}

@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	logger "github.com/gtkit/logger/v2"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // certExpiryWarnWindow 是证书临期告警窗口。

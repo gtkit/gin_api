@@ -10,8 +10,7 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/logger/v2"
-	"go.uber.org/zap"
+	logger "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // RouteTimeout 按路由的 TimeoutPolicy 返回对应的超时中间件。
@@ -174,7 +173,7 @@ func renewWriteDeadline(c *gin.Context, idle time.Duration) error {
 // 可能高频出现，带上高基数字段会让日志后端的索引失控。
 func logWriteDeadlineIssue(op string, err error) {
 	logger.Warn("write deadline operation failed",
-		zap.String("op", op), zap.Error(err))
+		logger.String("op", op), logger.Err(err))
 }
 
 // IsTimeoutError 报告错误是否为业务 deadline 到点。

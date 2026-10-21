@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -126,5 +128,23 @@ func TestRootRegistersMigrationCommands(t *testing.T) {
 		if !got[name] {
 			t.Fatalf("command %q is not registered", name)
 		}
+	}
+}
+
+func TestMigrationExecutionPreservesContextAndBothErrors(t *testing.T) {
+	type key struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), key{}, "migration"))
+	cancel()
+	execution, closing := errors.New("DDL failed"), errors.New("database close failed")
+	closeCalls := 0
+	sub := &cobra.Command{Use: "up", RunE: func(cmd *cobra.Command, _ []string) error {
+		if cmd.Context() != ctx || cmd.Context().Value(key{}) != "migration" || !errors.Is(cmd.Context().Err(), context.Canceled) {
+			t.Error("migration command lost context")
+		}
+		return execution
+	}}
+	err := executeMigrationCommand(ctx, sub, nil, func() error { closeCalls++; return closing }, "run migrate")
+	if !errors.Is(err, execution) || !errors.Is(err, closing) || closeCalls != 1 {
+		t.Fatalf("command error=%v close calls=%d", err, closeCalls)
 	}
 }

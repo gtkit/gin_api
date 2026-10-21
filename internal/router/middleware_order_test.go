@@ -28,6 +28,7 @@ var wantMiddlewareOrder = []string{
 	"RequestID",
 	"GinLogger",
 	"Metrics",
+	"GinRecovery",
 	"SecurityHeaders",
 	"ErrorHandler",
 	"Cors",
@@ -38,8 +39,8 @@ var wantMiddlewareOrder = []string{
 func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := New("test", Options{
-		AllowedOrigins: []string{"https://example.com"},
+	engine, err := newRouterForTest("test", Options{
+		Middleware: testMiddlewareWithOrigins([]string{"https://example.com"}),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -58,7 +59,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 func TestCorsIsOptional(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := New("test", Options{})
+	engine, err := newRouterForTest("test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestCorsIsOptional(t *testing.T) {
 func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := New("test", Options{})
+	engine, err := newRouterForTest("test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 func TestModulesAreMountedUnderTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := New("test", Options{
+	engine, err := newRouterForTest("test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing", func(c *gin.Context) { c.Status(http.StatusOK) })
 		},
@@ -122,7 +123,7 @@ func TestTrustedProxiesMustBeExplicit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var gotIP string
-	engine, err := New("test", Options{
+	engine, err := newRouterForTest("test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/ip", func(c *gin.Context) {
 				gotIP = c.ClientIP()

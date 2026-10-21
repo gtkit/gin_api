@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
@@ -115,38 +114,33 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 		}
 
 		status := c.Writer.Status()
-		fields := []zap.Field{
-			zap.Int("status", status),
-			zap.String("method", method),
-			zap.String("path", path),
-			zap.String("query", redactQuery(c.Request.URL.RawQuery)),
-			zap.String("ip", ginc.ClientIP(c)),
-			zap.Duration("latency", time.Since(start)),
-			zap.String("requestId", RequestIDFromContext(c)),
-			zap.String("userAgent", c.GetHeader("User-Agent")),
+		fields := []applog.Field{
+			applog.Int("status", status),
+			applog.String("method", method),
+			applog.String("path", path),
+			applog.String("query", redactQuery(c.Request.URL.RawQuery)),
+			applog.String("ip", ginc.ClientIP(c)),
+			applog.Duration("latency", time.Since(start)),
+			applog.String("requestId", RequestIDFromContext(c)),
+			applog.String("userAgent", c.GetHeader("User-Agent")),
 		}
 
 		if logReqBody {
-			fields = append(fields, zap.String("requestBody",
+			fields = append(fields, applog.String("requestBody",
 				truncate(redactBody(requestBodyType, requestBody), maxBodyLogSize)))
 		}
 		if logRespBody {
-			fields = append(fields, zap.String("responseBody",
+			fields = append(fields, applog.String("responseBody",
 				truncate(redactBody(w.Header().Get("Content-Type"), w.body.Bytes()), maxBodyLogSize)))
 		}
 
-		accessLogger := applog.AccessLog()
-		switch {
-		case status >= 500:
-			accessLogger.Error(path, fields...)
-		case status >= 400:
-			// 含 400 本身：参数校验失败同样是客户端错误，
-			// 旧实现的 `> 400` 会把它记成 Info，于是一次持续的坏请求风暴
-			// 在按级别过滤的日志视图里完全看不见。
-			accessLogger.Warn(path, fields...)
-		default:
-			accessLogger.Info(path, fields...)
+		level := applog.LevelInfo
+		if status >= 500 {
+			level = applog.LevelError
+		} else if status >= 400 {
+			level = applog.LevelWarn
 		}
+		applog.Log(c.Request.Context(), applog.LogEntry{Level: level, Message: path, Fields: fields, Stream: applog.AccessStream})
 	}
 }
 

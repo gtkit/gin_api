@@ -9,7 +9,7 @@ import (
 
 // WorkerKind 决定 worker 在**关停排序**中的位置。
 //
-// 零值非法：与 RouteSpec 的策略零值同一原则。若零值被解释成某个具体类别，
+// 零值非法：类别必须显式声明。若零值被解释成某个具体类别，
 // 忘记声明的 worker 就会静默落进那一类，而它错的方向恰恰最难发现——
 // 一个本该最先停的 producer 被当成 consumer，会在 HTTP 关停期间继续生产新任务。
 type WorkerKind uint8

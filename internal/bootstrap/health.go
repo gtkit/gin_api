@@ -30,6 +30,11 @@ func (h *runtimeHealthChecker) PingDB(ctx context.Context) error {
 	return h.resources.PingDB(ctx)
 }
 
+// RedisConfigured 区分未启用 Redis 与连接故障，供 readiness 跳过未配置项。
+func (h *runtimeHealthChecker) RedisConfigured() bool {
+	return h.resources != nil && h.resources.RedisConfigured()
+}
+
 // PingRedis 探测 Redis 并把结果计入可用性状态机。
 //
 // 结果计入状态机而不是只返回：readiness 探针是本进程对 Redis 最规律的一次调用，

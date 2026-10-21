@@ -1,7 +1,8 @@
-package dao
+package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,7 +11,19 @@ import (
 	"github.com/gtkit/redisx"
 )
 
-// openRedis 建立多 DB Redis 客户端并在 ctx 预算内完成一次连通性校验。
+// ProbeRedis 在调用方预算内复用运行期建连校验，并在检查完成后关闭连接。
+func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
+	client, err := OpenRedis(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := client.Close(); err != nil {
+		return fmt.Errorf("close redis probe: %w", err)
+	}
+	return nil
+}
+
+// OpenRedis 建立多 DB Redis 客户端并在 ctx 预算内完成一次连通性校验。
 //
 // 与旧实现的两处关键差异：
 //
@@ -29,7 +42,7 @@ import (
 // 不可达时本函数无法交出一个"稍后能自愈"的客户端，探测失败即关闭并返回 nil。
 // 消费方要区分"未配置"与"已配置但不可达"，用 Resources.RedisConfigured()
 // 而不是客户端指针的非空性——见那里的注释。
-func openRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
+func OpenRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
 	client, err := redisx.NewClientContext(ctx, buildRedisOptions(cfg)...)
 	if err != nil {
 		return nil, fmt.Errorf("init redis client: %w", err)
@@ -74,4 +87,11 @@ func buildRedisOptions(cfg config.RedisConfig) []redisx.Option {
 	}
 
 	return opts
+}
+
+func closeAndWrap(closer func() error, cause error) error {
+	if err := closer(); err != nil {
+		return errors.Join(cause, fmt.Errorf("close half-open connection: %w", err))
+	}
+	return cause
 }

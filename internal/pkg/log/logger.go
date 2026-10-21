@@ -1,191 +1,212 @@
-// Package log 负责进程级日志初始化：把 app 配置翻译成 gtkit/logger/v2 options，
-// 构建主实例（经 loggerv2.SetDefault 设为进程默认实例）与独立的 access 实例。
-//
-// 结构：主实例（不缓冲，错误日志不允许因缓冲丢失）+ access 实例（BufferedWriteSyncer，
-// 高吞吐访问日志，WithReplaceGlobals(false) 构建，不抢占 zap 全局）。
-// v2 的缓冲是实例级配置，无 per-channel 缓冲，故维持双实例。
-//
-// requestId 贯穿、相对路径锚定、caller 校准均由 loggerv2 库内建
-// （ContextWithRequestID / WithBasePath / 包级函数），本包不再承载这些逻辑。
-//
-// 分层约定：基础设施层直接使用 loggerv2 包级函数（logger.Info 等，写入默认实例）；
-// application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入。
+// Package log forwards project log events to the logger installed at startup.
+// It owns no SDK, notifier, file or background queue.
 package log
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"strings"
-	"sync"
+	"os"
+	"reflect"
+	"runtime/debug"
 	"sync/atomic"
-
-	loggerv2 "github.com/gtkit/logger/v2"
-
-	"github.com/gtkit/gin-api/internal/pkg/news"
-	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/runtime/resource"
+	"time"
 )
+
+// Level is the severity of a project log event.
+type Level uint8
 
 const (
-	// defaultLogPath 仅作零配置兜底（config.Validate 已强制 log.path 必填）。
-	defaultLogPath       = "./logs/app_client"
-	defaultAccessLogPath = "./logs/access"
-
-	// alertQueueLimit 是异步告警队列的深度上限（库默认 1024，此处收紧）。
-	// 告警只承载进程级事件，积压几十条就已经是告警风暴——继续排队的每一条
-	// 都在拉长关停时的排空时间（每条最坏 = 各通道超时之和），丢弃并计数
-	//（库内 DroppedMessages 可观测）比无界排队诚实。
-	alertQueueLimit = 64
+	LevelDebug Level = iota
+	LevelInfo
+	LevelWarn
+	LevelError
 )
 
-// newLogger 为测试注入点，默认走 loggerv2.New。
-//
-// New 而不是 MustNew：日志配置错误是启动失败，不是 panic——
-// panic 会绕过装配层的错误聚合与回滚链。
-var newLogger = loggerv2.New
+// Stream selects the main or HTTP access output of a logging implementation.
+type Stream uint8
 
-func Init() {
-	// 空配置不启用任何告警通道，构造不可能失败。
-	_ = InitWithConfig(&config.Config{})
+const (
+	MainStream Stream = iota
+	AccessStream
+)
+
+// Field is a project-owned structured value. SDK conversion stays in a backend.
+type Field struct {
+	Key   string
+	Value any
 }
 
-// InitWithConfig 构建主 logger 并设为进程默认实例（loggerv2.SetDefault），
-// 之后各层直接用 loggerv2 包级函数记录日志。仅在进程启动阶段（单 goroutine）调用一次。
-// 未初始化时包级函数写入 loggerv2 的纯控制台兜底实例（库内保证不落盘、不抢占 zap 全局）。
-//
-// 返回 error：告警通道（邮件/短信客户端）在通知器构造中建立，
-// 构造失败必须让启动失败，不得静默降级为"配置了却没有通道"。
-func InitWithConfig(cfg *config.Config) error {
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+// LogEntry preserves severity, fields, output routing and explicit alert intent.
+// A backend must copy Fields before retaining them beyond Log's return.
+type LogEntry struct {
+	Level   Level
+	Message string
+	Format  bool
+	Args    []any
+	Fields  []Field
+	Stream  Stream
+	Channel string
+	Alert   bool
+	// CallerSkip accounts for forwarding frames, excluding the backend itself.
+	CallerSkip int
+}
 
-	notifier, err := news.NewWithConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("init alert notifier: %w", err)
+// Text materializes a printf event only when an implementation needs it.
+func (entry LogEntry) Text() string {
+	if entry.Format {
+		return fmt.Sprintf(entry.Message, entry.Args...)
 	}
+	return entry.Message
+}
 
-	opts := []loggerv2.Option{
-		loggerv2.WithPath(resolvePath(cfg.Log.Path, defaultLogPath)),
-		// 相对路径锚定到稳定写根，日志落盘位置不依赖进程 cwd（锚定机制在库内）。
-		loggerv2.WithBasePath(resource.WriteRoot()),
-		loggerv2.WithLevel(strings.TrimSpace(cfg.Log.Level)), // 空值由库回退默认 info
-		loggerv2.WithConsole(cfg.Log.ConsoleStdout != 0),
-		loggerv2.WithFile(cfg.Log.FileStdout != 0),
-		loggerv2.WithDivision("daily"),
-		loggerv2.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
-		loggerv2.WithCompress(cfg.Log.Compress != 0),
-		loggerv2.WithMessager(&News{notifier: notifier}),
-		loggerv2.WithMessagerQueueSize(alertQueueLimit),
-	}
-	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
-	// 未配置时不透传，保留库默认的保留策略。
-	if cfg.Log.MaxAge > 0 {
-		opts = append(opts, loggerv2.WithMaxAge(cfg.Log.MaxAge))
-	}
-	if cfg.Log.MaxBackups > 0 {
-		opts = append(opts, loggerv2.WithMaxBackups(cfg.Log.MaxBackups))
-	}
+// Logger is the read-only capability shared by logging consumers.
+type Logger interface {
+	Log(context.Context, LogEntry)
+}
 
-	inst, err := newLogger(opts...)
-	if err != nil {
-		return fmt.Errorf("build logger: %w", err)
+var (
+	// ErrLoggerInstalled rejects replacing an active startup binding.
+	ErrLoggerInstalled = errors.New("a project logger is already installed")
+	// ErrInvalidLogger rejects an absent logging implementation.
+	ErrInvalidLogger = errors.New("a project logger is required")
+	installed        atomic.Pointer[binding]
+)
+
+var diagnosticContext = context.Background()
+
+type binding struct {
+	logger Logger
+	drain  func(context.Context) error
+}
+
+// Install binds one selected implementation and its owner's optional drain.
+// The returned release is idempotent and can only remove this exact binding.
+// It never closes resources. The owner drains them after preventing new writes.
+func Install(logger Logger, drain func(context.Context) error) (func(), error) {
+	if logger == nil {
+		return nil, ErrInvalidLogger
 	}
-	loggerv2.SetDefault(inst)
+	value := reflect.ValueOf(logger)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, ErrInvalidLogger
+		}
+	}
+	b := &binding{logger: logger, drain: drain}
+	if !installed.CompareAndSwap(nil, b) {
+		return nil, ErrLoggerInstalled
+	}
+	return func() { installed.CompareAndSwap(b, nil) }, nil
+}
+
+// Log forwards an event. Before installation and after release, diagnostics go
+// only to stderr: no default SDK, file creation or notification occurs.
+func Log(ctx context.Context, entry LogEntry) {
+	if current := installed.Load(); current != nil {
+		current.logger.Log(ctx, entry)
+		return
+	}
+	if entry.Level >= LevelInfo {
+		_, _ = fmt.Fprintln(os.Stderr, entry.Text())
+	}
+}
+
+// Drain invokes only the selected owner's cleanup. Ordinary consumers receive
+// Logger, not this lifecycle callback. It is shared by Stop and legacy draining.
+func Drain(ctx context.Context) error {
+	if current := installed.Load(); current != nil && current.drain != nil {
+		return current.drain(ctx)
+	}
 	return nil
 }
 
-// resolvePath 空白路径回退到默认值；锚定交给库的 WithBasePath。
-func resolvePath(path, fallback string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fallback
+// Sync keeps the existing process cleanup call compatible until stage 3 wiring.
+func Sync() {
+	if err := Drain(diagnosticContext); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "drain project logs:", err)
 	}
-
-	return path
 }
 
-// News 把 news.Notifier 适配成 loggerv2 的 Messager。
-type News struct {
-	notifier *news.Notifier
+// SyncAccessLog shares the same owner and drains access before main exactly once.
+func SyncAccessLog() { Sync() }
+
+func emit(ctx context.Context, level Level, msg string, alert bool, fields []Field) {
+	Log(ctx, LogEntry{Level: level, Message: msg, Fields: fields, Alert: alert, CallerSkip: 3})
 }
 
-func (n *News) Send(msg string)        { n.notifier.Warn("", msg) }
-func (n *News) SendTo(url, msg string) { n.notifier.Warn(url, msg) }
-
-func resetLogHooksForTest() {
-	newLogger = loggerv2.New
+func Debug(msg string, fields ...Field) {
+	emitProcess(LogEntry{Level: LevelDebug, Message: msg, Fields: fields})
+}
+func Info(msg string, fields ...Field) {
+	emitProcess(LogEntry{Level: LevelInfo, Message: msg, Fields: fields})
+}
+func Warn(msg string, fields ...Field) {
+	emitProcess(LogEntry{Level: LevelWarn, Message: msg, Fields: fields})
+}
+func Error(msg string, fields ...Field) {
+	emitProcess(LogEntry{Level: LevelError, Message: msg, Fields: fields})
+}
+func Debugf(format string, args ...any) {
+	emitProcess(LogEntry{Level: LevelDebug, Message: format, Format: true, Args: args, Alert: false})
+}
+func Infof(format string, args ...any) {
+	emitProcess(LogEntry{Level: LevelInfo, Message: format, Format: true, Args: args, Alert: false})
+}
+func Warnf(format string, args ...any) {
+	emitProcess(LogEntry{Level: LevelWarn, Message: format, Format: true, Args: args, Alert: false})
+}
+func Errorf(format string, args ...any) {
+	emitProcess(LogEntry{Level: LevelError, Message: format, Format: true, Args: args, Alert: false})
+}
+func HErrorf(format string, args ...any) {
+	emitProcess(LogEntry{Level: LevelError, Message: format, Format: true, Args: args, Alert: true})
 }
 
-func setNewLoggerForTest(fn func(opts ...loggerv2.Option) (*loggerv2.Logger, error)) {
-	newLogger = fn
-}
-
-// ---------------------------------------------------------------------------
-// Access Logger — 使用 BufferedWriteSyncer，仅供 HTTP 访问日志中间件使用
-// ---------------------------------------------------------------------------
-
-// accessLog 是 access logger 的当前实例。
+// emitProcess preserves the existing context-free process diagnostic API.
+// Request-aware variants bypass it and propagate the caller context through emit.
 //
-// **必须是原子的**：排空（SyncAccessLog）可能在一个被放弃的 goroutine 里继续
-// 执行——排空受预算与强制信号约束，超时后调用方就返回了，而那个 goroutine
-// 还在读它；此时另一次 InitAccessLog（进程内重新装配、测试用例串跑）就是
-// 一次真实的读写竞争。定向 -race 已复现。
-var accessLog atomic.Pointer[loggerv2.Logger]
-
-// InitAccessLog 初始化 access logger（BufferedWriteSyncer 模式）。
-//
-// 返回 error 让启动失败：日志配置错误 panic 会绕过装配层的错误聚合与回滚链。
-func InitAccessLog(cfg *config.Config) error {
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
-
-	path := defaultAccessLogPath
-	if p := strings.TrimSpace(cfg.Log.Path); p != "" {
-		path = p + "_access"
-	}
-
-	inst, err := loggerv2.New(
-		loggerv2.WithPath(path),
-		loggerv2.WithBasePath(resource.WriteRoot()),
-		loggerv2.WithLevel(strings.TrimSpace(cfg.Log.Level)),
-		loggerv2.WithConsole(cfg.Log.ConsoleStdout != 0),
-		loggerv2.WithFile(cfg.Log.FileStdout != 0),
-		loggerv2.WithDivision("daily"),
-		loggerv2.WithBuffered(true),
-		// 辅助实例不抢占 zap 全局（主实例经 SetDefault 持有默认地位）。
-		loggerv2.WithReplaceGlobals(false),
-	)
-	if err != nil {
-		return fmt.Errorf("build access logger: %w", err)
-	}
-	accessLog.Store(inst)
-	return nil
+//nolint:contextcheck,nolintlint // contextcheck consumes this function annotation as an analysis boundary; it emits no local issue for nolintlint to count.
+func emitProcess(entry LogEntry) {
+	entry.CallerSkip = 3
+	Log(diagnosticContext, entry)
+}
+func WarnCtx(ctx context.Context, msg string, fields ...Field) {
+	emit(ctx, LevelWarn, msg, false, fields)
+}
+func ErrorCtx(ctx context.Context, msg string, fields ...Field) {
+	emit(ctx, LevelError, msg, false, fields)
 }
 
-// fallbackAccessLog 缓存兜底实例：每次调用都新建会让每个请求泄漏一个
-// 带内部状态的实例。纯控制台配置不可能构造失败，MustNew 在此安全。
-var fallbackAccessLog = sync.OnceValue(func() *loggerv2.Logger {
-	return loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithReplaceGlobals(false),
-	)
-})
-
-// AccessLog 返回 access logger 实例。
-// 如果未初始化，返回缓存的纯控制台、不落盘兜底实例以保证安全——
-// 兜底实例若允许写文件，会以进程 cwd 为锚在任意目录刷出 logs/（曾污染 internal/router）。
-func AccessLog() *loggerv2.Logger {
-	if inst := accessLog.Load(); inst != nil {
-		return inst
+func String(key, value string) Field                 { return Field{key, value} }
+func Int(key string, value int) Field                { return Field{key, value} }
+func Int32(key string, value int32) Field            { return Field{key, value} }
+func Int64(key string, value int64) Field            { return Field{key, value} }
+func Duration(key string, value time.Duration) Field { return Field{key, value} }
+func Any(key string, value any) Field                { return Field{key, value} }
+func Err(err error) Field                            { return NamedError("error", err) }
+func NamedError(key string, err error) Field {
+	if err == nil {
+		return Field{}
 	}
-	return fallbackAccessLog()
+	return Field{key, err}
+}
+func Stack(key string) Field { return Field{key, string(debug.Stack())} }
+
+type requestIDKey struct{}
+
+// ContextWithRequestID binds the generated internal request ID without altering
+// cancellation or deadlines. It never trusts an inbound header by itself.
+func ContextWithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey{}, id)
 }
 
-// SyncAccessLog 刷写 access logger 的缓冲区并关闭文件资源。
-func SyncAccessLog() {
-	if inst := accessLog.Load(); inst != nil {
-		inst.Sync()
+// RequestIDFromContext retrieves the ID used by the project logging boundary.
+func RequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
 	}
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
 }

@@ -6,7 +6,7 @@ import (
 	"sort"
 )
 
-// authorizerIDPattern 与路由描述符里的 authorizer ID 同源。
+// authorizerIDPattern 约束模块路由取用的 authorizer ID。
 //
 // 该 ID 会进日志与 metrics label，必须低基数、稳定、不含用户输入。
 var authorizerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
