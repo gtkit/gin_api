@@ -2,10 +2,6 @@ package logging
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,9 +9,7 @@ import (
 	"github.com/gtkit/logger/v2"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
-	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/testutil"
 )
 
 func newConsoleLogger() *logger.Logger {
@@ -49,9 +43,9 @@ func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 	if logger.Default() != built {
 		t.Fatal("InitWithConfig 应把构建的实例设为 loggerv2 默认实例")
 	}
-	// 基础 10 项（含告警队列上限）+ MaxAge + MaxBackups
-	if gotOpts != 12 {
-		t.Fatalf("options 数量 = %d, want 12（MaxAge/MaxBackups 配置后应透传）", gotOpts)
+	// 纯日志基础 8 项 + MaxAge + MaxBackups；没有通知队列。
+	if gotOpts != 10 {
+		t.Fatalf("options 数量 = %d, want 10（MaxAge/MaxBackups 配置后应透传）", gotOpts)
 	}
 }
 
@@ -66,8 +60,8 @@ func TestInitWithConfigOmitsZeroRetentionOptions(t *testing.T) {
 	if err := initForTest(t, factory, &config.Config{}); err != nil {
 		t.Fatalf("InitWithConfig: %v", err)
 	}
-	if gotOpts != 10 {
-		t.Fatalf("options 数量 = %d, want 10（零值保留策略不应透传）", gotOpts)
+	if gotOpts != 8 {
+		t.Fatalf("options 数量 = %d, want 8（零值保留策略不应透传）", gotOpts)
 	}
 }
 
@@ -113,88 +107,43 @@ func TestInitWithConfigPreservesResolvedSDKOutputContract(t *testing.T) {
 }
 
 func TestInitWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
-	testutil.RequireLoopback(t)
-
-	type delivery struct{ path, text string }
+	type delivery struct{ target, text string }
 	deliveries := make(chan delivery, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Type    string `json:"msg_type"`
-			Content struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode alert: %v", err)
-		}
-		if r.Method != http.MethodPost || body.Type != "text" {
-			t.Errorf("unexpected alert request: %s, %q", r.Method, body.Type)
-		}
-		select {
-		case deliveries <- delivery{r.URL.Path, body.Content.Text}:
-		default:
-			t.Error("unexpected duplicate alert delivery")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := io.WriteString(w, `{"code":0,"msg":"success"}`); err != nil {
-			t.Errorf("test response I/O: %v", err)
-		}
-	}))
-	t.Cleanup(server.Close)
+	sink := &callbackNotification{warn: func(target string, args ...string) { deliveries <- delivery{target, strings.Join(args, " ")} }}
 	dir := t.TempDir()
-	cfg := &config.Config{
-		Log:  config.LogConfig{Path: filepath.Join(dir, "bridge"), FileStdout: 1},
-		News: config.NewsConfig{FSURL: server.URL + "/default"},
-	}
+	cfg := &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "bridge"), FileStdout: 1}}
 	previous := logger.Default()
+	p := New(Options{Configuration: fixedConfiguration{cfg}, Notification: sink})
+	if err := p.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		if err := applog.Drain(context.Background()); err != nil {
+		if err := p.Stop(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)
 		}
 	})
-	if err := initDefaultForTest(t, cfg); err != nil {
-		t.Fatal(err)
-	}
-	if logger.Default() == previous {
-		t.Fatal("compatibility entry point did not install its owner")
-	}
 	applog.Infof("bridge main %d", 7)
 	applog.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Stream: applog.AccessStream, Message: "bridge access"})
 	applog.HErrorf("default alert %d", 1)
-	notifier, err := news.NewWithConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter := &News{notifier: notifier}
-	adapter.SendTo(server.URL+"/explicit", "explicit alert 2")
-	if err := applog.Drain(t.Context()); err != nil {
+	adapter := &News{notifier: sink}
+	adapter.SendTo("explicit", "explicit alert 2")
+	if err := p.Drain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if logger.Default() != previous {
 		t.Fatal("drain did not restore the previous default logger")
 	}
-	if err := applog.Drain(t.Context()); err != nil {
-		t.Fatal(err)
-	}
 	got := make(map[string]string)
 	for range 2 {
-		select {
-		case sent := <-deliveries:
-			got[sent.path] = sent.text
-		default:
-			t.Fatal("drain returned before both alert deliveries completed")
-		}
+		d := <-deliveries
+		got[d.target] = d.text
 	}
-	for path, message := range map[string]string{"/default": "default alert 1", "/explicit": "explicit alert 2"} {
-		if !strings.Contains(got[path], message) {
-			t.Errorf("alert %s = %q, want %q", path, got[path], message)
-		}
+	if got[""] != "default alert 1" || got["explicit"] != "explicit alert 2" {
+		t.Fatalf("callbacks=%v", got)
 	}
 	logs := readLogs(t, dir)
-	for _, message := range []string{"bridge main 7", "bridge access", "default alert 1"} {
-		if !strings.Contains(logs, message) {
-			t.Errorf("missing %q in drained logs: %s", message, logs)
-		}
+	if !strings.Contains(logs, "bridge main 7") || !strings.Contains(logs, "bridge access") {
+		t.Fatalf("logs=%s", logs)
 	}
 }
 

@@ -55,7 +55,7 @@ func TestRegisterServerPluginsReturnsSelectedUninitializedCapabilities(t *testin
 	if set.DrainLogs == nil {
 		t.Fatal("logging owner drain missing")
 	}
-	for _, name := range []string{"config", "logging", "mysql", "redis", "cache", "http-middleware"} {
+	for _, name := range []string{"config", "notification.robot", "notification.mail", "notification.sms", "notification", "logging", "mysql", "redis", "cache", "http-middleware"} {
 		if err := r.Register(nameOnlyPlugin(name)); err == nil {
 			t.Fatalf("%s capability not registered", name)
 		}
@@ -74,7 +74,7 @@ func TestRegisterMigrationPluginsIsMinimalAndLazy(t *testing.T) {
 	if set.Database.DB() != nil || set.DrainLogs == nil {
 		t.Fatal("migration opened resources or lost drain")
 	}
-	for _, name := range []string{"config", "logging", "mysql"} {
+	for _, name := range []string{"config", "notification.robot", "notification.mail", "notification.sms", "notification", "logging", "mysql"} {
 		if err := r.Register(nameOnlyPlugin(name)); err == nil {
 			t.Fatalf("%s not registered", name)
 		}

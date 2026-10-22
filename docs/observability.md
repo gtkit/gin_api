@@ -129,38 +129,44 @@ handler、worker、外部调用尽量透传 request ID；后台任务没有 requ
 
 ### 告警通道有真实对外副作用
 
-`internal/pkg/news` 挂在 `gtkit/logger/v2` 的 Messager 上：**进程记一条告警级日志，
-就会向已配置的全部通道各发一条消息**——webhook、SMTP 邮件、短信。
+默认入口把 `notification` 注入 logging 的 Messager。H 系列日志写入有界队列后，依次尝试机器人、邮件和各手机号短信；这是尽力通知，入队、排空返回与真实送达是不同结果。
 
-因此它的误配置后果是**真实发送**，而不是一条错误日志：
+- `news.fsurl` 非空提供默认机器人目标；空则跳过，显式目标仍可发送。覆盖地址只影响机器人，邮件/短信仍使用其配置。
+- `email.host` 非空构造 SMTP 客户端，`alert_to` 非空才参与邮件告警。
+- `sms.provider=aliyun` 构造短信客户端，号码和逻辑模板成对才参与告警，短信可能计费。
 
-- `email.alert_to` 非空即启用邮件通道，收件人会收到真实邮件；
-- `sms.alert_phones` 与 `sms.alert_template` 成对配置即启用短信通道，**按条计费**；
-- webhook 配错群地址，告警内容会发进那个群。
+配置用途、默认值和关联约束见 [配置说明](../config/README.md#通知通道与告警开关)。现有配置字段和值不迁移。机器人仍支持飞书（空平台默认）、钉钉和企业微信；签名沿用各平台 SDK。
 
-接手部署时应先确认这三处的取值，再让服务在有真实流量的环境启动。
+单次发送独立 10 秒，按机器人→邮件→逐手机号短信顺序运行；不增加项目重试。唯一队列是日志 SDK 的 64 条待处理队列，满时会丢弃，SDK 的 `DroppedMessages()` 可读取其计数。队列不能承担持久化、必达或去重承诺。
 
-单次发送有独立超时（告警发生在日志调用路径上，通道故障不能拖住调用方），
-异步队列深度有限，超出即丢弃并计数——告警只承载进程级事件，
-积压几十条本身就已经是告警风暴。
+失败和 panic 只走普通诊断，包含通道、有限结果分类及耗时；不输出 SDK 错误原文、目标、凭据、收件人或正文。日志门面释放后仍使用普通后备诊断，不递归触发 H 系列；调用 `Notify` 的代码可通过 error 判断实际失败。
 
-**发送失败只记 Error 级日志，不触发 Messager**——否则一次平台故障会变成无限递归的告警风暴。
+### 通知插件与替换方式
 
-webhook 底层是 `gtkit/msgbot`：
+现有 `core.PluginRegistry` 管理所有生命周期；构造和 Register 不读配置、不发消息。默认三个通道的 `Open` 可分别注入，返回 sender、可选 `func(context.Context) error` 清理函数和 error。资源的清理权只转交对应通道；通知组合和日志只借用能力。
 
-```yaml
-news:
-  fsurl: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
-  platform: ""        # 留空按飞书处理 / dingtalk / wecom
-  secret: ""          # 平台侧开启加签时必填
+下面是入口中替换机器人 sender 的装配片段；`configuration` 是已注册的配置插件，`openRobot` 符合 `robot.Opener`。邮件和短信保持默认：
+
+```go
+robotChannel := robot.New(robot.Options{Configuration: configuration, Open: openRobot})
+mailChannel := mail.New(mail.Options{Configuration: configuration})
+smsChannel := sms.New(sms.Options{Configuration: configuration})
+for _, channel := range []core.Plugin{robotChannel, mailChannel, smsChannel} {
+    if err := registry.Register(channel, configuration.Name()); err != nil { return err }
+}
+alerts := notification.New(notification.Options{
+    Configuration: configuration, Robot: robotChannel, Mail: mailChannel, SMS: smsChannel,
+})
+if err := registry.Register(alerts, configuration.Name(), robotChannel.Name(), mailChannel.Name(), smsChannel.Name()); err != nil { return err }
+logs := logging.New(logging.Options{Configuration: configuration, Notification: alerts})
+if err := registry.Register(logs, configuration.Name(), alerts.Name()); err != nil { return err }
 ```
 
-`platform` 留空必须与该字段引入之前的行为一致（按飞书处理），否则一次升级就会让所有
-存量部署的告警发不出去。有测试钉住这条。
+这些包位于 `internal/plugin/builtin`。纯日志组合不注册上述通道/组合，直接构造 `logging.New(logging.Options{Configuration: configuration})`，并仅依赖配置插件。默认 server 与 migration 共用 `cmd/plugins.go` 的通知装配。替换不新增供应商配置、第二个队列或全局注册表；sender 必须响应 ctx 取消，自有资源由其 Open 返回清理函数，不得关闭外部借用的共享资源。
 
 ## 日志插件的所有权
 
-`cmd/plugins.go` 选择并注册日志插件，配置 Init 在其之前完成。业务、数据层和中间件经
+`cmd/plugins.go` 选择并注册通知和日志插件，配置及通道/组合 Init 先于 logging 完成。业务、数据层和中间件经
 `internal/pkg/log` 的事件门面转发给所选实例；默认 gtkit/logger/v2 实现在 builtin/logging，
 main/access 共用一个生命周期 owner。HTTP 中间件在最终 metrics 仪表就绪后 Build。
 
@@ -169,10 +175,11 @@ main/access 共用一个生命周期 owner。HTTP 中间件在最终 metrics 仪
 把 net/http 内部错误转发到所选日志插件；它不创建独立日志后端。该例外不扩大到其他
 标准库 log 或 slog 用法，项目其他日志继续遵守现有日志规则。
 
-正常由注册器在缓存/连接之后 Stop 日志插件，先停止接收新写入，等待已接收写入，再 Sync
-access/main。若 worker 未退出，只执行同一 owner 的 Drain，并返回资源未关闭错误。
+正常由注册器在缓存/连接之后 Stop 日志插件：关闭新写入，绑定实际清理 context，等待已接收写入，再 Sync access/main，最后幂等解除取消绑定。随后 notification.Stop 拒绝新通知并取消在途发送，各通道等待在途归零再释放自有资源。若 worker 未退出，只 Drain 同一日志 owner，保留共享通道并返回未关闭资源错误。
 回滚/停止总预算各 30 秒，第二信号取消剩余合作式等待；SDK Sync 没有 context 或 error 返回，
 不能承诺在阻塞 I/O 上硬中断，也不能把 void Sync 当作日志已成功送达的证据。
+
+锁定 logger/v2 v2.3.0 的 Sync 等待队列消费结束；本机 workspace SDK 默认等候 5 秒后可能返回，但后台回调仍继续。通知与每个通道均保护接纳和在途，迟到回调在停止后不会新发请求。无视取消的自定义 sender 超过预算时，Stop 返回 `ErrNotDrained` 并保留资源，重复 Stop 不再次清理；由进程退出回收。强制信号只能取消合作式工作，不能保证任意文件 I/O 或不合作 SDK 在硬 30 秒内退出。
 
 ### 本实例SQL慢查询阈值与失败诊断
 

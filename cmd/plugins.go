@@ -13,8 +13,12 @@ import (
 	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
 	defaulthttpmiddleware "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
 	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	defaultmail "github.com/gtkit/gin-api/internal/plugin/builtin/mail"
 	defaultmysql "github.com/gtkit/gin-api/internal/plugin/builtin/mysql"
+	defaultnotification "github.com/gtkit/gin-api/internal/plugin/builtin/notification"
 	defaultredis "github.com/gtkit/gin-api/internal/plugin/builtin/redis"
+	defaultrobot "github.com/gtkit/gin-api/internal/plugin/builtin/robot"
+	defaultsms "github.com/gtkit/gin-api/internal/plugin/builtin/sms"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -41,7 +45,6 @@ func registerServerPlugins(registry *core.PluginRegistry) (bootstrap.PluginSet, 
 		return bootstrap.PluginSet{}, errors.New("plugin registry is required")
 	}
 	configuration := defaultconfig.New(loadRuntimeConfiguration)
-	logging := defaultlogging.New(defaultlogging.Options{Configuration: configuration})
 	database := defaultmysql.New(defaultmysql.Options{Configuration: configuration})
 	redis := defaultredis.New(defaultredis.Options{Configuration: configuration, Required: bootstrap.RedisRequired})
 	cache := defaultcache.New(defaultcache.Options{Configuration: configuration, Redis: redis})
@@ -49,7 +52,8 @@ func registerServerPlugins(registry *core.PluginRegistry) (bootstrap.PluginSet, 
 	if err := registry.Register(configuration); err != nil {
 		return bootstrap.PluginSet{}, err
 	}
-	if err := registry.Register(logging, configuration.Name()); err != nil {
+	logging, err := registerNotificationLogging(registry, configuration)
+	if err != nil {
 		return bootstrap.PluginSet{}, err
 	}
 	for _, component := range []core.Plugin{database, redis} {
@@ -71,14 +75,13 @@ func registerServerPlugins(registry *core.PluginRegistry) (bootstrap.PluginSet, 
 	}, nil
 }
 
-// registerMigrationPlugins deliberately selects only configuration, logging and
-// database. OpenMigrationDB leaves DDL duration to the command timeout.
+// registerMigrationPlugins selects configuration, notification, logging and DB;
+// it does not register Redis, cache or HTTP. DDL uses the command timeout.
 func registerMigrationPlugins(registry *core.PluginRegistry) (bootstrap.MigrationPluginSet, error) {
 	if registry == nil {
 		return bootstrap.MigrationPluginSet{}, errors.New("plugin registry is required")
 	}
 	configuration := defaultconfig.New(loadRuntimeConfiguration)
-	logging := defaultlogging.New(defaultlogging.Options{Configuration: configuration})
 	database := defaultmysql.New(defaultmysql.Options{
 		Configuration: configuration, SelectCredentials: migrationCredentials,
 		Open: func(ctx context.Context, cfg config.DatabaseConfig, creds config.DBCredentials, logger gormlogger.Interface) (defaultmysql.Client, error) {
@@ -92,7 +95,8 @@ func registerMigrationPlugins(registry *core.PluginRegistry) (bootstrap.Migratio
 	if err := registry.Register(configuration); err != nil {
 		return bootstrap.MigrationPluginSet{}, err
 	}
-	if err := registry.Register(logging, configuration.Name()); err != nil {
+	logging, err := registerNotificationLogging(registry, configuration)
+	if err != nil {
 		return bootstrap.MigrationPluginSet{}, err
 	}
 	if err := registry.Register(database, configuration.Name(), logging.Name()); err != nil {
@@ -101,6 +105,28 @@ func registerMigrationPlugins(registry *core.PluginRegistry) (bootstrap.Migratio
 	return bootstrap.MigrationPluginSet{
 		Configuration: configuration, Logging: logging, Database: database, DrainLogs: logging.Drain,
 	}, nil
+}
+
+// registerNotificationLogging keeps both entry points on the same ownership graph.
+// Only Init may read configuration or open a sender.
+func registerNotificationLogging(registry *core.PluginRegistry, configuration *defaultconfig.Plugin) (*defaultlogging.Plugin, error) {
+	robot := defaultrobot.New(defaultrobot.Options{Configuration: configuration})
+	mail := defaultmail.New(defaultmail.Options{Configuration: configuration})
+	sms := defaultsms.New(defaultsms.Options{Configuration: configuration})
+	for _, channel := range []core.Plugin{robot, mail, sms} {
+		if err := registry.Register(channel, configuration.Name()); err != nil {
+			return nil, fmt.Errorf("register notification channel: %w", err)
+		}
+	}
+	notification := defaultnotification.New(defaultnotification.Options{Configuration: configuration, Robot: robot, Mail: mail, SMS: sms})
+	if err := registry.Register(notification, configuration.Name(), robot.Name(), mail.Name(), sms.Name()); err != nil {
+		return nil, fmt.Errorf("register notification: %w", err)
+	}
+	logging := defaultlogging.New(defaultlogging.Options{Configuration: configuration, Notification: notification})
+	if err := registry.Register(logging, configuration.Name(), notification.Name()); err != nil {
+		return nil, fmt.Errorf("register notification logging: %w", err)
+	}
+	return logging, nil
 }
 
 func migrationCredentials(cfg config.DatabaseConfig) config.DBCredentials {

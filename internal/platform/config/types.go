@@ -156,47 +156,44 @@ type DBCredentials struct {
 	Password string
 }
 
-// EmailConfig 是 SMTP 出站通道。Host 为空 = 不启用；启用时 From 必填。
-// AlertTo 非空即启用邮件告警通道（经 internal/pkg/news 扇出）。
+// EmailConfig controls the SMTP channel. A nonempty Host constructs a client in
+// notification.mail.Init; AlertTo independently opts it into alert fan-out.
+// Configuration validates values even when a composition selects pure logging.
 type EmailConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"` // 0 走库默认 25；587 提交口；465 配 implicit_ssl
-	User     string `mapstructure:"user"` // 空 = 不认证（可信内网中继）
-	Pass     string `mapstructure:"pass"`
-	From     string `mapstructure:"from"`
-	FromName string `mapstructure:"from_name"`
-	// ImplicitSSL 使用 465 端口式 SMTPS；默认策略为 STARTTLS 强制 TLS。
-	ImplicitSSL bool     `mapstructure:"implicit_ssl"`
-	AlertTo     []string `mapstructure:"alert_to"`
+	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client and requires other email fields empty.
+	Port        int      `mapstructure:"port"`         // SMTP port, 0 uses 25; allowed 0..65535; 465 normally requires ImplicitSSL.
+	User        string   `mapstructure:"user"`         // SMTP authentication user; empty uses no authentication (trusted relay only).
+	Pass        string   `mapstructure:"pass"`         // SMTP authentication secret used with User; empty sends no password.
+	From        string   `mapstructure:"from"`         // Envelope/header sender; valid address required when Host is set.
+	FromName    string   `mapstructure:"from_name"`    // Optional display name for From; empty adds no display name.
+	ImplicitSSL bool     `mapstructure:"implicit_ssl"` // true selects SMTPS; false retains the client's forced STARTTLS policy.
+	AlertTo     []string `mapstructure:"alert_to"`     // Valid recipients; empty disables email alerts but retains the configured client.
 }
 
-// Enabled 报告邮件通道是否启用。
+// Enabled reports whether SMTP client construction is configured, not whether alerts have recipients.
 func (c EmailConfig) Enabled() bool { return c.Host != "" }
 
-// SMSConfig 是出站短信通道。Provider 为空 = 不启用；当前仅支持 "aliyun"。
-// AlertPhones 与 AlertTemplate 同时非空即启用短信告警通道；
-// 告警模板必须声明 ${env} 变量（发送参数固定为 {"env": 环境名}）。
+// SMSConfig controls the default Aliyun SMS client and logical templates.
+// AlertPhones and AlertTemplate opt it into alerts together; alert parameters
+// contain env. Pluggable senders do not expand the configuration provider list.
 type SMSConfig struct {
-	Provider     string `mapstructure:"provider"`
-	AccessID     string `mapstructure:"access_id"`
-	AccessSecret string `mapstructure:"access_secret"`
-	RegionID     string `mapstructure:"region_id"` // 空走驱动默认 cn-hangzhou
-	SignName     string `mapstructure:"sign_name"`
-	// Templates 逻辑模板名 → 供应商模板；业务与告警都以逻辑名引用，
-	// 供应商编号只出现在配置里。
-	Templates     map[string]SMSTemplateConfig `mapstructure:"templates"`
-	AlertPhones   []string                     `mapstructure:"alert_phones"`
-	AlertTemplate string                       `mapstructure:"alert_template"`
+	Provider      string                       `mapstructure:"provider"`       // Empty disables the client and requires other SMS fields empty; only aliyun is accepted.
+	AccessID      string                       `mapstructure:"access_id"`      // Aliyun AccessKey ID; required when Provider is set, no fallback.
+	AccessSecret  string                       `mapstructure:"access_secret"`  // Aliyun AccessKey secret; required when Provider is set, no fallback.
+	RegionID      string                       `mapstructure:"region_id"`      // SMS region; empty uses the driver's cn-hangzhou default.
+	SignName      string                       `mapstructure:"sign_name"`      // Required default signature; a template may override it.
+	Templates     map[string]SMSTemplateConfig `mapstructure:"templates"`      // Logical names to provider templates; each entry requires Code, empty defines none.
+	AlertPhones   []string                     `mapstructure:"alert_phones"`   // Nonblank alert targets; empty disables SMS alerts, must be paired with AlertTemplate.
+	AlertTemplate string                       `mapstructure:"alert_template"` // Logical key in Templates, not provider ID; empty disables alerts, pair with AlertPhones. Template receives env.
 }
 
-// SMSTemplateConfig 是一条逻辑模板到供应商模板的映射。
+// SMSTemplateConfig maps one logical name to its provider template.
 type SMSTemplateConfig struct {
-	Code string `mapstructure:"code"`
-	// SignName 逐模板签名，空回退 SMSConfig.SignName。
-	SignName string `mapstructure:"sign_name"`
+	Code     string `mapstructure:"code"`      // Provider template ID; required for every defined logical template, no fallback.
+	SignName string `mapstructure:"sign_name"` // Per-template signature; empty falls back to SMSConfig.SignName.
 }
 
-// Enabled 报告短信通道是否启用。
+// Enabled reports whether SMS client construction is configured, not whether alerts have targets.
 func (c SMSConfig) Enabled() bool { return c.Provider != "" }
 
 type LogConfig struct {
@@ -357,20 +354,15 @@ const (
 // newsPlatforms 是启动校验用的平台白名单。
 var newsPlatforms = []string{NewsPlatformFeishu, NewsPlatformDingTalk, NewsPlatformWeCom}
 
-// NewsConfig 是告警通道配置。
-//
-// webhook 底层用 gtkit/msgbot，因此支持飞书 / 钉钉 / 企业微信三家；
-// Platform 留空按飞书处理，与本字段引入之前的行为一致。
+// NewsConfig configures the default robot and the separate image-message app.
+// Text alerts use only FSURL, Platform and Secret. The registered robot remains
+// available for explicit targets even when FSURL is empty.
 type NewsConfig struct {
-	// FSURL 是机器人 webhook 地址。字段名沿用历史（最初只支持飞书），
-	// 语义已是"告警 webhook"，各平台通用。
-	FSURL string `mapstructure:"fsurl"`
-	// Platform 是机器人平台：feishu（默认）、dingtalk 或 wecom。
-	Platform string `mapstructure:"platform"`
-	// Secret 是加签密钥，平台侧开启"加签"时必填。
-	Secret    string `mapstructure:"secret"`
-	AppID     string `mapstructure:"appid"`
-	AppSecret string `mapstructure:"appsecret"`
+	FSURL     string `mapstructure:"fsurl"`     // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
+	Platform  string `mapstructure:"platform"`  // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
+	Secret    string `mapstructure:"secret"`    // Optional platform signing secret; required operationally when platform-side signing is enabled.
+	AppID     string `mapstructure:"appid"`     // Image-message application ID; empty means not supplied, unused by text alert plugins.
+	AppSecret string `mapstructure:"appsecret"` // Image-message application secret; empty means not supplied, unused by text alert plugins.
 }
 
 type CORSConfig struct {

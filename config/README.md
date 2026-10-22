@@ -61,6 +61,33 @@ config/
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
 
+## 通知通道与告警开关
+
+默认 server 和 migration 均显式注册 `notification.robot`、`notification.mail`、`notification.sms`、`notification`，再初始化 `logging`。构造发生在各插件 Init，不发送启动测试消息。配置校验与原规则一致；没有告警目标不等于无需提供已启用客户端的必填配置。
+
+| 字段 | 用途、启用与约束 | 留空/默认与关联 |
+|---|---|---|
+| `news.fsurl` | 默认文本告警 http(s) webhook；显式目标只覆盖本次机器人地址 | 空跳过默认机器人发送；已注册机器人仍支持显式目标，邮件/短信不受影响 |
+| `news.platform` | `feishu/dingtalk/wecom`；忽略大小写和首尾空白 | 空按飞书处理；沿用现有验证白名单 |
+| `news.secret` | 平台签名密钥，不写日志 | 空不配置签名；平台要求加签时须提供 |
+| `news.appid/appsecret` | 原图片资讯应用字段 | 默认空；文本通知不读取，`SendPicMsg` 保留 |
+| `email.host` | SMTP 客户端开关；非空才构造 | 空禁用且其他 email 字段须为空；非空要求 from |
+| `email.port` | SMTP 端口，0..65535 | 0 用库默认 25；465 通常配 implicit_ssl=true |
+| `email.user/pass` | SMTP 认证账号/密码 | user 空不认证（仅可信中继）；pass 空不提供密码 |
+| `email.from/from_name` | 发件地址与显示名 | host 非空时 from 必填合法地址；from_name 空不设置 |
+| `email.implicit_ssl` | true 选 SMTPS | false 使用客户端强制 STARTTLS 策略 |
+| `email.alert_to` | 合法告警收件地址列表 | 空不发邮件告警；非空仍要求有效 host/from；主题 `[env] service alert`，正文为原告警参数用空格连接 |
+| `sms.provider` | 默认短信客户端开关，仅 `aliyun` | 空禁用且其他 SMS 字段须为空；实现可替换不等于新增供应商配置 |
+| `sms.access_id/access_secret` | Aliyun 凭据 | provider 非空时必填，无默认值 |
+| `sms.region_id` | 短信区域 | 空用驱动默认 cn-hangzhou |
+| `sms.sign_name` | 必填全局签名 | 模板级 sign_name 非空时覆盖它 |
+| `sms.templates` | 逻辑名到供应商模板的映射；每项 code 必填 | 空没有模板；每项 sign_name 空用全局签名 |
+| `sms.alert_phones/alert_template` | 告警号码与逻辑模板名，须成对；模板须存在 | 同时空则不发短信告警；模板收到 `{"env": 环境名}`，供应商模板应与该参数一致 |
+
+三个通道依次尽力发送：机器人→邮件→逐个号码短信，每次有独立 10 秒预算，也受调用取消和关闭预算约束；不增加项目重试。日志只有一个 64 条待处理队列，满队列可丢弃，不能当作可靠消息存储。所有发送有真实副作用，短信可能计费；本地验收仅用替身和回环服务。
+
+纯日志组合可不注册通知插件且不传 `logging.Options.Notification`；默认入口仍选择现有通知实现。替换、资源边界及关闭限制见 [可观测性说明](../docs/observability.md#通知插件与替换方式)。本次没有新增配置项或部署数据迁移。
+
 ## 密钥规则
 
 - 数据库密码、Redis 密码、JWT 私钥、支付私钥、API Key 不得提交。

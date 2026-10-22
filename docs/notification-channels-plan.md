@@ -1,16 +1,18 @@
 # 通知通道可插拔方案与分阶段实施计划
 
-编制日期：2026-10-22（Asia/Taipei）。文档版本：已批准方案，阶段 1 已完成。
+编制日期：2026-10-22（Asia/Taipei）。文档版本：阶段 1–4 已完成本地实现验收；阶段 5 本地验证完成，受控门禁已单独获准，执行中。
 
-> 用户已同意方案，并明确仅执行阶段 1（1.1–1.4）；阶段 2–5 未获实施授权。阶段 1 只固定项目契约与基线，不切换生产通知路径。实施记录见第 17 节；没有实际证据的设计与验收项仍为待实施、待验证。
+> 当前授权：用户已要求“把剩下所有的阶段都做完了，要保证代码能够安全高效稳定的运行在企业级线上”。阶段 1–2 的历史验收保留；本轮执行原编号阶段 3–5。
 >
-> 本文不代表通知插件已经实现。不续跑既有插件重构、日志性能优化或验收整改任务，不改动它们的计划及完成记录。阶段 1 允许相关基线、构建、vet、lint、race 与必要 OpenSpec 工件；不操作数据库、容器或发送真实通知。
+> lint、脚本 lint、vet、modern、race 与覆盖率继续暂停；全部功能完成后另行询问，只有明确允许才执行。普通相关测试显式 -vet=off；不以 make check 间接触发。真实供应商发送、生产操作、容量结论、提交发布不因本次实现授权自动获得许可。
 
 ## 1. 需求来源、目标与范围
 
 需求来源为用户本轮指令：“先针对通知通道可插拔出完整方案和分阶段实施计划，沿用现有插件机制，明确日志、机器人、邮件和短信的依赖与生命周期边界，落盘给我看，先不要改代码。”
 
-后续实施授权：“方案同意，按 docs/notification-channels-plan.md 先执行阶段 1，开始前回读计划和错误记录，完成后逐项验收、更新计划并汇报，不要自动进入阶段 2。”本次仅据此执行阶段 1。
+历史阶段 1 授权：“方案同意，按 docs/notification-channels-plan.md 先执行阶段 1，开始前回读计划和错误记录，完成后逐项验收、更新计划并汇报，不要自动进入阶段 2。”
+
+历史阶段 2 授权：“按 docs/notification-channels-plan.md 继续执行阶段 2，先回读计划和错误记录，完成后逐项验收、更新计划并汇报，不要进入阶段 3。刚才停掉的检查先不要跑。”该轮只实施阶段 2。当前用户授权剩余阶段 3–5，受控检查仍须在全部功能完成后另行询问并获准。
 
 推荐方案：沿用 `core.Plugin` / `PluginRegistry`，入口显式选择机器人、邮件、短信及通知组合插件；日志插件接收通知能力，停止自行构造通知客户端。通知组件先于日志初始化，晚于日志停止；补足日志队列迟到回调和在途发送的保护。
 
@@ -112,7 +114,7 @@ SDK 的丢弃计数在已读 logger 实现内为内部字段，本项目目前�
 | 默认目标与平台 | news.fsurl；platform 留空按 feishu，支持 dingtalk/wecom；平台归一化后选择 | 默认实现保持此契约，不改字段名 |
 | 显式目标覆盖 | Warn 的 url 非空只覆盖本次机器人目标；邮件与短信仍照常扇出 | 保留；不能将一次 SendTo 解释为只发机器人 |
 | 机器人加签 | news.secret 交给相同平台的 msgbot provider | 留在机器人默认实现；不得泄漏到其他通道或日志 |
-| 机器人 HTTP | provider 按本次目标构造，未注入客户端时使用 SDK 的共享客户端；Timeout 为 10 秒；当前未设置 Retry | 保留按目标构造和共享客户端；不关闭 SDK 全局客户端；项目不新增重试 |
+| 机器人 HTTP | provider 按本次目标构造；本阶段复核发现 Config.Freeze 在 HTTPClient=nil 时创建 http.Client，复用默认 Transport；Timeout 为 10 秒，Retry 零值 | 保留按目标构造和默认 Transport 复用；不关闭共享 Transport；项目不新增重试 |
 | 标题与编码 | 标题含 env、time.DateTime；args 用空格连接；平台 JSON 编码由 SDK 承担 | 字节/字段含义保留；不改成新通用消息协议 |
 | 邮件启用与认证 | host 非空启用；port=0 回落库默认 25；user 空不认证；From/FromName 与 implicit_ssl 透传 | 由邮件插件装配现有 Client；不改变 TLS 策略或凭据来源 |
 | 邮件告警目标与内容 | alert_to 非空接入告警；主题为 [env] service alert；Text 为原始 args 空格拼接 | 保留；不把机器人时间标题添加到邮件正文 |
@@ -147,7 +149,7 @@ SDK 的丢弃计数在已读 logger 实现内为内部字段，本项目目前�
 
 ## 5. 项目契约与拟定实现边界
 
-5.1 的类型契约已在阶段 1 新增，尚未接入生产路径；下述注入式通知器、通道插件和生命周期行为仍待后续获准阶段实现。
+5.1 的类型契约已在阶段 1 新增；注入式通知器、通道插件及组合生命周期已在阶段 2 实现，组件验收见第 18 节。默认日志及 server/migration 接线仍待阶段 3，不能将组件通过写成默认生产路径已切换。
 
 ### 5.1 契约归属
 
@@ -195,13 +197,13 @@ news 增加接收 context 的核心扇出入口，接收已翻译的选项及上
 | 组件 | 创建/持有 | 借用/接收 | 明确边界 |
 |---|---|---|---|
 | logging 插件 | main/access SDK 日志器、SDK 内部异步队列、日志门面绑定 | NotificationSink（允许为空，代表纯日志组合） | 不 import 机器人/邮件/短信默认实现，不读三类通道配置，不创建或 Stop 通道；仅在自身排空时调用 BindDrain |
-| 机器人插件 | 归一化平台配置、按本次目标构造 provider 的发送能力；若自定义工厂返回自有资源则持有其清理句柄 | 配置；默认实现借用 SDK 共享 HTTP 客户端 | SendTo 目标逐次生效；默认 URL 空不禁止显式目标；不关闭借来的全局 HTTP 客户端 |
+| 机器人插件 | 归一化平台配置、按本次目标构造 provider 的发送能力；若自定义工厂返回自有资源则持有其清理句柄 | 配置；默认实现沿用 SDK 的默认 Transport | SendTo 目标逐次生效；默认 URL 空不禁止显式目标；不关闭共享默认 Transport |
 | 邮件插件 | 一份 mail.Client 或替换 sender；转换 news.MailMessage 到现有 mail.Message | 配置 | 不构造通知器，不读取机器人/短信字段，不自行打 H 系列日志 |
 | 短信插件 | 一份 sms.Client 或替换 sender | 配置 | 不展开为供应商通用注册平台；默认实现保持 aliyun 映射，不构造通知器 |
 | 通知组合插件 | news.Notifier、不可变目标快照、发送生命周期 context、接纳/在途保护、drain 取消绑定 | 三个可选 sender、配置、非告警诊断回调 | 不拥有 sender 的 Close；不新建队列；实现 NotificationSink，给日志的能力不包含 Stop/Close |
 | cmd 注册入口 | 选择实现、声明真实依赖边、配置默认诊断回调 | 现有注册器 | 构造和注册阶段不读配置、不打开连接；决定启用哪些插件的代码组合 |
 
-默认 mail/sms 不暴露底层 Close，机器人默认借用共享客户端。因此不能为了统一外观而编造 SDK Close 方法。自定义工厂可返回 sender 和一个由其拥有的可选清理函数；该句柄只留在对应通道插件，借用接口不暴露它。工厂内部在返回前拥有其部分资源，异常出口自行回收或明确交回可清理的部分结果。
+默认 mail/sms 不暴露底层 Close，机器人按 SDK 实际行为复用默认 Transport。因此不能为了统一外观而编造 SDK Close 方法。自定义工厂可返回 sender 和一个由其拥有的可选清理函数；该句柄只留在对应通道插件，借用接口不暴露它。工厂内部在返回前拥有其部分资源，异常出口自行回收或明确交回可清理的部分结果。
 
 ### 5.3 可插拔规则
 
@@ -348,7 +350,7 @@ Start：同一拓扑顺序；全部 Init 成功后才进入全部 Start
 
 ## 10. 拟涉及文件与目录边界
 
-本轮实际只新增本文。下面是未来获准代码阶段的文件范围，不代表已经创建。
+本节为阶段 0 编制时的文件规划；当时只新增本文。阶段 1–2 的实际文件见第 17/18 节，后续阶段文件仍待对应授权。
 
 现有文件的拟修改职责：
 
@@ -413,12 +415,12 @@ internal/plugin/builtin/notification/drain.go      接纳、在途与 BindDrain 
 
 - 默认继续一个 SDK 告警消费者、64 深度队列；三个通道及通知组合不新增消费者队列。
 - Init/Start 不创建后台发送任务；drain 只注册短取消回调并在清理时解除/等待，不遗弃长期协程。
-- 默认机器人借用 SDK 共享 HTTP 客户端；SMTP 按现有 Send 路径；默认 SMS 不另起项目连接池。自定义发送器若创建池，必须声明拥有者、上限、取消与关闭能力。
+- 默认机器人每次 provider 构造由 SDK 创建 client 并复用默认 Transport；SMTP 按现有 Send 路径；默认 SMS 不另起项目连接池。自定义发送器若创建池，必须声明拥有者、上限、取消与关闭能力。
 - 本期无新增 DB/Redis 连接、存储量、迁移或持久消息保留期；外部邮件/短信费用与实际发送量有关，当前无可核实月度费用输入。
 
 ## 12. 完整方案验收矩阵（新组件行为待执行）
 
-以下描述完整通知插件方案应覆盖的可观察行为。阶段 1 只固定预期并运行既有路径回归，实际证据见第 17 节；下表涉及的新组件、接线和生命周期场景尚未验收。
+以下为完整方案预期矩阵。阶段 1 记录见第 17 节，阶段 2 已验证的组件子场景见 18.5；真实日志接线、完整门禁、反证变体和供应商场景尚未完成，不能把某一子场景通过等同整个编号已验收。
 
 | 编号 | 场景 | 必须拿到的证据 |
 |---|---|---|
@@ -465,50 +467,50 @@ internal/plugin/builtin/notification/drain.go      接纳、在途与 BindDrain 
 | 1.3 | 基线及兼容表可复核 | 新增 news 项目契约及装配侧别名；不改变生产接线；固定 G/A 编号对应的预期 | 新增类型无 SDK 泄漏、无反向依赖；相关构建与现有用例结果可读 | 契约必须引入新供应商 schema、全局注册表或移动模块 | 两份声明文件及 17.4 契约清单；双环境相关检查通过；已完成 |
 | 1.4 | 1.3 完成 | 记录本阶段结果、差异、剩余风险 | G6/G9 对照及阶段检查证据；新行为仍未接入生产路径 | 未验证项被勾为通过 | 17.5–17.8 逐项验收与限制；已完成，停在阶段 1 |
 
-### 阶段 2：通道插件和通知组合（未授权）
+### 阶段 2：通道插件和通知组合（已完成，受控检查未执行）
 
 | 步骤 | 前置条件 | 具体改动/动作 | 检查方法 / 可复核证据 | 停止条件 | 交付物 / 状态 |
 |---|---|---|---|---|---|
-| 2.1 | 阶段 1 验收记录齐备，阶段 2 获准 | 新增机器人、邮件、短信插件；实例级工厂、关闭态、资源所有权及在途保护 | A01–A04、A06、A08、A12/A13；工厂/发送/关闭计数及真实错误 | 工厂必须依赖 logging.Init，或需要未获准依赖/目录重排 | 三个可独立替换的通道插件；待执行/待授权 |
-| 2.2 | 通道接口和状态可用 | news 增加注入式 context 扇出入口；保留消息语义和原辅助方法；将空 URL 跳过纳入明确契约 | A03–A07、A18；仅 fake/回环输入证据 | 其他有效配置或正文发生未计划变化 | 注入式通知器及契约用例；待执行/待授权 |
-| 2.3 | 2.1/2.2 完成 | 新增通知组合插件、生命周期 context、BindDrain 及取消绑定清理 | A09–A14；同时取消和释放的屏障轨迹；无被遗弃等待 goroutine | 仅靠 Sync 返回推断无回调，或在途未退出就清理资源 | 通知组合及生命周期证据；待执行/待授权 |
-| 2.4 | 上述组件定向检查通过 | 运行本阶段受影响模块全量相关检查，记录结果 | 两种 SDK 环境的相关 build/vet/lint/race；更新 G2–G5 证据 | 同一问题三轮无进展，或本地 SDK API 被锁定构建拒绝 | 阶段 2 交付；待执行/待授权 |
+| 2.1 | 阶段 1 验收记录齐备，阶段 2 获准 | 新增机器人、邮件、短信插件；实例级工厂、关闭态、资源所有权及在途保护 | A01–A04、A06、A08、A12/A13；工厂/发送/关闭计数及真实错误 | 工厂必须依赖 logging.Init，或需要未获准依赖/目录重排 | 三个可独立替换的通道插件；已完成，见 18.3/18.5 |
+| 2.2 | 通道接口和状态可用 | news 增加注入式 context 扇出入口；保留消息语义和原辅助方法；将空 URL 跳过纳入明确契约 | A03–A07、A18；仅 fake/回环输入证据 | 其他有效配置或正文发生未计划变化 | 注入式通知器及契约用例；已完成，见 18.3/18.5 |
+| 2.3 | 2.1/2.2 完成 | 新增通知组合插件、生命周期 context、BindDrain 及取消绑定清理 | A09–A14 的组件级屏障与取消用例；真实日志接线留阶段 3 | 仅靠 Sync 返回推断无回调，或在途未退出就清理资源 | 通知组合及生命周期证据；组件范围已完成，真实日志接线仍待阶段 3 |
+| 2.4 | 上述组件实现完成 | 按最新限制运行双环境相关 build、普通测试（-vet=off），记录 G2–G5 与未执行项 | 不执行 lint/脚本 lint/vet/modern/race/覆盖率，不运行 make check；保留实际命令、退出码和日志 | 同一问题三轮无进展，或本地 SDK API 被锁定构建拒绝 | 允许范围的验收已完成；双环境各 600 项普通测试及构建通过，受控门禁未执行 |
 
 阶段 2 新组件暂不接入默认入口；旧构造入口只作为阶段 3 切换前的过渡，不能在运行时同时创建两份通知器。
 
-### 阶段 3：日志、server 与 migration 接线（未授权）
+### 阶段 3：日志、server 与 migration 接线（已完成本地实现验收）
 
 | 步骤 | 前置条件 | 具体改动/动作 | 检查方法 / 可复核证据 | 停止条件 | 交付物 / 状态 |
 |---|---|---|---|---|---|
-| 3.1 | 阶段 2 验收记录齐备，阶段 3 获准 | logging.Options 接收通知能力；mainOptions 移除配置型通知构造；Drain/部分失败清理绑定真实清理 context | A01、A09–A14、A17；日志性能与 owner 既有契约不退化 | 需要改日志后端、放宽过滤/关闭协议或依赖本地特有 SDK API | 日志通知适配；待执行/待授权 |
-| 3.2 | 3.1 与通道均可组合 | cmd 默认入口显式注册四个通知相关插件；server/migration 共用注册辅助函数；保留基础 PluginSet | A08/A16；实际拓扑轨迹与缺失/循环依赖错误；迁移组合零 Redis/HTTP | 为通知新增必填 PluginSet 能力，或仅修改 server 遗漏 migration | 两入口接线及组合测试；待执行/待授权 |
-| 3.3 | 两入口切换完成 | 删除 news 旧隐式构造职责及其厂商工厂依赖；迁移旧测试到新职责位置；保持 SendPicMsg | 调用方检索与整段回读；仅唯一默认构造点；A02/A06/A17 | 需要删除无关辅助能力或保留第二套活跃实例 | 单一构造路径；待执行/待授权 |
-| 3.4 | 3.1–3.3 完成 | 覆盖完整 App/Runtime 回滚、正常停止、存活 worker 只 Drain、workspace 迟到回调 | A08–A17；两环境 race、确定性屏障、真实清理计数 | worker 未退出却关闭通道，或失败只保留最后一个错误 | 阶段 3 交付；待执行/待授权 |
+| 3.1 | 阶段 2 验收记录齐备，阶段 3 获准 | logging.Options 接收通知能力；mainOptions 移除配置型通知构造；Drain/部分失败清理绑定真实清理 context | A01、A09–A14、A17；日志性能与 owner 既有契约不退化 | 需要改日志后端、放宽过滤/关闭协议或依赖本地特有 SDK API | 日志通知适配；已完成，见第 19 节 |
+| 3.2 | 3.1 与通道均可组合 | cmd 默认入口显式注册四个通知相关插件；server/migration 共用注册辅助函数；保留基础 PluginSet | A08/A16；实际拓扑轨迹与缺失/循环依赖错误；迁移组合零 Redis/HTTP | 为通知新增必填 PluginSet 能力，或仅修改 server 遗漏 migration | 两入口接线及组合测试；已完成，见第 19 节 |
+| 3.3 | 两入口切换完成 | 删除 news 旧隐式构造职责及其厂商工厂依赖；迁移旧测试到新职责位置；保持 SendPicMsg | 调用方检索与整段回读；仅唯一默认构造点；A02/A06/A17 | 需要删除无关辅助能力或保留第二套活跃实例 | 单一构造路径；已完成，见第 19 节 |
+| 3.4 | 3.1–3.3 完成 | 覆盖完整 App/Runtime 回滚、正常停止、存活 worker 只 Drain、workspace 迟到回调 | A08–A17；两环境普通测试、确定性屏障、真实清理计数；race 留待功能完成后单独授权 | worker 未退出却关闭通道，或失败只保留最后一个错误 | 阶段 3 交付；已完成，见第 19 节 |
 
-### 阶段 4：配置说明与使用文档同步（未授权）
+### 阶段 4：配置说明与使用文档同步（已完成）
 
 | 步骤 | 前置条件 | 具体改动/动作 | 检查方法 / 可复核证据 | 停止条件 | 交付物 / 状态 |
 |---|---|---|---|---|---|
-| 4.1 | 阶段 3 运行行为确定，阶段 4 获准 | 同步配置注释、example 和配置说明；逐项写用途、启用条件、默认/回落及关联 | 对照第 3/9 节与实际代码逐项回读；值与字段未变；纯文字步骤不运行测试 | 出现未计划新配置或需要改真实密钥文件 | 配置说明；待执行/待授权 |
-| 4.2 | 配置说明一致 | 更新已实现架构/可观测性说明、入口选实现示例、停止限制及两份 SDK 区别 | 所引用源码真实存在；内容不把 best-effort 写成必达；只有已实现能力进入使用说明 | 需要重写无关规范或把计划当实现 | 使用与维护说明；待执行/待授权 |
-| 4.3 | 4.1/4.2 完成 | 回读阶段交付，记录未验证边界 | 文档、示例、代码配置读取一一对应 | 实现/注释/示例口径不一致 | 阶段 4 交付；待执行/待授权 |
+| 4.1 | 阶段 3 运行行为确定，阶段 4 获准 | 同步配置注释、example 和配置说明；逐项写用途、启用条件、默认/回落及关联 | 对照第 3/9 节与实际代码逐项回读；值与字段未变；纯文字步骤不运行测试 | 出现未计划新配置或需要改真实密钥文件 | 配置说明；已完成，见第 19 节 |
+| 4.2 | 配置说明一致 | 更新已实现架构/可观测性说明、入口选实现示例、停止限制及两份 SDK 区别 | 所引用源码真实存在；内容不把 best-effort 写成必达；只有已实现能力进入使用说明 | 需要重写无关规范或把计划当实现 | 使用与维护说明；已完成，见第 19 节 |
+| 4.3 | 4.1/4.2 完成 | 回读阶段交付，记录未验证边界 | 文档、示例、代码配置读取一一对应 | 实现/注释/示例口径不一致 | 阶段 4 交付；已完成，见第 19 节 |
 
 若只授权本阶段文字修改，严格只编辑获准文字并回读；第 5 阶段检查不因文档完成而自动执行。
 
-### 阶段 5：总体回归、回退演练与交付（未授权）
+### 阶段 5：总体回归、回退演练与交付（已授权；受控检查待单独许可）
 
 | 步骤 | 前置条件 | 具体改动/动作 | 检查方法 / 可复核证据 | 停止条件 | 交付物 / 状态 |
 |---|---|---|---|---|---|
-| 5.1 | 阶段 1–4 完成，阶段 5 获准 | 运行完整本地验收矩阵及少量关键生命周期反证 | A01–A19 全部逐项记录；反证同时命中指定失败与原因；无 skip 冒充通过 | 任一资源安全、取消、原消息兼容契约失败 | 本专项功能证据；待执行/待授权 |
-| 5.2 | 本期定向检查通过 | 按实际 Makefile/指南执行最终门禁，workspace 与 GOWORK=off 分开记录 | 两环境 go build；受影响 race；make check 包括架构、vet、lint、modern、覆盖率等真实结果 | 构建依赖变更、缺工具需安装、隐式容器动作或范围外失败 | 完整门禁报告；待执行/待授权 |
-| 5.3 | 基线快照和候选差异清楚 | 在隔离副本演练仅撤销本期差异；对照旧配置与消息契约；不触碰当前工作树其他改动 | 回退后构造/发送路径与基线一致，列出数据/配置无迁移项；命令与退出码可复核 | 无法区分他人改动、需改写历史或操作生产 | 回退演练记录；待执行/待授权 |
-| 5.4 | 本地证据齐备 | 形成 G1–G9、A01–A20 与风险的交付矩阵 | 本地开发验收与真实供应商/生产容量分开结论；A20 未执行保持未验证 | 试图以 mock、Sync 或本地门禁代替真实送达/生产准入 | 阶段 5 交付；待执行/待授权 |
+| 5.1 | 阶段 1–4 完成，阶段 5 获准 | 运行完整本地验收矩阵及少量关键生命周期反证 | A01–A19 全部逐项记录；反证同时命中指定失败与原因；无 skip 冒充通过 | 任一资源安全、取消、原消息兼容契约失败 | 本专项功能证据；已完成，见第 19 节 |
+| 5.2 | 本期定向检查通过 | 按实际 Makefile/指南执行最终门禁，workspace 与 GOWORK=off 分开记录 | 两环境 go build；功能完成后另行询问 race/lint/脚本 lint/vet/modern/覆盖率，按获准项目执行并记录；未获准不跑 make check | 构建依赖变更、缺工具需安装、隐式容器动作或范围外失败 | 双环境构建通过；受控门禁待用户单独许可 |
+| 5.3 | 基线快照和候选差异清楚 | 在隔离副本演练仅撤销本期差异；对照旧配置与消息契约；不触碰当前工作树其他改动 | 回退后构造/发送路径与基线一致，列出数据/配置无迁移项；命令与退出码可复核 | 无法区分他人改动、需改写历史或操作生产 | 回退演练记录；已完成，见第 19 节 |
+| 5.4 | 本地证据齐备 | 形成 G1–G9、A01–A20 与风险的交付矩阵 | 本地开发验收与真实供应商/生产容量分开结论；A20 未执行保持未验证 | 试图以 mock、Sync 或本地门禁代替真实送达/生产准入 | 阶段 5 交付；已授权待执行 |
 
 第 5 阶段涉及运行行为交付时，按项目要求读取 backend-acceptance 及验收 Guide。真实供应商发送、生产灰度、提交和发布均需其对应的明确授权，本计划不自动授权这些动作。
 
 ### 13.1 后续代码阶段的检查命令范围
 
-以下是各代码阶段的检查范围，不能视为全部已经执行。阶段 1 的实际命令和结果见第 17 节；阶段 1/2/3 使用对应相关包集合，完整 `make check` 等最终门禁仍留在阶段 5。
+以下是各代码阶段的检查范围，不能视为全部已经执行。阶段 1 的实际命令和结果见第 17 节；阶段 1/2/3 使用对应相关包集合，完整 `make check` 等最终门禁仍留在阶段 5。最新用户指令优先：下方所有 race 或 make check 仅为历史拟定范围，实际执行前须待全部功能完成并另行获准；阶段 2 已明确不执行。
 
 ```text
 # 获准代码阶段后的相关包检查示意；新增包创建完成后才能执行。
@@ -566,7 +568,7 @@ Makefile 的 check 已包含架构传感器、vet、lint、modern 和覆盖率�
 
 | 输入 | 当前状态 | 影响 |
 |---|---|---|
-| 用户对方案及后续阶段的批准 | 方案及阶段 1 已获准；阶段 2–5 未获准 | 仅执行 1.1–1.4，完成后停止 |
+| 用户对方案及后续阶段的批准 | 阶段 1–2 已完成；阶段 3–5 本轮已获准 | 完成剩余功能、逐项验收；受控检查功能完成后单独申请 |
 | 真实告警频率、消息最大字节数、收件人数、供应商限额、实例数 | 未提供/未读取真实运行配置 | 无生产容量和成本结论；不阻止独立的本地接口实现方案审阅 |
 | 阿里云 SDK 默认重试 | 阶段 1 已核实真实配置、OpenAPI 与 dara 调用链，默认不启用 SDK 循环重试，见 17.3 | 最多一次 OpenAPI 初始尝试；传输重发/真实投递次数未实测，不能推断必不重复 |
 | 真实机器人/SMTP/短信测试凭据与专用目标、发送授权 | 未提供、未执行 | A20 保持未验证；不使用当前运行配置自动发送 |
@@ -574,7 +576,7 @@ Makefile 的 check 已包含架构传感器、vet、lint、modern 和覆盖率�
 | 具体实施/评审/通道/部署负责人和日历排期 | 未指定 | 采用阶段依赖顺序，不编造日期、人日或团队确认 |
 | 自定义供应商实现 | 本期不预选、不安装 | 默认现有供应商；未来接入时核对其配置、重试、拥有权和取消契约 |
 
-本地实现验收、真实供应商验收、生产容量/发布准入分别下结论；任何一项缺证据就标记该项未验证。方案已批准且阶段 1 已完成，只证明第 17 节所列声明与现有路径检查，不表示完整通知插件方案、真实送达或生产准入已验证。
+本地实现验收、真实供应商验收、生产容量/发布准入分别下结论；任何一项缺证据就标记该项未验证。阶段 1–2 的局部证据分别见第 17/18 节；不表示默认入口已切换、完整通知方案已验收、真实送达或生产准入已验证。
 
 ## 16. 阶段 0 实际交付记录（历史）
 
@@ -738,3 +740,156 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 | 测试覆盖 | 双环境既有基线与回归通过；未运行覆盖率或真实发送，未添加重复声明测试 |
 | 交叉验证 | 声明与第 5 节/G/A 预期一致，原生产相关文件哈希未变，gopls 与 rg 核对范围已说明 |
 | 如实报告 | 方案、阶段声明、既有回归、新行为、首轮失败、skip 和未验证项分别记录 |
+
+## 18. 阶段 2 实施清单与记录（2026-10-22）
+
+### 18.1 执行前回读、基线与检查边界
+
+已全文回读本计划、全局规则、项目错误记录入口及相关通知/日志历史记录，读取现有 core.Plugin、默认插件、news/mail/sms 源码和契约测试。当前工作树为干净状态；本机工具已实际核实为 go1.27.3 darwin/amd64 与 /usr/local/go/bin/gofmt。复用已有 OpenSpec change `add-pluggable-notification-channels`，CLI apply state=ready、已完成 4/19 项；此数字只说明任务状态，不证明阶段 2 已完成。
+
+独立证据目录：`/var/folders/_w/xwv4k3t12vn9054592gsk5200000gn/T/gin-api-notification-stage2-b36v3mss`。已保存 456 个源码/依赖/计划/规范文件的基线散列及相关原始副本、Git 状态和 commit。未读取真实密钥配置。只撤销本期差异的回退方法仍按 14.2；不移动目录或修改依赖。
+
+本次允许相关 build 和普通测试；普通测试使用 `go test -vet=off -json -count=1 -timeout=5m`，分别在当前 workspace 与 GOWORK=off 执行。不执行任何 lint、脚本 lint、vet、modern、race 或覆盖率命令，不运行 make check。既有历史门禁不算本阶段通过；未执行项在最终矩阵单列，不为补齐它们自动重试或询问。
+
+### 18.2 固定实现细节与文件范围（实现前保存）
+
+| 步骤 | 文件及具体职责 | 验收与停止条件 |
+|---|---|---|
+| 2.1 | 新增 `internal/plugin/notification_channel.go`：供三个通道及通知组合复用的实例级资源状态，无注册器或后台工作循环；Init/Start/Stop、同锁接纳与归还、完成 channel 等待、自有清理函数、迟到工厂结果清理。新增 `builtin/robot/{plugin,sender}.go`、`builtin/mail/plugin.go`、`builtin/sms/plugin.go`：依赖 ConfigurationProvider，实例级 Opener 返回 sender 与可选 context 清理函数，默认适配现有 SDK；按已有配置门控。 | New 不读配置、不调工厂；同一实例只构造一次；失败/取消保留原错误及清理错误。Stop 超时但在途未退出时返回未排空错误，保留资源，不启动遗弃等待 goroutine。 |
+| 2.2 | 新增 `internal/pkg/news/delivery.go`：注入式 Options、发送结果分类、仅含通道/结果/耗时的诊断、边界 sender 验证与 context 扇出。修改 `news.go`：保留旧构造入口及图片辅助方法；Warn 委托同一 context 核心，复制目标、逐次复制参数，继续固定顺序和 10 秒单次预算。 | 旧有效输入字节/字段不变；默认 URL 空跳过；显式 URL 不影响邮件/SMS。逐 sender 隔离 panic/错误，诊断不拼接 SDK 原始错误或敏感负载。 |
+| 2.3 | `internal/plugin/notification.go` 增加三个借用 provider 契约。新增 `builtin/notification/{plugin,drain}.go`：Init 验证已启用配置对应 provider，构造唯一注入式 Notifier；只发布受生命周期保护的通知能力，BindDrain 只注册取消回调，release 幂等并等待自身回调。 | 生命周期不保存 Init context；组合不关闭借用 sender；Stop 先关闭接纳并取消在途。取消/解除/Stop 的屏障用例证明组件级行为，真实 SDK 日志 owner 接线不在本阶段。 |
+| 2.4 | 对上述文件新增同包或外部 `*_test.go`，包括注册器回滚三通道轨迹、工厂部分结果/typed nil/取消、发送/关闭竞争、未排空资源保留、独立超时、目标快照、诊断脱敏、drain 解除与迟到回调。 | 两环境相关普通测试与 build；逐项记录实际结果。未运行 race 不宣称已通过数据竞争检测；未接日志/两入口的 A09/A10/A15/A16/A17 总体场景仍待阶段 3/5。 |
+
+`NotificationChannel` 仅复用四个本期 owner 相同的接纳、在途、取消和一次清理协议，放在既有 plugin 包，不建立新层级、不修改 Core 或其他默认插件。新资源工厂清理预算沿用计划中的 30 秒回滚上限；正常 Stop 使用调用方真实 context。创建只保存选项，所有工厂仅由 Init 触发。
+
+任意用户实现可能通过接口返回 typed nil；单个 `news.ValidateSender` 仅在构造/发布边界用 reflect.ValueOf/Kind/IsNil 识别该情况，不反射调用、不遍历字段、不在发送热路径使用反射。具体 SDK 指针仍先直接判 nil。没有这一边界检查就无法在不调用任意实现方法的情况下拒绝 typed nil；不扩大成通用反射工具。
+
+仅在本次已批准的四个 builtin 包及现有 news/plugin 文件内增补实现和测试；`cmd/plugins.go`、logging、bootstrap、Core、mail/sms 原 SDK 封装、配置值及示例保持原样。OpenSpec 仅同步本 change 的阶段 2 授权/实施记录，保留阶段 3–5 未完成，不归档。
+
+执行前状态（历史）：上述细节与范围已落盘并回读后实施；当时组件、测试和构建尚未完成。最终结果如下。
+
+### 18.3 实际实现与文件归属
+
+本阶段修改 2 个已有 Go 文件，新增 14 个 Go 文件（包括 6 份测试），共 16 份 Go 文件：
+
+| 文件 | 实际改动 |
+|---|---|
+| internal/pkg/news/news.go | 保留 NewWithConfig 与 SendPicMsg；Warn 委托 context 核心；冻结原目标 slice；修正 SDK client/Transport 注释。 |
+| internal/pkg/news/delivery.go、delivery_test.go | New(Options) 注入三个 sender；WarnContext 同步串行扇出、独立 10 秒预算、panic/错误隔离、结果分类和无敏感负载的诊断；继续使用 stringx 标题拼接。 |
+| internal/plugin/notification.go | 原 NotificationSink 别名保留，增加三个窄借用 provider。 |
+| internal/plugin/notification_channel.go、notification_channel_test.go | 四个本期 owner 复用的实例级状态：工厂只执行一次、发布前检查、部分结果清理、接纳/在途门禁、Stop 共享结果、未排空保留资源、取消绑定和幂等 release。无新注册器或工作队列。 |
+| internal/plugin/builtin/robot/plugin.go、sender.go、sender_test.go | 可替换机器人通道及 msgbot 默认适配；默认平台/大小写、飞书和钉钉签名、本次目标覆盖的本机 HTTP 夹具。 |
+| internal/plugin/builtin/mail/plugin.go、plugin_test.go | 邮件工厂仅由 Init 执行；host 门控；转换 news.MailMessage 至原 mail.Message；借用发送复制 To，关闭句柄仅由 owner 持有。 |
+| internal/plugin/builtin/sms/plugin.go、plugin_test.go | 短信工厂仅由 Init 执行；保留 aliyun 配置门控、逻辑模板与签名映射；冻结配置并复制每次 params。 |
+| internal/plugin/builtin/notification/plugin.go、drain.go、plugin_test.go | 验证启用配置与实际 provider；构造唯一注入式通知器；Warn/Notify 和 BindDrain 都经过同一 owner；不拥有通道清理权。 |
+
+默认日志、cmd/plugins.go、bootstrap、Core、原 mail/sms SDK 封装、全部配置和依赖文件均未改；以 baseline-sha256.json 与 scope-report.json 对照。服务及迁移入口仍使用旧 NewWithConfig，阶段 3 才切换，运行时没有同时启用两组实例。旧构造的错误诊断回调仍保留；无原始 SDK 报错/目标负载的诊断保证限于本阶段新增注入式路径。
+
+### 18.4 实际命令、环境和结果
+
+本阶段所有 Go 命令使用已安装的 Go 1.27.3、GOTOOLCHAIN=local、GOPROXY=off；workspace 使用项目 go.work，locked 使用 GOWORK=off。未安装工具或下载依赖。普通测试显式禁用自动 vet：
+
+```text
+# 改前基线（仅现有通道与 plugin 包）
+/usr/local/bin/go test -vet=off -json -count=1 -timeout=5m ./internal/pkg/news ./internal/pkg/mail ./internal/pkg/sms ./internal/plugin/...
+# 最终普通测试（加入原日志使用方所在的 bootstrap/cmd 回归）
+/usr/local/bin/go test -vet=off -json -count=1 -timeout=5m ./internal/pkg/news ./internal/pkg/mail ./internal/pkg/sms ./internal/plugin/... ./internal/bootstrap ./cmd
+# 相同范围构建
+/usr/local/bin/go build ./internal/pkg/news ./internal/pkg/mail ./internal/pkg/sms ./internal/plugin/... ./internal/bootstrap ./cmd
+```
+
+两种环境分别执行；同标签 .json 保存完整命令、cwd、环境、UTC 起止时间、exit 与计数，同标签 .log 为原始输出。下表为 UTC 时间，日期均为 2026-10-22（本地 Asia/Taipei 加 8 小时）。
+
+| 原始标签 | UTC 开始 → 结束 | 真实结果 |
+|---|---|---|
+| baseline-workspace | 2026-10-22T12:32:56.898896+00:00 → 2026-10-22T12:33:31.573790+00:00 | exit 0；10 包、251 项 pass，0 fail/skip |
+| baseline-locked | 2026-10-22T12:32:56.898785+00:00 → 2026-10-22T12:33:21.763025+00:00 | exit 0；10 包、251 项 pass，0 fail/skip |
+| after-workspace | 2026-10-22T12:36:47.337845+00:00 → 2026-10-22T12:37:18.077970+00:00 | exit 1；notification 测试编译失败（未使用导入）；不能作通过证据 |
+| after-locked | 2026-10-22T12:36:47.337755+00:00 → 2026-10-22T12:37:17.214176+00:00 | exit 1；notification 测试编译失败（未使用导入）；不能作通过证据 |
+| final-acceptance-workspace | 2026-10-22T12:40:13.425133+00:00 → 2026-10-22T12:41:10.709864+00:00 | exit 0；16 包、600 项 pass，0 fail/skip |
+| final-acceptance-locked | 2026-10-22T12:40:13.425066+00:00 → 2026-10-22T12:41:14.483737+00:00 | exit 0；16 包、600 项 pass，0 fail/skip |
+| final-build-workspace | 2026-10-22T12:40:31.288880+00:00 → 2026-10-22T12:40:38.097459+00:00 | exit 0 |
+| final-build-locked | 2026-10-22T12:40:31.117669+00:00 → 2026-10-22T12:40:37.604171+00:00 | exit 0 |
+
+中间 final-* 与 accepted-tests-* 结果也保留在证据目录；最后恢复计划要求的 stringx 后，以 final-acceptance-* 和 final-build-* 为交付依据。基线和最终测试包集合不同，不能将 251→600 解释为全部新增测试数量。新增机器人 HTTP 用例使用本机进程内测试服务和注入客户端，不调用真实供应商。600 项计数包括测试和子测试，不是 600 条外部请求。
+
+本次没有执行 lint、脚本 lint、vet、modern、任何 race 或覆盖率门禁，没有运行 make check。它们均为“按用户指令未执行”，不能记为通过。普通并发屏障测试不替代 race 检测；全文和语法审阅不替代 lint/modern。OpenSpec 格式校验单独记录，其成功不代表运行行为验证。
+
+### 18.5 逐步验收与 G/A 边界
+
+| 步骤 / 场景 | 本阶段实际证据 | 结论与范围 |
+|---|---|---|
+| 2.1；A01/A02/A04 | TestNotificationRegistryCompositionAndOwnership、TestDisabledChannelFactoriesAreNotCalled、TestDefaultChannelsConstructWithoutSending、TestNotificationRejectsConfiguredMissingAndTypedNilProviders | 构造/注册零工厂调用；三通道分别可替换，初始化不发送；禁用零构造，启用缺失/typed nil 拒绝；纯日志真实入口仍待阶段 3。 |
+| 2.1；A08 | TestRegistryRollsBackPartialFactoryAndUnstartedChannels、TestNotificationChannelPartialFactoryResults、TestNotificationChannelLateFactoryResultIsCleaned | 三通道回滚、部分结果/清理错误、迟到取消及工厂结果收回均通过；不依赖 logging.Init。 |
+| 2.2；A03/A05 | TestSenderPreservesPlatformSigningAndPerCallTarget、TestInjectedNotifierEmptyTargetAndMissingCapability | 默认/大小写平台、飞书/钉钉签名及逐次目标输入通过；空默认 URL 零机器人调用，显式 URL 仍发送，其他通道继续。 |
+| 2.2；A06 | TestInjectedNotifierMessagesAndSnapshots、TestChannelFactoryConfigurationIsCopied、两个 BorrowedView 测试及既有 mail/sms 测试 | 标题、主题、Text、逻辑模板、env、配置快照和逐调用参数复制通过；签名回落继续由原 SMS 封装负责。 |
+| 2.2；A07/A18 | TestInjectedNotifierFailureAndPanicIsolation、TestInjectedNotifierIndependentTenSecondBudgets、TestInjectedNotifierCancellationDoesNotInvokeSenders | 单通道错误/panic 不阻断后续；每次独立 10 秒（假时钟合计 40 秒，不是性能实测）；取消零新发送；新诊断不含错误原文或目标负载。 |
+| 2.3；A09/A10 的组件部分 | TestNotificationRegistryCompositionAndOwnership、TestNotificationDrainCancellationAndLateCallbacks | 仿日志 owner 先停止，组合停止后旧回调零后端调用；这不是实际 logger SDK Sync 的后台轨迹，真实接线留阶段 3。 |
+| 2.3；A12/A13 | TestNotificationChannelStopWaitsForActiveSend、TestNotificationChannelConcurrentStopSharesCleanup、TestNotificationChannelUncooperativeSendRetainsResource、TestCompositeAndChannelKeepNonCooperatingResources | 屏障下先关接纳再取消/等待，一次清理；不合作发送导致未排空错误且零资源关闭；测试主动释放夹具并等待退出。race 尚未执行。 |
+| 2.3；A14 | TestNotificationChannelDrainReleaseAndInitContext、TestNotificationDrainCancellationAndLateCallbacks | Init context 结束不取消运行期；release 重复/并发安全用例通过；已过期 drain 立即拒绝新发送，旧绑定不取消另一实例。未声称 race 已证实。 |
+| 2.4；G2/G3/G4/G5/G6/G7/G9 | 上述组件用例、双环境 build、各 600 项普通测试，原日志调用方回归 | 仅本阶段组件及原调用方范围通过；G3 的默认依赖接线、G5 的实际 SDK 迟到回调与 G9 的完整门禁仍未完成。 |
+| G1/G8；A15/A16/A17 新接线部分 | 未实施 | 默认日志/两入口接线及存活 worker 路径留阶段 3，原有日志回归不等于新接线验收。 |
+| A19/A20、容量与发布 | 未执行 | 反证变体留阶段 5；无真实供应商目标或发送授权，无生产性能、送达或发布准入结论。 |
+
+2.1–2.3 实现完成；2.4 在本次获准范围内完成。受控门禁未执行是明确记录的验收缺口；不得将组件本地通过宣称为整个通知方案或生产准入完成。后续仍严格停在阶段 2，等待用户另行授权阶段 3。
+
+### 18.6 回审、错误记录与交付
+
+- 通过 gopls references -d 实际追踪 Notifier.Warn，exit0；references-warn.log 显示现有生产使用方仍为 logging/options.go 的 Send/SendTo 适配，签名无需改动；测试和 ErrRecord 也同步回归。查询范围为当前模块、darwin/amd64、默认构建及 workspace，不声称覆盖其他平台、标签或仓库外调用方。
+- 实际回读全部新增生产文件及修改函数，核对 Factory→Init→protected sender→WarnContext→Stop→cleanup 路径和每个错误分支；不借阶段 2 修改注册器、默认日志或入口。
+- ERR-20261022-076 记录 SDK 文件名猜测失败；077 记录 client/Transport 事实更正；078 记录首轮测试无用导入导致编译失败；079 记录恢复原计划 stringx 拼接。均依据实际输出处理并关闭，原失败日志保留。
+- 本地 rollback 未演练；保留独立快照及原清单，撤回本期 16 份 Go 文件差异和对应阶段记录即可回到阶段前状态，不需要数据/配置迁移。未执行 reset、clean、提交、发布、容器或真实通知。
+- 合规记录：仅授权目录与当前阶段；context/超时、错误聚合、资源拥有权、并发屏障及消息兼容有上述普通测试证据；包导入、依赖版本和配置边界已核对。Go modern/lint、race、覆盖率未执行，不能勾选通过；未知生产容量及外部送达保持未验证。
+
+最终交付回读：OpenSpec 严格格式校验于 2026-10-22T12:43:08.460068+00:00 至 2026-10-22T12:43:09.313699+00:00 执行，exit0，1 个 change 有效、0 failed；命令及原文保存为 openspec-validation.json/.log。该 change 的 1.1–2.4 共 8 项完成，3.1–5.4 共 11 项仍待实施；未归档或合并规范。最终 scope-report.json 记录 16 份 Go 文件（2 份已有、14 份新增）的 SHA-256，stage2-code.diff 保存完整代码差异；基线中的阶段 3 入口、配置与依赖散列均未变化。
+
+## 19. 阶段 3–5 本轮执行记录
+
+### 19.1 执行前核对与落盘计划（已读取，尚未改代码）
+
+- 最新授权：完成剩余阶段 3–5，原编号和范围不变。已实际回读全局规则、错误记录（076–079 均已关闭）、原计划和源码；应用 harness-implement、Go 现代写法/生命周期/测试/可观测性与 backend-acceptance。
+- 独立基线：`/var/folders/_w/xwv4k3t12vn9054592gsk5200000gn/T/gin-api-notification-final-niflew30`，包含本轮开始文件 SHA256、相关原件和原脏工作树差异；阶段 2 的未提交成果保留。依赖版本与解析来源沿用第 2.2 节，不升级 SDK。
+- 3.1：修改 logging/plugin.go 与 options.go，新增可选 NotificationSink；初始化边界拒绝 typed nil；无通知时不传 Messager；关闭接纳后把实际清理 ctx 绑定到通知，Sync 结束释放绑定。partial Init、Drain、Stop 沿用同一 owner，不新增后台包装协程。测试覆盖纯日志、目标透传、绑定取消/释放和失败清理。
+- 3.2：cmd/plugins.go 共用四个通知插件的注册辅助函数；默认 server/migration 都接入 config→channels→notification→logging；原六个基础能力不变，迁移不引入 Redis/cache/HTTP。补 cmd/plugins_test.go 和必要的 notification_plugins_test.go 组合测试。
+- 3.3：news.go/delivery.go 去掉 NewWithConfig、旧厂商工厂及临时邮件适配；统一使用本项目 MailMessage/WebhookSender/SMSSender。迁移 news_test.go、alert_channels_test.go 与 logging/options_test.go，保留 SendPicMsg 和所有仍适用的消息/失败契约。
+- 3.4：新增 logging/notification_test.go、bootstrap/notification_test.go 等定向契约证据，覆盖默认拓扑、App/Runtime 停止与回滚、存活 worker 只 Drain、真实 SDK 排空和迟到回调。测试仅 fake/本机回环，普通测试显式 -vet=off。
+- 4.1–4.3：仅改 config/env.yml.example、config/README.md、config/types.go 通知字段注释以及 docs/observability.md、docs/architecture.md 对应内容；配置字段、值、真实配置不变；以代码逐项回读，记录说明，不为纯文字步骤另跑测试。
+- 5.1–5.4：完整相关普通测试、两环境全仓 build、少量关键契约隔离 mutation 反证；用隔离副本恢复 3.1–3.3 基线，复验旧隐式构造路径；记录 G/A 矩阵、风险及真实供应商/容量缺口。性能只比较同机相同基准，不编造生产容量。全部功能完成后询问受控门禁许可；未许可保持未执行，不宣称完整上线准入。
+- 失败处理和停止条件：遵循第 13/14 节；本期引入失败在范围内修复并重跑相关普通测试；连续三轮无进展停止。所有权、消息兼容或配置行为须扩大范围才可修复时先说明；无生产/凭据/容器动作。交付物为源码、定向测试、说明、原计划更新及独立原始证据。
+
+### 19.2 阶段 3 实际实现与验收
+
+- 3.1：logging 通过 Options.Notification 借用通知；无通知时不设置 SDK Messager；排空与部分构造失败统一使用原 owner，BindDrain 收到实际清理 context，release 幂等；不新增热路径反射/队列/后台包装。
+- 3.2：server/migration 共用 registerNotificationLogging，显式注册三通道→notification→logging，基础 PluginSet 不变；迁移仍无 Redis/cache/HTTP。缺失/循环依赖和重复 owner 在构造前被拒绝。
+- 3.3：删除 news.NewWithConfig、webhookSenderFor 与临时邮件适配；news 不再导入 mail/sms/config/msgbot 厂商构造；SendPicMsg 保留，消息格式、签名、每次 10 秒及 64 条队列有用例。旧测试按新职责迁移，未保留双活路径。
+- 3.4：真实日志队列与默认机器人回环、Runtime Init/Start 回滚、NewApp 中间件失败取消/关闭错误、App 错误退出、存活 worker 只 Drain、SDK 迟到回调、脱敏后备诊断全部实际运行。workspace SDK 提前返回、锁定 SDK 等待回调分别由同一用例观察，不能将其视为相同关闭能力。
+
+### 19.3 阶段 4 实际交付
+
+已回读 config/env.yml.example、config/README.md、config/types.go、docs/architecture.md、docs/observability.md：客户端开关与告警目标分开，列明默认值/约束/关系；提供 Open 替换及纯日志示例，写清取消和资源保留限制。configuration-readback.json 核对例子非注释行、配置 Go 非注释内容均不变；go.mod/go.sum/go.work/go.work.sum 字节不变。未读取或改写真实运行配置。该纯文字步骤未单独启动测试。
+
+### 19.4 阶段 5 已取得的原始证据
+
+证据根目录为 19.1 的独立目录。所有普通测试均为本机 /usr/local/bin/go（go1.27.3 darwin/amd64），GOTOOLCHAIN=local、GOPROXY=off；命令、cwd、GOWORK、开始/结束 UTC、exit 均存各同名 .json，完整输出存 .log：
+
+| 证据 | 命令范围 | 真实结果 |
+|---|---|---|
+| baseline-workspace / baseline-locked | 17 个相关包，go test -vet=off -json -count=1 -timeout=5m | 双环境各 617 项 pass，0 fail/skip |
+| final-tests-workspace / final-tests-locked | 同上，news/mail/sms/log/plugin/.../bootstrap/cmd | 双环境各 635 项 pass，0 fail/skip，exit0 |
+| final-build-workspace / final-build-locked | go build ./... | 双环境 exit0 |
+| rollback-workspace / rollback-locked | -overlay rollback-overlay.json 恢复 13 份 Go 文件的阶段前内容/不存在状态，同一相关普通测试 | 双环境各 617 项 pass，0 fail/skip；原工作树未撤回 |
+| counterexample-drop-explicit-target | 隔离丢弃 News.SendTo 的 URL | 测试 exit1，目标透传断言 callbacks 失败；无编译失败 |
+| counterexample-detach-drain-budget | 隔离错误改用 WithoutCancel | 测试 exit1，cleanup context was replaced；无编译失败 |
+| counterexample-skip-active-drain | 隔离跳过 active 等待 | 测试 exit1，Stop=<nil> 错误提前关闭断言命中；测试随后也检测到未释放夹具 goroutine；无编译失败 |
+
+反证全部只在 Go overlay 生效，当前源文件未改成错误实现；counterexamples.json 对 JSON Output 解码后核对断言原因。回退验证的是接线前的阶段 2 基线，恢复日志/两个入口/旧隐式工厂这一组行为；不涉及数据库、配置数据、Git 历史或部署回退。
+
+受控检查仍为**未执行**：lint、脚本 lint、vet、modern、race、覆盖率；全部功能完成后单独询问。A20 真实供应商、生产容量、退出硬时限/灰度均未验证，不宣称生产准入。
+
+### 19.5 受控检查单独授权（执行前记录）
+
+全部功能、配置说明、本地普通回归、构建和隔离回退完成后，已单独询问用户。用户明确回答“允许，运行以上全部检查（推荐）”，授权双环境 lint、脚本 lint、vet、modern、全量 race 与覆盖率门禁。此处之前的未执行记录是当时事实，不能改写成已执行。
+
+计划执行原 make check（含 scaffold 验证口径和完整 race 覆盖率）：workspace 与 GOWORK=off 分别执行，覆盖率输出写到独立证据目录，不覆盖旧 profile。已读取 Makefile 的 check 依赖、coverage、hook/入口自检脚本：不包含真实数据库、镜像拉取/构建或容器创建；不执行 release-check/check-restricted/test-integration。保留本机锁定 golangci-lint 2.14.0，临时 PATH 包装仅在 run 参数增加已核实官方 --allow-serial-runners，等待同机工具锁，不删除锁、不终止其他任务、不降低检查或替换退出码。单项失败保留原日志，修复本期引入问题后按实际影响复验。性能基准只量化现有日志微基准，不承诺生产容量。
+
+19.5 补救记录：首轮 make check 在包级变量传感器停止（exit2，原始日志保留），notification/plugin.go 中两处空赋值触发其 var _ 名称匹配。5.2 范围内消除该写法：直接 recover 保持诊断 panic 隔离；Warn 显式判定 Notify 错误并结束，诊断出口不重复。检查器、白名单、接口和资源协议不改；先重跑相关普通回归，再继续完整门禁。

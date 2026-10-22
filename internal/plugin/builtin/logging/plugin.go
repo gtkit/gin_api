@@ -10,6 +10,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/plugin"
 	"github.com/gtkit/logger/v2"
@@ -23,6 +24,8 @@ type Factory func(...logger.Option) (*logger.Logger, error)
 // Options defers configuration reads and instance construction to Init.
 type Options struct {
 	Configuration plugin.ConfigurationProvider
+	// Notification is borrowed. Nil selects logging without outbound alerts.
+	Notification  plugin.NotificationSink
 	MainFactory   Factory
 	AccessFactory Factory
 }
@@ -115,6 +118,12 @@ func (p *Plugin) Init(ctx context.Context) error {
 			p.initErr = fmt.Errorf("read logging config: %w", core.ErrPluginContractViolation)
 			return
 		}
+		if p.options.Notification != nil {
+			if err := news.ValidateSender(p.options.Notification); err != nil {
+				p.initErr = fmt.Errorf("logging notification: %w", err)
+				return
+			}
+		}
 		p.initErr = p.initialize(ctx, cfg)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			p.initErr = errors.Join(p.initErr, ctxErr, p.drainPartial(ctx))
@@ -125,10 +134,7 @@ func (p *Plugin) Init(ctx context.Context) error {
 
 func (p *Plugin) initialize(ctx context.Context, cfg *config.Config) error {
 	p.previous = logger.Default()
-	opts, err := mainOptions(cfg)
-	if err != nil {
-		return err
-	}
+	opts := mainOptions(cfg, p.options.Notification)
 	main, err := p.options.MainFactory(opts...)
 	p.main = main
 	if err != nil {
@@ -285,6 +291,12 @@ func (p *Plugin) closeOwned(ctx context.Context) error {
 	p.gate.Unlock()
 	if p.release != nil {
 		p.release()
+	}
+	// Bind the actual cleanup budget before waiting for writes or the SDK queue.
+	// The borrowed capability owns cancellation, never resource closure here.
+	if p.options.Notification != nil && (p.main != nil || p.access != nil) {
+		release := p.options.Notification.BindDrain(ctx)
+		defer release()
 	}
 	p.writes.Wait()
 	if p.access != nil {

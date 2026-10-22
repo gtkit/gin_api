@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/gtkit/gin-api/internal/pkg/news"
@@ -16,12 +15,7 @@ const (
 	alertQueueLimit      = 64
 )
 
-func mainOptions(cfg *config.Config) ([]logger.Option, error) {
-	notifier, err := news.NewWithConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("init alert notifier: %w", err)
-	}
-
+func mainOptions(cfg *config.Config, notifier news.AlertSink) []logger.Option {
 	opts := []logger.Option{
 		logger.WithPath(resolvePath(cfg.Log.Path, defaultLogPath)),
 		// 相对路径锚定到稳定写根，日志落盘位置不依赖进程 cwd（锚定机制在库内）。
@@ -32,8 +26,9 @@ func mainOptions(cfg *config.Config) ([]logger.Option, error) {
 		logger.WithDivision("daily"),
 		logger.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
 		logger.WithCompress(cfg.Log.Compress != 0),
-		logger.WithMessager(&News{notifier: notifier}),
-		logger.WithMessagerQueueSize(alertQueueLimit),
+	}
+	if notifier != nil {
+		opts = append(opts, logger.WithMessager(&News{notifier: notifier}), logger.WithMessagerQueueSize(alertQueueLimit))
 	}
 	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
 	// 未配置时不透传，保留库默认的保留策略。
@@ -44,7 +39,7 @@ func mainOptions(cfg *config.Config) ([]logger.Option, error) {
 		opts = append(opts, logger.WithMaxBackups(cfg.Log.MaxBackups))
 	}
 
-	return opts, nil
+	return opts
 }
 
 func accessOptions(cfg *config.Config) []logger.Option {
@@ -70,9 +65,9 @@ func resolvePath(path, fallback string) string {
 	return path
 }
 
-// News 把 news.Notifier 适配成 loggerv2 的 Messager。
+// News forwards SDK callbacks to a borrowed alert sink, including explicit URLs.
 type News struct {
-	notifier *news.Notifier
+	notifier news.AlertSink
 }
 
 func (n *News) Send(msg string)        { n.notifier.Warn("", msg) }

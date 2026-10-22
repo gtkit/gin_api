@@ -12,7 +12,7 @@
 cmd/                         → CLI 入口、默认插件选择和显式注册
 internal/
   core/                      → 编译期插件契约与依赖注册器，不持有具体基础设施实现
-  plugin/                    → 六类能力接口；builtin/ 下为内置默认实现
+  plugin/                    → 基础能力与通知契约；builtin/ 下为内置默认实现
   appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
@@ -45,16 +45,34 @@ pkg/                         → 对外可复用包（可被仓库外项目 impo
 在初始化前校验重复名称、缺失依赖和循环依赖，按稳定拓扑顺序初始化/启动，按逆序停止并聚合
 错误。回调不在注册器锁内执行，重复停止是幂等的。
 
-`internal/plugin` 定义配置、日志、数据库、Redis、响应缓存和 HTTP 中间件六类能力，
+`internal/plugin` 定义原有六类基础能力及可选通知契约；`PluginSet` 的六个必填字段保持不变，
 `internal/plugin/builtin/` 提供默认实现。`cmd/plugins.go` 是默认选择的组合根：只构造和注册，
 配置读取、连接和日志实例创建都在 `Init`。Bootstrap 必须收到显式 registrar，消费具名能力，
 不回落到默认实现。替换只修改业务入口注册，不修改 Core；不使用 Go `plugin` 包、动态 `.so`
 或运行期发现。
 
-默认依赖图为 config→logging→mysql/redis，cache 依赖 config/logging/redis，HTTP 中间件依赖
-config/logging。配置在 Init 才加载，因此图静态声明 cache→redis（已获准）；内存/禁用缓存
-仍不访问 Redis，required/optional Redis 规则按启用功能推导。迁移只注册 config/logging/mysql，
-选择迁移凭据和 OpenMigrationDB，保留 DDL 的命令超时。doctor/JWT/module 保持各自最小装配。
+默认通知依赖图（箭头从被依赖者指向使用方）为：
+
+```mermaid
+flowchart LR
+    config --> robot[notification.robot]
+    config --> mail[notification.mail]
+    config --> sms[notification.sms]
+    robot --> notification
+    mail --> notification
+    sms --> notification
+    notification --> logging
+    config --> logging
+    logging --> mysql
+    logging --> redis
+    redis --> cache
+    logging --> cache
+    logging --> middleware[http-middleware]
+```
+
+MySQL、Redis、cache 和 HTTP 中间件仍直接依赖 config。cache 的静态 Redis 边不意味着内存/禁用缓存会访问 Redis，required/optional 规则按实际功能推导。migration 同样注册三个通知通道、组合、logging 和 MySQL，使用迁移凭据与 DDL 命令超时，不注册 Redis/cache/HTTP。doctor/JWT/module 保持最小装配。
+
+`news.New` 只组合借用的发送接口，默认客户端由各通道插件 Init 构造和拥有；不再存在 `news.NewWithConfig` 隐式工厂。日志只借用 `NotificationSink`。纯日志可只选择 config/logging。可用现有通道插件的 Open 替换一个 sender 并复用其接纳/取消/清理保护，不必改其他通道或 Core；配置白名单仍为原有供应商。具体例子见 [通知插件与替换方式](observability.md#通知插件与替换方式)。
 
 插件独占自己创建的连接和缓存 Store；`platform/data.Resources` 只保存不带 `Close` 权限的
 借用视图。HTTP 链由所选 builder 在最终 metrics 就绪后构建，保留外层 Recovery 到请求体限制
@@ -62,8 +80,8 @@ config/logging。配置在 Init 才加载，因此图静态声明 cache→redis�
 
 插件回滚、停止总预算各 30 秒。Runtime.Close 保留父取消和更短 deadline；App/命令只在必要
 收尾边界建立独立预算并接第二信号。模块/扩展失败与插件回滚共享一个 30 秒截止时间。
-HTTP/worker 先分阶段退出，再逆序停止插件；日志最后由同一个 owner 排空。仍存活的 worker
-使共享插件停止被跳过，返回 ErrWorkerNotExited，仅尝试该 logger owner 的独立 Drain。
+HTTP/worker 先分阶段退出，再逆序停止资源插件；随后 logging 排空、notification 关闭接纳、各通道释放资源。仍存活的 worker
+使共享插件停止被跳过，返回 ErrWorkerNotExited，仅尝试该 logger owner 的独立 Drain；不越权关闭通知及通道。
 
 context 需要实现合作：默认日志 SDK 的 void Sync、部分无 context 的 Close 无法硬中断。
 不以可遗弃 goroutine 隐藏未完成关闭，不把预算或 race 测试解释为任意插件隔离或永不 OOM。
