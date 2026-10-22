@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // requestIDPattern 是定长小写十六进制的判据，长度直接取自导出的契约常量——
@@ -112,7 +112,7 @@ func TestRequestIDReachesGoContext(t *testing.T) {
 	engine := gin.New()
 	engine.Use(mw)
 	engine.GET("/probe", func(c *gin.Context) {
-		fromGoCtx = logger.RequestIDFromContext(c.Request.Context())
+		fromGoCtx = applog.RequestIDFromContext(c.Request.Context())
 		c.Status(http.StatusOK)
 	})
 
@@ -144,9 +144,19 @@ func TestRequestIDGeneratorPrefixIsPerProcess(t *testing.T) {
 		t.Fatalf("NewRequestIDGenerator: %v", err)
 	}
 
-	a1, _ := genA.Next()
-	a2, _ := genA.Next()
-	b1, _ := genB.Next()
+	a1, err := genA.Next()
+
+	if err != nil {
+		t.Fatalf("genA.Next: %v", err)
+	}
+	a2, err := genA.Next()
+	if err != nil {
+		t.Fatalf("genA.Next: %v", err)
+	}
+	b1, err := genB.Next()
+	if err != nil {
+		t.Fatalf("genB.Next: %v", err)
+	}
 
 	if a1[:32] != a2[:32] {
 		t.Fatal("the process prefix changed between two ids from the same generator")

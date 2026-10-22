@@ -75,23 +75,13 @@ func (b *KeyBuilder) Build(
 		pattern = notFoundRouteKey
 	}
 
-	var sb strings.Builder
-	sb.WriteString(b.prefix)
-	sb.WriteString(":rl:")
-	sb.WriteString(policy.ID)
-	sb.WriteByte(':')
-	sb.WriteString(method)
-	sb.WriteByte(':')
-	sb.WriteString(pattern)
-	sb.WriteByte(':')
-	sb.WriteString(subject.Scope.String())
+	key := b.prefix + ":rl:" + policy.ID + ":" + method + ":" + pattern + ":" + subject.Scope.String()
 
 	if subject.Scope != ScopeGlobal {
-		sb.WriteByte(':')
-		sb.WriteString(b.hash(subject.Value))
+		key += ":" + b.hash(subject.Value)
 	}
 
-	return sb.String()
+	return key
 }
 
 // hash 用 HMAC-SHA256 派生主体标识，取前 16 字节 hex。
@@ -100,7 +90,11 @@ func (b *KeyBuilder) Build(
 // hex 会让每个 Redis 键平白多出 32 字节——在百万级键规模下不是小数目。
 func (b *KeyBuilder) hash(value string) string {
 	mac := hmac.New(sha256.New, b.secret)
-	mac.Write([]byte(value))
+	if _, err := mac.Write([]byte(value)); err != nil {
+		// The concrete standard-library HMAC always returns a nil error.
+		// A violated internal invariant must not produce an empty/unkeyed key.
+		panic(fmt.Errorf("rate limit HMAC invariant: %w", err))
+	}
 	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 

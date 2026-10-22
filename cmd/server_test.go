@@ -15,7 +15,9 @@ func TestPrintBannerLayout(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	printBanner(&out)
+	if err := printBanner(&out); err != nil {
+		t.Fatal(err)
+	}
 	got := out.String()
 
 	artLines := strings.Split(strings.Trim(_UI, "\n"), "\n")

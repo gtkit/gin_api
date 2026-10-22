@@ -17,7 +17,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/sony/gobreaker/v2"
 )
 
@@ -155,7 +155,7 @@ func (r *Registry) settings(cfg Config, name string) gobreaker.Settings {
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			// 状态变更是低基数事件，每次都记：它是"下游为什么突然全部快速失败/
 			// 恢复"的第一手线索。
-			logger.Warnf("circuit breaker %q state changed: %s -> %s", name, from, to)
+			applog.Warnf("circuit breaker %q state changed: %s -> %s", name, from, to)
 		},
 	}
 }

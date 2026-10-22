@@ -12,13 +12,13 @@ import (
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/plugin"
-	sdk "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 // Factory is the instance constructor used only by this default implementation.
-type Factory func(...sdk.Option) (*sdk.Logger, error)
+type Factory func(...logger.Option) (*logger.Logger, error)
 
 // Options defers configuration reads and instance construction to Init.
 type Options struct {
@@ -36,8 +36,8 @@ type Plugin struct {
 	initOnce     sync.Once
 	initErr      error
 	stopped      bool
-	main, access *sdk.Logger
-	previous     *sdk.Logger
+	main, access *logger.Logger
+	previous     *logger.Logger
 	release      func()
 	closeOnce    sync.Once
 	closeErr     error
@@ -55,9 +55,9 @@ type fieldBuffer struct{ fields [pooledFields]zap.Field }
 // flag for level queries; gate serializes the authoritative check and writes.Add
 // with closing, so Stop cannot begin Wait while another Add is still possible.
 type logSnapshot struct {
-	main                 *sdk.Logger
-	mainCallers          [4]*sdk.Logger
-	accessForward        *sdk.Logger
+	main                 *logger.Logger
+	mainCallers          [4]*logger.Logger
+	accessForward        *logger.Logger
 	mainCore, accessCore zapcore.Core
 	closing              atomic.Bool
 }
@@ -80,10 +80,10 @@ var _ applog.LevelEnabler = (*Plugin)(nil)
 // New selects factories without creating resources or reading configuration.
 func New(options Options) *Plugin {
 	if options.MainFactory == nil {
-		options.MainFactory = sdk.New
+		options.MainFactory = logger.New
 	}
 	if options.AccessFactory == nil {
-		options.AccessFactory = sdk.New
+		options.AccessFactory = logger.New
 	}
 	return &Plugin{options: options}
 }
@@ -124,7 +124,7 @@ func (p *Plugin) Init(ctx context.Context) error {
 }
 
 func (p *Plugin) initialize(ctx context.Context, cfg *config.Config) error {
-	p.previous = sdk.Default()
+	p.previous = logger.Default()
 	opts, err := mainOptions(cfg)
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func (p *Plugin) initialize(ctx context.Context, cfg *config.Config) error {
 		return errors.Join(err, p.drainPartial(ctx))
 	}
 	p.release = release
-	sdk.SetDefault(main)
+	logger.SetDefault(main)
 	return nil
 }
 
@@ -206,8 +206,8 @@ func (p *Plugin) Log(ctx context.Context, entry applog.LogEntry) {
 	var fields []zap.Field
 	if count := len(entry.Fields); count > 0 {
 		if count <= pooledFields {
-			buffer, _ := p.fields.Get().(*fieldBuffer)
-			if buffer == nil {
+			buffer, ok := p.fields.Get().(*fieldBuffer)
+			if !ok || buffer == nil {
 				buffer = new(fieldBuffer)
 			}
 			defer p.releaseFields(buffer)
@@ -222,7 +222,7 @@ func (p *Plugin) Log(ctx context.Context, entry applog.LogEntry) {
 		}
 	}
 	if id := applog.RequestIDFromContext(ctx); id != "" {
-		ctx = sdk.ContextWithRequestID(ctx, id)
+		ctx = logger.ContextWithRequestID(ctx, id)
 	}
 	message := entry.Text()
 	if entry.Alert {
@@ -293,8 +293,8 @@ func (p *Plugin) closeOwned(ctx context.Context) error {
 	if p.main != nil {
 		p.main.Sync()
 	}
-	if p.main != nil && sdk.Default() == p.main {
-		sdk.SetDefault(p.previous)
+	if p.main != nil && logger.Default() == p.main {
+		logger.SetDefault(p.previous)
 	}
 	return ctx.Err()
 }

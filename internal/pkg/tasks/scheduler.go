@@ -188,7 +188,7 @@ func (s *Scheduler) Name() string { return s.name }
 // spec 的合法性用一个临时实例验证后立即关闭。spec 写错（"0 3 * * *" 少写一段）
 // 如果留到运行期才发现，表现是这个任务**永远不触发**，
 // 而没有任何人在等一个不存在的信号。
-func (s *Scheduler) Prepare(ctx context.Context) error {
+func (s *Scheduler) Prepare(ctx context.Context) (err error) {
 	// 只 PING 不能证明当前 ACL 能执行脚本，也不能证明锁键与 fence 键
 	// 在同一个集群 slot。用随机探测键真跑一遍抢锁/续租/释放。
 	if err := singleton.Probe(ctx, s.client, schedulerLeasePrefix); err != nil {
@@ -204,7 +204,9 @@ func (s *Scheduler) Prepare(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(
 			context.WithoutCancel(ctx), s.cfg.EffectiveShutdownTimeout())
 		defer cancel()
-		_ = probe.Shutdown(shutdownCtx)
+		if shutdownErr := probe.Shutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(err, fmt.Errorf("tasks: close scheduler probe: %w", shutdownErr))
+		}
 	}()
 
 	if err := s.register(ctx, probe); err != nil {
@@ -339,8 +341,11 @@ func (s *Scheduler) leadOnce(ctx context.Context) (acquired bool, err error) {
 		shutdownCtx, shutdownCancel := context.WithTimeout(
 			context.WithoutCancel(ctx), s.cfg.EffectiveShutdownTimeout())
 		defer shutdownCancel()
-		_ = inner.Shutdown(shutdownCtx)
-		return true, regErr
+		shutdownErr := inner.Shutdown(shutdownCtx)
+		if shutdownErr != nil {
+			shutdownErr = fmt.Errorf("close unregistered scheduler: %w", shutdownErr)
+		}
+		return true, errors.Join(regErr, shutdownErr)
 	}
 
 	// Run 在 leadCtx 取消后触发关闭并返回。取消来自两处：进程关停，或续租失败。

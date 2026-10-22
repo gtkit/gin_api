@@ -46,7 +46,11 @@ func TestPanicRequestObservability(t *testing.T) {
 			})
 			reader := sdkmetric.NewManualReader()
 			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-			t.Cleanup(func() { _ = provider.Shutdown(context.WithoutCancel(t.Context())) })
+			t.Cleanup(func() {
+				if err := provider.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+					t.Errorf("provider.Shutdown(context.WithoutCancel(t.Context())): %v", err)
+				}
+			})
 			recorder, err := metrics.New(provider.Meter("panic-contract"))
 			if err != nil {
 				t.Fatal(err)
@@ -81,7 +85,11 @@ func TestPanicRequestObservability(t *testing.T) {
 					if m.Name != "http.server.requests" {
 						continue
 					}
-					for _, point := range m.Data.(metricdata.Sum[int64]).DataPoints {
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					if !ok {
+						t.Fatalf("panic metric data type %T", m.Data)
+					}
+					for _, point := range sum.DataPoints {
 						status, _ := point.Attributes.Value("http.response.status_code")
 						if status.AsInt64() != int64(tc.want) {
 							t.Fatalf("metric status = %v", status)
@@ -106,8 +114,8 @@ func TestPanicRequestObservability(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				logs.Write(data)
-				return nil
+				_, err = logs.Write(data)
+				return err
 			}); err != nil {
 				t.Fatal(err)
 			}

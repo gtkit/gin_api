@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	golimit "github.com/gtkit/golimit/v2"
+	"github.com/gtkit/golimit/v2"
 )
 
 // LocalBackend 是进程内令牌桶。

@@ -491,11 +491,13 @@ func TestInflightLoadsAreBounded(t *testing.T) {
 	started := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		_, _ = c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
+		if _, err := c.GetOrLoad(context.Background(), "occupier", func(context.Context) (string, error) {
 			close(started)
 			<-release
 			return "a", nil
-		})
+		}); err != nil {
+			t.Errorf("occupier load: %v", err)
+		}
 	})
 	<-started
 
@@ -547,11 +549,13 @@ func TestInvalidateFencesInFlightLoad(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
+		if _, err := c.GetOrLoad(context.Background(), "k", func(context.Context) (string, error) {
 			close(loading)
 			<-release
 			return "stale", nil // 早于更新发出、晚于更新返回的旧值
-		})
+		}); err != nil {
+			t.Errorf("in-flight stale load: %v", err)
+		}
 	}()
 
 	<-loading

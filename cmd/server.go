@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"io"
 	"strings"
 
@@ -78,7 +77,7 @@ var bannerPalette = []string{
 // 变了，线会跟着变，不会出现"线比字长一截"这种一眼可见的错位。
 // 宽度按 rune 计：art 全部由单元格宽的制表符与块字符组成，len() 会按字节
 // 数算出三倍长度。
-func printBanner(w io.Writer) {
+func printBanner(w io.Writer) error {
 	lines := strings.Split(strings.Trim(_UI, "\n"), "\n")
 
 	width := 0
@@ -88,20 +87,13 @@ func printBanner(w io.Writer) {
 		}
 	}
 
-	var b strings.Builder
-	b.WriteByte('\n')
+	parts := []string{"\n"}
 	for i, ln := range lines {
-		b.WriteString(bannerPalette[i%len(bannerPalette)])
-		b.WriteString(ln)
-		b.WriteString(bannerReset)
-		b.WriteByte('\n')
+		parts = append(parts, bannerPalette[i%len(bannerPalette)], ln, bannerReset, "\n")
 	}
-	b.WriteString(bannerRule)
-	b.WriteString(strings.Repeat("─", width))
-	b.WriteString(bannerReset)
-	b.WriteString("\n\n")
-
-	fmt.Fprint(w, b.String())
+	parts = append(parts, bannerRule, strings.Repeat("─", width), bannerReset, "\n\n")
+	_, err := io.WriteString(w, strings.Join(parts, ""))
+	return err
 }
 
 func init() {
@@ -109,7 +101,7 @@ func init() {
 }
 
 // newServerCmd 构造 server 子命令——CLI 的主用途：启动 HTTP 服务与后台 worker。
-// 执行流程：bootstrap.NewApp 组装依赖（配置/DB/Redis/路由/worker）→ 打印启动 banner →
+// 执行流程：先检查启动banner写出 → bootstrap.NewApp组装配置/DB/Redis/路由/worker →
 // app.Run 阻塞运行直到进程退出。任一步失败经 commandError 附前缀返回。
 func newServerCmd(opts *rootOptions) *cobra.Command {
 	// 协调器来自进程唯一的信号监督者：信号在 NewApp 之前就可能到达，
@@ -128,6 +120,10 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 			// 上层取消（含 cobra 的 ExecuteContext）才能同时作用于资源建立与运行阶段。
 			ctx := cmd.Context()
 
+			if err := printBanner(cmd.OutOrStdout()); err != nil {
+				return commandError("write startup banner", err)
+			}
+
 			app, err := bootstrap.NewApp(ctx, bootstrap.Options{
 				Shutdown:        shutdown,
 				RegisterPlugins: registerServerPlugins,
@@ -145,7 +141,6 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 				}
 				return commandError("bootstrap app", err)
 			}
-			printBanner(cmd.OutOrStdout())
 
 			return commandError("run app", app.Run(ctx))
 		},

@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 	"errors"
-	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -229,7 +229,7 @@ func TestPluginRegistryLifecycleOrder(t *testing.T) {
 		"start:a", "start:b", "start:c",
 		"stop:c", "stop:b", "stop:a",
 	}
-	if !reflect.DeepEqual(events, want) {
+	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
@@ -257,7 +257,7 @@ func TestPluginRegistryInitFailureRollsBackCurrentAndCompleted(t *testing.T) {
 		t.Fatalf("Init error = %v, want init error", err)
 	}
 	want := []string{"init:a", "init:b", "stop:b", "stop:a"}
-	if !reflect.DeepEqual(events, want) {
+	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
@@ -285,7 +285,7 @@ func TestPluginRegistryStartFailureRollsBackCurrentAndStarted(t *testing.T) {
 		t.Fatalf("Start error = %v, want start error", err)
 	}
 	want := []string{"init:a", "init:b", "start:a", "start:b", "stop:b", "stop:a"}
-	if !reflect.DeepEqual(events, want) {
+	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }

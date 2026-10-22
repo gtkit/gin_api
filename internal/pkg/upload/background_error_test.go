@@ -129,7 +129,9 @@ func readAllLogs(t *testing.T, dir string) string {
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
-		sb.Write(b)
+		if _, err := sb.Write(b); err != nil {
+			t.Fatalf("collect log output: %v", err)
+		}
 	}
 	return sb.String()
 }

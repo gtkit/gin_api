@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
-
-	"golang.org/x/sync/errgroup"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 const (
@@ -144,7 +142,7 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		// fail-closed：未配置 checker 属装配错误，报"未就绪"而非"就绪"，
 		// 避免错误装配的实例仍被纳入流量。
 		if checker == nil {
-			logger.Warn("readiness checker not configured; reporting not ready")
+			applog.Warn("readiness checker not configured; reporting not ready")
 			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{Status: statusUnavailable})
 			return
 		}
@@ -237,15 +235,15 @@ func runDependencyChecks(
 	defer cancel()
 
 	outcomes := make([]depOutcome, len(deps))
-	group, groupCtx := errgroup.WithContext(ctx)
+	var group sync.WaitGroup
 
 	for i, dep := range deps {
-		group.Go(func() error {
+		group.Go(func() {
 			if dep.ping == nil {
 				outcomes[i] = depOutcome{name: dep.name, status: statusSkipped}
-				return nil
+				return
 			}
-			depCtx, cancelDep := boundedTimeout(groupCtx, readyDepTimeout)
+			depCtx, cancelDep := boundedTimeout(ctx, readyDepTimeout)
 			defer cancelDep()
 
 			err := dep.ping(depCtx)
@@ -266,12 +264,11 @@ func runDependencyChecks(
 					detail: truncateDepError(err), required: true, failed: true,
 				}
 			}
-			return nil
 		})
 	}
-	// 各子任务恒返回 nil：一个依赖失败不该取消其余依赖的检查——
+	// 一个依赖失败不取消其余依赖的检查——
 	// 那会让 readiness 的输出取决于哪个依赖先失败。
-	_ = group.Wait()
+	group.Wait()
 
 	slices.SortFunc(outcomes, func(a, b depOutcome) int { return cmp.Compare(a.name, b.name) })
 
@@ -341,7 +338,7 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 
 	if err == nil {
 		if st.lastCategory != "" {
-			logger.Info("readiness dependency recovered", logger.String("dependency", name))
+			applog.Info("readiness dependency recovered", applog.String("dependency", name))
 			st.lastCategory = ""
 			st.lastLoggedAt = time.Time{}
 		}
@@ -354,8 +351,8 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 		return
 	}
 
-	logger.Error("readiness dependency check failed",
-		logger.String("dependency", name), logger.Err(err))
+	applog.Error("readiness dependency check failed",
+		applog.String("dependency", name), applog.Err(err))
 	st.lastCategory = category
 	st.lastLoggedAt = now
 }

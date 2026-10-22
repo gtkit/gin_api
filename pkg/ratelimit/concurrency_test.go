@@ -13,7 +13,7 @@ import (
 //
 // 这正是主从切换、故障恢复与 SCRIPT FLUSH 之后的真实形态——
 // 大量并发请求同时发现脚本缓存没了，同时去重载。
-type alwaysNoScript struct{}
+type alwaysNoScript struct{ cause error }
 
 func (alwaysNoScript) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd {
 	cmd := redis.NewStringCmd(ctx)
@@ -21,9 +21,9 @@ func (alwaysNoScript) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd
 	return cmd
 }
 
-func (alwaysNoScript) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
+func (f alwaysNoScript) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
 	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("NOSCRIPT No matching script"))
+	cmd.SetErr(f.cause)
 	return cmd
 }
 
@@ -44,8 +44,9 @@ func (alwaysNoScript) Del(ctx context.Context, _ ...string) *redis.IntCmd {
 func TestConcurrentScriptReloadIsRaceFree(t *testing.T) {
 	t.Parallel()
 
+	failure := errors.New("NOSCRIPT No matching script")
 	backend := &RedisBackend{
-		client:   alwaysNoScript{},
+		client:   alwaysNoScript{cause: failure},
 		health:   NewHealthState(DefaultHealthPolicy(), nil),
 		observer: nopObserver{},
 	}
@@ -61,8 +62,13 @@ func TestConcurrentScriptReloadIsRaceFree(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Go(func() {
-			// 结果必然是错误（脚本恒 NOSCRIPT），这里只关心并发访问的安全性。
-			_, _ = backend.check(context.Background(), policy, "subject")
+			// 首批执行返回NOSCRIPT原因，降级后的短路返回不可用判定。
+			decision, err := backend.check(context.Background(), policy, "subject")
+			if err != nil && !errors.Is(err, failure) {
+				t.Errorf("unexpected reload failure: %v", err)
+			} else if err == nil && decision.Outcome != OutcomeBackendUnavailable {
+				t.Errorf("degraded request returned %v", decision.Outcome)
+			}
 		})
 	}
 	wg.Wait()

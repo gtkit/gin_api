@@ -20,7 +20,11 @@ func newMetricsEngine(t *testing.T) (*gin.Engine, *sdkmetric.ManualReader) {
 
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("provider.Shutdown(context.Background()): %v", err)
+		}
+	})
 
 	recorder, err := metrics.New(provider.Meter("test"))
 	if err != nil {

@@ -61,7 +61,9 @@ func startRecorder(t *testing.T, r *Recorder) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = r.Run(ctx)
+		if err := r.Run(ctx); err != nil {
+			t.Errorf("audit Run: %v", err)
+		}
 	}()
 	return func() {
 		cancel()

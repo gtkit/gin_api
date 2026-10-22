@@ -46,7 +46,7 @@ func TestCooperativeTimeoutMapsDeadlineExceededTo504(t *testing.T) {
 	engine := newTimeoutEngine(t, cooperativePolicy(50*time.Millisecond, time.Second),
 		func(c *gin.Context) {
 			<-c.Request.Context().Done()
-			_ = c.Error(fmt.Errorf("slow query: %w", c.Request.Context().Err()))
+			c.Error(fmt.Errorf("slow query: %w", c.Request.Context().Err())).Type = gin.ErrorTypePrivate
 		})
 
 	w := httptest.NewRecorder()
@@ -64,7 +64,7 @@ func TestCooperativeTimeoutMapsDeadlineExceededTo504(t *testing.T) {
 func TestClientDisconnectWritesNothing(t *testing.T) {
 	engine := newTimeoutEngine(t, cooperativePolicy(time.Second, time.Second),
 		func(c *gin.Context) {
-			_ = c.Error(fmt.Errorf("upstream: %w", context.Canceled))
+			c.Error(fmt.Errorf("upstream: %w", context.Canceled)).Type = gin.ErrorTypePrivate
 		})
 
 	w := httptest.NewRecorder()
@@ -86,7 +86,7 @@ func TestTimeoutDoesNotOverwriteAWrittenResponse(t *testing.T) {
 		func(c *gin.Context) {
 			c.String(http.StatusOK, "partial")
 			<-c.Request.Context().Done()
-			_ = c.Error(c.Request.Context().Err())
+			c.Error(c.Request.Context().Err()).Type = gin.ErrorTypePrivate
 		})
 
 	w := httptest.NewRecorder()
@@ -200,8 +200,14 @@ func TestWriteDeadlineIsActuallySetOnRealConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("resp.Body.Close(): %v", err)
+		}
+	}()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Errorf("test response I/O: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -247,8 +253,14 @@ func TestWriteDeadlineSurvivesResponseBodyLogging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("resp.Body.Close(): %v", err)
+		}
+	}()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Errorf("test response I/O: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -291,7 +303,11 @@ func TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("conn.Close(): %v", err)
+		}
+	}()
 	reader := bufio.NewReader(conn)
 
 	sendAndRead := func(path string) (string, error) {
@@ -307,7 +323,11 @@ func TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline(t *testing.T) {
 		if err != nil {
 			return "", fmt.Errorf("read response: %w", err)
 		}
-		defer func() { _ = resp.Body.Close() }()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("resp.Body.Close(): %v", err)
+			}
+		}()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return "", fmt.Errorf("read body: %w", err)
@@ -372,7 +392,11 @@ func TestStreamingRenewsIdleWriteDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("resp.Body.Close(): %v", err)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

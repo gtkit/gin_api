@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gouploader"
 )
 
@@ -61,7 +61,7 @@ func NewLocalUploader(o LocalOptions, extra ...gouploader.Option) (*gouploader.U
 		gouploader.WithAllowedTypes(o.AllowedTypes...),
 		// 排在 extra 之前：装配方可用自己的实现取代（见函数注释）。
 		gouploader.WithOnBackgroundError(func(err error) {
-			logger.Errorf("upload: gouploader background error: %v", err)
+			applog.Errorf("upload: gouploader background error: %v", err)
 		}),
 	}, extra...)
 	uploader, err := gouploader.New(opts...)

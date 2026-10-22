@@ -19,29 +19,33 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/json"
-	sdk "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
 )
 
-func newJSONPlugin(t *testing.T, level string, alerts sdk.Messager) (*Plugin, string) {
+func newJSONPlugin(t *testing.T, level string, alerts logger.Messager) (*Plugin, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "app"), Level: level, FileStdout: 1}}
-	factory := func(opts ...sdk.Option) (*sdk.Logger, error) {
-		return sdk.New(append(opts, sdk.WithOutJSON(true), sdk.WithReplaceGlobals(false), sdk.WithMessager(alerts), sdk.WithRedactKeys("secret"))...)
+	factory := func(opts ...logger.Option) (*logger.Logger, error) {
+		return logger.New(append(opts, logger.WithOutJSON(true), logger.WithReplaceGlobals(false), logger.WithMessager(alerts), logger.WithRedactKeys("secret"))...)
 	}
 	p := New(Options{Configuration: fixedConfiguration{cfg}, MainFactory: factory, AccessFactory: factory})
 	if err := p.Init(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = p.Stop(context.WithoutCancel(t.Context())) })
+	t.Cleanup(func() {
+		if err := p.Stop(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("p.Stop(context.WithoutCancel(t.Context())): %v", err)
+		}
+	})
 	return p, dir
 }
 
-func setSDKLevel(t *testing.T, logger *sdk.Logger, level string) {
+func setSDKLevel(t *testing.T, instance *logger.Logger, level string) {
 	t.Helper()
 	// The workspace SDK returns error; locked v2.3.0 has a void method.
-	switch setter := any(logger).(type) {
+	switch setter := any(instance).(type) {
 	case interface{ SetLevel(string) error }:
 		if err := setter.SetLevel(level); err != nil {
 			t.Fatal(err)
@@ -116,7 +120,10 @@ func jsonRecords(t *testing.T, dir string) map[string]map[string]any {
 			if err := json.Unmarshal([]byte(line), &record); err != nil {
 				return err
 			}
-			message, _ := record["msg"].(string)
+			message, ok := record["msg"].(string)
+			if !ok {
+				t.Fatalf("log field has type %T", record["msg"])
+			}
 			record["output_file"] = filepath.Base(path)
 			entries[message] = record
 		}
@@ -139,11 +146,11 @@ func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
 	applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "forwarded", CallerSkip: 1})
 	_, _, accessLine, _ := runtime.Caller(0)
 	applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "access", Stream: applog.AccessStream})
-	logger := data.NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
+	gormLogger := data.NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
 	_, _, traceLine, _ := runtime.Caller(0)
-	logger.Trace(ctx, time.Now(), func() (string, int64) { return "SELECT ?", 1 }, nil)
+	gormLogger.Trace(ctx, time.Now(), func() (string, int64) { return "SELECT ?", 1 }, nil)
 	_, _, infoLine, _ := runtime.Caller(0)
-	logger.Info(ctx, "gorm info %d", 1)
+	gormLogger.Info(ctx, "gorm info %d", 1)
 	p.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "channel", Channel: "contract", Fields: []applog.Field{applog.Int("count", 9)}})
 	large := make([]applog.Field, pooledFields+1)
 	for i := range large {
@@ -163,7 +170,10 @@ func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
 		{"forwarded", forwardedLine + 1}, {"access", accessLine + 1},
 	} {
 		record := records[tc.message]
-		caller, _ := record["caller"].(string)
+		caller, ok := record["caller"].(string)
+		if !ok {
+			t.Fatalf("log field has type %T", record["caller"])
+		}
 		if !strings.HasSuffix(caller, fmt.Sprintf("%s:%d", filepath.Base(file), tc.line)) {
 			t.Errorf("%s caller=%q want line=%d", tc.message, caller, tc.line)
 		}
@@ -175,8 +185,14 @@ func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
 		line    int
 	}{{"gorm query", traceLine + 1}, {"gorm info 1", infoLine + 1}} {
 		record := records[tc.message]
-		caller, _ := record["caller"].(string)
-		source, _ := record["source"].(string)
+		caller, ok := record["caller"].(string)
+		if !ok {
+			t.Fatalf("log field has type %T", record["caller"])
+		}
+		source, ok := record["source"].(string)
+		if !ok {
+			t.Fatalf("log field has type %T", record["source"])
+		}
 		if !strings.HasPrefix(caller, "data/init.go:") || !strings.HasSuffix(source, fmt.Sprintf("%s:%d", filepath.Base(file), tc.line)) {
 			t.Errorf("%s caller=%q source=%q", tc.message, caller, source)
 		}
@@ -192,7 +208,7 @@ func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
 	if records["channel"]["channel"] != "contract" || records["channel"]["count"] != float64(9) {
 		t.Fatal("channel fields changed")
 	}
-	if output, _ := records["access"]["output_file"].(string); !strings.Contains(output, "app_access") {
+	if output, ok := records["access"]["output_file"].(string); !ok || !strings.Contains(output, "app_access") {
 		t.Fatalf("access routed to %q", output)
 	}
 	if records["large"]["field8"] != float64(8) || records["empty"]["name"] != nil {
@@ -273,7 +289,11 @@ func TestClosingOwnerPreservesNewBinding(t *testing.T) {
 		p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Fields: []applog.Field{applog.Any("blocked", block)}})
 	})
 	<-block.entered
-	work.Go(func() { _ = p.Stop(context.WithoutCancel(t.Context())) })
+	work.Go(func() {
+		if err := p.Stop(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("p.Stop(context.WithoutCancel(t.Context())): %v", err)
+		}
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for !p.current.Load().closing.Load() {
 		if time.Now().After(deadline) {
@@ -339,7 +359,7 @@ func TestInstallConflictPreservesExistingOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	factory := func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), nil }
+	factory := func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }
 	p := New(Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: factory, AccessFactory: factory})
 	if err := p.Init(t.Context()); !errors.Is(err, applog.ErrLoggerInstalled) {
 		t.Fatalf("conflicting init=%v", err)

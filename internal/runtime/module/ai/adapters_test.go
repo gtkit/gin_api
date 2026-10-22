@@ -28,7 +28,8 @@ type fakeProvider struct {
 	// openErr 让 ChatStream 在建流阶段就失败。
 	openErr error
 	// closed 记录 StreamReader.Close 是否被调用。
-	closed bool
+	closed   bool
+	closeErr error
 }
 
 func (f *fakeProvider) Name() llm.ProviderName { return f.name }
@@ -60,7 +61,7 @@ func (f *fakeProvider) ChatStream(_ context.Context, req *llm.ChatRequest) (*llm
 		return nil, io.EOF
 	}, func() error {
 		f.closed = true
-		return nil
+		return f.closeErr
 	}), nil
 }
 
@@ -401,5 +402,33 @@ func TestLogAuditorToleratesAMissingSink(t *testing.T) {
 	logAuditor{logf: func(format string, args ...any) { got = format }}.Auditf("hit %d", 1)
 	if got != "hit %d" {
 		t.Errorf("the auditor did not forward to the sink: %q", got)
+	}
+}
+
+// Cleanup failures remain visible after EOF and beside receive/callback failures.
+func TestStreamRetainsCloseFailureAndPartialReply(t *testing.T) {
+	t.Parallel()
+	closeErr := errors.New("close failed")
+	primary := errors.New("primary failed")
+	for _, mode := range []string{"eof", "receive", "callback"} {
+		t.Run(mode, func(t *testing.T) {
+			fake := &fakeProvider{name: "deepseek", chunks: []*llm.StreamChunk{{Delta: "partial"}}, closeErr: closeErr}
+			if mode == "receive" {
+				fake.streamErr = primary
+			}
+			client := newClient(map[string]entry{"deepseek": {provider: fake, model: "m"}}, "deepseek")
+			reply, err := client.Stream(t.Context(), aiapp.ChatCall{}, func(string) error {
+				if mode == "callback" {
+					return primary
+				}
+				return nil
+			})
+			if !fake.closed || reply.Content != "partial" || !errors.Is(err, closeErr) {
+				t.Fatalf("closed=%v reply=%+v err=%v", fake.closed, reply, err)
+			}
+			if mode != "eof" && !errors.Is(err, primary) {
+				t.Fatalf("lost primary failure: %v", err)
+			}
+		})
 	}
 }

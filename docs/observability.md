@@ -173,3 +173,9 @@ main/access 共用一个生命周期 owner。HTTP 中间件在最终 metrics 仪
 access/main。若 worker 未退出，只执行同一 owner 的 Drain，并返回资源未关闭错误。
 回滚/停止总预算各 30 秒，第二信号取消剩余合作式等待；SDK Sync 没有 context 或 error 返回，
 不能承诺在阻塞 I/O 上硬中断，也不能把 void Sync 当作日志已成功送达的证据。
+
+### 本实例SQL慢查询阈值与失败诊断
+
+`log.sql_slow_threshold_ms`省略/null时为200ms，0仅关闭专属慢查询WARN，正整数按毫秒生效，负值/溢出拒绝。`log.sql`非零时普通SQL INFO保持，错误SQL仍按原级别输出；参数过滤始终生效。阈值构造时按值固定，LogMode副本不共享配置指针。prod环境拒绝debug日志级别（首尾空白规则不变），dev/test允许。
+
+统一HTTP错误日志使用goerr1.5的Inspect保留原根错误、Join并列清理原因及已有栈；对客只输出原公开文案和request_id。诊断失败独立记录，不能覆盖主状态。无日志实现时的stderr写出失败保留为有界进程状态，由Drain返回；不递归写失败日志器。默认gtkit SDK的void输出/Sync仍受SDK本身可观测边界约束，不能把void返回当作持久送达证据。

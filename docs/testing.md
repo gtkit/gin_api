@@ -61,7 +61,7 @@ loopback 可用的完整跑更高。取下界保证两种环境的 `make check` 
 | Contract | 公开 API 响应结构、错误码、分页结构、DTO json tag |
 | Regression | 修 bug 先补一个能失败的复现用例 |
 
-集成测试用真实 MySQL 验证 repository 与 schema 一致性（配置取自 `config/env/env.yml`），
+集成测试用真实MySQL验证repository与schema一致性（配置取自显式隔离APP_ROOT下的运行配置），
 **事务内强制回滚、零持久化**，无 DB 时自动 SKIP。
 
 ### 哪些包有集成测试
@@ -69,7 +69,7 @@ loopback 可用的完整跑更高。取下界保证两种环境的 `make check` 
 不维护清单——列表会腐烂，而 grep 不会：
 
 ```bash
-grep -rl '^//go:build integration' --include='*_test.go' internal pkg
+grep -rl '^//go:build integration' --include='*_test.go' internal pkg cmd
 ```
 
 `make test-integration` 用的就是这条反查，因此**在新包里加集成测试不需要改 Makefile**，
@@ -81,12 +81,11 @@ grep -rl '^//go:build integration' --include='*_test.go' internal pkg
 
 ### 集成测试跑在哪个库上
 
-`make test-integration` 连的是 `config/env/env.yml` 里 `database.name` 指的那个库——
-对多数人来说那是自己的主开发库。它必须是一个**迁移状态与本仓一致**的库，
+`make test-integration` 必须指定项目根之外的独立 `APP_ROOT`，先运行无连接的cmd前置检查，再执行完整真实套件。缺少根、项目根/子目录、配置symlink逃逸均失败；不会回落到项目真实配置。MySQL使用隔离文件的`database.name`，它必须是一个**迁移状态与本仓一致**的专用测试库，
 否则失败原因是环境而不是代码：少一张表就报 `Table 'xxx' doesn't exist`，
 而那条错误看起来和真实缺陷一模一样。
 
-因此推荐给集成测试单开一个库，用 `APP_` 覆盖指过去，不动主配置：
+先复制`config/env.yml.example`到独立临时运行目录的`config/env/env.yml`（文件0600），填写本地测试库与本地凭据，并配置临时JWT密钥。不要复制真实生产配置或密钥。插件套件固定连接127.0.0.1:3306/6379，屏蔽继承的APP_覆盖后从该隔离文件加载，使用生成的临时钥与独占namespace；非标准本地端口尚不支持该套件，须先明确调整夹具。其他仓储集成套件仍按该文件读取连接。
 
 一次性准备。建库这步怎么执行取决于 MySQL 怎么连（本机客户端、`docker exec`、GUI），
 因此这里只给 SQL：
@@ -102,11 +101,10 @@ CREATE DATABASE gin_api_itest DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unic
 
 ```bash
 # 灌迁移（migrate 命令同样认 APP_ 覆盖）
-APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest make migrate-up dev
+APP_ROOT=/absolute/path/to/isolated-runtime make migrate-up dev
 
 # 每次跑
-APP_ROOT=$(git rev-parse --show-toplevel) APP_DATABASE__NAME=gin_api_itest \
-  REQUIRE_DB_INTEGRATION=1 make test-integration
+APP_ROOT=/absolute/path/to/isolated-runtime REQUIRE_DB_INTEGRATION=1 make test-integration
 ```
 
 **必须是新库**：基线迁移 `20260731000001` 自己 `CREATE TABLE users`，
@@ -227,3 +225,17 @@ case 名说明业务场景；断言具体；覆盖 success、error、edge 三类
 - 修复后重跑受影响包的全量测试，再跑 `make check`。
 - **测试失败不能只改断言凑绿。**
 - 交付说明实际跑过的命令；没跑要说明原因。
+
+### 验收整改入口与工具失败
+
+`make test`实际调用test-race；迁移目标与test/dev/prod组合时仍保留环境占位。`make check-make-entries`在临时fixture执行Make接线（Go/lint stub只证明调用），clean本体使用真实Go和os.Root，检查symlink/越界及相邻哨兵；日常check包含该自检。真实受影响Go测试必须另外跑，不能把stub当业务通过。
+
+`make lint`和`make tool`除常规包外，还逐个检查scripts目录的独立Go工具；这些build-ignore程序不会进入普通`./...`集合。errcheck开启blank/type-assertion检查并关闭内置函数豁免，测试没有整类errcheck豁免。工具的输出、诊断和self-test清理失败须非零退出；三个诊断工具在stderr自身也不可写时退出2，clean保持既有非零退出1。正常参数和成功输出不变；0 issues只证明实际扫描集合和启用规则，不代表所有运行路径都已实测。
+
+project init在变更文件或移走旧Git前，将文件类型、存在性、mode、原始字节与symlink目标写入根目录同级的 `.projectinit-snapshot-*/recovery.json`（目录0700、文件0600；content是JSON的base64字节字段）。根root与entries的相对path共同定位原文件；kind依次为0不存在、1普通文件、2目录、3symlink。回滚失败时错误给出确切恢复目录，原Git保存在其git-dir；panic/非正常返回同样保留副本并继续传播原panic，不声称已回滚成功。恢复需维护者核对路径和原始字节后处理，不存在自动重放命令；恢复副本可能含敏感文件，不可公开或直接提交。正常完成/成功恢复后清理，清理失败返回非零错误并保留路径。
+
+CLI的stdout/stderr写出、文件close/remove及生成锁释放均处理失败；doctor探针收尾失败会返回退出1并保留原报告/失败原因，报告自身0/2/1语义不变。JSON/人类报告写出失败也返回非零，不把空输出当作通过。
+
+`make test-integration`显式设置PLUGIN_INTEGRATION=1；强制模式缺少该opt-in时直接运行cmd套件会失败，不能静默跳过。`make release-check`同时传REQUIRE_DB_INTEGRATION=1和PLUGIN_INTEGRATION=1。`make check-make-entries`的临时Go模块真实验证cmd集成fixture存在时可使门禁失败，移除后恢复；这证明接线，不替代真实MySQL/Redis套件。共享Redis不得执行SCRIPT FLUSH，相关专用实例测试仍保留单独授权条件。
+
+Compose应用验证用`make check-compose-app`（Python标准库+Docker Compose CLI，只解析合成配置，不连daemon创建容器）；该目标不加入日常check的工具前置。它验证默认活跃集合mysql/redis、显式app profile、挂载/地址/显式空密码、健康/退出参数及宿主shell入口fixture。容器PID 1、实际UID映射、私钥可读性、API/ready故障恢复和SIGTERM必须在获准的临时应用容器中另验。优先用`dev-app-up-existing`复用已启动依赖，不通过停止共享DB/Redis做故障注入；独占app可断开自己的网络后从容器内部检查/health与/ready，再恢复网络。停止/删除只指向本次app和无使用者的独占网络，不删除依赖数据卷。

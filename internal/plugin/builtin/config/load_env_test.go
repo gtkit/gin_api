@@ -306,3 +306,49 @@ func TestEnvKeyToConfigPath(t *testing.T) {
 		})
 	}
 }
+
+func TestRedisPrefixEnvironmentOverride(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("APP_REDIS__PREFIX", "env:namespace")
+	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.EffectiveRedisPrefix(); got != "env:namespace" {
+		t.Fatalf("prefix=%q", got)
+	}
+	t.Setenv("APP_REDIS__PREFIX", "  ")
+	if _, err := loadFromReader(strings.NewReader(minimalConfigYAML())); err == nil {
+		t.Fatal("whitespace env prefix accepted")
+	}
+}
+
+func TestSQLSlowThresholdDecodePreservesPresenceAndIntegers(t *testing.T) {
+	clearConfigEnv(t)
+	for _, tc := range []struct {
+		raw             string
+		valid, nilValue bool
+	}{
+		{"null", true, true}, {"0", true, false}, {"17", true, false}, {"0.5", false, false},
+		{"true", false, false}, {"-1", false, false}, {"9223372036854775807", false, false},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			input := strings.Replace(minimalConfigYAML(), "  sql: 1", "  sql: 1\n  sql_slow_threshold_ms: "+tc.raw, 1)
+			cfg, err := loadFromReader(strings.NewReader(input))
+			if (err == nil) != tc.valid {
+				t.Fatalf("decode %s: %v", tc.raw, err)
+			}
+			if err == nil && (cfg.Log.SQLSlowThresholdMS == nil) != tc.nilValue {
+				t.Fatal("presence lost")
+			}
+		})
+	}
+	t.Setenv("APP_LOG__SQL_SLOW_THRESHOLD_MS", "17")
+	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.SQLSlowThresholdMS == nil || *cfg.Log.SQLSlowThresholdMS != 17 {
+		t.Fatal("integer override lost")
+	}
+}

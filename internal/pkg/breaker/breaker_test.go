@@ -36,7 +36,10 @@ func TestBreakerIsolatesDownstreams(t *testing.T) {
 	t.Parallel()
 
 	r := NewRegistry(Config{ConsecutiveFailures: 1}, "failing", "healthy")
-	_ = r.Do("failing", func() error { return errors.New("boom") })
+	failure := errors.New("boom")
+	if err := r.Do("failing", func() error { return failure }); !errors.Is(err, failure) {
+		t.Fatalf("initial downstream failure: %v", err)
+	}
 
 	if err := r.Do("healthy", func() error { return nil }); err != nil {
 		t.Fatalf("a healthy downstream was affected by another downstream's breaker: %v", err)
@@ -58,10 +61,14 @@ func TestCancellationDoesNotTripTheBreaker(t *testing.T) {
 
 	// 远超阈值的取消次数。
 	for range 10 {
-		_ = r.Do("billing", func() error { return context.Canceled })
+		if err := r.Do("billing", func() error { return context.Canceled }); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled call: %v", err)
+		}
 	}
 	for range 10 {
-		_ = r.Do("billing", func() error { return context.DeadlineExceeded })
+		if err := r.Do("billing", func() error { return context.DeadlineExceeded }); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expired call: %v", err)
+		}
 	}
 
 	executed := false
@@ -87,7 +94,9 @@ func TestCustomFailureClassifierExcludesBusinessErrors(t *testing.T) {
 	}, "billing")
 
 	for range 10 {
-		_ = r.Do("billing", func() error { return businessErr })
+		if err := r.Do("billing", func() error { return businessErr }); !errors.Is(err, businessErr) {
+			t.Fatalf("business rejection: %v", err)
+		}
 	}
 
 	executed := false
@@ -171,8 +180,11 @@ func TestSuccessStillResetsFailureCount(t *testing.T) {
 	fail := func() error { return downstream }
 	ok := func() error { return nil }
 
-	_ = r.Do("svc", fail)
-	_ = r.Do("svc", fail)
+	for range 2 {
+		if err := r.Do("svc", fail); !errors.Is(err, downstream) {
+			t.Fatalf("warmup failure: %v", err)
+		}
+	}
 	// 一次成功必须清零：否则下一次失败就是第三次，会误跳闸。
 	if err := r.Do("svc", ok); err != nil {
 		t.Fatalf("success returned an error: %v", err)

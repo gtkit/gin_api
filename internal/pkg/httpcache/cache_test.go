@@ -29,7 +29,11 @@ func newTestStager(t *testing.T) *Stager {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = stager.Close() })
+	t.Cleanup(func() {
+		if err := stager.Close(); err != nil {
+			t.Errorf("stager.Close(): %v", err)
+		}
+	})
 	return stager
 }
 

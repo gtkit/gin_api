@@ -173,8 +173,8 @@ func TestGeneratePartialWriteDoesNotCorruptTarget(t *testing.T) {
 	defer func() { tempFileWriter = original }()
 	tempFileWriter = func(f *os.File, data []byte) (int, error) {
 		if strings.Contains(f.Name(), "providers.go-") {
-			n, _ := f.Write(data[:len(data)/2])
-			return n, errors.New("injected disk failure")
+			n, err := f.Write(data[:len(data)/2])
+			return n, errors.Join(errors.New("injected disk failure"), err)
 		}
 		return f.Write(data)
 	}
@@ -342,7 +342,11 @@ func TestGenerationLockRejectsConcurrentRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first lock: %v", err)
 	}
-	defer release()
+	defer func() {
+		if err := release(); err != nil {
+			t.Errorf("release generation lock: %v", err)
+		}
+	}()
 
 	if _, err := acquireGenerationLock(root); err == nil {
 		t.Fatal("a second generation acquired the lock while the first still holds it")

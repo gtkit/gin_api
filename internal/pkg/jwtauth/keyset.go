@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 )
 
@@ -167,7 +168,7 @@ func (s *KeySet) OrderedKeys() []VerificationKey { return s.ordered }
 
 // LoadEd25519PrivateKey 从 PEM 文件读取私钥并校验文件形态与权限。
 func LoadEd25519PrivateKey(path string, strictPerm bool) (ed25519.PrivateKey, error) {
-	data, err := readKeyFile(path, strictPerm)
+	data, err := readKeyFile(path, strictPerm, false)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +190,7 @@ func LoadEd25519PrivateKey(path string, strictPerm bool) (ed25519.PrivateKey, er
 
 // LoadEd25519PublicKey 从 PEM 文件读取公钥。
 func LoadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
-	data, err := readKeyFile(path, false)
+	data, err := readKeyFile(path, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +213,12 @@ func LoadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 // readKeyFile 读取密钥文件并校验它确实是普通文件。
 //
 // strictPerm 为真时（生产环境的私钥）要求 group/other 无任何权限位。
+// public为真时，Unix公钥还必须禁止group/other写入，允许0644等只读共享。
 //
 // 允许受控的 secret mount symlink：解析之后仍然检查目标类型与权限，
 // 因此符号链接本身不构成绕过。禁止目录、设备文件等非普通文件——
 // 那类路径要么读出垃圾，要么让进程挂在一个特殊文件上。
-func readKeyFile(path string, strictPerm bool) ([]byte, error) {
+func readKeyFile(path string, strictPerm, public bool) ([]byte, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve key path %s: %w", path, err)
@@ -233,6 +235,9 @@ func readKeyFile(path string, strictPerm bool) ([]byte, error) {
 		return nil, fmt.Errorf(
 			"private key %s is readable or writable by group/other (mode %04o); use 0600",
 			resolved, info.Mode().Perm())
+	}
+	if public && runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("public key %s is writable by group/other (mode %04o); remove group/other write access", resolved, info.Mode().Perm())
 	}
 
 	data, err := os.ReadFile(resolved)

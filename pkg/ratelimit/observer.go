@@ -75,7 +75,8 @@ type options struct {
 	observer  Observer
 	// degradedStart 允许后端在启动期不可用时以 Degraded 相位构造成功，
 	// 由恢复探测把它带回 Healthy（见 WithDegradedStart）。
-	degradedStart bool
+	degradedStart            bool
+	probeCleanupErrorHandler func(error)
 }
 
 // newOptions 应用调用方给出的选项，并在此集中给出默认值。
@@ -118,4 +119,11 @@ func WithDegradedStart() Option {
 // WithObserver 注入运行期事件的接收者。不注入时事件被丢弃，包不产生任何输出。
 func WithObserver(observer Observer) Option {
 	return func(o *options) { o.observer = observer }
+}
+
+// WithProbeCleanupErrorHandler 接收本后端首次探针清理失败。
+// 回调应尽快返回；它不会改变能力健康判定，也不扩展既有Observer接口。
+// 未注入时错误仍由RedisBackend.ProbeCleanupError保留，供调用方诊断。
+func WithProbeCleanupErrorHandler(handler func(error)) Option {
+	return func(o *options) { o.probeCleanupErrorHandler = handler }
 }

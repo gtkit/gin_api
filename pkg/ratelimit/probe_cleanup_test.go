@@ -3,8 +3,43 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/redis/go-redis/v9"
 )
+
+type cancelingProbeCleanupClient struct {
+	*fakeRedis
+	cancel context.CancelFunc
+}
+
+func (c cancelingProbeCleanupClient) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	c.cancel()
+	return c.fakeRedis.Del(ctx, keys...)
+}
+
+func TestProbeCleanupCancellationStopsConstructionWithBothCauses(t *testing.T) {
+	t.Parallel()
+	for _, degraded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("degraded=%v", degraded), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			cleanup := errors.New("DEL cleanup denied")
+			client := cancelingProbeCleanupClient{fakeRedis: &fakeRedis{delErr: cleanup}, cancel: cancel}
+			var options []Option
+			if degraded {
+				options = append(options, WithDegradedStart())
+			}
+			backend, err := NewRedisBackend(ctx, client, options...)
+			if backend != nil || !errors.Is(err, context.Canceled) || !errors.Is(err, cleanup) {
+				t.Fatalf("canceled construction backend=%v err=%v", backend, err)
+			}
+		})
+	}
+}
 
 // TestProbeCleanupFailureDoesNotFailConstruction 钉住"清理失败不是能力失败"。
 //
@@ -15,7 +50,7 @@ import (
 //
 // 这个方向的失败不是保守，是错误：它以"更安全"的名义拒绝了一个可用的系统。
 //
-// 清理确实可以丢弃：两个探针键（桶键与注册表键）都在创建它们的同一段 Lua 里
+// 清理失败必须可诊断，且不能与能力失败混淆。两个探针键在创建它们的同一段 Lua 里
 // PEXPIRE（script.go 的 `PEXPIRE registry` 与 `PEXPIRE KEYS[1]`），因此清理
 // 失败的唯一后果是它们多存活一个 TTL 周期后自行消失。
 func TestProbeCleanupFailureDoesNotFailConstruction(t *testing.T) {
@@ -38,6 +73,33 @@ func TestProbeCleanupFailureDoesNotFailConstruction(t *testing.T) {
 	// 清理确实被尝试过——否则本测试证明的只是"没调用 Del"。
 	if _, _, del := fake.counts(); del == 0 {
 		t.Error("探针未尝试清理临时键：清理是尽力而为，但必须真的尝试")
+	}
+}
+
+func TestProbeCleanupFailureIsRetainedAndNotifiedOnce(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("NOPERM del")
+	var calls atomic.Int32
+	backend, err := NewRedisBackend(context.Background(), &fakeRedis{delErr: cause}, WithProbeCleanupErrorHandler(func(err error) {
+		if !errors.Is(err, cause) {
+			t.Errorf("cleanup notification lost cause: %v", err)
+		}
+		calls.Add(1)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var work sync.WaitGroup
+	for range 16 {
+		work.Go(func() {
+			if err := backend.probe(context.Background()); err != nil {
+				t.Errorf("capability probe: %v", err)
+			}
+		})
+	}
+	work.Wait()
+	if !errors.Is(backend.ProbeCleanupError(), cause) || calls.Load() != 1 || backend.Health().Phase() != PhaseHealthy {
+		t.Fatalf("cleanup=%v calls=%d health=%v", backend.ProbeCleanupError(), calls.Load(), backend.Health().Phase())
 	}
 }
 

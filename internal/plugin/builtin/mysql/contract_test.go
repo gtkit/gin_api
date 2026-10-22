@@ -26,7 +26,11 @@ func ownedClient(t *testing.T) (ownedSQLClient, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("Close SQL: %v", err)
+		}
+	})
 	client, err := ormx.OpenWithDB(t.Context(), db, ormx.WithSkipInitializeWithVersion(true), ormx.WithServerVersion("8.0.36"), ormx.WithStartupPing(false))
 	if err != nil {
 		t.Fatal(err)
@@ -83,14 +87,15 @@ func TestFactoryOwnershipAndConfiguration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				mock.ExpectationsWereMet()
 				if err := p.Start(t.Context()); err != nil {
 					t.Fatal(err)
 				}
 			} else if p.DB() != nil {
 				t.Fatal("failed resource published")
 			}
-			_ = p.Init(t.Context())
+			if again := p.Init(t.Context()); again != err {
+				t.Fatalf("Init result changed: first=%v second=%v", err, again)
+			}
 			if opens != 1 || provider.calls != 1 {
 				t.Fatalf("reopened: %d reads %d", opens, provider.calls)
 			}
@@ -98,8 +103,12 @@ func TestFactoryOwnershipAndConfiguration(t *testing.T) {
 			for range 16 {
 				group.Go(func() {
 					stopErr := p.Stop(context.Background())
-					if tc.closeFailure && !errors.Is(stopErr, closeErr) {
-						t.Error(stopErr)
+					if tc.closeFailure {
+						if !errors.Is(stopErr, closeErr) {
+							t.Errorf("Stop missing close cause: %v", stopErr)
+						}
+					} else if stopErr != nil {
+						t.Errorf("Stop: %v", stopErr)
 					}
 				})
 			}
@@ -141,11 +150,15 @@ func TestConfigRejectionAndTypedNil(t *testing.T) {
 			if !tc.typedNil && opens != 0 {
 				t.Fatal("opened without configuration")
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
 		})
 	}
 	p := New(Options{})
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
 	if !errors.Is(p.Init(t.Context()), core.ErrPluginContractViolation) {
 		t.Fatal("restarted after stop")
 	}

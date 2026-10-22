@@ -153,7 +153,7 @@ func NewModuleGenerator(startDir string) (*ModuleGenerator, error) {
 	return &ModuleGenerator{root: root, modulePath: modulePath, now: time.Now}, nil
 }
 
-func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptions) (*GenerateResult, error) {
+func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptions) (_ *GenerateResult, err error) {
 	if g == nil {
 		return nil, fmt.Errorf("module generator is nil")
 	}
@@ -165,7 +165,7 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer func() { err = errors.Join(err, release()) }()
 
 	data, err := newModuleTemplateData(rawName, opts.Fields, g.modulePath)
 	if err != nil {
@@ -772,11 +772,20 @@ func findProjectRoot(startDir string) (string, error) {
 	// 路径不存在时保持原样：那种情况由下面的向上查找报出更准确的错误。
 	if resolved, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
 		current = resolved
+	} else if !errors.Is(evalErr, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve project root symlinks: %w", evalErr)
 	}
 
 	for {
-		if fileExists(filepath.Join(current, "go.mod")) &&
-			fileExists(filepath.Join(current, "internal", "bootstrap", "providers.go")) {
+		moduleExists, err := fileExists(filepath.Join(current, "go.mod"))
+		if err != nil {
+			return "", err
+		}
+		providersExist, err := fileExists(filepath.Join(current, "internal", "bootstrap", "providers.go"))
+		if err != nil {
+			return "", err
+		}
+		if moduleExists && providersExist {
 			return current, nil
 		}
 
@@ -921,12 +930,11 @@ func splitWords(name string) []string {
 }
 
 func toPascalCase(words []string) string {
-	var builder strings.Builder
+	parts := make([]string, 0, len(words))
 	for _, word := range words {
-		builder.WriteString(strings.ToUpper(word[:1]))
-		builder.WriteString(word[1:])
+		parts = append(parts, strings.ToUpper(word[:1])+word[1:])
 	}
-	return builder.String()
+	return strings.Join(parts, "")
 }
 
 func lowerFirst(v string) string {
@@ -1034,7 +1042,16 @@ func sqlColumnDefinition(fieldType string) string {
 	}
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func fileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect project file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("project file %s is not a regular file", path)
+	}
+	return true, nil
 }

@@ -94,7 +94,9 @@ func TestGinShouldBindIsVulnerable(t *testing.T) {
 	var got payload
 	engine := gin.New()
 	engine.POST("/x", func(c *gin.Context) {
-		_ = c.ShouldBind(&got)
+		if err := c.ShouldBind(&got); err != nil {
+			t.Errorf("bind control payload: %v", err)
+		}
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/x?role=admin", strings.NewReader("name=bob"))

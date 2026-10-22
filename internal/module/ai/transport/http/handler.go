@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/ginx"
 	"github.com/gtkit/ssex"
 
@@ -153,7 +153,7 @@ func (h *Handler) ChatStream(c *gin.Context) {
 		defer close(hbDone)
 		if err := stream.Heartbeat(hbCtx, h.timeouts.Heartbeat); err != nil &&
 			!errors.Is(err, context.Canceled) {
-			logger.Debugf("ai: sse heartbeat stopped: %v", err)
+			applog.Debugf("ai: sse heartbeat stopped: %v", err)
 		}
 	}()
 
@@ -200,7 +200,7 @@ func (h *Handler) finishStream(
 	if err != nil {
 		// 已保存部分结果：走 done 而不是 error——客户端的处置与正常结束相同
 		//（拿 conversation_id 继续聊），差别只是要不要提示"回答不完整"。
-		logger.Warnf("ai: stream interrupted after %d chars were persisted: %v",
+		applog.Warnf("ai: stream interrupted after %d chars were persisted: %v",
 			len([]rune(result.Content)), err)
 	}
 
@@ -222,7 +222,7 @@ func (h *Handler) finishStream(
 // 把它上抛给 gin 只会让错误中间件试图再写一次响应体。
 func emit(stream *ssex.Stream, name string, payload any) {
 	if err := stream.Event(name, payload); err != nil {
-		logger.Debugf("ai: write sse %q event: %v", name, err)
+		applog.Debugf("ai: write sse %q event: %v", name, err)
 	}
 }
 
@@ -235,7 +235,7 @@ func streamErrorMessage(err error) string {
 	if item := errMapper.Resolve(err); item != nil {
 		return item.Message()
 	}
-	logger.Errorf("ai: unmapped stream failure: %v", err)
+	applog.Errorf("ai: unmapped stream failure: %v", err)
 	return "AI 服务暂不可用"
 }
 

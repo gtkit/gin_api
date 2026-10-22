@@ -25,7 +25,9 @@ func TestPublicOpenRejectsInvalidMinimumVersionBeforeDial(t *testing.T) {
 			}
 			client, err := open(t.Context(), config.DatabaseConfig{MinVersion: "invalid"}, config.DBCredentials{}, nil)
 			if client != nil {
-				_ = client.Close()
+				if err := client.Close(); err != nil {
+					t.Errorf("client.Close(): %v", err)
+				}
 				t.Fatal("invalid minimum version published a client")
 			}
 			if err == nil || !strings.Contains(err.Error(), "invalid database.min_version") {
@@ -217,7 +219,9 @@ func TestMigrationOpenStillHonorsStartupBudget(t *testing.T) {
 	client, err := OpenMigrationDB(ctx, testDBConfig(3600), config.DBCredentials{}, nil)
 	if err == nil {
 		if client != nil {
-			_ = client.Close()
+			if err := client.Close(); err != nil {
+				t.Errorf("client.Close(): %v", err)
+			}
 		}
 		t.Fatal("expired context must fail the migration open, not proceed")
 	}

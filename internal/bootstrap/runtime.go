@@ -7,12 +7,12 @@ import (
 	"sync"
 
 	"github.com/gtkit/gin-api/internal/core"
-	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/plugin"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // Runtime represents process-wide runtime dependencies.
@@ -95,7 +95,7 @@ func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *R
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	logger.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
+	applog.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
 	return &Runtime{
 		config: cfg, resources: resources, plugins: registry, cache: set.Cache,
 		middleware: set.Middleware, jwt: jwtAssembly, drain: set.DrainLogs, force: opts.forceSignal(),
@@ -115,7 +115,7 @@ func logResourceStates(resources *data.Resources) {
 	if state == nil || state.State() == data.AvailabilityHealthy {
 		return
 	}
-	logger.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
+	applog.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
 		"until the process restarts", state.Name(), state.State())
 }
 

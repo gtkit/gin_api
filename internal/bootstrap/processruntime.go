@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 

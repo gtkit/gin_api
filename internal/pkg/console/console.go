@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // ANSI SGR 序列。自实现而非依赖第三方库：本包对颜色的全部需求就是这三种，
@@ -59,7 +61,9 @@ func ExitIf(err error) {
 // 不做 TTY 检测：替换前的实现同样不做，重定向到文件时一样会写入转义序列。
 // 加检测是行为变更，与本次「只换实现、不改行为」的目标冲突。
 func colorOut(message, color string) {
-	fmt.Fprintln(consoleWriter, color+message+colorReset)
+	if _, err := fmt.Fprintln(consoleWriter, color+message+colorReset); err != nil {
+		applog.Error("write console message failed", applog.Err(err))
+	}
 }
 
 func setConsoleOutputForTest(w io.Writer) func() {

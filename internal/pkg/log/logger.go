@@ -78,7 +78,18 @@ var (
 	// ErrInvalidLogger rejects an absent logging implementation.
 	ErrInvalidLogger = errors.New("a project logger is required")
 	installed        atomic.Pointer[binding]
+	fallbackFailure  atomic.Pointer[fallbackWriteError]
 )
+
+type fallbackWriteError struct{ err error }
+
+// Keep only the first outstanding failure, bounded independently of log volume.
+// The process owner observes it through Drain; never recurse through this logger.
+func writeDiagnostic(message string) {
+	if _, err := fmt.Fprintln(os.Stderr, message); err != nil {
+		fallbackFailure.CompareAndSwap(nil, &fallbackWriteError{err: fmt.Errorf("write fallback diagnostic: %w", err)})
+	}
+}
 
 var diagnosticContext = context.Background()
 
@@ -95,6 +106,8 @@ func Install(logger Logger, drain func(context.Context) error) (func(), error) {
 	if logger == nil {
 		return nil, ErrInvalidLogger
 	}
+	// An interface can hold a typed nil even when logger != nil. Validate it
+	// only at installation; the log write path never uses reflection.
 	value := reflect.ValueOf(logger)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
@@ -103,7 +116,9 @@ func Install(logger Logger, drain func(context.Context) error) (func(), error) {
 		}
 	}
 	b := &binding{logger: logger, drain: drain}
-	b.levels, _ = logger.(LevelEnabler)
+	if levels, ok := logger.(LevelEnabler); ok {
+		b.levels = levels
+	}
 	if !installed.CompareAndSwap(nil, b) {
 		return nil, ErrLoggerInstalled
 	}
@@ -131,23 +146,27 @@ func Log(ctx context.Context, entry LogEntry) {
 		return
 	}
 	if entry.Level >= LevelInfo {
-		_, _ = fmt.Fprintln(os.Stderr, entry.Text())
+		writeDiagnostic(entry.Text())
 	}
 }
 
 // Drain invokes only the selected owner's cleanup. Ordinary consumers receive
 // Logger, not this lifecycle callback. It is shared by Stop and legacy draining.
 func Drain(ctx context.Context) error {
-	if current := installed.Load(); current != nil && current.drain != nil {
-		return current.drain(ctx)
+	var err error
+	if failure := fallbackFailure.Swap(nil); failure != nil {
+		err = failure.err
 	}
-	return nil
+	if current := installed.Load(); current != nil && current.drain != nil {
+		err = errors.Join(err, current.drain(ctx))
+	}
+	return err
 }
 
 // Sync keeps the existing process cleanup call compatible until stage 3 wiring.
 func Sync() {
 	if err := Drain(diagnosticContext); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "drain project logs:", err)
+		writeDiagnostic("drain project logs: " + err.Error())
 	}
 }
 
@@ -229,6 +248,8 @@ func RequestIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	id, _ := ctx.Value(requestIDKey{}).(string)
-	return id
+	if id, ok := ctx.Value(requestIDKey{}).(string); ok {
+		return id
+	}
+	return ""
 }

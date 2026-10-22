@@ -91,7 +91,11 @@ func TestGormLoggerUsesSelectedImplementation(t *testing.T) {
 			for _, field := range event.Fields {
 				fields[field.Key] = field.Value
 			}
-			if fields["sql"] != "SELECT ?" || fields["trace_id"] != "sql-request" || !strings.Contains(fields["source"].(string), "gorm_logger_contract_test.go:") {
+			source, ok := fields["source"].(string)
+			if !ok {
+				t.Fatalf("source has type %T", fields["source"])
+			}
+			if fields["sql"] != "SELECT ?" || fields["trace_id"] != "sql-request" || !strings.Contains(source, "gorm_logger_contract_test.go:") {
 				t.Fatalf("fields=%v", fields)
 			}
 			_, hasRows := fields["rows"]
@@ -109,5 +113,35 @@ func TestGormLoggerUsesSelectedImplementation(t *testing.T) {
 	verbose.Error(ctx, "error %d", 3)
 	if len(sink.entries) != 3 || sink.entries[0].Text() != "info 1" || sink.entries[1].Text() != "warn 2" || sink.entries[2].Text() != "error 3" {
 		t.Fatalf("printf forwarding=%+v", sink.entries)
+	}
+}
+
+func TestSQLSlowThresholdIsAnIndependentValue(t *testing.T) {
+	sink := &queryLogCapture{}
+	release, err := applog.Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, threshold := range []*int64{nil, new(int64(0)), new(int64(1500))} {
+		cfg := &config.Config{Log: config.LogConfig{SQLSlowThresholdMS: threshold}}
+		logger := NewGormLogger(cfg)
+		if threshold != nil {
+			*threshold = 1
+		} // Changing the source pointer cannot change a built logger.
+		sink.entries = nil
+		calls := 0
+		logger.Trace(t.Context(), time.Now().Add(-time.Second), func() (string, int64) { calls++; return "SELECT ?", 1 }, nil)
+		wantSlow := threshold == nil
+		if (len(sink.entries) == 1) != wantSlow || (calls == 1) != wantSlow {
+			t.Fatalf("threshold snapshot failed: entries=%v calls=%d", sink.entries, calls)
+		}
+		silent := logger.LogMode(gormlogger.Silent)
+		silent.Trace(t.Context(), time.Now(), func() (string, int64) { t.Error("silent evaluated SQL"); return "", 0 }, errors.New("hidden"))
+		sink.entries = nil
+		logger.Trace(t.Context(), time.Now(), func() (string, int64) { return "SELECT ?", 1 }, errors.New("visible error"))
+		if len(sink.entries) != 1 || sink.entries[0].Level != applog.LevelError {
+			t.Fatalf("error log disabled: %v", sink.entries)
+		}
 	}
 }

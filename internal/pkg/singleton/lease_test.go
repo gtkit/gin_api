@@ -25,7 +25,11 @@ func newTestLease(t *testing.T, ttl time.Duration) (*Lease, *miniredis.Miniredis
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	lease, err := NewLease(client, "test", "job", ttl)
 	if err != nil {
@@ -247,7 +251,11 @@ func TestNewLeaseValidatesItsInputs(t *testing.T) {
 	testutil.RequireLoopback(t)
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	tests := []struct {
 		name   string

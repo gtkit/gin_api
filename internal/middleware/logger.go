@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -40,7 +41,9 @@ type responseBodyWriter struct {
 
 func (r responseBodyWriter) Write(b []byte) (int, error) {
 	if remain := bodyLogCaptureLimit - r.body.Len(); remain > 0 {
-		r.body.Write(b[:min(len(b), remain)])
+		if _, err := r.body.Write(b[:min(len(b), remain)]); err != nil {
+			return 0, fmt.Errorf("capture response log prefix: %w", err)
+		}
 	}
 	return r.ResponseWriter.Write(b)
 }

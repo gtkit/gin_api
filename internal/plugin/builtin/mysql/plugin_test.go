@@ -18,7 +18,11 @@ func TestMySQLPluginLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("sqlDB.Close(): %v", err)
+		}
+	})
 	client, err := ormx.OpenWithDB(t.Context(), sqlDB,
 		ormx.WithSkipInitializeWithVersion(true),
 		ormx.WithServerVersion("8.0.36"),

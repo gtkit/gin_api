@@ -18,13 +18,12 @@ const noLoopbackEnv = "ALLOW_NO_LOOPBACK"
 //
 // 逐个测试探测会在受限环境里产生几十次注定失败的 syscall，而结果对同一个
 // 进程不会变。
-var loopbackUsable = sync.OnceValue(func() bool {
+var loopbackUsable = sync.OnceValues(func() (bool, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return false
+		return false, err
 	}
-	listener.Close()
-	return true
+	return true, listener.Close()
 })
 
 // requireLoopback 声明该测试需要绑定本地回环端口，不具备则跳过。
@@ -40,7 +39,17 @@ var loopbackUsable = sync.OnceValue(func() bool {
 func requireLoopback(t *testing.T) {
 	t.Helper()
 
-	if reason, skip := loopbackSkipReason(os.Getenv(noLoopbackEnv), loopbackUsable); skip {
+	probe := func() bool {
+		available, err := loopbackUsable()
+		if available && err != nil {
+			t.Fatalf("close loopback probe: %v", err)
+		}
+		if err != nil {
+			t.Logf("loopback unavailable: %v", err)
+		}
+		return available
+	}
+	if reason, skip := loopbackSkipReason(os.Getenv(noLoopbackEnv), probe); skip {
 		t.Skip(reason)
 	}
 }

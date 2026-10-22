@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,32 @@ import (
 
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 )
+
+type failingBodyCloser struct {
+	cause error
+	calls int
+}
+
+func (c *failingBodyCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *failingBodyCloser) Close() error             { c.calls++; return c.cause }
+
+func TestMaxBytesClosePreservesPrimaryAndCleanupFailures(t *testing.T) {
+	primary := errors.New("wrapped close failed")
+	cleanup := errors.New("underlying close failed")
+	wrapped := &failingBodyCloser{cause: primary}
+	original := &failingBodyCloser{cause: cleanup}
+	body := &maxBytesReaderWrapper{ReadCloser: wrapped, original: original}
+	err := body.Close()
+	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
+		t.Fatalf("lost close cause: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("duplicate close: %v", err)
+	}
+	if wrapped.calls != 1 || original.calls != 1 {
+		t.Fatalf("close counts wrapped=%d original=%d", wrapped.calls, original.calls)
+	}
+}
 
 // newMaxBytesTestEngine 组装与生产一致的相关中间件链（ErrorHandler → MaxBytesLimit → GinLogger）。
 func newMaxBytesTestEngine(maxBytes int64, accessLog AccessLogOptions, handler gin.HandlerFunc) *gin.Engine {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -56,7 +57,7 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 		// 退出码由报告推导（0 全通 / 2 仅 optional 降级 / 1 失败），
 		// 因此这里自行控制输出，不让 cobra 再打印一遍用法。
 		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			cfg, err := load()
 			if err != nil {
 				return commandError("validate runtime configuration", err)
@@ -77,20 +78,19 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 			}
 			if deep && buildProbes != nil {
 				probes, release, probeErr := buildProbes(cmd.Context(), cfg)
-				if probeErr != nil {
-					// 连不上正是 deep 检查要报告的结论本身，不该让命令直接崩掉。
-					// 必须显式告知诊断层"探测能力没建起来"：只把 Probes 留空的话，
-					// 它与"没接探针"无法区分，会被记成 skipped 而让退出码变成 0。
-					cmd.PrintErrf("deep probes unavailable: %v\n", probeErr)
-					opts.ProbesUnavailable = true
-				} else {
-					// 关闭错误要可见但不翻转诊断结论：doctor 的退出码由报告推导，
-					// 探针连接自身的收尾失败打到 stderr 供操作者判断。
+				if release != nil {
 					defer func() {
-						if cerr := release(); cerr != nil {
-							cmd.PrintErrf("release deep probes: %v\n", cerr)
+						if closeErr := release(); closeErr != nil {
+							err = &exitCodeError{code: diagnostics.ExitFailed, cause: errors.Join(err, commandError("release deep probes", closeErr))}
 						}
 					}()
+				}
+				if probeErr != nil {
+					opts.ProbesUnavailable = true
+					if _, writeErr := fmt.Fprintf(cmd.ErrOrStderr(), "deep probes unavailable: %v\n", probeErr); writeErr != nil {
+						return errors.Join(probeErr, commandError("write deep probe diagnostic", writeErr))
+					}
+				} else {
 					opts.Probes = probes
 				}
 			}
@@ -102,7 +102,9 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 					return commandError("write doctor report", err)
 				}
 			} else {
-				printHumanReport(cmd, cfg, report)
+				if err := printHumanReport(cmd, cfg, report); err != nil {
+					return commandError("write doctor report", err)
+				}
 			}
 
 			if code := report.ExitCode(); code != diagnostics.ExitOK {
@@ -127,9 +129,13 @@ func newDoctorCmdWithDeps(load configLoader, buildProbes probeBuilder) *cobra.Co
 type exitCodeError struct {
 	code   int
 	report diagnostics.Report
+	cause  error
 }
 
 func (e *exitCodeError) Error() string {
+	if e.cause != nil {
+		return e.cause.Error()
+	}
 	failed, degraded := 0, 0
 	for _, c := range e.report.Checks {
 		switch c.Status {
@@ -145,18 +151,18 @@ func (e *exitCodeError) Error() string {
 
 // ExitCode 让根命令取出应当使用的进程退出码。
 func (e *exitCodeError) ExitCode() int { return e.code }
+func (e *exitCodeError) Unwrap() error { return e.cause }
 
-func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics.Report) {
-	cmd.Println("config: ok")
-	cmd.Printf("env: %s\n", cfg.Env)
-	cmd.Printf("application: %s\n", cfg.App.Name)
-	cmd.Printf("listen: %s\n", net.JoinHostPort(cfg.App.Host, cfg.App.Port))
-	cmd.Printf("pprof: %s\n", enabledLabel(cfg.Pprof.Enabled))
-	cmd.Printf("deep: %s\n", enabledLabel(report.Deep))
-
-	for _, c := range report.Checks {
-		cmd.Printf("%-18s %-9s %-22s %s\n", c.Name, c.Status, c.ErrorCode, c.Detail)
+func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics.Report) error {
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "config: ok\nenv: %s\napplication: %s\nlisten: %s\npprof: %s\ndeep: %s\n", cfg.Env, cfg.App.Name, net.JoinHostPort(cfg.App.Host, cfg.App.Port), enabledLabel(cfg.Pprof.Enabled), enabledLabel(report.Deep)); err != nil {
+		return err
 	}
+	for _, check := range report.Checks {
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%-18s %-9s %-22s %s\n", check.Name, check.Status, check.ErrorCode, check.Detail); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // buildRuntimeProbes 只绑定已加载配置，不做 I/O 或初始化完整 Runtime。

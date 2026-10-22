@@ -14,7 +14,7 @@ import (
 	"github.com/gtkit/gin-api/internal/core"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	sdk "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 )
 
 type failedConfiguration struct{ err error }
@@ -30,10 +30,10 @@ func TestPluginLifecycleAndFailures(t *testing.T) {
 		{"missing config", Options{}, nil},
 		{"config failed", Options{Configuration: failedConfiguration{failure}}, failure},
 		{"config nil", Options{Configuration: failedConfiguration{}}, core.ErrPluginContractViolation},
-		{"main nil", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...sdk.Option) (*sdk.Logger, error) { return nil, nil }}, core.ErrPluginContractViolation},
-		{"main partial", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), failure }}, failure},
-		{"access failed", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), nil }, AccessFactory: func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), failure }}, failure},
-		{"access nil", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), nil }, AccessFactory: func(...sdk.Option) (*sdk.Logger, error) { return nil, nil }}, core.ErrPluginContractViolation},
+		{"main nil", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return nil, nil }}, core.ErrPluginContractViolation},
+		{"main partial", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), failure }}, failure},
+		{"access failed", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), failure }}, failure},
+		{"access nil", Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) { return nil, nil }}, core.ErrPluginContractViolation},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New(tc.options)
@@ -67,9 +67,13 @@ func TestPluginLifecycleAndFailures(t *testing.T) {
 	if !errors.Is(p.Init(ctx), context.Canceled) {
 		t.Fatal("ignored init cancellation")
 	}
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("p.Stop(t.Context()): %v", err)
+	}
 	stopped := New(Options{})
-	_ = stopped.Stop(t.Context())
+	if err := stopped.Stop(t.Context()); err != nil {
+		t.Errorf("stopped.Stop(t.Context()): %v", err)
+	}
 	if !errors.Is(stopped.Init(t.Context()), core.ErrPluginContractViolation) {
 		t.Fatal("init after stop")
 	}
@@ -78,13 +82,17 @@ func TestPluginWritesStreamsFieldsAndAlerts(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "app"), Level: "debug", FileStdout: 1}}
 	alerts := &messages{}
-	p := New(Options{Configuration: fixedConfiguration{cfg}, MainFactory: func(opts ...sdk.Option) (*sdk.Logger, error) {
-		return sdk.New(append(opts, sdk.WithMessager(alerts), sdk.WithReplaceGlobals(false))...)
+	p := New(Options{Configuration: fixedConfiguration{cfg}, MainFactory: func(opts ...logger.Option) (*logger.Logger, error) {
+		return logger.New(append(opts, logger.WithMessager(alerts), logger.WithReplaceGlobals(false))...)
 	}})
 	if err := p.Init(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = p.Stop(context.Background()) })
+	t.Cleanup(func() {
+		if err := p.Stop(context.Background()); err != nil {
+			t.Errorf("p.Stop(context.Background()): %v", err)
+		}
+	})
 	if err := p.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +137,10 @@ func readLogs(t *testing.T, dir string) string {
 			return nil
 		}
 		data, err := os.ReadFile(path)
-		out.Write(data)
+		if err != nil {
+			return err
+		}
+		_, err = out.Write(data)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -195,11 +206,15 @@ func TestStopWaitsForAdmittedWritesAndClosesOnce(t *testing.T) {
 func TestInitCancellationAfterConstructionReleasesOwnedLogger(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	p := New(Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...sdk.Option) (*sdk.Logger, error) { cancel(); return newConsoleLogger(), nil }, AccessFactory: func(...sdk.Option) (*sdk.Logger, error) { return newConsoleLogger(), nil }})
+	p := New(Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: func(...logger.Option) (*logger.Logger, error) { cancel(); return newConsoleLogger(), nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }})
 	if err := p.Init(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("init=%v", err)
 	}
-	t.Cleanup(func() { _ = p.Stop(context.Background()) })
+	t.Cleanup(func() {
+		if err := p.Stop(context.Background()); !errors.Is(err, context.Canceled) {
+			t.Errorf("Stop must preserve failed initialization cancellation: %v", err)
+		}
+	})
 	if err := p.Start(t.Context()); err == nil {
 		t.Fatal("canceled Init left its resources published and startable")
 	}

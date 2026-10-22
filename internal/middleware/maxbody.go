@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"io"
 	"net/http"
 
@@ -97,8 +98,7 @@ func (w *maxBytesReaderWrapper) Close() error {
 	// 关闭包装的读取器
 	if err := w.ReadCloser.Close(); err != nil {
 		// 尝试关闭原始读取器
-		w.original.Close()
-		return err
+		return errors.Join(err, w.original.Close())
 	}
 
 	// 关闭原始读取器

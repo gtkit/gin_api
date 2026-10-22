@@ -18,7 +18,7 @@ require (
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/ginx v1.2.0
 	github.com/gtkit/go-llm-provider/v2 v2.15.0
-	github.com/gtkit/goerr v1.4.0
+	github.com/gtkit/goerr v1.5.0
 	github.com/gtkit/gojwt v1.1.0
 	github.com/gtkit/golimit/v2 v2.3.0
 	github.com/gtkit/gouploader v1.8.1

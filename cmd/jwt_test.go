@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,4 +264,21 @@ func readPublicKey(t *testing.T, path string) ed25519.PublicKey {
 		t.Fatalf("public key is %T, want ed25519", parsed)
 	}
 	return key
+}
+
+func TestJWTGenerateOutputFailureKeepsTheCompletedKeyPair(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	failure := errors.New("key summary output failed")
+	command := newJWTGenerateCmd()
+	command.SetOut(versionFailWriter{failure})
+	command.SetArgs([]string{"--kid", "output-failure", "--out-dir", directory})
+	if err := command.Execute(); !errors.Is(err, failure) {
+		t.Fatalf("output error=%v", err)
+	}
+	for _, name := range []string{"output-failure.private.pem", "output-failure.public.pem"} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("completed key removed: %v", err)
+		}
+	}
 }

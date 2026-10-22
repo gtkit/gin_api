@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	schema "github.com/gtkit/gin-api/internal/platform/config"
@@ -143,6 +144,19 @@ func decode(k *koanf.Koanf) (*schema.Config, error) {
 	}
 
 	var cfg schema.Config
+	// This presence-aware field must not inherit mapstructure's float/bool-to-int
+	// coercions. Environment overrides are decimal integer strings.
+	if raw := k.Get("log.sql_slow_threshold_ms"); raw != nil {
+		switch value := raw.(type) {
+		case int, int64:
+		case string:
+			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+				return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer: %w", err)
+			}
+		default:
+			return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer, got %T", raw)
+		}
+	}
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。
 	//

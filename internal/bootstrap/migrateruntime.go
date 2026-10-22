@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/core"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/plugin"
 	"gorm.io/gorm"
@@ -79,7 +79,7 @@ func NewMigrationRuntime(ctx context.Context, opts MigrationOptions) (_ *Migrati
 	if err := openCtx.Err(); err != nil {
 		return nil, err
 	}
-	logger.Infof("migration runtime initialized with env=%s", cfg.Env)
+	applog.Infof("migration runtime initialized with env=%s", cfg.Env)
 	return &MigrationRuntime{cfg: cfg, database: set.Database, plugins: registry}, nil
 }
 

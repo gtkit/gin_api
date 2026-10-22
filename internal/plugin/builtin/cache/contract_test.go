@@ -90,13 +90,24 @@ func TestFactoryFailureOwnership(t *testing.T) {
 			if (tc.nilStore || tc.typedNil) && !errors.Is(err, core.ErrPluginContractViolation) {
 				t.Fatal(err)
 			}
-			_ = p.Init(t.Context())
+			if again := p.Init(t.Context()); again != err {
+				t.Fatalf("Init result changed: first=%v second=%v", err, again)
+			}
 			if calls != 1 || cfg.reads != 1 {
 				t.Fatal("reconstructed store")
 			}
 			var group sync.WaitGroup
 			for range 16 {
-				group.Go(func() { _ = p.Stop(context.Background()) })
+				group.Go(func() {
+					stopErr := p.Stop(context.Background())
+					if tc.closeError {
+						if !errors.Is(stopErr, closeErr) {
+							t.Errorf("Stop missing cleanup cause: %v", stopErr)
+						}
+					} else if stopErr != nil {
+						t.Errorf("Stop: %v", stopErr)
+					}
+				})
 			}
 			group.Wait()
 			if !tc.nilStore && !tc.typedNil && owned.closes.Load() != 1 {
@@ -134,11 +145,15 @@ func TestConfigurationFailuresAndCancellation(t *testing.T) {
 			if err := p.Init(ctx); err == nil {
 				t.Fatal("invalid config accepted")
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
 		})
 	}
 	p := New(Options{})
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
 	if !errors.Is(p.Init(t.Context()), core.ErrPluginContractViolation) {
 		t.Fatal("init after stop")
 	}
@@ -181,7 +196,11 @@ func TestMemoryAndDisabledHaveNoRedisDependency(t *testing.T) {
 			if err := p.Init(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = p.Stop(context.Background()) })
+			t.Cleanup(func() {
+				if err := p.Stop(context.Background()); err != nil {
+					t.Errorf("Stop: %v", err)
+				}
+			})
 			if p.Enabled() != enabled {
 				t.Fatal("enabled changed")
 			}
@@ -192,14 +211,23 @@ func TestRedisStoreBorrowingPrefixTTLAndAdmission(t *testing.T) {
 	testutil.RequireLoopback(t)
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), DB: 3})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("Close Redis: %v", err)
+		}
+	})
 	cfg := &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis, RedisDB: 3, TTL: 7 * time.Second}}
-	cfg.App.Name = "contract"
+	cfg.App.Name = "same-application"
+	cfg.Redis.Prefix = "contract"
 	p := New(Options{Configuration: &configValue{cfg: cfg}, Redis: redisView{client: client, configured: true, wantDB: 3, t: t}})
 	if err := p.Init(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = p.Stop(context.Background()) })
+	t.Cleanup(func() {
+		if err := p.Stop(context.Background()); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
 	engine := gin.New()
 	calls := 0
 	engine.GET("/public", p.Middleware(3*time.Second), func(c *gin.Context) { calls++; c.String(http.StatusOK, "public") })

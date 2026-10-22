@@ -2,9 +2,44 @@ package console
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
+
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
+
+type failedConsoleWriter struct{ cause error }
+
+func (w failedConsoleWriter) Write([]byte) (int, error) { return 0, w.cause }
+
+type consoleFailureLog struct{ entries []applog.LogEntry }
+
+func (l *consoleFailureLog) Log(_ context.Context, entry applog.LogEntry) {
+	l.entries = append(l.entries, entry)
+}
+
+func TestConsoleFailureReachesExistingLogger(t *testing.T) {
+	cause := errors.New("console unavailable")
+	restore := setConsoleOutputForTest(failedConsoleWriter{cause})
+	defer restore()
+	logs := &consoleFailureLog{}
+	release, err := applog.Install(logs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	Success("accepted")
+	if len(logs.entries) != 1 || logs.entries[0].Level != applog.LevelError {
+		t.Fatalf("entries=%v", logs.entries)
+	}
+	for _, field := range logs.entries[0].Fields {
+		if err, ok := field.Value.(error); ok && errors.Is(err, cause) {
+			return
+		}
+	}
+	t.Fatal("console failure cause missing from terminal log")
+}
 
 // TestColoredOutputBytes 锁定三个打印函数的**逐字节**输出。
 //

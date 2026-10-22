@@ -19,13 +19,18 @@ const noLoopbackEnv = "ALLOW_NO_LOOPBACK"
 // 逐个测试探测会在受限环境里产生几十次注定失败的 syscall，而结果对同一个
 // 进程不会变。用 sync.OnceValue 而不是 sync.Once + 包级 bool：后者需要在
 // 函数里重新绑定包级变量，那是本仓明令禁止的形态（见 check-package-vars）。
-var loopbackUsable = sync.OnceValue(func() bool {
+type capabilityProbe struct {
+	available  bool
+	cause      error
+	cleanupErr error
+}
+
+var loopbackUsable = sync.OnceValue(func() capabilityProbe {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return false
+		return capabilityProbe{cause: err}
 	}
-	listener.Close()
-	return true
+	return capabilityProbe{available: true, cleanupErr: listener.Close()}
 })
 
 // RequireLoopback 声明该测试需要绑定或连接本地回环端口，不具备则跳过。
@@ -54,7 +59,17 @@ var loopbackUsable = sync.OnceValue(func() bool {
 func RequireLoopback(t *testing.T) {
 	t.Helper()
 
-	if reason, skip := skipReason(os.Getenv(noLoopbackEnv), loopbackUsable); skip {
+	probe := func() bool {
+		result := loopbackUsable()
+		if result.cleanupErr != nil {
+			t.Fatalf("close loopback probe listener: %v", result.cleanupErr)
+		}
+		if result.cause != nil {
+			t.Logf("loopback capability probe: %v", result.cause)
+		}
+		return result.available
+	}
+	if reason, skip := skipReason(os.Getenv(noLoopbackEnv), probe); skip {
 		t.Skip(reason)
 	}
 }

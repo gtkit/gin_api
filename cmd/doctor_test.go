@@ -231,7 +231,9 @@ func TestDoctorDeepProbeBuildFailureIsReported(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{"--deep"})
 
-	_ = cmd.Execute()
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("unavailable deep probes reported success")
+	}
 
 	if !strings.Contains(out.String(), "deep probes unavailable") {
 		t.Fatalf("output does not report the probe build failure: %s", out.String())
@@ -292,5 +294,34 @@ func TestDoctorWiresRedisRequirednessFromAssembly(t *testing.T) {
 			t.Errorf("doctor 命令把 Redis 必需性写死为 %q：必需性取决于哪些能力被启用，"+
 				"必须由装配层推导", literal)
 		}
+	}
+}
+
+func TestDoctorReturnsCleanupAndOutputFailures(t *testing.T) {
+	t.Parallel()
+	cleanup := errors.New("probe cleanup failed")
+	command := newDoctorCmdWithDeps(func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil }, func(context.Context, *config.Config) (diagnostics.Probes, func() error, error) {
+		return diagnostics.Probes{PingDB: func(context.Context) error { return nil }}, func() error { return cleanup }, nil
+	})
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&output)
+	command.SetArgs([]string{"--deep", "--json"})
+	err := command.Execute()
+	if !errors.Is(err, cleanup) {
+		t.Fatalf("cleanup failure lost: %v", err)
+	}
+	coded, ok := errors.AsType[interface {
+		error
+		ExitCode() int
+	}](err)
+	if !ok || coded.ExitCode() != diagnostics.ExitFailed {
+		t.Fatalf("cleanup exit=%v", err)
+	}
+	writeFailure := errors.New("doctor output failed")
+	command = newDoctorCmdWithDeps(func() (*config.Config, error) { return configWithRealKeysForDoctor(t), nil }, nil)
+	command.SetOut(versionFailWriter{writeFailure})
+	if err := command.Execute(); !errors.Is(err, writeFailure) {
+		t.Fatalf("output failure lost: %v", err)
 	}
 }

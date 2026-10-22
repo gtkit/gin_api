@@ -11,6 +11,8 @@ ARG APP_NAME
 # 而 direct 需要 builder 基础镜像里并不存在的 git，最终表现为 `go mod download` 失败。
 # 依赖全部公开，注入一个可达的 proxy 即可，无需给镜像装 git。
 ARG GOPROXY
+ARG BUILD_COMMIT=unknown
+ARG BUILD_TIME=unknown
 ENV GOPROXY=${GOPROXY}
 
 WORKDIR /src
@@ -27,7 +29,7 @@ RUN test -n "$APP_NAME" || { echo "APP_NAME build-arg is required (see project.m
 
 # CGO_ENABLED=0：纯 Go 依赖（gorm mysql 驱动无 cgo），产出静态二进制；
 # -trimpath 去除构建机路径，-s -w 去符号表减小体积。
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o "/out/${APP_NAME}" .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.BuildCommit=${BUILD_COMMIT} -X main.BuildTime=${BUILD_TIME}" -o "/out/${APP_NAME}" .
 
 # ============================================================================
 # 运行阶段：alpine + tzdata（application.timezone 需要）+ CA 证书（HTTPS 出站）

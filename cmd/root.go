@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
 
@@ -24,23 +25,47 @@ type rootOptions struct {
 // "第一次/第二次"的判定变成竞态。监督者把两次信号翻译成协调器动作，
 // 经 rootOptions 交给需要它的命令。
 func Execute() error {
+	return ExecuteWithBuildInfo(BuildInfo{})
+}
+
+// BuildInfo supplies immutable executable metadata from the process entrypoint.
+// Missing build inputs remain explicitly unknown.
+type BuildInfo struct {
+	Version   string
+	Commit    string
+	BuildTime string
+}
+
+// ExecuteWithBuildInfo runs the existing command tree with supplied build inputs.
+func ExecuteWithBuildInfo(info BuildInfo) error {
 	sup := newSignalSupervisor(context.Background())
 	defer sup.Close()
 
-	return NewRootCmd(sup).ExecuteContext(sup.ctx)
+	return newRootCmd(sup, info).ExecuteContext(sup.ctx)
 }
 
 // NewRootCmd 构造 root cobra 命令，并把所有经 RegisterRootCommand 注册的子命令
 // （server / migrate / jwt / module / project / doctor 等）挂载上去。
 // SilenceUsage/SilenceErrors 关闭 cobra 默认的用法与错误输出，错误统一交给调用方处理。
 func NewRootCmd(signals *signalSupervisor) *cobra.Command {
+	return newRootCmd(signals, BuildInfo{})
+}
+
+func newRootCmd(signals *signalSupervisor, info BuildInfo) *cobra.Command {
 	opts := &rootOptions{signals: signals}
+	values := []*string{&info.Version, &info.Commit, &info.BuildTime}
+	for _, value := range values {
+		if strings.TrimSpace(*value) == "" {
+			*value = "unknown"
+		}
+	}
 
 	rootCmd := &cobra.Command{
 		Use:           appmeta.CommandName,
 		Short:         appmeta.RuntimeName + " runtime",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       fmt.Sprintf("%s commit=%s build_time=%s", info.Version, info.Commit, info.BuildTime),
 	}
 
 	rootCmd.AddCommand(buildRootCommands(opts)...)

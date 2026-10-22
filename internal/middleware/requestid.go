@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // RequestIDHeader 是请求 ID 的响应头名。
@@ -94,7 +94,7 @@ func RequestID(gen *RequestIDGenerator) gin.HandlerFunc {
 		id, err := gen.Next()
 		if err != nil {
 			// 计数耗尽属不可能事件；真发生时宁可不带 ID 也不发重复 ID。
-			logger.Errorf("request id generation failed: %v", err)
+			applog.Errorf("request id generation failed: %v", err)
 			c.Next()
 			return
 		}
@@ -103,7 +103,7 @@ func RequestID(gen *RequestIDGenerator) gin.HandlerFunc {
 		c.Writer.Header().Set(RequestIDHeader, id)
 		c.Set(RequestIDContextKey, id)
 		c.Request = c.Request.WithContext(
-			logger.ContextWithRequestID(c.Request.Context(), id))
+			applog.ContextWithRequestID(c.Request.Context(), id))
 
 		c.Next()
 	}

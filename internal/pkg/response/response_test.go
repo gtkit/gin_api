@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
+
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 func TestMain(m *testing.M) {
@@ -446,3 +449,102 @@ func TestErrorIsAnAliasOfErr(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+type diagnosticCapture struct{ entries []applog.LogEntry }
+
+func (d *diagnosticCapture) Log(_ context.Context, e applog.LogEntry) {
+	d.entries = append(d.entries, e)
+}
+
+func TestErrorDiagnosticsPreserveTheWholeRootAndClientContract(t *testing.T) {
+	sink := &diagnosticCapture{}
+	release, err := applog.Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	first, cleanup := errors.New("private primary"), errors.New("private cleanup")
+	root := fmt.Errorf("outer operation: %w", errors.Join(goerr.New(first, goerr.StatusNotFound(), "public message"), goerr.WithStack(cleanup)))
+	c, rec := newCtx()
+	c.Request = c.Request.WithContext(applog.ContextWithRequestID(c.Request.Context(), "generated-id"))
+	Err(c, root)
+	ObserveError(c, root)
+	if rec.Code != 404 || len(sink.entries) != 1 {
+		t.Fatalf("status=%d entries=%d", rec.Code, len(sink.entries))
+	}
+	fields := map[string]any{}
+	for _, field := range sink.entries[0].Fields {
+		fields[field.Key] = field.Value
+	}
+	text, ok := fields["error"].(string)
+	if !ok || !strings.Contains(text, "outer operation") || !strings.Contains(text, "private cleanup") {
+		t.Fatalf("root lost: %v", fields)
+	}
+	causes, ok := fields["error_causes"].([]map[string]any)
+	if !ok || len(causes) < 5 {
+		t.Fatalf("cause tree lost: %v", fields)
+	}
+	frames := 0
+	for i, cause := range causes {
+		parent, ok := cause["parent"].(int)
+		if !ok {
+			t.Fatalf("parent has type %T", cause["parent"])
+		}
+		if parent >= i {
+			t.Fatal("invalid parent")
+		}
+		causeFrames, ok := cause["frames"].([]map[string]any)
+		if !ok {
+			t.Fatalf("frames have type %T", cause["frames"])
+		}
+		frames += len(causeFrames)
+	}
+	if frames == 0 {
+		t.Fatal("origin stacks lost")
+	}
+	body := decode(t, rec)
+	if body["msg"] != "public message" || body["request_id"] != "generated-id" || len(body) != 4 || strings.Contains(rec.Body.String(), "private") {
+		t.Fatalf("client contract: %s", rec.Body.String())
+	}
+}
+
+func TestDiagnosticFailureDoesNotChangeTheBusinessResponse(t *testing.T) {
+	sink := &diagnosticCapture{}
+	release, err := applog.Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	c, rec := newCtx()
+	Err(c, goerr.New(errors.New(strings.Repeat("x", 17000)), goerr.StatusNotLoggedIn(), "please authenticate"))
+	if rec.Code != 401 || decode(t, rec)["msg"] != "please authenticate" || len(sink.entries) != 1 {
+		t.Fatalf("response changed: %s", rec.Body.String())
+	}
+	found := false
+	for _, f := range sink.entries[0].Fields {
+		if f.Key == "error_diagnostic_failure" {
+			found = true
+		}
+		if f.Key == "error" {
+			t.Fatal("failed inspection was represented as a complete snapshot")
+		}
+	}
+	if !found {
+		t.Fatal("diagnostic failure ignored")
+	}
+	var knownNil *goerr.Item
+	c, rec = newCtx()
+	Err(c, knownNil)
+	if rec.Code != 500 {
+		t.Fatalf("typed nil status=%d", rec.Code)
+	}
+	var unknownNil *diagnosticNilError
+	fields := ErrorLogFields(unknownNil)
+	if len(fields) != 2 || fields[1].Key != "error_diagnostic_failure" {
+		t.Fatalf("typed nil diagnostic=%v", fields)
+	}
+}
+
+type diagnosticNilError struct{}
+
+func (*diagnosticNilError) Error() string { panic("typed-nil method must not run") }

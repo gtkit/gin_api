@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+// EffectiveRedisPrefix selects the shared auth/rate-limit/response-cache namespace.
+// Empty prefix preserves the original application name byte for byte.
+func (c Config) EffectiveRedisPrefix() string {
+	if c.Redis.Prefix != "" {
+		return c.Redis.Prefix
+	}
+	return c.App.Name
+}
+
+// EffectiveSQLSlowThreshold returns the validated per-instance warning threshold.
+func (c LogConfig) EffectiveSQLSlowThreshold() time.Duration {
+	if c.SQLSlowThresholdMS == nil {
+		return 200 * time.Millisecond
+	}
+	return time.Duration(*c.SQLSlowThresholdMS) * time.Millisecond
+}
+
 // EffectiveDrainWait 返回生效的 LB 传播等待时长。
 func (a AppConfig) EffectiveDrainWait() time.Duration {
 	if a.DrainWaitSeconds <= 0 {

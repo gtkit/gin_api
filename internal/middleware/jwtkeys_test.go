@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	gojwt "github.com/gtkit/gojwt"
+	"github.com/gtkit/gojwt"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"

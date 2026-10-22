@@ -9,7 +9,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	defaulthttp "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
+	defaulthttpmiddleware "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
 	"go.opentelemetry.io/otel"
 
 	"gorm.io/gorm"
@@ -130,7 +130,11 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 	t.Parallel()
 	for _, resources := range []*data.Resources{nil, {}} {
 		checker := newHealthChecker(resources)
-		if checker.(*runtimeHealthChecker).RedisConfigured() {
+		runtimeChecker, ok := checker.(*runtimeHealthChecker)
+		if !ok {
+			t.Fatalf("health checker type %T", checker)
+		}
+		if runtimeChecker.RedisConfigured() {
 			t.Fatal("zero resources reported Redis configured")
 		}
 		if err := checker.PingDB(t.Context()); err == nil {
@@ -144,7 +148,7 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 
 func installMiddlewareFixture(t *testing.T, inf *infra) {
 	t.Helper()
-	builder := defaulthttp.New(defaulthttp.Options{Configuration: loadedConfiguration{inf.cfg}})
+	builder := defaulthttpmiddleware.New(defaulthttpmiddleware.Options{Configuration: loadedConfiguration{inf.cfg}})
 	registry := core.NewPluginRegistry()
 	if err := registry.Register(builder); err != nil {
 		t.Fatal(err)

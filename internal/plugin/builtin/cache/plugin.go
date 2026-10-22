@@ -104,7 +104,7 @@ func (p *Plugin) initialize(ctx context.Context) error {
 			cfg.Enabled = false
 		}
 	}
-	store, err := p.options.Factory(cfg, client, snapshot.App.Name)
+	store, err := p.options.Factory(cfg, client, snapshot.EffectiveRedisPrefix())
 	if store != nil {
 		v := reflect.ValueOf(store)
 		switch v.Kind() {

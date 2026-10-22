@@ -1,4 +1,4 @@
-.PHONY: dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -16,7 +16,15 @@ BIN_DIR := ./bin
 
 Linux := CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 RUN := go run -tags="sonic"
-BUILD_FLAGS := -tags="sonic" -ldflags "-s -w"
+# 构建追溯输入，可由CI显式固定；直用go build/Docker build未注入时为unknown。
+BUILD_COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ || printf unknown)
+BUILD_FLAGS := -tags="sonic" -ldflags "-s -w -X main.BuildCommit=$(BUILD_COMMIT) -X main.BuildTime=$(BUILD_TIME)"
+# app profile专用；不改变既有dev-up的默认依赖入口。
+COMPOSE_ENV_FILE ?= .env
+COMPOSE_PROJECT ?= $(APP_NAME)
+APP_COMPOSE = docker compose --project-name "$(COMPOSE_PROJECT)" --env-file "$(COMPOSE_ENV_FILE)" --profile app
+APP_COMPOSE_ENV = DEV_APP_NAME="$(APP_NAME)" DEV_BUILD_COMMIT="$(BUILD_COMMIT)" DEV_BUILD_TIME="$(BUILD_TIME)"
 ## 构建mac版本,需要安装upx
 # 多个 tag 的正确写法: 多个 tag 之间用逗号或空格分隔
 #go build -tags=sonic,debug ./...
@@ -29,6 +37,21 @@ ifeq ($(filter migrate-%,$(MAKECMDGOALS)),)
 else
 	@:
 endif
+
+ifeq ($(filter migrate-%,$(MAKECMDGOALS)),)
+run: dev ## 本地启动（dev别名）
+lint: tool ## 校验锁定lint工具版本并执行lint
+test: test-race ## 执行带race的测试
+else
+run lint test:
+	@:
+endif
+
+clean: ## 仅清理默认受管二进制与覆盖率文件，拒绝越界和symlink
+	go run ./scripts/clean.go --bin-dir "$(BIN_DIR)" --app-name "$(APP_NAME)" --coverage-profile "$(COVERAGE_PROFILE)"
+
+check-make-entries: ## 隔离验证常用入口、迁移占位与清理边界
+	@ bash ./scripts/check-make-entries.sh
 
 ## 查看监听在 $(PORT) 端口的进程
 port:
@@ -98,6 +121,9 @@ tool: ## Lint Go code with the installed golangci-lint
 	@ bash ./scripts/check-tool-version.sh golangci-lint "$(GOLANGCI_LINT_VERSION)"
 	@ echo "▶️ golangci-lint run ($(GOLANGCI_LINT_VERSION))"
 	golangci-lint run $(LINT_TARGETS)
+	@ for source in scripts/*.go; do \
+		golangci-lint run --enable-only=errcheck "$$source" || exit "$$?"; \
+	done
 	@ echo "✅ golangci-lint run"
 
 vet: ## Run go vet
@@ -138,19 +164,21 @@ test-race: ## Run race-enabled tests
 ##
 ## 手工列举会腐烂，而且腐烂得很安静：在一个新包里加了集成测试，本目标跑不到它，
 ## 于是那条测试等于不在门禁里——而输出看起来一切正常。
-INTEGRATION_PKGS = $(sort $(patsubst %,./%,$(dir $(shell grep -rl '^//go:build integration' --include='*_test.go' internal pkg 2>/dev/null))))
+INTEGRATION_PKGS = $(sort $(patsubst %,./%,$(dir $(shell grep -rl '^//go:build integration' --include='*_test.go' internal pkg cmd 2>/dev/null))))
 
-test-integration: ## Run real-dependency integration tests locally (set REQUIRE_DB_INTEGRATION=1 to turn skips into failures)
-	## MySQL 侧连的是 config/env/env.yml 里 database.name 指的库，它必须与本仓迁移状态一致；
+test-integration: ## Run real-dependency integration tests from an isolated APP_ROOT (REQUIRE_DB_INTEGRATION=1 forbids skips)
+	## APP_ROOT必须显式指向项目根之外的隔离运行配置；先验证元数据，再连接依赖。
+	## MySQL 侧连的是该根config/env/env.yml的database.name，它必须与本仓迁移状态一致；
 	## Redis 侧连 REDIS_ITEST_ADDR（默认 127.0.0.1:6379）的 REDIS_ITEST_DB（默认 15）。
 	## 单开一个 MySQL 库更省事（建库 + 迁移 + 运行的完整命令见 docs/testing.md）：
-	##   APP_DATABASE__NAME=gin_api_itest REQUIRE_DB_INTEGRATION=1 make test-integration
+	##   APP_ROOT=/path/to/isolated-runtime REQUIRE_DB_INTEGRATION=1 make test-integration
 	## 少一张表时报的是 "Table 'xxx' doesn't exist"，那条错误与真实缺陷长得一模一样。
 	##
 	## 空集合即失败：本仓必然有集成测试，反查出 0 个只可能是枚举坏了，
 	## 而那种坏法的表现是"全绿"。
 	@ test -n "$(INTEGRATION_PKGS)" || { echo "FAIL: no integration-tagged test packages found; the discovery is broken"; exit 1; }
-	go test -tags integration -race -count=1 -timeout=5m $(INTEGRATION_PKGS)
+	PLUGIN_INTEGRATION=1 go test -tags integration -count=1 -v -run '^TestPluginIntegrationPrerequisites$$' ./cmd
+	PLUGIN_INTEGRATION=1 go test -tags integration -race -count=1 -timeout=5m $(INTEGRATION_PKGS)
 
 image: ## Build the Docker image locally, tagged with the current commit short sha (requires Docker; servers do not run Docker)
 	## APP_NAME 只决定 builder 阶段的产物名；容器内路径固定为 /app/bin/server（exec-form
@@ -159,6 +187,8 @@ image: ## Build the Docker image locally, tagged with the current commit short s
 	## builder 镜像里并不存在的 git。
 	docker build \
 		--build-arg APP_NAME=$(APP_NAME) \
+		--build-arg BUILD_COMMIT="$(BUILD_COMMIT)" \
+		--build-arg BUILD_TIME="$(BUILD_TIME)" \
 		--build-arg GOPROXY=$$(go env GOPROXY) \
 		-t $(APP_NAME):$$(git rev-parse --short HEAD) .
 
@@ -233,6 +263,23 @@ dev-up: ## 拉起本地开发依赖（MySQL/Redis）并等待健康
 dev-down: ## 停止本地开发依赖，**保留数据卷**
 	docker compose down
 
+check-compose-app: ## 仅用隔离环境解析Compose并验证app契约，不创建容器
+	python3 ./scripts/check-compose-app.py --app-name "$(APP_NAME)"
+
+dev-app-up: ## 显式构建并启动app及健康依赖；先准备隔离配置、钥和迁移
+	@ test -f "$(COMPOSE_ENV_FILE)" || { echo "missing Compose env file" >&2; exit 1; }
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) build --pull=false app
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) up --pull never -d --wait app
+
+dev-app-up-existing: ## 仅启动app，复用已有DB/Redis（不创建同类依赖容器）
+	@ test -f "$(COMPOSE_ENV_FILE)" || { echo "missing Compose env file" >&2; exit 1; }
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) build --pull=false app
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) up --pull never --no-deps -d --wait app
+
+dev-app-down: ## 仅停止并移除app；不停止DB/Redis，不删除数据卷
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) stop app
+	$(APP_COMPOSE_ENV) $(APP_COMPOSE) rm -f app
+
 dev-reset: ## 删除本地开发依赖及其数据卷（不可恢复，需二次确认）
 	@ echo "⚠️  这会删除本地开发库的**全部数据**（gin-api-dev-mysql-data / gin-api-dev-redis-data）。"
 	@ echo "    确认请输入 yes:"
@@ -277,7 +324,7 @@ check-appmeta: ## 校验 internal/appmeta 与 project.mk 零差异（防身份�
 MIGRATE = $(if $(filter dev,$(ENV)),$(RUN) .,$(BIN_DIR)/$(APP_NAME))
 
 ## 环境占位目标：允许 `make migrate-xxx <env>` 把环境名作为第二个目标传入(dev/test/prod)
-prod test:
+prod:
 	@:
 
 # migrate-migration 走位置参数: make migrate-migration create_xxx_table dev
@@ -312,7 +359,7 @@ migrate-up: ## 执行迁移建表(非 dev 走二进制并二次确认)
 migrate-status: ## 查看迁移状态
 	$(MIGRATE) migrate status
 
-check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context tool vet check-modern check-coverage ## Run all required pre-submit checks
+check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context check-make-entries tool vet check-modern check-coverage ## Run all required pre-submit checks
 
 check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
 
@@ -330,7 +377,7 @@ release-check: ## 发布门禁：日常门禁 + 数据库/迁移真实验证 + �
 	## REQUIRE_DB_INTEGRATION=1 把"跳过"变成"失败"：
 	## 集成测试默认在无数据库时跳过，那在日常是便利，在发布时是漏洞——
 	## 跳过等于没跑，却仍然记为通过。
-	@ REQUIRE_DB_INTEGRATION=1 $(MAKE) test-integration
+	@ REQUIRE_DB_INTEGRATION=1 PLUGIN_INTEGRATION=1 $(MAKE) test-integration
 	@ $(MAKE) migrate-verify
 	@ $(MAKE) security-release
 	@ echo "✅ release-check"

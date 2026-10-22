@@ -23,7 +23,11 @@ func newTestRecorder(t *testing.T) (*Recorder, *sdkmetric.ManualReader) {
 
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("provider.Shutdown(context.Background()): %v", err)
+		}
+	})
 
 	rec, err := New(provider.Meter(scopeName))
 	if err != nil {
@@ -130,7 +134,10 @@ func TestRequestAttributesCarryNoHighCardinalityFields(t *testing.T) {
 	rec.RecordRequest(context.Background(), "GET", "/api/v1/user", 200, time.Millisecond)
 
 	m := collect(t, reader, "http.server.requests")
-	sum := m.Data.(metricdata.Sum[int64])
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 
 	allowed := map[attribute.Key]struct{}{
 		"http.request.method":       {},
@@ -197,10 +204,17 @@ func TestWorkerHealthIsObservedAtCollectionTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterWorkerHealth: %v", err)
 	}
-	t.Cleanup(func() { _ = unregister() })
+	t.Cleanup(func() {
+		if err := unregister(); err != nil {
+			t.Errorf("unregister(): %v", err)
+		}
+	})
 
 	m := collect(t, reader, "worker.consecutive_failures")
-	gauge := m.Data.(metricdata.Gauge[int64])
+	gauge, ok := m.Data.(metricdata.Gauge[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 	if gauge.DataPoints[0].Value != 3 {
 		t.Fatalf("consecutive failures = %d, want 3", gauge.DataPoints[0].Value)
 	}
@@ -210,14 +224,20 @@ func TestWorkerHealthIsObservedAtCollectionTime(t *testing.T) {
 	health = WorkerHealth{ConsecutiveFailures: 0, LastSuccess: time.Unix(1754000000, 0)}
 
 	m = collect(t, reader, "worker.consecutive_failures")
-	gauge = m.Data.(metricdata.Gauge[int64])
+	gauge, ok = m.Data.(metricdata.Gauge[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 	if gauge.DataPoints[0].Value != 0 {
 		t.Fatalf("after a success the streak reads %d, want 0: the callback is not reading "+
 			"the current state", gauge.DataPoints[0].Value)
 	}
 
 	m = collect(t, reader, "worker.last_success_timestamp")
-	gauge = m.Data.(metricdata.Gauge[int64])
+	gauge, ok = m.Data.(metricdata.Gauge[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 	if gauge.DataPoints[0].Value != 1754000000 {
 		t.Fatalf("last success = %d, want 1754000000", gauge.DataPoints[0].Value)
 	}
@@ -237,10 +257,17 @@ func TestNeverSucceededReportsZeroInsteadOfNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterWorkerHealth: %v", err)
 	}
-	t.Cleanup(func() { _ = unregister() })
+	t.Cleanup(func() {
+		if err := unregister(); err != nil {
+			t.Errorf("unregister(): %v", err)
+		}
+	})
 
 	m := collect(t, reader, "worker.last_success_timestamp")
-	gauge := m.Data.(metricdata.Gauge[int64])
+	gauge, ok := m.Data.(metricdata.Gauge[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 	if len(gauge.DataPoints) != 1 {
 		t.Fatalf("data points = %d, want 1: a worker that never succeeded must still report "+
 			"a series, otherwise the alert rule sees no data instead of a problem",
@@ -262,10 +289,17 @@ func TestDBPoolStatsSplitByState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterDBPoolStats: %v", err)
 	}
-	t.Cleanup(func() { _ = unregister() })
+	t.Cleanup(func() {
+		if err := unregister(); err != nil {
+			t.Errorf("unregister(): %v", err)
+		}
+	})
 
 	m := collect(t, reader, "db.client.connections.usage")
-	gauge := m.Data.(metricdata.Gauge[int64])
+	gauge, ok := m.Data.(metricdata.Gauge[int64])
+	if !ok {
+		t.Fatalf("metric has unexpected shape %T", m.Data)
+	}
 	if len(gauge.DataPoints) != 2 {
 		t.Fatalf("connection usage produced %d series, want 2 (used + idle)", len(gauge.DataPoints))
 	}

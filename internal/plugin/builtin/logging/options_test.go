@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	loggerv2 "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/news"
@@ -18,18 +18,18 @@ import (
 	"github.com/gtkit/gin-api/internal/testutil"
 )
 
-func newConsoleLogger() *loggerv2.Logger {
-	return loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithReplaceGlobals(false),
+func newConsoleLogger() *logger.Logger {
+	return logger.MustNew(
+		logger.WithConsole(true),
+		logger.WithFile(false),
+		logger.WithReplaceGlobals(false),
 	)
 }
 
 func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 	built := newConsoleLogger()
 	var gotOpts int
-	factory := Factory(func(opts ...loggerv2.Option) (*loggerv2.Logger, error) {
+	factory := Factory(func(opts ...logger.Option) (*logger.Logger, error) {
 		gotOpts = len(opts)
 		return built, nil
 	})
@@ -46,7 +46,7 @@ func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 		t.Fatalf("InitWithConfig: %v", err)
 	}
 
-	if loggerv2.Default() != built {
+	if logger.Default() != built {
 		t.Fatal("InitWithConfig 应把构建的实例设为 loggerv2 默认实例")
 	}
 	// 基础 10 项（含告警队列上限）+ MaxAge + MaxBackups
@@ -57,7 +57,7 @@ func TestInitWithConfigSetsDefaultLogger(t *testing.T) {
 
 func TestInitWithConfigOmitsZeroRetentionOptions(t *testing.T) {
 	var gotOpts int
-	factory := Factory(func(opts ...loggerv2.Option) (*loggerv2.Logger, error) {
+	factory := Factory(func(opts ...logger.Option) (*logger.Logger, error) {
 		gotOpts = len(opts)
 		return newConsoleLogger(), nil
 	})
@@ -75,30 +75,30 @@ func TestInitWithConfigOmitsZeroRetentionOptions(t *testing.T) {
 // the former falls back to stdout, the latter rejects it. The adapter preserves
 // the resolved dependency's contract without referring to newer SDK symbols.
 func TestInitWithConfigPreservesResolvedSDKOutputContract(t *testing.T) {
-	probe, sdkErr := loggerv2.New(loggerv2.WithConsole(false), loggerv2.WithFile(false), loggerv2.WithReplaceGlobals(false))
+	probe, sdkErr := logger.New(logger.WithConsole(false), logger.WithFile(false), logger.WithReplaceGlobals(false))
 	if probe != nil {
 		probe.Sync()
 	}
-	previous := loggerv2.Default()
+	previous := logger.Default()
 	err := initDefaultForTest(t, nil)
 	if sdkErr != nil {
 		if err == nil || !strings.Contains(err.Error(), sdkErr.Error()) {
 			t.Fatalf("SDK output error lost: got %v, SDK %v", err, sdkErr)
 		}
-		if loggerv2.Default() != previous {
+		if logger.Default() != previous {
 			t.Fatal("failed initialization replaced the default logger")
 		}
 	} else {
 		if err != nil {
 			t.Fatalf("legacy SDK output fallback changed: %v", err)
 		}
-		if loggerv2.Default() == previous {
+		if logger.Default() == previous {
 			t.Fatal("successful legacy fallback did not publish its owner")
 		}
 		if err := applog.Drain(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if loggerv2.Default() != previous {
+		if logger.Default() != previous {
 			t.Fatal("legacy output owner was not released")
 		}
 	}
@@ -136,7 +136,9 @@ func TestInitWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 			t.Error("unexpected duplicate alert delivery")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":0,"msg":"success"}`)
+		if _, err := io.WriteString(w, `{"code":0,"msg":"success"}`); err != nil {
+			t.Errorf("test response I/O: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 	dir := t.TempDir()
@@ -144,7 +146,7 @@ func TestInitWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 		Log:  config.LogConfig{Path: filepath.Join(dir, "bridge"), FileStdout: 1},
 		News: config.NewsConfig{FSURL: server.URL + "/default"},
 	}
-	previous := loggerv2.Default()
+	previous := logger.Default()
 	t.Cleanup(func() {
 		if err := applog.Drain(context.Background()); err != nil {
 			t.Error(err)
@@ -153,7 +155,7 @@ func TestInitWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 	if err := initDefaultForTest(t, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if loggerv2.Default() == previous {
+	if logger.Default() == previous {
 		t.Fatal("compatibility entry point did not install its owner")
 	}
 	applog.Infof("bridge main %d", 7)
@@ -168,7 +170,7 @@ func TestInitWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 	if err := applog.Drain(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if loggerv2.Default() != previous {
+	if logger.Default() != previous {
 		t.Fatal("drain did not restore the previous default logger")
 	}
 	if err := applog.Drain(t.Context()); err != nil {
@@ -223,7 +225,7 @@ func initForTest(t *testing.T, factory Factory, cfg *config.Config) error {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	p := New(Options{Configuration: fixedConfiguration{cfg}, MainFactory: factory, AccessFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) { return newConsoleLogger(), nil }})
+	p := New(Options{Configuration: fixedConfiguration{cfg}, MainFactory: factory, AccessFactory: func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }})
 	t.Cleanup(func() {
 		if err := p.Stop(context.Background()); err != nil {
 			t.Error(err)

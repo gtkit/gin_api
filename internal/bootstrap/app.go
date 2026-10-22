@@ -15,7 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 	"github.com/gtkit/gin-api/internal/plugin"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // Options defines runtime startup options.
@@ -207,7 +207,9 @@ func (a *App) Run(ctx context.Context) (err error) {
 	prebindClosed := false
 	defer func() {
 		if !prebindClosed {
-			_ = bound.Close()
+			if closeErr := bound.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close prebound http listener: %w", closeErr))
+			}
 		}
 	}()
 
@@ -252,7 +254,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 			// 混入清理/回滚失败或其他故障的错误树必须保留上报——
 			// errors.Is 对 Join 任一成员命中即真，不能用它整体判定。
 			if IsPureCancellation(startErr) {
-				logger.Infof("startup barrier canceled by a shutdown request: %v", startErr)
+				applog.Infof("startup barrier canceled by a shutdown request: %v", startErr)
 				return errors.Join(a.shutdown.Cause(), pprofErr)
 			}
 			return errors.Join(a.shutdown.Cause(), fmt.Errorf("start workers: %w", startErr), pprofErr)
@@ -266,7 +268,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 		a.shutdown.RequestShutdown(nil)
 	}
 	if a.shutdownRequested() {
-		logger.Info("shutdown requested during startup: skipping http serve")
+		applog.Info("shutdown requested during startup: skipping http serve")
 		return a.gracefulShutdown(ctx, nil, true, pprofEndpoint)
 	}
 
@@ -330,7 +332,7 @@ func alertExitError(err error) {
 	if err == nil {
 		return
 	}
-	logger.HErrorf("process exiting with error: %v", err)
+	applog.HErrorf("process exiting with error: %v", err)
 }
 
 // shutdownRequested 非阻塞探测是否已有关停请求。
@@ -395,7 +397,7 @@ func (a *App) gracefulShutdown(
 		}
 	}
 
-	logger.Infof("shutdown phase=%s", a.shutdown.Phase())
+	applog.Infof("shutdown phase=%s", a.shutdown.Phase())
 
 	// 1. 停 producer：不再产生新任务。
 	collect(a.stopKindWithBudget(base, KindProducer))
@@ -466,7 +468,7 @@ func (a *App) stopKindWithBudget(base context.Context, kind WorkerKind) error {
 // 此时继续 Shutdown 只会让进程在故障关停中无限滞留。
 func (a *App) shutdownHTTP(base context.Context) error {
 	if a.shutdown.Forced() {
-		logger.Warn("forced shutdown: closing http server without draining in-flight requests")
+		applog.Warn("forced shutdown: closing http server without draining in-flight requests")
 		return a.httpServer.Close()
 	}
 
@@ -474,7 +476,7 @@ func (a *App) shutdownHTTP(base context.Context) error {
 	defer finish()
 
 	if err := shutdownHTTPServer(shutdownCtx, a.httpServer, a.httpConfig); err != nil {
-		logger.Warnf("graceful http shutdown failed (%v); closing listeners", err)
+		applog.Warnf("graceful http shutdown failed (%v); closing listeners", err)
 		return errors.Join(err, a.httpServer.Close())
 	}
 	return nil
@@ -498,7 +500,7 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 		return nil
 	}
 	if endpoint.Exited() {
-		logger.Warn("pprof endpoint had already exited before shutdown; " +
+		applog.Warn("pprof endpoint had already exited before shutdown; " +
 			"the capability was degraded for part of this process lifetime")
 	}
 

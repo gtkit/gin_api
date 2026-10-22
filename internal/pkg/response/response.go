@@ -3,6 +3,7 @@ package resp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 
@@ -11,16 +12,17 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
 	"github.com/gtkit/verify"
 )
 
 // ResResult 统一响应信封。
 type ResResult struct {
-	Code    goerr.Code `json:"code"`
-	Message string     `json:"msg"`
-	Data    any        `json:"data"`
+	Code      goerr.Code `json:"code"`
+	Message   string     `json:"msg"`
+	Data      any        `json:"data"`
+	RequestID string     `json:"request_id"`
 }
 
 // ErrMapping 将一个 sentinel error 映射到 goerr.Status + 可选的客户端文案。
@@ -75,7 +77,7 @@ func newResponse(code goerr.Code, msg string, data any) *ResResult {
 }
 
 func Ok(c *gin.Context, data any) {
-	respJSON(c, http.StatusOK, newResponse(0, "OK", data))
+	WriteJSON(c, http.StatusOK, newResponse(0, "OK", data))
 }
 
 func Err(c *gin.Context, err error) {
@@ -107,8 +109,8 @@ func bindErrResponse(c *gin.Context, err error) {
 	}
 	// 短路顺序不能调换：翻译器未就绪时不得走 verify.StructErr——
 	// validator 首次校验即缓存字段名，早调用会让消息漏出 Go 字段名。
-	if _, ok := errors.AsType[validator.ValidationErrors](err); ok && validationTranslationReady.Load() {
-		if translated := verify.StructErr(err); translated != nil {
+	if validationErrors, ok := errors.AsType[validator.ValidationErrors](err); ok && validationTranslationReady.Load() {
+		if translated := verify.StructErr(validationErrors); translated != nil {
 			Err(c, translated)
 			return
 		}
@@ -138,7 +140,7 @@ func MapErr(c *gin.Context, err error, mapper *ErrMapper) {
 	// 那条真实故障就此消失（既不回 500，也不进错误率）。
 	if errx.IsPureAbort(err) {
 		if c != nil {
-			_ = c.Error(err)
+			c.Error(err).Type = gin.ErrorTypePrivate
 			c.Abort()
 		}
 		return
@@ -155,8 +157,8 @@ func MapErr(c *gin.Context, err error, mapper *ErrMapper) {
 func ErrWithData(c *gin.Context, err error, data any) {
 	item := toError(err, goerr.StatusInternalServer)
 	httpCode := item.HTTPCode()
-	logError(c, item, httpCode)
-	respJSON(c, httpCode, newResponse(item.Code(), clientMessage(item), data))
+	logError(c, err, item, httpCode)
+	WriteJSON(c, httpCode, newResponse(item.Code(), clientMessage(item), data))
 }
 
 func NotFoundError(c *gin.Context, errmsg string) {
@@ -176,7 +178,7 @@ func NotAllowedMethod(c *gin.Context, errmsg string) {
 	if errmsg == "" {
 		errmsg = "method not allowed"
 	}
-	respJSON(c, http.StatusMethodNotAllowed, NewResponse(MethodNotAllowedCode, errmsg, nil))
+	WriteJSON(c, http.StatusMethodNotAllowed, NewResponse(MethodNotAllowedCode, errmsg, nil))
 }
 
 func normalizeData(data any) any {
@@ -196,18 +198,15 @@ func clientMessage(item goerr.Error) string {
 }
 
 func toError(err error, fallback func() *goerr.Status) goerr.Error {
-	if item, ok := goerr.AsItem(err); ok {
-		return item
-	}
 	if err == nil {
 		return goerr.New(nil, fallback())
 	}
-	return goerr.New(err, fallback())
+	return goerr.Convert(err)
 }
 
 // logError 在响应层统一记录错误日志。
 // 5xx → error 级别，4xx → warn 级别，2xx（业务错误）→ 不记录（属于正常业务流程）。
-func logError(c *gin.Context, item goerr.Error, httpCode int) {
+func logError(c *gin.Context, root error, item goerr.Error, httpCode int) {
 	if c == nil || item == nil {
 		return
 	}
@@ -216,24 +215,30 @@ func logError(c *gin.Context, item goerr.Error, httpCode int) {
 		return
 	}
 
-	fields := []logger.Field{}
+	if root == nil {
+		root = item
+	}
+	if ErrorWasLogged(c, root) {
+		return
+	}
+	c.Set(loggedErrorKey, root)
+	fields := ErrorLogFields(root)
 	if c.Request != nil {
 		fields = append(fields,
-			logger.String("method", c.Request.Method),
-			logger.String("path", c.Request.URL.Path),
+			applog.String("method", c.Request.Method),
+			applog.String("path", c.Request.URL.Path),
 		)
 	}
 	fields = append(fields,
-		logger.Int("http_status", httpCode),
-		logger.Int("error_code", int(item.Code())),
-		logger.String("error", item.Error()),
+		applog.Int("http_status", httpCode),
+		applog.Int("error_code", int(item.Code())),
 	)
 
 	if httpCode >= http.StatusInternalServerError {
-		logger.ErrorCtx(requestCtx(c), "[Response] request failed", fields...)
+		applog.ErrorCtx(requestCtx(c), "[Response] request failed", fields...)
 		return
 	}
-	logger.WarnCtx(requestCtx(c), "[Response] request failed", fields...)
+	applog.WarnCtx(requestCtx(c), "[Response] request failed", fields...)
 }
 
 // NewResponse 创建自定义 code 的响应，供中间件直接用 c.AbortWithStatusJSON 时使用。
@@ -253,7 +258,7 @@ func Error(c *gin.Context, err error) {
 
 // OkErr 返回 HTTP 200 + 业务错误码响应（用于"请求成功但业务被拒"场景）。
 func OkErr(c *gin.Context, err goerr.Error) {
-	respJSON(c, http.StatusOK, newResponse(err.Code(), clientMessage(err), nil))
+	WriteJSON(c, http.StatusOK, newResponse(err.Code(), clientMessage(err), nil))
 }
 
 // BindStructErr 处理结构体绑定/验证错误，使用 HTTP 422；请求体超限单独映射为 413。
@@ -275,7 +280,7 @@ func TooManyRequestsErr(c *gin.Context, message string) {
 	if message == "" {
 		message = "请求过于频繁"
 	}
-	respJSON(c, http.StatusTooManyRequests, NewResponse(TooManyRequestsCode, message, nil))
+	WriteJSON(c, http.StatusTooManyRequests, NewResponse(TooManyRequestsCode, message, nil))
 }
 
 // GatewayTimeoutCode 是业务预算到点对客户端暴露的业务错误码。
@@ -291,7 +296,7 @@ func GatewayTimeoutErr(c *gin.Context, message string) {
 	if message == "" {
 		message = "请求超时"
 	}
-	respJSON(c, http.StatusGatewayTimeout, NewResponse(GatewayTimeoutCode, message, nil))
+	WriteJSON(c, http.StatusGatewayTimeout, NewResponse(GatewayTimeoutCode, message, nil))
 }
 
 // PayloadTooLargeCode 是请求体超限对客户端暴露的业务错误码（沿用历史号段）。
@@ -303,7 +308,7 @@ func PayloadTooLargeErr(c *gin.Context, message string, maxBytes int64) {
 	if message == "" {
 		message = "请求体过大"
 	}
-	respJSON(c, http.StatusRequestEntityTooLarge, NewResponse(PayloadTooLargeCode, message, gin.H{
+	WriteJSON(c, http.StatusRequestEntityTooLarge, NewResponse(PayloadTooLargeCode, message, gin.H{
 		"max_bytes":       maxBytes,
 		"max_bytes_human": FormatBytes(maxBytes),
 	}))
@@ -321,7 +326,7 @@ func UnsupportedMediaTypeErr(c *gin.Context, message string) {
 	if message == "" {
 		message = "不支持的请求内容类型"
 	}
-	respJSON(c, http.StatusUnsupportedMediaType, NewResponse(UnsupportedMediaTypeCode, message, nil))
+	WriteJSON(c, http.StatusUnsupportedMediaType, NewResponse(UnsupportedMediaTypeCode, message, nil))
 }
 
 // BadRequestCode 是请求不符合接口契约时的业务错误码。
@@ -332,7 +337,7 @@ func BadRequestErr(c *gin.Context, message string) {
 	if message == "" {
 		message = "请求不合法"
 	}
-	respJSON(c, http.StatusBadRequest, NewResponse(BadRequestCode, message, nil))
+	WriteJSON(c, http.StatusBadRequest, NewResponse(BadRequestCode, message, nil))
 }
 
 // payloadTooLargeFromBind 识别绑定错误链上的请求体超限（http.MaxBytesReader
@@ -359,13 +364,39 @@ func FormatBytes(bytes int64) string {
 	return humanize.IBytes(uint64(bytes))
 }
 
-func respJSON(c *gin.Context, httpCode int, data any) {
+// WriteJSON writes a request-owned envelope with the server-generated request ID.
+// Context-free constructors keep an empty ID until this boundary.
+func WriteJSON(c *gin.Context, httpCode int, data *ResResult) {
 	if c == nil {
 		return
 	}
 	c.Abort()
-	c.JSON(httpCode, data)
+	envelope := *data
+	envelope.RequestID = applog.RequestIDFromContext(requestCtx(c))
+	c.Set(envelopeWriteKey, true)
+	defer c.Set(envelopeWriteKey, false)
+	c.JSON(httpCode, &envelope)
 }
+
+const (
+	loggedErrorKey   = "response.logged.error"
+	envelopeWriteKey = "response.envelope.write"
+)
+
+// ErrorWasLogged prevents a terminal middleware from repeating the same failure.
+// An independent later error is still observed.
+func ErrorWasLogged(c *gin.Context, err error) bool {
+	if c == nil || err == nil {
+		return false
+	}
+	previous, exists := c.Get(loggedErrorKey)
+	root, ok := previous.(error)
+	return exists && ok && errors.Is(root, err)
+}
+
+// IsEnvelopeWrite identifies the synchronous WriteJSON call, allowing an
+// oversized, uncached response to pass without making another body-sized copy.
+func IsEnvelopeWrite(c *gin.Context) bool { return c != nil && c.GetBool(envelopeWriteKey) }
 
 // requestCtx 取请求 context（含 requestId）供日志 *Ctx 方法提取；请求缺失时退回 Background。
 func requestCtx(c *gin.Context) context.Context {
@@ -373,4 +404,30 @@ func requestCtx(c *gin.Context) context.Context {
 		return c.Request.Context()
 	}
 	return context.Background()
+}
+
+// ErrorLogFields projects goerr's diagnostic into internal log fields. It never
+// exposes the diagnostic as an HTTP payload, nor captures another stack.
+func ErrorLogFields(err error) []applog.Field {
+	diagnostic, inspectErr := goerr.Inspect(err)
+	if inspectErr != nil {
+		return []applog.Field{applog.String("error_type", fmt.Sprintf("%T", err)),
+			applog.String("error_diagnostic_failure", inspectErr.Error())}
+	}
+	causes := make([]map[string]any, 0, len(diagnostic.Causes))
+	for _, cause := range diagnostic.Causes {
+		frames := make([]map[string]any, 0, len(cause.Frames))
+		for _, frame := range cause.Frames {
+			frames = append(frames, map[string]any{"function": frame.Function, "file": frame.File, "line": frame.Line})
+		}
+		causes = append(causes, map[string]any{"parent": cause.Parent, "has_code": cause.HasCode, "code": cause.Code, "frames": frames})
+	}
+	return []applog.Field{applog.String("error", diagnostic.Error), applog.Any("error_causes", causes)}
+}
+
+// ObserveError logs an error at a terminal boundary after a response was committed.
+// It shares the same status selection, diagnostics and duplicate suppression.
+func ObserveError(c *gin.Context, err error) {
+	item := toError(err, goerr.StatusInternalServer)
+	logError(c, err, item, item.HTTPCode())
 }

@@ -29,7 +29,11 @@ func newLuaBackend(t *testing.T) (*RedisBackend, *miniredis.Miniredis) {
 	mr.SetTime(luaBase)
 
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	backend, err := NewRedisBackend(context.Background(), client, WithKeyPrefix("lua"))
 	if err != nil {
@@ -167,7 +171,7 @@ func TestLuaRefillsOverTime(t *testing.T) {
 			t.Fatalf("预热请求: %v", err)
 		}
 	}
-	if d, _ := backend.check(ctx, policy, "refill-key"); d.Outcome != OutcomeRateLimited {
+	if d, err := backend.check(ctx, policy, "refill-key"); err != nil || d.Outcome != OutcomeRateLimited {
 		t.Fatalf("预热后应处于限流状态，实际 %v", d.Outcome)
 	}
 
@@ -196,7 +200,11 @@ func TestProbeIsRepeatableAndLeavesNothing(t *testing.T) {
 	mr := miniredis.RunT(t)
 	mr.SetTime(luaBase)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	// 时钟不推进：所有探测产物都在存活期内，最能暴露"跨重启共享注册表"。
 	for i := range 3 {

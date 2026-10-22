@@ -180,7 +180,7 @@ func TestAvailabilityProbeRespectsCooldownAndInterval(t *testing.T) {
 	}
 
 	// 紧接着再调：仍在冷却内，不探测。
-	if probed, _ := tracker.MaybeProbe(context.Background()); probed {
+	if probed, err := tracker.MaybeProbe(context.Background()); probed || err != nil {
 		t.Fatal("MaybeProbe probed again immediately after a failed probe")
 	}
 }
@@ -246,7 +246,9 @@ func TestAvailabilitySingleProbeOwnership(t *testing.T) {
 	for range concurrent {
 		go func() {
 			defer wg.Done()
-			_, _ = tracker.MaybeProbe(context.Background())
+			if _, err := tracker.MaybeProbe(context.Background()); err != nil {
+				t.Errorf("concurrent MaybeProbe: %v", err)
+			}
 		}()
 	}
 

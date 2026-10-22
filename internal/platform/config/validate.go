@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -431,6 +432,9 @@ func validateRedisDBZeroConsumers(c Config) error {
 
 func validateRedisConfig(redis RedisConfig) error {
 	var errs []error
+	if redis.Prefix != "" && strings.TrimSpace(redis.Prefix) == "" {
+		errs = append(errs, errors.New("redis.prefix must not be whitespace-only"))
+	}
 	if redis.Addr != "" {
 		errs = append(errs, mustHostPort("redis.addr", redis.Addr))
 	}
@@ -618,6 +622,12 @@ func validateLogConfig(environment env.Env, logCfg LogConfig, appRoot string) er
 	case "", "debug", "info", "warn", "error", "dpanic", "panic", "fatal":
 	default:
 		errs = append(errs, errors.New("log.level must be one of debug, info, warn, error, dpanic, panic, fatal"))
+	}
+	if environment.IsProd() && strings.TrimSpace(logCfg.Level) == "debug" {
+		errs = append(errs, errors.New("log.level debug is not allowed in prod"))
+	}
+	if threshold := logCfg.SQLSlowThresholdMS; threshold != nil && (*threshold < 0 || *threshold > math.MaxInt64/int64(time.Millisecond)) {
+		errs = append(errs, errors.New("log.sql_slow_threshold_ms must be nonnegative and fit time.Duration"))
 	}
 	if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
 		errs = append(errs, err)

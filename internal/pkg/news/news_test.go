@@ -3,7 +3,7 @@ package news
 import (
 	"context"
 	"errors"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +29,10 @@ var _ newslib.AppNewser = (*fakeAppNewser)(nil)
 // 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
 // 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
 func newTestNotifier(url, env, now string, sender func(context.Context, string, ...string) error, errLogger func(string)) *Notifier {
-	n, _ := NewWithConfig(nil) // nil 配置不启用任何通道，构造不可能失败
+	n, err := NewWithConfig(nil)
+	if err != nil {
+		panic("construct disabled test notifier: " + err.Error())
+	}
 	n.defaultURL = url
 	n.envName = env
 	n.now = func() string { return now }
@@ -129,7 +132,7 @@ func TestSendPicMsgSkipsBlankOpenIDs(t *testing.T) {
 	}
 
 	want := []string{"u1:shot.png", "u2:shot.png"}
-	if !reflect.DeepEqual(app.sent, want) {
+	if !slices.Equal(app.sent, want) {
 		t.Fatalf("sent=%v want=%v", app.sent, want)
 	}
 }

@@ -36,7 +36,8 @@ type Credential struct {
 type PasswordHasher interface {
 	Hash(ctx context.Context, password string) (string, error)
 	Compare(ctx context.Context, hashed, password string) error
-	// CompareWithDummy 在账号不存在时消耗等量的时间，恒返回不匹配错误。
+	// CompareWithDummy 在账号不存在时消耗等量时间；正常完成返回不匹配，
+	// 取消、资源闸门或掩护哈希异常仍返回对应的基础设施错误。
 	CompareWithDummy(ctx context.Context, password string) error
 }
 

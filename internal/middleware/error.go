@@ -8,7 +8,7 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
 )
 
@@ -40,8 +40,8 @@ func ErrorHandler() gin.HandlerFunc {
 		// 连接已经没了，写只会产生一条无意义的错误日志；更糟的是它会把
 		// "客户端走了"记成一次服务端错误，污染错误率指标。
 		if IsClientGone(err) {
-			logger.Debug("client disconnected before the response was written",
-				logger.String("path", requestPath(c)))
+			applog.Debug("client disconnected before the response was written",
+				applog.String("path", requestPath(c)))
 			return
 		}
 
@@ -57,10 +57,6 @@ func ErrorHandler() gin.HandlerFunc {
 		}
 
 		// Step 7: 响应未写出，走统一响应（resp.Err 内部会记日志），这里不再重复记录。
-		if appErr, ok := errors.AsType[goerr.Error](err); ok {
-			resp.Err(c, appErr)
-			return
-		}
 		resp.Err(c, err)
 	}
 }
@@ -68,41 +64,41 @@ func ErrorHandler() gin.HandlerFunc {
 // logContextError 统一记录 ErrorHandler 捕获到的错误。
 // 对于 5xx 错误使用 error 级别，4xx / 业务错误使用 warn，便于告警时做级别区分。
 func logContextError(c *gin.Context, err error) {
-	fields := []logger.Field{
-		logger.String("path", requestPath(c)),
-		logger.Err(err),
+	if resp.ErrorWasLogged(c, err) {
+		return
 	}
+	fields := append(resp.ErrorLogFields(err), applog.String("path", requestPath(c)))
 
 	// Step 1: 对请求体超限这种明确的客户端错误单独降级为 warn，
 	// 避免它们被误判成服务故障噪音。超限统一以标准库错误类型表示
 	// （http.MaxBytesReader 超限时 Read 返回 *http.MaxBytesError）。
 	if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		fields = append(fields,
-			logger.Int("http_status", http.StatusRequestEntityTooLarge),
-			logger.Int32("error_code", resp.PayloadTooLargeCode),
-			logger.Int64("max_bytes", maxBytesErr.Limit),
+			applog.Int("http_status", http.StatusRequestEntityTooLarge),
+			applog.Int32("error_code", resp.PayloadTooLargeCode),
+			applog.Int64("max_bytes", maxBytesErr.Limit),
 		)
-		logger.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+		applog.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 		return
 	}
 
 	// Step 2: 如果错误本身带有 goerr 语义，就按它的 HTTP 状态码区分日志级别。
 	if appErr, ok := errors.AsType[goerr.Error](err); ok {
 		fields = append(fields,
-			logger.Int("http_status", appErr.HTTPCode()),
-			logger.Int("error_code", int(appErr.Code())),
+			applog.Int("http_status", appErr.HTTPCode()),
+			applog.Int("error_code", int(appErr.Code())),
 		)
 		if isServerSideAppError(appErr) {
-			logger.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+			applog.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 			return
 		}
 
-		logger.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+		applog.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 		return
 	}
 
 	// Step 3: 其余未知错误默认按服务端错误记录。
-	logger.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+	applog.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 }
 
 func isServerSideAppError(err goerr.Error) bool {

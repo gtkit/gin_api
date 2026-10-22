@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	gojwt "github.com/golang-jwt/jwt/v5"
+	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/gtkit/goerr"
 	jwtclaims "github.com/gtkit/gojwt/claims"
 
@@ -64,7 +64,7 @@ const maxTokenBytes = 8 << 10 // 8 KiB
 // 没有 ctx 就无法透传取消与超时——一个挂住的黑名单查询会把
 // 每个请求都拖到超时，而那时再改签名会波及全部调用点。
 type TokenParser interface {
-	ParseToken(ctx context.Context, token string, opts ...gojwt.ParserOption) (*jwtclaims.Claims, error)
+	ParseToken(ctx context.Context, token string, opts ...jwtv5.ParserOption) (*jwtclaims.Claims, error)
 }
 
 // RevocationChecker 报告访问令牌是否已被撤销。
@@ -261,7 +261,7 @@ func abortOnContextError(c *gin.Context, err error) bool {
 	if !errx.IsPureAbort(err) {
 		return false
 	}
-	_ = c.Error(err)
+	c.Error(err).Type = gin.ErrorTypePrivate
 	c.Abort()
 	return true
 }

@@ -170,3 +170,21 @@ func TestDeprecatedWriteTimeoutIsRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveRedisPrefixPreservesNamespaceBytes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, prefix, want string }{
+		{"legacy", "", "legacy"}, {" legacy:", "", " legacy:"},
+		{"legacy", "explicit", "explicit"}, {"legacy", " raw: ", " raw: "},
+	} {
+		cfg := Config{}
+		cfg.App.Name = tc.name
+		cfg.Redis.Prefix = tc.prefix
+		if got := cfg.EffectiveRedisPrefix(); got != tc.want {
+			t.Errorf("prefix=%q want %q", got, tc.want)
+		}
+	}
+	if err := validateRedisConfig(RedisConfig{Prefix: " \t"}); err == nil || !strings.Contains(err.Error(), "redis.prefix") {
+		t.Fatalf("whitespace accepted: %v", err)
+	}
+}

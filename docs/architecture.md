@@ -348,6 +348,9 @@ runtime 禁止：
 - repo 数据访问统一经 `mdbCtx(ctx)`。
 - repo 内部可用事务处理单 repo / 聚合内部的多语句写。
 - 跨多个 repo 的业务事务由 application 的 `TxManager.Do` 编排。
+- 同归属管理器的嵌套 `Do` 使用同一物理事务的savepoint；内层成功不独立提交，
+  内层失败回滚到savepoint，外层可显式处理后继续。未知/跨管理器、并行或已关闭的scope拒绝。
+  savepoint或回滚失败使外层不可提交；清理错误与原错误并列返回，panic在清理后继续传播。
 
 ## 配置管理
 

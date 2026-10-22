@@ -118,7 +118,11 @@ func (s *stubLLM) Stream(
 			reply.Content = sb.String()
 			return reply, err
 		}
-		sb.WriteString(d)
+		if _, err := sb.WriteString(d); err != nil {
+			reply := s.reply
+			reply.Content = sb.String()
+			return reply, err
+		}
 	}
 	reply := s.reply
 	reply.Content = sb.String()

@@ -18,9 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/goerr"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -100,6 +103,16 @@ type loadEntry struct {
 // 快速失败而不是排队：排队本身就要占一个 goroutine，而上限存在的理由
 // 正是"阻塞的 loader 不得无界积累"。
 var ErrLoadsSaturated = errors.New("cache: too many concurrent loads in flight")
+
+// ErrLoaderPanic identifies a recovered asynchronous loader failure.
+var ErrLoaderPanic = errors.New("cache: loader panicked")
+
+// loaderPanicError keeps an error-valued panic discoverable without exposing its text.
+type loaderPanicError struct{ cause error }
+
+func (*loaderPanicError) Error() string        { return ErrLoaderPanic.Error() }
+func (*loaderPanicError) Is(target error) bool { return target == ErrLoaderPanic }
+func (p *loaderPanicError) Unwrap() error      { return p.cause }
 
 // Option 配置缓存。
 type Option[T any] func(*Cache[T])
@@ -221,13 +234,25 @@ func (c *Cache[T]) GetOrLoad(
 	//
 	// joining 为真时本闭包不会被执行（singleflight 已有该键的在途调用），
 	// 因此摘除登记的责任只属于登记者，不会重复也不会遗漏。
-	ch := c.group.DoChan(key, func() (any, error) {
+	ch := c.group.DoChan(key, func() (result any, loadErr error) {
 		if !joining {
 			defer c.finishLoad(key)
 		}
 
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
 		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				failure := &loaderPanicError{}
+				if cause, ok := recovered.(error); ok {
+					failure.cause = cause
+				}
+				result = zero
+				loadErr = goerr.New(failure, goerr.StatusInternalServer())
+				applog.ErrorCtx(loadCtx, "cache loader panic recovered",
+					applog.String("stack", string(debug.Stack())))
+			}
+		}()
 
 		value, err := load(loadCtx)
 		if err != nil {

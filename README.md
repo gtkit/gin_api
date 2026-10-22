@@ -55,6 +55,8 @@ make project-init NAME=your_project                  # 执行
 日志级别去除首尾空白后只接受 `debug/info/warn/error/dpanic/panic/fatal`；`database.maxlifeseconds` 必须非负，
 省略/0 仍使用默认 1800 秒。连接池和 Redis 的既有默认及消费方规则保持不变，详见 [配置说明](config/README.md#核心字段校验)。
 
+Redis认证、限流与响应缓存统一使用 `redis.prefix`；省略或空串时原样回落 `application.name`，不补分隔符。存量升级须保持旧实际namespace：旧版忽略的非空prefix若不同于旧应用名，须先改为原namespace再升级；直接改名会使撤销/刷新状态失联。本次不搬迁key、不扩展DB/Redis集群。
+
 ## 架构
 
 ```text
@@ -255,15 +257,44 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 镜像内不含 `config/env/env.yml`、PEM 私钥与 `.git`（`.dockerignore` 保证）；运行配置挂载注入。
 
 产物名由 `--build-arg APP_NAME` 决定（`make image` 从 `project.mk` 取），构建阶段显式断言其非空；
-**容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**——`ENTRYPOINT` 必须是 exec form
-（shell form 会让 shell 成为 PID 1，破坏信号转发与优雅关停），而 exec form 不做变量展开。
+**容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**。镜像默认`ENTRYPOINT`为exec form，
+应用profile的入口先检查UID再exec原二进制，检查后的shell不常驻PID 1。
 宿主机侧的 `bin/$(APP_NAME)` 由冻结的部署脚本负责，与容器内路径互不牵连。
+
+### 本地 Compose 应用入口
+
+默认`make dev-up`仍只启动MySQL/Redis。显式`app` profile提供应用服务；服务器部署方式保持。
+先检查本机已有镜像和容器：同类依赖已启动时优先复用，不重复创建MySQL/Redis。
+复制`compose.env.example`准备本地私密env文件，并按模板填写应用挂载、UID/GID和本地连接。
+隔离配置中的JWT路径应指向`/app/config/pem`内的临时密钥，私钥0600、公钥0644；
+`redis.prefix`必须独占，测试库必须先应用本仓既有迁移。应用启动不自动执行DDL，`/ready`不替代迁移版本核对。
+
+```bash
+make check-compose-app # 合成环境解析和shell入口fixture；不创建容器，不读取真实.env
+make dev-app-up COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+# 已有本机依赖：按模板设置DEV_APP_DB_HOST/DEV_APP_REDIS_ADDR，再用此入口
+make dev-app-up-existing COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+make dev-app-down COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+```
+
+容器内固定APP_ROOT=/app、HTTP 0.0.0.0:8008，宿主只映射127.0.0.1的DEV_APP_PORT。
+配置和密钥只读挂载，日志目录需预先存在且可由DEV_APP_UID写入；缺少挂载不自动创建。
+默认身份1000:1000，可填宿主`id -u`/`id -g`，入口拒绝UID 0，不能靠放宽私钥权限解决身份不匹配。
+Docker Desktop复用已有服务可用host.docker.internal；其他环境须提供已确认可达的本机地址。
+DEV_APP_DB_PASSWORD/DEV_APP_REDIS_PASSWORD未设置时继承依赖密码，显式空值则保留为空，仅用于确实无密码的本地测试服务。
+
+`dev-app-up`构建并启动应用及其健康依赖，`dev-app-up-existing`以--no-deps只启动应用；
+执行前须按AGENTS.md确认本地镜像/容器与授权，不隐式拉取缺失镜像。APP_NAME仍由project.mk注入，
+BUILD_COMMIT/BUILD_TIME可固定；COMPOSE_PROJECT默认APP_NAME，验收可指定独占项目名。
+`dev-app-down`只停止/移除app，保留依赖及数据卷；无其他服务的独占网络需确认无使用者后单独清理。
+容器以/ready作健康检查，SIGTERM宽限3分钟；它是本地默认，改变服务关停预算时须同步核对。
+解析和入口fixture通过不等于镜像、真实API、依赖故障或信号验收通过。
 
 ### 数据库集成测试（本地手动）
 
-`make test-integration` 用真实 MySQL 验证 repository 与 schema 一致性（配置取自
-`config/env/env.yml`，事务内强制回滚、零持久化；无 DB 时自动 SKIP）。
-当前不设 CI 强制 job；将来需要时设 `REQUIRE_DB_INTEGRATION=1` 可把 SKIP 变为失败。
+`make test-integration`使用项目根之外的显式隔离APP_ROOT，先验证配置元数据再连接真实依赖；
+包含cmd插件套件和仓储事务回滚。Make强制PLUGIN_INTEGRATION=1，发布入口还设置
+REQUIRE_DB_INTEGRATION=1使缺依赖失败；日常check仍不依赖数据库。准备方法见`docs/testing.md`。
 
 ## 配置与性能
 
@@ -272,3 +303,9 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 - 模块生成器生成含 Up/Down 区段的 goose 单文件 SQL 草稿。执行走内置的 `migrate` CLI
   （`make migrate-up` / `migrate-status`，连库验证见 `make migrate-verify`），
   上线前须经 DBA 审阅。
+
+常用入口：`make run`（dev别名）、`make lint`（检查锁定工具版本并执行lint）、`make test`（scaffold标签、race完整测试）、`make clean`（只删除默认bin/<APP_NAME>与.cache/coverage.out）。`make migrate-status test`等迁移命令中的test仍是环境占位，不会启动测试或服务；自定义输出不由clean管理，越界、symlink或非普通文件会被拒绝。入口fixture自检已接入make check，实际Go回归另行执行。
+
+`go run . --version`或二进制`--version`无需配置、数据库或Redis，输出version/commit/build_time。版本常量仍只在version.go；普通go build缺少注入时commit/time显示unknown。make build/image注入当前HEAD及UTC构建时间，CI可显式提供BUILD_COMMIT/BUILD_TIME固定输入；Docker直接构建的同名ARG默认unknown。未提交工作区内容不能仅由HEAD证明，交付应同时保留diff和构建证据。
+
+JWT生成公钥0644可通过doctor；Unix上私钥不得开放group/other访问，公钥及previous公钥不得group/other可写。Windows权限位不代表ACL，未声称ACL已验。生成器只清理本次独占创建的文件，输出失败仍返回错误，已完成且可用的密钥不会因打印失败被删除。

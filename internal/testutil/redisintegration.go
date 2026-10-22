@@ -68,12 +68,18 @@ func RealRedisOrSkip(t *testing.T) *redis.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("close unreachable Redis client: %v", closeErr)
+		}
 		SkipOrFailIntegration(t, "real redis unreachable at %s db %d: %v", addr, db, err)
 		return nil
 	}
 
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close Redis client: %v", err)
+		}
+	})
 	return client
 }
 
@@ -93,12 +99,12 @@ func UniqueKeyPrefix(t *testing.T, client *redis.Client) string {
 		for {
 			keys, next, err := client.Scan(ctx, cursor, prefix+"*", 256).Result()
 			if err != nil {
-				t.Logf("cleanup scan for %s*: %v", prefix, err)
+				t.Errorf("cleanup scan for %s*: %v", prefix, err)
 				return
 			}
 			if len(keys) > 0 {
 				if err := client.Del(ctx, keys...).Err(); err != nil {
-					t.Logf("cleanup del for %s*: %v", prefix, err)
+					t.Errorf("cleanup del for %s*: %v", prefix, err)
 					return
 				}
 			}

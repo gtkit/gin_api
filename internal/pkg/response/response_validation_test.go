@@ -42,7 +42,11 @@ func TestBindStructErrTranslatesValidationErrors(t *testing.T) {
 	render := func() (int, string) {
 		c, rec := newCtx()
 		BindStructErr(c, verr)
-		return rec.Code, decode(t, rec)["msg"].(string)
+		msg, ok := decode(t, rec)["msg"].(string)
+		if !ok {
+			t.Fatal("response msg is not a string")
+		}
+		return rec.Code, msg
 	}
 
 	code, msg := render()
@@ -85,7 +89,10 @@ func TestBindErrTranslatesValidationErrors(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	msg := decode(t, rec)["msg"].(string)
+	msg, ok := decode(t, rec)["msg"].(string)
+	if !ok {
+		t.Fatal("response msg is not a string")
+	}
 	if !strings.Contains(msg, "keyword") || !containsHan(msg) {
 		t.Errorf("msg = %q, want Chinese message naming field %q", msg, "keyword")
 	}

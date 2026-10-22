@@ -20,7 +20,7 @@ import (
 
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gincache"
 	"github.com/gtkit/gincache/persist"
 	"github.com/gtkit/gincache/persist/ristrettoadapter"
@@ -133,15 +133,27 @@ func (s *Stager) Middleware(ttl time.Duration) gin.HandlerFunc {
 		// 响应期准入：请求期判据看不到响应头，而"这个响应能不能共享"
 		// 恰恰写在响应头里。写入、命中回放、singleflight 分发前都会复检。
 		gincache.WithCacheableResponse(cacheableResponse),
+		gincache.WithLogger(cacheLogger{}),
 	)
 
 	// 外层再包一道响应期审计。见 auditResponse 的说明：准入已由库层拒绝，
 	// 审计负责把"这条路由不该挂缓存"的配置错误变成日志里的可见信号。
 	return func(c *gin.Context) {
+		c.Set(envelopeLimitKey, s.maxBody)
 		cached(c)
+		// Envelope failures set no-store as a transport safeguard. They are
+		// observed by the outer adapter, not a route admission warning.
+		if writer, ok := c.Writer.(*envelopeWriter); ok && writer.err != nil {
+			return
+		}
 		auditResponse(c)
 	}
 }
+
+type cacheLogger struct{}
+
+func (cacheLogger) Errorf(format string, args ...any) { applog.Errorf(format, args...) }
+func (cacheLogger) Debugf(format string, args ...any) { applog.Debugf(format, args...) }
 
 // cacheableResponse 是响应期准入判据（cache-preset spec）。
 //
@@ -187,21 +199,21 @@ func auditResponse(c *gin.Context) {
 	header := c.Writer.Header()
 
 	if len(header.Values("Set-Cookie")) > 0 {
-		logger.Warn("cached route produced a Set-Cookie response; admission rejected it, "+
+		applog.Warn("cached route produced a Set-Cookie response; admission rejected it, "+
 			"so this route is effectively uncached and probably should not mount the cache middleware",
-			logger.String("path", c.FullPath()))
+			applog.String("path", c.FullPath()))
 	}
 	if cc := header.Get("Cache-Control"); cc != "" && containsNoStoreOrPrivate(cc) {
-		logger.Warn("cached route declared a non-shareable Cache-Control; admission rejected it, "+
+		applog.Warn("cached route declared a non-shareable Cache-Control; admission rejected it, "+
 			"so this route is effectively uncached",
-			logger.String("path", c.FullPath()), logger.String("cache_control", cc))
+			applog.String("path", c.FullPath()), applog.String("cache_control", cc))
 	}
 	if v := header.Get("Vary"); v != "" && !varyIsCacheable(header) {
 		// 只报真正被拒的：CORS 的 Vary: Origin 是可缓存的（见 varyIsCacheable），
 		// 对它告警会让每个请求都产出一条日志——噪音本身就是一次故障。
-		logger.Warn("cached route declared a Vary the cache key cannot honor, so this route "+
+		applog.Warn("cached route declared a Vary the cache key cannot honor, so this route "+
 			"is effectively uncached",
-			logger.String("path", c.FullPath()), logger.String("vary", v))
+			applog.String("path", c.FullPath()), applog.String("vary", v))
 	}
 }
 
@@ -280,7 +292,11 @@ func cacheableRequest(c *gin.Context) (bool, gincache.Strategy) {
 		// 部分内容请求的响应是片段，缓存后会被当成完整响应发给别人。
 		return false, gincache.Strategy{}
 	}
-	return true, gincache.Strategy{CacheKey: cacheKey(c.Request)}
+	key := cacheKey(c.Request)
+	if c.GetBool(envelopeModeKey) {
+		key = ":envelope:" + key
+	}
+	return true, gincache.Strategy{CacheKey: key}
 }
 
 // cacheKey 组成缓存键：方法 + 路径 + 规范化后的查询串。

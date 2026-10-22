@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
 	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
-	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/router"
@@ -181,7 +181,7 @@ func newProvidersWithBudget(
 	inf.telemetry = telemetryProvider
 	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(budget.Context(ctx)) })
 	if telemetryProvider.Enabled() {
-		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
+		applog.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
 	}
 
@@ -230,7 +230,7 @@ func newProvidersWithBudget(
 	inf.outbound = outbound
 	rb.push("outbound http clients", outbound.Close)
 	if names := outbound.Names(); len(names) > 0 {
-		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
+		applog.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
 	// 3c. 响应缓存。Runtime 的 Cache 插件已按 Redis 可达性完成初始化；
@@ -244,7 +244,7 @@ func newProvidersWithBudget(
 	responseCache := cachePlugin
 	inf.cache = responseCache
 	if cachePlugin.Enabled() {
-		logger.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
+		applog.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
 			"explicitly mount the middleware, and requests carrying identity always bypass it",
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
 	}
@@ -403,7 +403,7 @@ func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, b
 			}
 		}
 		if accounts == nil {
-			logger.Warnf("account-dimension credential rate limiting is off: define ratelimit "+
+			applog.Warnf("account-dimension credential rate limiting is off: define ratelimit "+
 				"policy %q to guard against distributed password spraying", authruntime.AccountRateLimitPolicyID)
 		}
 
@@ -416,7 +416,7 @@ func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, b
 			AccessTTL: inf.cfg.JWT.EffectiveTokenTTL(inf.cfg.Auth.Mode),
 			// 撤销记录必须活过 exp + 验签 leeway：同一个偏移的单一来源是配置。
 			ClockSkew: time.Duration(inf.cfg.JWT.ClockSkewSeconds) * time.Second,
-			KeyPrefix: inf.cfg.App.Name,
+			KeyPrefix: inf.cfg.EffectiveRedisPrefix(),
 			Metrics:   inf.recorder,
 			Accounts:  accounts,
 		})
@@ -513,7 +513,7 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	for _, id := range reg.IDs() {
 		if a, ok := reg.Lookup(id); ok {
 			if deny, isDeny := a.(sharedauth.DenyAllAuthorizer); isDeny {
-				logger.Warnf("authorizer %q denies every request: %s", id, deny.Reason)
+				applog.Warnf("authorizer %q denies every request: %s", id, deny.Reason)
 			}
 		}
 	}
@@ -531,7 +531,7 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 	return func(id string) gin.HandlerFunc {
 		authorizer, ok := reg.Lookup(id)
 		if !ok {
-			logger.Errorf("authorizer %q is not registered; denying every request to the routes "+
+			applog.Errorf("authorizer %q is not registered; denying every request to the routes "+
 				"that reference it (register it at the scaffold:module-authorizers marker)", id)
 			authorizer = sharedauth.DenyAll(fmt.Sprintf("authorizer %q is not registered", id))
 		}

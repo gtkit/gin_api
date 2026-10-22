@@ -4,7 +4,10 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"testing"
+
+	"github.com/gtkit/gin-api/internal/projectinit"
 
 	"github.com/gtkit/gin-api/internal/scaffold"
 )
@@ -37,11 +40,13 @@ func TestPrintGenerationSummaryDryRun(t *testing.T) {
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)
 
-	printGenerationSummary(rootCmd, &scaffold.GenerateResult{
+	if err := printGenerationSummary(rootCmd, &scaffold.GenerateResult{
 		DryRun:  true,
 		Created: []string{"internal/module/demo/application/service.go"},
 		Updated: []string{"internal/bootstrap/providers.go"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	got := out.String()
 	if !bytes.Contains([]byte(got), []byte("would create internal/module/demo/application/service.go")) {
@@ -52,5 +57,18 @@ func TestPrintGenerationSummaryDryRun(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(got), []byte("dry-run mode: no files were written")) {
 		t.Fatalf("summary missing dry-run tail: %s", got)
+	}
+}
+
+func TestScaffoldOutputFailuresAreReturned(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("summary output failed")
+	root := NewRootCmd(nil)
+	root.SetOut(versionFailWriter{failure})
+	if err := printGenerationSummary(root, &scaffold.GenerateResult{}); !errors.Is(err, failure) {
+		t.Fatalf("generation summary: %v", err)
+	}
+	if err := printProjectInitResult(root, &projectinit.Result{DryRun: true}); !errors.Is(err, failure) {
+		t.Fatalf("project summary: %v", err)
 	}
 }

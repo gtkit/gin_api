@@ -11,19 +11,24 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
-const slowTime = 200 * time.Millisecond
-
 // NewGormLogger uses the selected project logger. Parameters are always omitted
 // at every SQL log level, including errors and slow queries.
 func NewGormLogger(cfg *config.Config) gormlogger.Interface {
 	level := gormlogger.Warn
+	threshold := (config.LogConfig{}).EffectiveSQLSlowThreshold()
 	if cfg != nil && cfg.Log.SQL != 0 {
 		level = gormlogger.Info
 	}
-	return &gormLogger{logLevel: level}
+	if cfg != nil {
+		threshold = cfg.Log.EffectiveSQLSlowThreshold()
+	}
+	return &gormLogger{logLevel: level, slowThreshold: threshold}
 }
 
-type gormLogger struct{ logLevel gormlogger.LogLevel }
+type gormLogger struct {
+	logLevel      gormlogger.LogLevel
+	slowThreshold time.Duration
+}
 
 var _ gormlogger.Interface = (*gormLogger)(nil)
 
@@ -81,13 +86,13 @@ func (l *gormLogger) Trace(
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
 		applog.Log(ctx, applog.LogEntry{Level: applog.LevelError, Message: "gorm query error", Fields: append(fields, applog.Err(err)), CallerSkip: 1})
-	case slowTime != 0 && elapsed > slowTime && l.logLevel >= gormlogger.Warn:
+	case l.slowThreshold > 0 && elapsed > l.slowThreshold && l.logLevel >= gormlogger.Warn:
 		if !applog.Enabled(applog.LevelWarn, applog.MainStream) {
 			return
 		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
-		applog.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "gorm slow query", Fields: append(fields, applog.Duration("slow_threshold", slowTime)), CallerSkip: 1})
+		applog.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "gorm slow query", Fields: append(fields, applog.Duration("slow_threshold", l.slowThreshold)), CallerSkip: 1})
 	case l.logLevel == gormlogger.Info:
 		if !applog.Enabled(applog.LevelInfo, applog.MainStream) {
 			return

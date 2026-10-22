@@ -62,7 +62,11 @@ func TestNewLocalUploaderRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
-	defer func() { _ = rc.Close() }()
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("rc.Close(): %v", err)
+		}
+	}()
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, rc); err != nil {
 		t.Fatalf("read back: %v", err)

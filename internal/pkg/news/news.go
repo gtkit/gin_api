@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/msgbot"
 	"github.com/gtkit/msgbot/dingtalk"
 	"github.com/gtkit/msgbot/feishu"
@@ -55,7 +55,7 @@ type Notifier struct {
 func NewWithConfig(cfg *config.Config) (*Notifier, error) {
 	n := &Notifier{
 		now:         func() string { return time.Now().Format(time.DateTime) },
-		errorLogger: func(msg string) { logger.Error(msg) },
+		errorLogger: func(msg string) { applog.Error(msg) },
 	}
 	if cfg == nil {
 		// 无配置时按飞书兜底，与本字段引入之前的行为一致。
@@ -231,7 +231,7 @@ func SendPicMsg(ctx context.Context, newsApp newslib.AppNewser, openids, shotnam
 			continue
 		}
 		if err := newsApp.SendImageMsg(ctx, openid, shotname); err != nil {
-			logger.Errorf("send image message error:%v, openid:%s", err, openid)
+			applog.Errorf("send image message error:%v, openid:%s", err, openid)
 		}
 	}
 	return nil

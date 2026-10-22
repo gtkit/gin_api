@@ -7,6 +7,7 @@
 package ai
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	llm "github.com/gtkit/go-llm-provider/v2/provider"
 	"gorm.io/gorm"
 
@@ -82,18 +83,17 @@ func New(deps Deps) (Assembly, error) {
 			Store: aiconversation.New(deps.DB),
 			LLM:   client,
 		},
-		aiapp.WithAuditor(logAuditor{logf: logger.Infof}),
+		aiapp.WithAuditor(logAuditor{logf: applog.Infof}),
 		aiapp.WithSystemPrompt(cfg.SystemPrompt),
 		aiapp.WithHistoryMessages(cfg.EffectiveHistoryMessages()),
 		aiapp.WithMaxTokens(cfg.MaxTokens),
 		aiapp.WithTemperature(cfg.Temperature),
 	)
 	if err != nil {
-		_ = client.Close()
-		return Assembly{}, fmt.Errorf("ai: build service: %w", err)
+		return Assembly{}, errors.Join(fmt.Errorf("ai: build service: %w", err), client.Close())
 	}
 
-	logger.Infof("ai chat assembled with providers %v (default=%s)", client.names, client.defaultName)
+	applog.Infof("ai chat assembled with providers %v (default=%s)", client.names, client.defaultName)
 
 	return Assembly{
 		Service: service,
@@ -121,7 +121,7 @@ func buildClientWithFactory(cfg config.AIModuleConfig, create func() *http.Clien
 	})
 	defer func() {
 		if err != nil {
-			_ = closeClients()
+			err = errors.Join(err, closeClients())
 		}
 	}()
 	presets := llm.AllPresets()

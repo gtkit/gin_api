@@ -10,13 +10,17 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func newLoggerEngine(opts AccessLogOptions) *gin.Engine {
+func newLoggerEngine(t *testing.T, opts AccessLogOptions) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(GinLogger(opts))
 	// echo handler：读取请求体并原样写回，用于验证 body 透传未被中间件破坏。
 	echo := func(c *gin.Context) {
-		body, _ := io.ReadAll(c.Request.Body)
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Errorf("read echo body: %v", err)
+			return
+		}
 		c.Data(http.StatusOK, "application/json", body)
 	}
 	engine.POST("/echo", echo)
@@ -43,7 +47,7 @@ func TestGinLoggerPassesThroughBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			engine := newLoggerEngine(tt.opts)
+			engine := newLoggerEngine(t, tt.opts)
 
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/echo?token=abc123", strings.NewReader(payload))
@@ -62,7 +66,7 @@ func TestGinLoggerPassesThroughBody(t *testing.T) {
 }
 
 func TestGinLoggerWriteMethods(t *testing.T) {
-	engine := newLoggerEngine(AccessLogOptions{LogRequestBody: true, LogResponseBody: true})
+	engine := newLoggerEngine(t, AccessLogOptions{LogRequestBody: true, LogResponseBody: true})
 
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
@@ -83,7 +87,7 @@ func TestGinLoggerWriteMethods(t *testing.T) {
 }
 
 func TestGinLoggerGetAndStaticSkip(t *testing.T) {
-	engine := newLoggerEngine(AccessLogOptions{LogRequestBody: true, LogResponseBody: true})
+	engine := newLoggerEngine(t, AccessLogOptions{LogRequestBody: true, LogResponseBody: true})
 
 	t.Run("GET is handled without body wrapping", func(t *testing.T) {
 		w := httptest.NewRecorder()

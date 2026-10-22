@@ -30,7 +30,11 @@ func TestSameNameReusesOneClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer func() { _ = factory.Close() }()
+	defer func() {
+		if err := factory.Close(); err != nil {
+			t.Errorf("factory.Close(): %v", err)
+		}
+	}()
 
 	first, err := factory.Client("billing")
 	if err != nil {
@@ -56,7 +60,11 @@ func TestEachNameGetsItsOwnPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer func() { _ = factory.Close() }()
+	defer func() {
+		if err := factory.Close(); err != nil {
+			t.Errorf("factory.Close(): %v", err)
+		}
+	}()
 
 	billing, err := factory.Client("billing")
 	if err != nil {
@@ -100,7 +108,11 @@ func TestUnknownNameIsAnError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			defer func() { _ = factory.Close() }()
+			defer func() {
+				if err := factory.Close(); err != nil {
+					t.Errorf("factory.Close(): %v", err)
+				}
+			}()
 
 			client, err := factory.Client(tt.lookup)
 			if !errors.Is(err, tt.wantErr) {
@@ -121,7 +133,11 @@ func TestNamesAreSortedAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer func() { _ = factory.Close() }()
+	defer func() {
+		if err := factory.Close(); err != nil {
+			t.Errorf("factory.Close(): %v", err)
+		}
+	}()
 
 	want := []string{"billing", "inventory"}
 	if got := factory.Names(); !slices.Equal(got, want) {

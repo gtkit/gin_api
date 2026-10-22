@@ -200,15 +200,18 @@ type SMSTemplateConfig struct {
 func (c SMSConfig) Enabled() bool { return c.Provider != "" }
 
 type LogConfig struct {
-	SQL           int    `mapstructure:"sql"`
-	Compress      int    `mapstructure:"compress"`
-	ConsoleStdout int    `mapstructure:"consolestdout"`
-	FileStdout    int    `mapstructure:"filestdout"`
-	Level         string `mapstructure:"level"`
-	MaxAge        int    `mapstructure:"maxage"`
-	MaxBackups    int    `mapstructure:"maxbackups"`
-	MaxSize       int    `mapstructure:"maxsize"`
-	Path          string `mapstructure:"path"`
+	SQL int `mapstructure:"sql"`
+	// SQLSlowThresholdMS controls dedicated slow-query warnings. Nil uses 200ms;
+	// zero disables only that warning; positive values are milliseconds.
+	SQLSlowThresholdMS *int64 `mapstructure:"sql_slow_threshold_ms"`
+	Compress           int    `mapstructure:"compress"`
+	ConsoleStdout      int    `mapstructure:"consolestdout"`
+	FileStdout         int    `mapstructure:"filestdout"`
+	Level              string `mapstructure:"level"`
+	MaxAge             int    `mapstructure:"maxage"`
+	MaxBackups         int    `mapstructure:"maxbackups"`
+	MaxSize            int    `mapstructure:"maxsize"`
+	Path               string `mapstructure:"path"`
 	// AccessRequestBody 控制是否在 HTTP 访问日志中记录请求体。默认 false（不记录）。
 	// 开启后请求体仍会经敏感字段脱敏；非结构化 body 只记录 content-type 与大小占位。
 	AccessRequestBody bool `mapstructure:"access_request_body"`
@@ -224,7 +227,9 @@ type RedisConfig struct {
 	Password string `mapstructure:"password"`
 	// DBs 为需要初始化的逻辑库号；配置地址时必填且非负、不重复。
 	// 无 Redis 消费能力且地址为空时可省略；须包含各启用能力使用的库号。
-	DBs    []int  `mapstructure:"dbs"`
+	DBs []int `mapstructure:"dbs"`
+	// Prefix is shared by auth, rate limits and response caching. Empty falls back
+	// to App.Name without trimming or separators; whitespace-only is invalid.
 	Prefix string `mapstructure:"prefix"`
 
 	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，

@@ -513,8 +513,14 @@ func parseConsumeResult(raw any) (code, uid int64, replaySecret string, err erro
 		return 0, 0, "", fmt.Errorf("tokenstore: malformed consume code %#v", values[0])
 	}
 
-	uidStr, _ := values[1].(string)
-	replaySecret, _ = values[2].(string)
+	uidStr, ok := values[1].(string)
+	if !ok {
+		return 0, 0, "", fmt.Errorf("tokenstore: malformed consume uid type %T", values[1])
+	}
+	replaySecret, ok = values[2].(string)
+	if !ok {
+		return 0, 0, "", fmt.Errorf("tokenstore: malformed replay secret type %T", values[2])
+	}
 	if uidStr == "" {
 		return code, 0, replaySecret, nil
 	}

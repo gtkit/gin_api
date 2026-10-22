@@ -9,7 +9,7 @@ import (
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/gtkit/gojwt/claims"
 
-	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
 

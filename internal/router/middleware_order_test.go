@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,7 +48,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 	}
 
 	got := middlewareNames(engine)
-	if !reflect.DeepEqual(got, wantMiddlewareOrder) {
+	if !slices.Equal(got, wantMiddlewareOrder) {
 		t.Fatalf("middleware chain = %v, want exactly %v", got, wantMiddlewareOrder)
 	}
 }

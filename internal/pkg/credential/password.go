@@ -102,11 +102,13 @@ func (h *Hasher) Compare(hashed, password string) error {
 // 只需几微秒。这个差值稳定、可测量，攻击者据此可以枚举出哪些手机号已注册——
 // 一个不需要任何口令就能拿到的用户名单。
 //
-// 返回值恒为 ErrMismatch：调用方应当把它与"密码错误"作完全相同的处理，
+// 比对正常完成（含恰好匹配）时返回 ErrMismatch：调用方把它与"密码错误"作相同处理，
 // 包括响应内容与状态码。响应上区分两者，等于把时间信道上刚堵住的信息
-// 直接写进报文。
+// 直接写进报文。掩护哈希损坏等异常仍返回基础设施错误。
 func (h *Hasher) CompareWithDummy(password string) error {
-	// 忽略返回值：这次比对的目的是消耗与真实比对相同的时间，结果不影响结论。
-	_ = bcrypt.CompareHashAndPassword([]byte(h.dummyHash), []byte(password))
-	return ErrMismatch
+	err := h.Compare(h.dummyHash, password)
+	if err == nil || errors.Is(err, ErrMismatch) {
+		return ErrMismatch
+	}
+	return fmt.Errorf("credential: timing-cover comparison: %w", err)
 }

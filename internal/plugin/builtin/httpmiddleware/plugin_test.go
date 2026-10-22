@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,12 +84,18 @@ func TestInitAndBuildContracts(t *testing.T) {
 			if p.Start(t.Context()) == nil {
 				t.Fatal("start after failure")
 			}
-			_ = p.Stop(t.Context())
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("p.Stop(t.Context()): %v", err)
+			}
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("p.Stop(t.Context()): %v", err)
+			}
 		})
 	}
 	p := New(Options{})
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("p.Stop(t.Context()): %v", err)
+	}
 	if !errors.Is(p.Init(t.Context()), core.ErrPluginContractViolation) {
 		t.Fatal("init after stop")
 	}
@@ -152,7 +159,7 @@ func TestBuildExactOrderAndFrozenConfiguration(t *testing.T) {
 					}
 				}
 			}
-			if !reflect.DeepEqual(got, want) {
+			if !slices.Equal(got, want) {
 				t.Fatalf("chain=%v want=%v", got, want)
 			}
 			if factoryCalls != 1 || provider.reads != 1 {
@@ -164,7 +171,9 @@ func TestBuildExactOrderAndFrozenConfiguration(t *testing.T) {
 			if _, err := p.Build(deps); !errors.Is(err, plugin.ErrMiddlewareAlreadyBuilt) {
 				t.Fatalf("duplicate Build=%v", err)
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("p.Stop(t.Context()): %v", err)
+			}
 			if _, err := p.Build(deps); !errors.Is(err, core.ErrPluginContractViolation) {
 				t.Fatal("build after stop")
 			}
@@ -211,7 +220,9 @@ func TestBuildFailuresAreTerminalAndPreserveRoot(t *testing.T) {
 			if !errors.Is(again, plugin.ErrMiddlewareAlreadyBuilt) || (tc.want != nil && !errors.Is(again, tc.want)) {
 				t.Fatal(again)
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("p.Stop(t.Context()): %v", err)
+			}
 		})
 	}
 }
@@ -246,5 +257,7 @@ func TestConcurrentBuildOnlyConstructsOnce(t *testing.T) {
 	if success.Load() != 1 || duplicates.Load() != 31 || constructions.Load() != 1 {
 		t.Fatalf("success=%d duplicate=%d factory=%d", success.Load(), duplicates.Load(), constructions.Load())
 	}
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("p.Stop(t.Context()): %v", err)
+	}
 }

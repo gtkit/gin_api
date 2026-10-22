@@ -40,7 +40,9 @@ func TestPprofDisabledReturnsNoHandle(t *testing.T) {
 		t.Fatalf("startPprofServer(disabled): %v", err)
 	}
 	if h != nil {
-		_ = h.Shutdown(context.Background())
+		if err := h.Shutdown(context.Background()); err != nil {
+			t.Errorf("h.Shutdown(context.Background()): %v", err)
+		}
 		t.Fatal("a disabled pprof config produced a live handle")
 	}
 	// nil handle 上的方法必须安全：调用方不该被迫到处判空。
@@ -65,12 +67,24 @@ func TestPprofBindFailureIsAStartupError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = held.Close() }()
+	defer func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("held.Close(): %v", err)
+		}
+	}()
 
-	port := strconv.Itoa(held.Addr().(*net.TCPAddr).Port)
+	addr, ok := held.Addr().(*net.TCPAddr)
+
+	if !ok {
+		t.Fatalf("listener address has type %T", held.Addr())
+	}
+
+	port := strconv.Itoa(addr.Port)
 	h, err := startPprofServer(config.PprofConfig{Enabled: true, Host: "127.0.0.1", Port: port})
 	if err == nil {
-		_ = h.Shutdown(context.Background())
+		if err := h.Shutdown(context.Background()); err != nil {
+			t.Errorf("h.Shutdown(context.Background()): %v", err)
+		}
 		t.Fatal("startPprofServer succeeded on an occupied port")
 	}
 	if !strings.Contains(err.Error(), port) {
@@ -90,9 +104,19 @@ func TestPprofBindFailureDoesNotEnableSampling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = held.Close() }()
+	defer func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("held.Close(): %v", err)
+		}
+	}()
 
-	port := strconv.Itoa(held.Addr().(*net.TCPAddr).Port)
+	addr, ok := held.Addr().(*net.TCPAddr)
+
+	if !ok {
+		t.Fatalf("listener address has type %T", held.Addr())
+	}
+
+	port := strconv.Itoa(addr.Port)
 	if _, err := startPprofServer(config.PprofConfig{
 		Enabled: true, Host: "127.0.0.1", Port: port,
 		BlockProfileRate: 10000, MutexProfileFraction: 100,
@@ -126,8 +150,12 @@ func TestPprofServesAndShutsDownCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /debug/pprof/: %v", err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Errorf("test response I/O: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("resp.Body.Close(): %v", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -143,7 +171,9 @@ func TestPprofServesAndShutsDownCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pprof port %s is still held after shutdown: %v", addr, err)
 	}
-	_ = again.Close()
+	if err := again.Close(); err != nil {
+		t.Errorf("again.Close(): %v", err)
+	}
 }
 
 // TestPprofShutdownClearsProfileRates 钉住采样率在关停时被清零。
@@ -288,7 +318,9 @@ func TestPprofServesGoroutineLeakProfile(t *testing.T) {
 		t.Fatalf("GET /debug/pprof/goroutineleak: %v", err)
 	}
 	body, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("resp.Body.Close(): %v", err)
+	}
 	if readErr != nil {
 		t.Fatalf("read body: %v", readErr)
 	}

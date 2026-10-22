@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/models"
 )
@@ -169,7 +169,7 @@ func (r *Recorder) drain(ctx context.Context, batch []models.OperationAudit) {
 func (r *Recorder) flush(ctx context.Context, batch []models.OperationAudit) {
 	if err := r.sink.WriteBatch(ctx, batch); err != nil {
 		r.dropped.Add(int64(len(batch)))
-		logger.Warnf("auditlog: drop batch of %d records on sink failure: %v", len(batch), err)
+		applog.Warnf("auditlog: drop batch of %d records on sink failure: %v", len(batch), err)
 	}
 }
 
@@ -179,7 +179,7 @@ func (r *Recorder) reportDrops() {
 	current := r.dropped.Load()
 	last := r.reported.Load()
 	if current > last && r.reported.CompareAndSwap(last, current) {
-		logger.Warnf("auditlog: %d audit records dropped so far (+%d since last report)",
+		applog.Warnf("auditlog: %d audit records dropped so far (+%d since last report)",
 			current, current-last)
 	}
 }

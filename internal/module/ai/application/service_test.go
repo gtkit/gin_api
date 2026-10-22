@@ -149,7 +149,11 @@ func (f *fakeLLM) Stream(_ context.Context, call ChatCall, onDelta func(string) 
 			reply.Content = sb.String()
 			return reply, cbErr
 		}
-		sb.WriteString(d)
+		if _, err := sb.WriteString(d); err != nil {
+			reply := f.reply
+			reply.Content = sb.String()
+			return reply, err
+		}
 	}
 
 	reply := f.reply

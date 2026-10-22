@@ -12,7 +12,7 @@ import (
 	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
 	"github.com/gtkit/gin-api/internal/testutil"
 
-	loggerv2 "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 )
 
 // captureMessager 收集经 H 系列推送的消息，断言告警执行点。
@@ -43,11 +43,11 @@ func withCaptureMessager(t *testing.T) (*captureMessager, func()) {
 	t.Helper()
 
 	capture := &captureMessager{}
-	inst := loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithMessager(capture),
-		loggerv2.WithReplaceGlobals(false),
+	inst := logger.MustNew(
+		logger.WithConsole(true),
+		logger.WithFile(false),
+		logger.WithMessager(capture),
+		logger.WithReplaceGlobals(false),
 	)
 	drain := installTestLogger(t, inst)
 	return capture, drain
@@ -111,7 +111,7 @@ func (b *blockingMessager) SendTo(_, msg string) { b.Send(msg) }
 // the test's blocking sender before finishing.
 func TestSDKDrainWaitsForItsOwner(t *testing.T) {
 	block := &blockingMessager{entered: make(chan struct{}), release: make(chan struct{})}
-	inst := loggerv2.MustNew(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithMessager(block), loggerv2.WithReplaceGlobals(false))
+	inst := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithMessager(block), logger.WithReplaceGlobals(false))
 	drain := installTestLogger(t, inst)
 	defer drain()
 	applog.HErrorf("stuck alert")
@@ -186,10 +186,10 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 type loggingTestConfiguration struct{}
 
 func (loggingTestConfiguration) Value() (*config.Config, error) { return &config.Config{}, nil }
-func installTestLogger(t *testing.T, inst *loggerv2.Logger) func() {
+func installTestLogger(t *testing.T, inst *logger.Logger) func() {
 	t.Helper()
-	p := defaultlogging.New(defaultlogging.Options{Configuration: loggingTestConfiguration{}, MainFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) { return inst, nil }, AccessFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) {
-		return loggerv2.New(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithReplaceGlobals(false))
+	p := defaultlogging.New(defaultlogging.Options{Configuration: loggingTestConfiguration{}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return inst, nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) {
+		return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
 	}})
 	if err := p.Init(t.Context()); err != nil {
 		t.Fatal(err)

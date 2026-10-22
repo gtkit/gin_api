@@ -8,7 +8,7 @@ import (
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	sdk "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 )
 
 // BenchmarkLogHotPath uses the real SDK encoder/caller and a /dev/null console
@@ -75,14 +75,18 @@ func benchmarkPlugin(b *testing.B, level string) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { _ = output.Close() })
-	factory := func(...sdk.Option) (*sdk.Logger, error) {
+	b.Cleanup(func() {
+		if err := output.Close(); err != nil {
+			b.Errorf("output.Close(): %v", err)
+		}
+	})
+	factory := func(...logger.Option) (*logger.Logger, error) {
 		// Construction captures stdout; restore it before starting any benchmark
 		// workers. No benchmark mutates stdout while workers are running.
 		previous := os.Stdout
 		os.Stdout = output
 		defer func() { os.Stdout = previous }()
-		return sdk.New(sdk.WithConsole(true), sdk.WithFile(false), sdk.WithLevel(level), sdk.WithReplaceGlobals(false), sdk.WithOutJSON(true))
+		return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithLevel(level), logger.WithReplaceGlobals(false), logger.WithOutJSON(true))
 	}
 	p := New(Options{Configuration: fixedConfiguration{&config.Config{}}, MainFactory: factory, AccessFactory: factory})
 	if err := p.Init(b.Context()); err != nil {

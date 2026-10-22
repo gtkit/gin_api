@@ -1,7 +1,8 @@
 package ai
 
 import (
-	"reflect"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -138,38 +139,61 @@ func TestHardenIsResilientToBothKnobs(t *testing.T) {
 
 // TestNewProviderPicksTheNativePathForNonOpenAIVendors 钉住协议分派。
 //
-// 用 OpenAI 兼容路径构造 Claude / Gemini 会得到一个能启动、能发请求、但每次
-// 都被对端拒绝的 provider，而错误信息指向的是"上游返回了 404"。判据是
-// **构造出来的类型不同**——同一个类型说明分派没生效。
+// 通过注入的传输截获请求，检查 OpenAI 兼容路径和原生协议的路径、认证头，
+// 不依赖 SDK 未导出实现的动态类型名，也不触达真实供应商。
 func TestNewProviderPicksTheNativePathForNonOpenAIVendors(t *testing.T) {
 	t.Parallel()
 
 	presets := llm.AllPresets()
-
-	openaiCompatible, err := newProvider(llm.ProviderDeepSeek, "k",
-		presets[llm.ProviderDeepSeek].BaseURL, presets[llm.ProviderDeepSeek].DefaultModel, newHTTPClient())
-	if err != nil {
-		t.Fatalf("newProvider(deepseek): %v", err)
-	}
-
-	native, err := newProvider(llm.ProviderAnthropic, "k",
-		presets[llm.ProviderAnthropic].BaseURL, presets[llm.ProviderAnthropic].DefaultModel, newHTTPClient())
-	if err != nil {
-		t.Fatalf("newProvider(anthropic): %v", err)
-	}
-
-	if got, want := native.Name(), llm.ProviderAnthropic; got != want {
-		t.Errorf("native provider name = %q, want %q", got, want)
-	}
-	// 类型相同即说明 anthropic 被当成了 OpenAI 兼容平台。
-	if typeName(openaiCompatible) == typeName(native) {
-		t.Errorf("anthropic was built through the OpenAI-compatible path (%s): "+
-			"every request would be rejected by the endpoint",
-			typeName(native))
+	for _, tc := range []struct {
+		name                               llm.ProviderName
+		basePath, path, authKey, authValue string
+	}{
+		{name: llm.ProviderDeepSeek, basePath: "/v1", path: "/v1/chat/completions", authKey: "Authorization", authValue: "Bearer test-key"},
+		{name: llm.ProviderAnthropic, path: "/v1/messages", authKey: "X-Api-Key", authValue: "test-key"},
+	} {
+		t.Run(string(tc.name), func(t *testing.T) {
+			var request *http.Request
+			client := &http.Client{Timeout: time.Second, Transport: protocolProbeTransport(func(req *http.Request) (*http.Response, error) {
+				request = req
+				if req.Body != nil {
+					if err := req.Body.Close(); err != nil {
+						return nil, err
+					}
+				}
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"protocol probe"}}`)),
+					Request:    req,
+				}, nil
+			})}
+			provider, err := newProvider(tc.name, "test-key", "https://model.invalid"+tc.basePath, presets[tc.name].DefaultModel, client)
+			if err != nil {
+				t.Fatalf("newProvider(%s): %v", tc.name, err)
+			}
+			if got := provider.Name(); got != tc.name {
+				t.Fatalf("provider name = %q, want %q", got, tc.name)
+			}
+			_, err = provider.Chat(t.Context(), &llm.ChatRequest{Messages: []llm.Message{llm.UserText("protocol probe")}, MaxTokens: 16})
+			if request == nil {
+				t.Fatalf("Chat did not reach the injected transport: %v", err)
+			}
+			if err == nil {
+				t.Fatal("Chat ignored the transport's controlled 400 response")
+			}
+			if request.Method != http.MethodPost || request.URL.Path != tc.path {
+				t.Errorf("request = %s %s, want POST %s", request.Method, request.URL.Path, tc.path)
+			}
+			if got := request.Header.Get(tc.authKey); got != tc.authValue {
+				t.Errorf("%s = %q, want %q", tc.authKey, got, tc.authValue)
+			}
+		})
 	}
 }
 
-// typeName 返回动态类型名，用于区分"走了哪条协议路径"。
-func typeName(v any) string {
-	return reflect.TypeOf(v).String()
+type protocolProbeTransport func(*http.Request) (*http.Response, error)
+
+func (transport protocolProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return transport(req)
 }

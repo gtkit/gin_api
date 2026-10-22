@@ -141,7 +141,9 @@ func TestKeysShareAClusterHashTag(t *testing.T) {
 	client := &fakeRefreshClient{evalResults: []evalResult{{val: []any{int64(1), "", ""}}}}
 	store := newFakeStore(t, client)
 
-	_, _, _ = store.Consume(context.Background(), "fam1.secret1")
+	if _, _, err := store.Consume(context.Background(), "fam1.secret1"); !errors.Is(err, ErrRefreshNotFound) {
+		t.Fatalf("absent refresh: %v", err)
+	}
 
 	if len(client.evalKeys) != 1 {
 		t.Fatalf("eval calls = %d, want 1", len(client.evalKeys))
@@ -183,7 +185,9 @@ func TestSecretIsNotUsedRawInKeys(t *testing.T) {
 	store := newFakeStore(t, client)
 
 	const secret = "distinctive-secret-value"
-	_, _, _ = store.Consume(context.Background(), "fam."+secret)
+	if _, _, err := store.Consume(context.Background(), "fam."+secret); !errors.Is(err, ErrRefreshNotFound) {
+		t.Fatalf("absent refresh: %v", err)
+	}
 
 	for _, k := range client.evalKeys[0] {
 		if strings.Contains(k, secret) {
@@ -553,7 +557,10 @@ func TestRevokeRequiresATokenID(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeRevocationClient{}
-	list, _ := NewRevocationList(client, "p", 0)
+	list, err := NewRevocationList(client, "p", 0)
+	if err != nil {
+		t.Fatalf("NewRevocationList: %v", err)
+	}
 
 	if err := list.Revoke(context.Background(), "", time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("Revoke accepted an empty token id")
@@ -566,7 +573,11 @@ func TestRevokeRequiresATokenID(t *testing.T) {
 func TestRevokeReportsStorageFailure(t *testing.T) {
 	t.Parallel()
 
-	list, _ := NewRevocationList(&fakeRevocationClient{setErr: errors.New("down")}, "p", 0)
+	list, err := NewRevocationList(&fakeRevocationClient{setErr: errors.New("down")}, "p", 0)
+
+	if err != nil {
+		t.Fatalf("NewRevocationList: %v", err)
+	}
 	if err := list.Revoke(context.Background(), "jti", time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("Revoke reported success although nothing was stored: logout would silently " +
 			"do nothing")
@@ -589,7 +600,11 @@ func TestIsRevokedReadsTheStore(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			list, _ := NewRevocationList(&fakeRevocationClient{exists: tt.exists}, "p", 0)
+			list, err := NewRevocationList(&fakeRevocationClient{exists: tt.exists}, "p", 0)
+
+			if err != nil {
+				t.Fatalf("NewRevocationList: %v", err)
+			}
 			got, err := list.IsRevoked(context.Background(), "jti")
 			if err != nil {
 				t.Fatalf("IsRevoked: %v", err)

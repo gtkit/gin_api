@@ -125,11 +125,20 @@ func parseMinVersion(v string) (serverVersion, error) {
 	if m == nil {
 		return serverVersion{}, fmt.Errorf("cannot parse minimum version %q", v)
 	}
-	major, _ := strconv.Atoi(m[1])
-	minor, _ := strconv.Atoi(m[2])
+	major, err := strconv.Atoi(m[1])
+	if err != nil {
+		return serverVersion{}, fmt.Errorf("parse minimum major version: %w", err)
+	}
+	minor, err := strconv.Atoi(m[2])
+	if err != nil {
+		return serverVersion{}, fmt.Errorf("parse minimum minor version: %w", err)
+	}
 	patch := 0
 	if m[3] != "" {
-		patch, _ = strconv.Atoi(m[3])
+		patch, err = strconv.Atoi(m[3])
+		if err != nil {
+			return serverVersion{}, fmt.Errorf("parse minimum patch version: %w", err)
+		}
 	}
 	return serverVersion{major: major, minor: minor, patch: patch, raw: v}, nil
 }

@@ -174,7 +174,7 @@ func TestTaskRunsImmediatelyOnStart(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	go func() { _ = runner.Run(ctx) }()
+	startRunnerForTest(t, ctx, runner)
 
 	select {
 	case held := <-ran:
@@ -197,7 +197,11 @@ func TestLosingTheLeaseCancelsTheTask(t *testing.T) {
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	// 短租期让续租周期落在几十毫秒量级，测试因此不必等太久。
 	lease, err := NewLease(client, "test", "job", 150*time.Millisecond)
@@ -230,7 +234,7 @@ func TestLosingTheLeaseCancelsTheTask(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	go func() { _ = runner.Run(ctx) }()
+	startRunnerForTest(t, ctx, runner)
 
 	select {
 	case <-started:
@@ -270,7 +274,11 @@ func TestSecondInstanceSkipsInsteadOfRunning(t *testing.T) {
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	// 两个 Runner 共用一个 Redis，模拟两个副本。
 	makeRunner := func(t *testing.T, obs Observer, task TaskFunc) *Runner {
@@ -301,7 +309,7 @@ func TestSecondInstanceSkipsInsteadOfRunning(t *testing.T) {
 	})
 
 	ctx := t.Context()
-	go func() { _ = first.Run(ctx) }()
+	startRunnerForTest(t, ctx, first)
 
 	select {
 	case <-holding:
@@ -386,13 +394,34 @@ func TestReleaseHappensEvenAfterCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_ = runner.Run(ctx)
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("Run after deadline: %v", err)
+	}
 
 	// Run 返回后锁必须已经释放：下一个实例应当能立刻抢到。
 	if _, err := lease.Acquire(context.Background()); err != nil {
 		t.Fatalf("the lock was not released after shutdown (%v): the next instance would "+
 			"have to wait out the whole lease term", err)
 	}
+}
+
+// Cleanup先终止并等待Run，再让更早登记的Redis清理执行。
+func startRunnerForTest(t *testing.T, parent context.Context, runner *Runner) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("runner Run: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("runner did not stop before cleanup")
+		}
+	})
 }
 
 // TestGuaranteeStringIsStable 钉住可作日志字段的稳定名称。

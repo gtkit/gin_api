@@ -97,3 +97,5 @@ Lua 脚本对时间有两条独立规则：
 Lua 的 `number` 是 IEEE-754 double。浮点令牌在长时间运行与多副本下会漂移，而漂移方向不可预测——可能超发配额也可能误杀。
 
 因此内部换算成 microtokens（1 令牌 = 10⁶）全整数运算，`Validate` 保证换算后不越过 2⁵³ 的精确整数边界。越界之后运算开始丢精度，而表现是**限流悄悄失准**，没有任何报错。
+
+探针DEL失败不改变已验证的EVALSHA能力。首个清理错误由`RedisBackend.ProbeCleanupError()`保留，可用`WithProbeCleanupErrorHandler(func(error))`接入调用方日志；每个后端只通知一次，既有Observer接口不变，包自身不输出日志。未删除探针键仍由创建它们的Lua TTL回收（默认探针策略约61秒），不能宣称立即清理完成。项目bootstrap已将通知接入gtkit日志。

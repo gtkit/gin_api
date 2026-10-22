@@ -9,7 +9,7 @@ import (
 	"github.com/gtkit/gin-api/internal/plugin"
 	defaultcache "github.com/gtkit/gin-api/internal/plugin/builtin/cache"
 	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
-	defaulthttp "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
+	defaulthttpmiddleware "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
 	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
 	defaultmysql "github.com/gtkit/gin-api/internal/plugin/builtin/mysql"
 	defaultredis "github.com/gtkit/gin-api/internal/plugin/builtin/redis"
@@ -43,7 +43,7 @@ func TestRegisterServerPluginsReturnsSelectedUninitializedCapabilities(t *testin
 	if _, ok := set.Cache.(*defaultcache.Plugin); !ok {
 		t.Fatal("cache type")
 	}
-	if _, ok := set.Middleware.(*defaulthttp.Plugin); !ok {
+	if _, ok := set.Middleware.(*defaulthttpmiddleware.Plugin); !ok {
 		t.Fatal("middleware type")
 	}
 	if _, err := set.Configuration.Value(); !errors.Is(err, plugin.ErrConfigurationUnavailable) {

@@ -71,6 +71,8 @@ c.Invalidate(key)                                  // 写 DB 成功后主动失�
 - **容量上限 + LRU**：无界缓存在键空间随请求变化时会一直涨。那不是命中率问题，
   是一次必然发生的 OOM。
 - **失败不缓存**：缓存下来的错误会被固定住整个 TTL，故障早已恢复而调用方还在拿错误。
+- **loader panic**：在实际加载goroutine内恢复为可识别的 `ErrLoaderPanic`，返回固定文案并记录栈；
+  不缓存结果，释放在途登记。无视context的loader仍不能被强行终止。
 - **取消只影响当前调用方**：loader 拿到的是 `context.WithoutCancel` 的 ctx，
   一个提前放弃的调用方不会连累其他等待者。
 

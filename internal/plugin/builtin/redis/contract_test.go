@@ -77,7 +77,9 @@ func TestResourceAndCancellationContracts(t *testing.T) {
 			}
 			t.Cleanup(func() {
 				if owned.closes.Load() == 0 {
-					_ = owned.Close()
+					if err := owned.Close(); err != nil {
+						t.Errorf("Close unused owned fixture: %v", err)
+					}
 				}
 			})
 			opens := 0
@@ -144,7 +146,16 @@ func TestResourceAndCancellationContracts(t *testing.T) {
 			}
 			var group sync.WaitGroup
 			for range 16 {
-				group.Go(func() { _ = p.Stop(context.Background()) })
+				group.Go(func() {
+					stopErr := p.Stop(context.Background())
+					if tc.closeFailure {
+						if !errors.Is(stopErr, closeFailure) {
+							t.Errorf("Stop missing cleanup cause: %v", stopErr)
+						}
+					} else if stopErr != nil {
+						t.Errorf("Stop: %v", stopErr)
+					}
+				})
 			}
 			group.Wait()
 			used := tc.partial || tc.openErr == nil && !tc.typedNil
@@ -180,14 +191,18 @@ func TestConfigurationAndUnconfiguredRequired(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("init=%v", err)
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
 			if err := p.Start(t.Context()); err == nil {
 				t.Fatal("started after stop")
 			}
 		})
 	}
 	p := New(Options{})
-	_ = p.Stop(t.Context())
+	if err := p.Stop(t.Context()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
 	if !errors.Is(p.Init(t.Context()), core.ErrPluginContractViolation) {
 		t.Fatal("init after stop")
 	}

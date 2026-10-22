@@ -1,8 +1,13 @@
 package cmd
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -10,7 +15,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 
-	"github.com/gtkit/gojwt"
 	"github.com/spf13/cobra"
 )
 
@@ -63,14 +67,9 @@ func newJWTGenerateCmd() *cobra.Command {
 
 			// stdout **绝不输出私钥内容**：这条命令的输出经常被直接粘进
 			// 工单、聊天窗口或 CI 日志。
-			cmd.Printf("kid: %s\n", result.kid)
-			cmd.Printf("private key: %s (mode 0600)\n", result.privatePath)
-			cmd.Printf("public key:  %s\n", result.publicPath)
-			cmd.Println()
-			cmd.Println("config snippet:")
-			cmd.Printf("  jwt:\n    active:\n      kid: %s\n      private_key_path: %s\n      public_key_path: %s\n",
-				result.kid, result.privatePath, result.publicPath)
-			return nil
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "kid: %s\nprivate key: %s (mode 0600)\npublic key:  %s\n\nconfig snippet:\n  jwt:\n    active:\n      kid: %s\n      private_key_path: %s\n      public_key_path: %s\n",
+				result.kid, result.privatePath, result.publicPath, result.kid, result.privatePath, result.publicPath)
+			return commandError("write generated key summary", err)
 		},
 	}
 
@@ -121,7 +120,7 @@ func generateKeyPair(kid, outDir string) (generateResult, error) {
 }
 
 // generateKeyFiles 保留配置中的完整文件名和父目录，不重新推导密钥位置。
-func generateKeyFiles(kid, privatePath, publicPath string) (generateResult, error) {
+func generateKeyFiles(kid, privatePath, publicPath string) (_ generateResult, err error) {
 	dirs := []string{filepath.Dir(privatePath)}
 	if dir := filepath.Dir(publicPath); dir != dirs[0] {
 		dirs = append(dirs, dir)
@@ -139,24 +138,79 @@ func generateKeyFiles(kid, privatePath, publicPath string) (generateResult, erro
 			return generateResult{}, fmt.Errorf(
 				"%s already exists: a kid identifies one immutable key pair, so rotation means "+
 					"generating a new kid rather than replacing this one: %w", path, os.ErrExist)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return generateResult{}, fmt.Errorf("inspect key output %s: %w", path, statErr)
 		}
 	}
 
-	if err := gojwt.GenerateEd25519Keys(privatePath, publicPath); err != nil {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
 		return generateResult{}, fmt.Errorf("generate ed25519 keys: %w", err)
 	}
-	cleanup := func() {
-		_ = os.Remove(privatePath)
-		_ = os.Remove(publicPath)
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return generateResult{}, fmt.Errorf("encode private key: %w", err)
 	}
-	// 创建权限受 umask 影响；保留命令原有的精确权限约定。
-	for _, file := range []struct {
-		path string
-		mode os.FileMode
-	}{{privatePath, 0o600}, {publicPath, 0o644}} {
-		if err := os.Chmod(file.path, file.mode); err != nil {
-			cleanup()
-			return generateResult{}, fmt.Errorf("chmod key file: %w", err)
+	publicDER, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		return generateResult{}, fmt.Errorf("encode public key: %w", err)
+	}
+	outputs := []struct {
+		path   string
+		mode   os.FileMode
+		data   []byte
+		file   *os.File
+		closed bool
+	}{
+		{path: privatePath, mode: 0o600, data: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})},
+		{path: publicPath, mode: 0o644, data: pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})},
+	}
+	complete := false
+	defer func() {
+		for i := len(outputs) - 1; i >= 0; i-- {
+			output := &outputs[i]
+			if output.file == nil {
+				continue
+			}
+			if !output.closed {
+				if closeErr := output.file.Close(); closeErr != nil {
+					err = errors.Join(err, fmt.Errorf("close generated key %s: %w", output.path, closeErr))
+				}
+			}
+			if !complete {
+				if removeErr := os.Remove(output.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					err = errors.Join(err, fmt.Errorf("remove generated key %s: %w", output.path, removeErr))
+				}
+			}
+		}
+	}()
+	// Both exclusive creates precede writing either key. Only acquired files are owned.
+	for i := range outputs {
+		output := &outputs[i]
+		file, openErr := os.OpenFile(output.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, output.mode)
+		if openErr != nil {
+			return generateResult{}, fmt.Errorf("create key output %s: %w", output.path, openErr)
+		}
+		output.file = file
+	}
+	for i := range outputs {
+		output := &outputs[i]
+		n, writeErr := output.file.Write(output.data)
+		if writeErr == nil && n != len(output.data) {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			return generateResult{}, fmt.Errorf("write generated key %s: %w", output.path, writeErr)
+		}
+		if syncErr := output.file.Sync(); syncErr != nil {
+			return generateResult{}, fmt.Errorf("sync generated key %s: %w", output.path, syncErr)
+		}
+		output.closed = true
+		if closeErr := output.file.Close(); closeErr != nil {
+			return generateResult{}, fmt.Errorf("close generated key %s: %w", output.path, closeErr)
+		}
+		if chmodErr := os.Chmod(output.path, output.mode); chmodErr != nil {
+			return generateResult{}, fmt.Errorf("chmod generated key %s: %w", output.path, chmodErr)
 		}
 	}
 
@@ -164,11 +218,11 @@ func generateKeyFiles(kid, privatePath, publicPath string) (generateResult, erro
 	// "文件内容在但目录里看不到"的状态。
 	for _, dir := range dirs {
 		if err := syncDir(dir); err != nil {
-			cleanup()
 			return generateResult{}, err
 		}
 	}
 
+	complete = true
 	return generateResult{kid: kid, privatePath: privatePath, publicPath: publicPath}, nil
 }
 

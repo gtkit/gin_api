@@ -12,12 +12,14 @@ type ResResult struct {
     Code    goerr.Code `json:"code"`
     Message string     `json:"msg"`
     Data    any        `json:"data"`
+    RequestID string   `json:"request_id"`
 }
 ```
 
 - `code = 0` 表示成功，非零为业务/错误码。
 - 字段名是 `msg` 不是 `message`；这是前后端契约，不要改。
 - `nil` data 序列化为空数组而非 `null`——由 response 包统一处理，handler 不管。
+- `request_id` 来自服务端关联context，与X-Request-ID和日志一致；构造helper无context时先为空，WriteJSON收口填入。极早失败未分配ID时为空；探针/SSE/非JSON协议不套信封。增加字段会影响严格schema/签名/快照客户端，接入方应允许该增量字段。
 - 404、405 等不进任何路由组的响应也用同一个信封，客户端不必为它们写第二套解析。
 
 ## 响应 helper
@@ -71,7 +73,7 @@ if err != nil {
 
 | 方法 | 去向 | 内容 |
 |---|---|---|
-| `Error()` | 服务端日志（`response.logError` 记的就是它） | 含技术细节 |
+| `Error()` | 服务端日志（记录传入根错误全文，保留外层动作及Join并列原因） | 含技术细节 |
 | `Message()` | 响应体 `msg` 字段（经脱敏截断） | 面向用户，不含实现细节 |
 
 `goerr.New(cause, status, msgs...)` 的行为决定了正确写法：
@@ -325,13 +327,13 @@ var validationOptions = func() []verify.Option {
 
 ```
 GinRecovery → RequestID → [otelgin] → GinLogger → Metrics
-→ SecurityHeaders → ErrorHandler → [Cors] → MaxBytesLimit
+→ GinRecovery（内层） → SecurityHeaders → ErrorHandler → [Cors] → MaxBytesLimit
 ```
 
 方括号表示条件装配：`otelgin` 在开启 telemetry 时挂，`Cors` 仅当 `cors.allowed_origins` 非空时挂。
 
 顺序不是随意的：Recovery 在最外层才能兜住后续全部中间件的 panic；RequestID 必须在日志之前，
-否则日志里没有 ID；MaxBytesLimit 在最后，才能覆盖到不进任何路由组的 404/405 路径。
+否则日志里没有 ID；内层Recovery让业务panic先转成500，再回到外层日志/指标记录最终状态；最外层保留以兜住中间件自身panic。MaxBytesLimit 在最后，才能覆盖到不进任何路由组的 404/405 路径。
 
 ### 路由级
 
@@ -366,3 +368,7 @@ HTTP server 有一层保守的全局写超时兜底。普通路由受它保护�
 gin 的 `c.Writer` 是 Context 的内部字段，handler 返回后归还对象池，
 下个请求会把它重置到另一个响应上——晚退出一步写的就是别人的响应，
 一次跨请求数据泄漏，且不报错、不进日志。
+
+统一信封的匿名只读缓存路由显式挂 `httpcache.UnifiedJSONCache(deps.Cache(0))`，handler仍调用resp.Ok等helper。它使用独立 `:envelope:` 缓存key域，升级后这类响应会冷缓存一次；每次回放只替换顶层request_id，保留data中的大整数及嵌套同名字段。此模式移除Content-Length、ETag、Last-Modified及整包摘要，并去掉本次请求的条件验证头，因此条件GET返回带当前ID的200；通用缓存维持原验证行为。HEAD/204/304不补body。流式、压缩、签名及普通非信封JSON不得使用此包装；不兼容写出会得到受控错误，超限helper响应保留当前ID但不缓存。当前内置业务路由没有匿名缓存调用点，新增路由按实际协议显式选择。
+
+HTTP错误日志从原始根错误调用goerr.Inspect，投影原因树父子索引、状态及分支已有栈的函数/文件/行。Convert仅选择对客状态，不用于替代原根错误记录；Inspect失败单列受控诊断失败字段，不改业务码、HTTP状态或公开文案。不得把Diagnostic整体返回客户端，也不保证隔离自定义Error/Unwrap的阻塞或panic。

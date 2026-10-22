@@ -43,7 +43,15 @@ func newSQLMockGorm(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("sqlDB.Close(): %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("SQL fixture expectations: %v", err)
+		}
+	})
 
 	db, err := gorm.Open(mysql.New(mysql.Config{
 		Conn:                      sqlDB,
@@ -62,7 +70,15 @@ func newSQLMockOrmxClient(t *testing.T) (*ormx.Client, sqlmock.Sqlmock) {
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("sqlDB.Close(): %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("SQL fixture expectations: %v", err)
+		}
+	})
 
 	client, err := ormx.OpenWithDB(context.Background(), sqlDB,
 		ormx.WithSkipInitializeWithVersion(true),
@@ -151,7 +167,11 @@ func TestInstrumentRedisSpansOmitStatement(t *testing.T) {
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	tp, rec := newRecorder()
 	if err := instrumentRedis(client, tp); err != nil {
@@ -194,7 +214,11 @@ func TestInstrumentTracingCoversAllRedisDBs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("redisx.NewClient: %v", err)
 	}
-	t.Cleanup(func() { _ = rx.Close() })
+	t.Cleanup(func() {
+		if err := rx.Close(); err != nil {
+			t.Errorf("rx.Close(): %v", err)
+		}
+	})
 
 	client, mock := newSQLMockOrmxClient(t)
 	res := &Resources{mysqlView: client, redis: rx}

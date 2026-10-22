@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // Guarantee 声明任务在"两个实例同时运行"时靠什么保证正确。
@@ -82,7 +83,7 @@ type Runner struct {
 
 // Observer 接收 Runner 的运行期事件，便于接日志与指标。
 //
-// 各方法可为 nil 时不调用（见 nopObserver）。实现必须并发安全且不阻塞。
+// 未配置时由默认观察者记录失败。实现必须并发安全且不阻塞。
 type Observer interface {
 	// LeaseAcquired 在成功抢到租约时调用。
 	LeaseAcquired(task string, fence int64)
@@ -100,13 +101,17 @@ type Observer interface {
 	TaskFailed(task string, err error)
 }
 
-type nopObserver struct{}
+type loggingObserver struct{}
 
-func (nopObserver) LeaseAcquired(string, int64) {}
-func (nopObserver) LeaseSkipped(string)         {}
-func (nopObserver) LeaseLost(string, error)     {}
-func (nopObserver) TaskSucceeded(string)        {}
-func (nopObserver) TaskFailed(string, error)    {}
+func (loggingObserver) LeaseAcquired(string, int64) {}
+func (loggingObserver) LeaseSkipped(string)         {}
+func (loggingObserver) TaskSucceeded(string)        {}
+func (loggingObserver) LeaseLost(task string, err error) {
+	applog.Error("singleton lease failed", applog.String("task", task), applog.Err(err))
+}
+func (loggingObserver) TaskFailed(task string, err error) {
+	applog.Error("singleton task failed", applog.String("task", task), applog.Err(err))
+}
 
 // Config 是 Runner 的配置。
 type Config struct {
@@ -116,7 +121,7 @@ type Config struct {
 	MaxRuntime time.Duration
 	// Guarantee 声明重复执行时的正确性来源，零值非法。
 	Guarantee Guarantee
-	// Observer 接收运行期事件，可为 nil。
+	// Observer 接收运行期事件；nil 时默认记录失败日志。
 	Observer Observer
 }
 
@@ -161,7 +166,7 @@ func NewRunner(lease *Lease, task TaskFunc, cfg Config) (*Runner, error) {
 
 	observer := cfg.Observer
 	if observer == nil {
-		observer = nopObserver{}
+		observer = loggingObserver{}
 	}
 
 	return &Runner{
@@ -232,7 +237,9 @@ func (r *Runner) runOnce(ctx context.Context) {
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), r.renewTimeout)
 		defer releaseCancel()
-		_ = r.lease.Release(releaseCtx, held)
+		if releaseErr := r.lease.Release(releaseCtx, held); releaseErr != nil {
+			r.observer.LeaseLost(r.lease.name, releaseErr)
+		}
 	}()
 
 	// 任务 ctx 由三件事终止：进程关停（父 ctx）、最大执行时长、失去租约。
@@ -245,6 +252,10 @@ func (r *Runner) runOnce(ctx context.Context) {
 	go func() {
 		defer close(renewDone)
 		r.keepAlive(taskCtx, cancel, held)
+	}()
+	defer func() {
+		cancel()
+		<-renewDone
 	}()
 
 	taskErr := r.task(taskCtx, held)

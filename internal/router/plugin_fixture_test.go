@@ -9,7 +9,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/plugin"
-	defaulthttp "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
+	defaulthttpmiddleware "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
 	"github.com/gtkit/gin-api/internal/shared/env"
 	"go.opentelemetry.io/otel"
 )
@@ -34,7 +34,7 @@ func (o testMiddlewareOwner) Build(deps plugin.MiddlewareDeps) (chain []gin.Hand
 func testMiddlewareWithOrigins(origins []string) plugin.MiddlewareBuilder {
 	cfg := &config.Config{}
 	cfg.CORS.AllowedOrigins = origins
-	builder := defaulthttp.New(defaulthttp.Options{Configuration: middlewareConfiguration{cfg}})
+	builder := defaulthttpmiddleware.New(defaulthttpmiddleware.Options{Configuration: middlewareConfiguration{cfg}})
 	registry := core.NewPluginRegistry()
 	err := registry.Register(builder)
 	if err == nil {

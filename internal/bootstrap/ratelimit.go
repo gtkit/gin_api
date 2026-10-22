@@ -9,7 +9,7 @@ import (
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
 
 // rateLimitAssembly 是限流的装配产物。
@@ -30,7 +30,7 @@ func buildRateLimits(
 		return rateLimitAssembly{}, nil
 	}
 
-	keys, err := ratelimit.NewKeyBuilder(cfg.RateLimit.KeyHMACSecret, cfg.App.Name)
+	keys, err := ratelimit.NewKeyBuilder(cfg.RateLimit.KeyHMACSecret, cfg.EffectiveRedisPrefix())
 	if err != nil {
 		return rateLimitAssembly{}, fmt.Errorf("build rate limit key builder: %w", err)
 	}
@@ -57,7 +57,7 @@ func buildRateLimits(
 			return rateLimitAssembly{}, errors.Join(convErr, registry.Close())
 		}
 
-		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.App.Name, degradedStartAllowed)
+		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.EffectiveRedisPrefix(), degradedStartAllowed)
 		if buildErr != nil {
 			return rateLimitAssembly{}, errors.Join(buildErr, registry.Close())
 		}
@@ -74,7 +74,7 @@ func buildRateLimits(
 	// 失去确定答案，也让审计无从下手。
 	registry.Freeze()
 
-	logger.Infof("rate limiting enabled with %d policies: %v", len(registry.IDs()), registry.IDs())
+	applog.Infof("rate limiting enabled with %d policies: %v", len(registry.IDs()), registry.IDs())
 	return rateLimitAssembly{registry: registry, keys: keys}, nil
 }
 
@@ -119,6 +119,9 @@ func buildLimiter(
 		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),
 			ratelimit.WithObserver(rateLimitObserver{}),
+			ratelimit.WithProbeCleanupErrorHandler(func(err error) {
+				applog.Warn("rate limit probe cleanup failed; artifacts retain their TTL", applog.Err(err))
+			}),
 		}
 		if degradedStartAllowed {
 			backendOpts = append(backendOpts, ratelimit.WithDegradedStart())
@@ -128,7 +131,7 @@ func buildLimiter(
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
 		}
 		if backend.Health().Phase() == ratelimit.PhaseDegraded {
-			logger.Warnf("redis rate limit backend started degraded (redis unavailable at startup); " +
+			applog.Warnf("redis rate limit backend started degraded (redis unavailable at startup); " +
 				"degraded-mode policies apply their failure modes until the recovery probe succeeds")
 		}
 		*redisBackend = backend
@@ -156,13 +159,13 @@ func buildLimiter(
 // 这条路径**不会自行恢复**：没有后端连接可探测，恢复靠进程重启。
 func unreachableLimiter(policy ratelimit.Policy) (ratelimit.Limiter, error) {
 	if policy.FailureMode == ratelimit.FailureLocalFallback {
-		logger.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
+		applog.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
 			"bucket for this process lifetime (quota counts per replica; restart after redis recovers)",
 			policy.ID)
 		return ratelimit.NewLocalBackend(policy)
 	}
 
-	logger.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
+	applog.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
 		"process lifetime (restart after redis recovers)", policy.ID, policy.FailureMode)
 	return ratelimit.NewUnavailableLimiter(policy), nil
 }
@@ -269,15 +272,15 @@ type rateLimitObserver struct{}
 //
 // 低基数事件，每次都记：它是排查"限流为什么突然放宽或收紧"的第一手线索。
 func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
-	logger.Warn("rate limit backend phase changed",
-		logger.String("from", from.String()), logger.String("to", to.String()))
+	applog.Warn("rate limit backend phase changed",
+		applog.String("from", from.String()), applog.String("to", to.String()))
 }
 
 // FellBackToLocal 在首次降级到本地影子桶时记录一次。
 //
 // 只记一次：故障期间每个请求都打一条会把日志刷满，而信息量只有第一条。
 func (rateLimitObserver) FellBackToLocal(policyID string) {
-	logger.Warn("rate limit fell back to the local shadow bucket; "+
+	applog.Warn("rate limit fell back to the local shadow bucket; "+
 		"the model is the same but the state is not carried over, so up to one burst may pass through",
-		logger.String("policy", policyID))
+		applog.String("policy", policyID))
 }

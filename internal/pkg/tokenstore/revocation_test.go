@@ -19,7 +19,11 @@ func newTestRevocationList(t *testing.T) (*RevocationList, *miniredis.Miniredis)
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	list, err := NewRevocationList(client, "test", 0)
 	if err != nil {

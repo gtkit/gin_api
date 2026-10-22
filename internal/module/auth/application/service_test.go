@@ -764,8 +764,11 @@ func TestAccountNormalizationClosesTheRateLimitBypass(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	// PAD SPACE 下这是同一个数据库账号。
-	_, _ = svc.Login(ctx, "13800000000 ", "pw")
-	_, _ = svc.Login(ctx, "  13800000000", "pw")
+	for _, phone := range []string{"13800000000 ", "  13800000000"} {
+		if _, err := svc.Login(ctx, phone, "pw"); err != nil {
+			t.Fatalf("Login with account whitespace: %v", err)
+		}
+	}
 
 	for _, account := range seen.accounts {
 		if account != "13800000000" {

@@ -1,6 +1,21 @@
 package mysql
 
-import "testing"
+import (
+	"errors"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+func TestParseMinVersionOverflowPreservesCause(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("9", 40)
+	for _, input := range []string{huge + ".0", "8." + huge, "8.0." + huge} {
+		if _, err := parseMinVersion(input); !errors.Is(err, strconv.ErrRange) {
+			t.Fatalf("overflow %q: %v", input, err)
+		}
+	}
+}
 
 func TestParseServerVersion(t *testing.T) {
 	t.Parallel()

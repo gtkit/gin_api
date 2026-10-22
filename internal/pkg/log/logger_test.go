@@ -3,6 +3,7 @@ package log
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,5 +178,25 @@ func TestLoggerConcurrentForwarding(t *testing.T) {
 	}
 	if RequestIDFromContext(t.Context()) != "" {
 		t.Fatal("unexpected ID")
+	}
+}
+
+func TestFallbackWriteFailureIsReturnedByDrain(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "closed-stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stderr
+	os.Stderr = file
+	defer func() { os.Stderr = previous }()
+	Error("diagnostic whose writer fails")
+	if err := Drain(t.Context()); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("write failure lost: %v", err)
+	}
+	if err := Drain(t.Context()); err != nil {
+		t.Fatalf("acknowledged failure retained: %v", err)
 	}
 }

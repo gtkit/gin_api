@@ -39,5 +39,7 @@ func TestRunOncePanicReleasesLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire after panic = %v", err)
 	}
-	_ = lease.Release(t.Context(), held)
+	if err := lease.Release(t.Context(), held); err != nil {
+		t.Errorf("lease.Release(t.Context(), held): %v", err)
+	}
 }

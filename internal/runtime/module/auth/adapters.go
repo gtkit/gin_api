@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"golang.org/x/sync/semaphore"
 
@@ -121,9 +121,9 @@ func (h passwordHasher) CompareWithDummy(ctx context.Context, password string) e
 
 	err = h.hasher.CompareWithDummy(password)
 	if !errors.Is(err, credential.ErrMismatch) {
-		// 契约要求它恒为不匹配。真冒出别的错误说明底层实现变了——
-		// 如实返回而不是掩盖：这条路径上的静默会让防账号枚举的时间掩护
-		// 悄悄失效，而没有任何迹象。
+		// 掩护哈希异常等基础设施失败保留原因，不伪装成用户密码错误。
+		// 正常比对的匹配/不匹配都由credential映射为ErrMismatch，
+		// 此分支不会泄露正常情况下的账号存在性。
 		return err
 	}
 	return authapp.ErrInvalidCredentials
@@ -199,11 +199,11 @@ func (l revocationList) Revoke(ctx context.Context, tokenID string, expiresAt ti
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
-func (authAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }
+func (authAuditor) Auditf(format string, args ...any) { applog.Infof(format, args...) }
 
 // Failf 走 Warn：登录失败、重用检测、撤销失败都是安全排查的起点，
 // 与"某某登录成功"共用一个级别，告警规则就只能靠解析文本。
-func (authAuditor) Failf(format string, args ...any) { logger.Warnf(format, args...) }
+func (authAuditor) Failf(format string, args ...any) { applog.Warnf(format, args...) }
 
 // eventRecorder 把认证事件转发给指标仪表。
 type eventRecorder struct {
@@ -270,7 +270,7 @@ func (l accountLimiter) Allow(ctx context.Context, account string) bool {
 	decision, err := l.limiter.Check(ctx, key)
 	if err != nil {
 		// 与路由限流中间件同款留痕：不留的话，一次长时间的降级不会有任何记录。
-		logger.Warnf("account rate limit backend error; the policy's failure mode decided "+
+		applog.Warnf("account rate limit backend error; the policy's failure mode decided "+
 			"the outcome (policy=%s outcome=%s): %v", policy.ID, decision.Outcome, err)
 	}
 	if l.recorder != nil {

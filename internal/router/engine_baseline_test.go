@@ -131,6 +131,9 @@ func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) resp.ResResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("响应体不是统一信封: %v; body = %q", err, rec.Body.String())
 	}
+	if got.RequestID == "" || got.RequestID != rec.Header().Get(middleware.RequestIDHeader) {
+		t.Fatalf("request ID mismatch: body=%q header=%q", got.RequestID, rec.Header().Get(middleware.RequestIDHeader))
+	}
 	return got
 }
 

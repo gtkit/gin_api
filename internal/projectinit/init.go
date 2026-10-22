@@ -96,8 +96,6 @@ type Initializer struct {
 	gitInit        func(root, branch string) error
 	gitAdd         func(root string) error
 	gitCommit      func(root, message string) error
-	// warnf 输出非致命告警（如快照清理失败）。
-	warnf func(format string, args ...any)
 }
 
 // New 从 startDir 向上查找包含 go.mod 的项目根，构造 Initializer。
@@ -127,12 +125,11 @@ func New(startDir string) (*Initializer, error) {
 		gitInit:        gitInitBranch,
 		gitAdd:         gitAddAll,
 		gitCommit:      gitCommit,
-		warnf:          func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	}, nil
 }
 
 // Run 执行实例化。opts.DryRun 为真时不做任何落盘/破坏性操作。
-func (i *Initializer) Run(opts Options) (*Result, error) {
+func (i *Initializer) Run(opts Options) (_ *Result, err error) {
 	branch, gitState, err := i.validateInputs(opts) // ⓪
 	if err != nil {
 		return nil, err
@@ -140,7 +137,9 @@ func (i *Initializer) Run(opts Options) (*Result, error) {
 
 	result := &Result{DryRun: opts.DryRun}
 	if opts.DryRun {
-		i.planDryRun(opts, result)
+		if err := i.planDryRun(opts, result); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -157,15 +156,28 @@ func (i *Initializer) Run(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer i.cleanupSnapshot(snap)
+	returned := false
+	defer func() {
+		// An abnormal callback exit has not completed rollback. Keep the only
+		// copy of the old Git and original files; let the original panic escape.
+		if !returned {
+			snap.preserve = true
+		}
+		err = errors.Join(err, snap.cleanup())
+	}()
 
 	if err := i.transformFiles(opts, result); err != nil { // ②
-		return nil, i.rollback(snap, err, "file transformation")
+		failure := i.rollback(snap, err, "file transformation")
+		returned = true
+		return nil, failure
 	}
 	if err := i.selfCheck(i.root); err != nil { // ③
-		return nil, i.rollback(snap, fmt.Errorf("post-init self-check failed: %w", err), "self-check")
+		failure := i.rollback(snap, fmt.Errorf("post-init self-check failed: %w", err), "self-check")
+		returned = true
+		return nil, failure
 	}
 	if err := i.rebuildGit(snap, gitState, branch, savedExclude, opts, result); err != nil { // ④
+		returned = true
 		return nil, err
 	}
 
@@ -173,6 +185,7 @@ func (i *Initializer) Run(opts Options) (*Result, error) {
 	if opts.NoCommit {
 		result.Notes = append(result.Notes, noCommitNote)
 	}
+	returned = true
 	return result, nil
 }
 
@@ -248,17 +261,20 @@ func (i *Initializer) validateInputs(opts Options) (branch string, gitState gitE
 }
 
 // planDryRun 只列出将发生的改动，不触碰磁盘。
-func (i *Initializer) planDryRun(opts Options, result *Result) {
+func (i *Initializer) planDryRun(opts Options, result *Result) error {
 	result.Rewritten = append(result.Rewritten, projectMkPath, appmetaPath)
 	for _, rel := range motherDeploymentFiles {
 		if _, err := os.Lstat(filepath.Join(i.root, rel)); err == nil {
 			result.Deleted = append(result.Deleted, rel)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect deployment entry %s: %w", rel, err)
 		}
 	}
 	result.Notes = append(result.Notes, deploymentNote, laravelRemovalNote)
 	if opts.NoCommit {
 		result.Notes = append(result.Notes, noCommitNote)
 	}
+	return nil
 }
 
 // ① takeSnapshot 在项目根之外备份全部受影响路径与旧 Git。
@@ -271,15 +287,17 @@ func (i *Initializer) takeSnapshot(gitState gitEntryState, opts Options) (*snaps
 	affected := append([]string{projectMkPath, appmetaPath}, motherDeploymentFiles...)
 	for _, rel := range affected {
 		if err := snap.capture(rel); err != nil {
-			_ = snap.cleanup()
-			return nil, err
+			return nil, errors.Join(err, snap.cleanup())
 		}
+	}
+
+	if err := snap.persistRecovery(); err != nil {
+		return nil, errors.Join(err, snap.cleanup())
 	}
 
 	if gitState == gitDirOK && opts.ForceReinitGit {
 		if err := snap.saveGitDir(filepath.Join(i.root, ".git")); err != nil {
-			_ = snap.cleanup()
-			return nil, err
+			return nil, errors.Join(err, snap.cleanup())
 		}
 	}
 	return snap, nil
@@ -307,7 +325,10 @@ func (i *Initializer) transformFiles(opts Options, result *Result) error {
 	for _, rel := range motherDeploymentFiles {
 		full := filepath.Join(i.root, rel)
 		if _, err := os.Lstat(full); err != nil {
-			continue // 已不存在（重复执行）——幂等。
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("inspect mother deployment entry %s: %w", rel, err)
 		}
 		if err := os.Remove(full); err != nil {
 			return fmt.Errorf("remove mother deployment entry %s: %w", rel, err)
@@ -370,33 +391,39 @@ func (i *Initializer) rebuildGit(
 // rollback 恢复快照并把恢复错误与原始错误一起返回。
 func (i *Initializer) rollback(snap *snapshot, cause error, stage string) error {
 	if rerr := snap.restore(); rerr != nil {
-		return fmt.Errorf("%s failed: %w; additionally the rollback did not fully succeed: %v", stage, cause, rerr)
+		snap.preserve = true
+		return fmt.Errorf("%s failed: %w; rollback incomplete, recovery retained at %s: %w", stage, cause, snap.dir, rerr)
 	}
 	return fmt.Errorf("%s failed (all changes rolled back): %w", stage, cause)
 }
 
 // rollbackNewGit 先删掉本次新建的 .git，再走普通回滚。
 func (i *Initializer) rollbackNewGit(snap *snapshot, cause error, stage string) error {
-	if err := os.RemoveAll(filepath.Join(i.root, ".git")); err != nil {
-		return fmt.Errorf("%s failed: %w; additionally the new git dir could not be removed: %v", stage, cause, err)
+	if removeErr := os.RemoveAll(filepath.Join(i.root, ".git")); removeErr != nil {
+		snap.preserve = true
+		cause = errors.Join(cause, fmt.Errorf("remove new git dir; recovery retained at %s: %w", snap.dir, removeErr))
 	}
 	return i.rollback(snap, cause, stage)
 }
 
-// cleanupSnapshot 在所有退出路径删除快照；失败只告警并打印绝对路径供人工处理，
-// 不改变主流程结论。
-func (i *Initializer) cleanupSnapshot(snap *snapshot) {
-	dir := snap.dir
-	if err := snap.cleanup(); err != nil {
-		i.warnf("warning: could not remove snapshot directory %s: %v (remove it manually)", dir, err)
-	}
-}
-
 func findProjectRoot(startDir string) (string, error) {
-	dir := startDir
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root: %w", err)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(dir); resolveErr == nil {
+		dir = resolved
+	} else if !errors.Is(resolveErr, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve project root symlinks: %w", resolveErr)
+	}
 	for {
-		if fileExists(filepath.Join(dir, "go.mod")) {
+		if info, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("go.mod in %s is not a regular file", dir)
+			}
 			return dir, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect go.mod: %w", err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -418,11 +445,6 @@ func readModulePath(root string) (string, error) {
 		}
 	}
 	return "", errors.New("module path not found in go.mod")
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 // runGenAppmeta 调用 make 的身份生成入口。

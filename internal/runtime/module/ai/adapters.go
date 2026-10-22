@@ -100,7 +100,7 @@ func (c *llmClient) Chat(ctx context.Context, call aiapp.ChatCall) (aiapp.Reply,
 // 上层据此把部分结果落库（见 LLMClient port 的契约）。
 func (c *llmClient) Stream(
 	ctx context.Context, call aiapp.ChatCall, onDelta func(string) error,
-) (aiapp.Reply, error) {
+) (reply aiapp.Reply, err error) {
 	e, err := c.resolve(call.Provider)
 	if err != nil {
 		return aiapp.Reply{}, err
@@ -110,11 +110,14 @@ func (c *llmClient) Stream(
 	if err != nil {
 		return aiapp.Reply{}, translateError(err)
 	}
-	// Close 的错误只记不抛：流已经读完（或已经出错），关闭失败改变不了结果，
-	// 用它覆盖掉真正的错误只会让排查走错方向。
-	defer func() { _ = stream.Close() }()
+	// 清理失败与接收/回调失败并列保留，已收到的内容仍交给上层落库。
+	defer func() {
+		if closeErr := stream.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close upstream stream: %w", translateError(closeErr)))
+		}
+	}()
 
-	reply := aiapp.Reply{
+	reply = aiapp.Reply{
 		Provider: string(e.provider.Name()),
 		Model:    effectiveModel(call.Model, e.model),
 	}
@@ -149,12 +152,18 @@ func (c *llmClient) Stream(
 		}
 
 		if chunk.ReasoningDelta != "" {
-			reasoning.WriteString(chunk.ReasoningDelta)
+			if _, err := reasoning.WriteString(chunk.ReasoningDelta); err != nil {
+				reply.Content, reply.Reasoning = content.String(), reasoning.String()
+				return reply, fmt.Errorf("accumulate reasoning: %w", err)
+			}
 		}
 		if chunk.Delta == "" {
 			continue
 		}
-		content.WriteString(chunk.Delta)
+		if _, err := content.WriteString(chunk.Delta); err != nil {
+			reply.Content, reply.Reasoning = content.String(), reasoning.String()
+			return reply, fmt.Errorf("accumulate content: %w", err)
+		}
 		if cbErr := onDelta(chunk.Delta); cbErr != nil {
 			// 写回客户端失败之后继续读上游没有意义，只是白付剩余 token 的钱。
 			reply.Content = content.String()

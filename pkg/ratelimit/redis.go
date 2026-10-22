@@ -47,7 +47,9 @@ type RedisBackend struct {
 	sha    atomic.Pointer[string]
 	health *HealthState
 	// keyPrefix 隔离不同服务的限流键。
-	keyPrefix string
+	keyPrefix                string
+	probeCleanupError        atomic.Pointer[error]
+	probeCleanupErrorHandler func(error)
 }
 
 // NewRedisBackend 构造并**实测**限流能力。
@@ -66,10 +68,11 @@ func NewRedisBackend(
 	resolved := newOptions(opts)
 
 	b := &RedisBackend{
-		client:    client,
-		health:    NewHealthState(DefaultHealthPolicy(), resolved.observer),
-		keyPrefix: resolved.keyPrefix,
-		observer:  resolved.observer,
+		client:                   client,
+		health:                   NewHealthState(DefaultHealthPolicy(), resolved.observer),
+		keyPrefix:                resolved.keyPrefix,
+		observer:                 resolved.observer,
+		probeCleanupErrorHandler: resolved.probeCleanupErrorHandler,
 	}
 
 	// degradedStart 只吸收**后端不可用**，不吸收调用方的取消：
@@ -139,20 +142,28 @@ func (b *RedisBackend) probe(ctx context.Context) error {
 			"cannot serve rate limit decisions", decision.Outcome)
 	}
 
-	// 探测产物尽力清理：桶键与注册表键。
-	//
-	// **清理失败就地丢弃，不作为探测结果返回。** 这是一次有意的忽略错误，依据是
-	// 两个键的存活时长由创建它们的同一段脚本设置（script.go 对注册表键与桶键
-	// 各有一次 PEXPIRE），因此清理失败的唯一后果是它们多存活一个 TTL 周期后
-	// 自行消失。
-	//
-	// 反过来把它当成能力失败，会让"允许 EVALSHA 但不允许 DEL"这种最小权限配置
-	// 使含 fail_closed 策略的进程**永久起不来**——而限流能力本身完好：运行期
-	// 路径从不删除键，键一律靠 TTL 回收。那个方向的失败不是保守，是错误。
-	//
-	// 也不经 Observer 上报：被上报的事实是一个自行消失的状态，而 Observer 是
-	// 对外发布的接口，为它加一个方法会破坏所有外部实现者。
-	_ = b.client.Del(ctx, b.qualifiedKey(key), b.registryKey(probePolicy)).Err()
+	// 两键都由创建它们的Lua设置TTL。DEL ACL缺失不等于限流能力失败；
+	// 保存首个清理错误并通知拥有者，避免恢复探测重复刷日志。
+	if err := b.client.Del(ctx, b.qualifiedKey(key), b.registryKey(probePolicy)).Err(); err != nil {
+		cleanupErr := fmt.Errorf("clean rate limit probe artifacts (TTL expiry remains active): %w", err)
+		if b.probeCleanupError.CompareAndSwap(nil, new(cleanupErr)) && b.probeCleanupErrorHandler != nil {
+			b.probeCleanupErrorHandler(cleanupErr)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(ctxErr, cleanupErr)
+		}
+	}
+	// A completed capability check must not turn caller cancellation during
+	// cleanup into successful construction (including degraded-start mode).
+	return ctx.Err()
+}
+
+// ProbeCleanupError 返回本后端首次探针清理失败；无失败时为nil。
+// 状态保留到后端销毁，不表示限流能力失效；探针键仍按Lua的TTL回收。
+func (b *RedisBackend) ProbeCleanupError() error {
+	if err := b.probeCleanupError.Load(); err != nil {
+		return *err
+	}
 	return nil
 }
 
@@ -384,8 +395,11 @@ func (b *FallbackBackend) Check(ctx context.Context, key string) (Decision, erro
 		b.redis.observer.FellBackToLocal(b.policy.ID)
 	})
 
-	local, _ := b.shadow.Check(ctx, key)
+	local, localErr := b.shadow.Check(ctx, key)
 	local.Degraded = true
+	if localErr != nil {
+		return local, errors.Join(err, fmt.Errorf("local rate limit fallback: %w", localErr))
+	}
 	return local, nil
 }
 

@@ -3,7 +3,7 @@ package bootstrap
 import (
 	"context"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 )
@@ -71,16 +71,16 @@ func (w *asynqSchedulerWorker) Cleanup(ctx context.Context) error {
 func schedulerObserver() tasks.SchedulerObserver {
 	return tasks.SchedulerObserver{
 		LeaseAcquired: func(scheduler string, fence int64) {
-			logger.Infof("task scheduler %q acquired the lease (fence=%d)", scheduler, fence)
+			applog.Infof("task scheduler %q acquired the lease (fence=%d)", scheduler, fence)
 		},
 		LeaseSkipped: func(scheduler string) {
-			logger.Debugf("task scheduler %q: lease held by another instance", scheduler)
+			applog.Debugf("task scheduler %q: lease held by another instance", scheduler)
 		},
 		LeaseLost: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q lost the lease and stopped scheduling: %v", scheduler, err)
+			applog.Warnf("task scheduler %q lost the lease and stopped scheduling: %v", scheduler, err)
 		},
 		RoundFailed: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q round failed, will retry: %v", scheduler, err)
+			applog.Warnf("task scheduler %q round failed, will retry: %v", scheduler, err)
 		},
 	}
 }

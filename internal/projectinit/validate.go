@@ -119,7 +119,13 @@ func checkRequiredTools(lookPath func(string) (string, error)) error {
 // 否则会在 ④ 阶段才发现，白白走一遍回滚。
 func checkGitInitBranchSupport() error {
 	cmd := exec.Command("git", "init", "-h")
-	out, _ := cmd.CombinedOutput() // `git init -h` 以非零码退出属正常，只看输出内容。
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Git 的帮助用法以129退出；无法执行或其他退出码不是有效能力证据。
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 129 {
+			return fmt.Errorf("inspect git init help: %w", err)
+		}
+	}
 	if !strings.Contains(string(out), "-b ") && !strings.Contains(string(out), "--initial-branch") {
 		return errors.New("this git version does not support `git init -b <branch>`; upgrade git")
 	}

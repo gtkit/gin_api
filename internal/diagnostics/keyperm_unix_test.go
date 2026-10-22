@@ -41,3 +41,42 @@ func TestJWTKeyPermissionsDetectsTooOpen(t *testing.T) {
 			got.Status, got.ErrorCode, CodeInsecurePerm)
 	}
 }
+
+func TestJWTKeyPermissionsFollowTheirRole(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		private, public os.FileMode
+		want            CheckStatus
+	}{
+		{"generated", 0o600, 0o644, StatusPass}, {"public-readonly", 0o400, 0o444, StatusPass},
+		{"private-readable", 0o644, 0o644, StatusFail}, {"public-writable", 0o600, 0o666, StatusFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			private, public := filepath.Join(dir, "private"), filepath.Join(dir, "public")
+			if err := os.WriteFile(private, []byte("metadata only"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(public, []byte("metadata only"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(private, tc.private); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(public, tc.public); err != nil {
+				t.Fatal(err)
+			}
+			cfg := validConfig()
+			cfg.JWT.Active.PrivateKeyPath = private
+			cfg.JWT.Active.PublicKeyPath = public
+			if got := checkJWTKeys(cfg); got.Status != tc.want {
+				t.Fatalf("check=%+v", got)
+			}
+			cfg.JWT.Active.PublicKeyPath = dir
+			if got := checkJWTKeys(cfg); got.Status != StatusFail {
+				t.Fatal("directory accepted as public key")
+			}
+		})
+	}
+}

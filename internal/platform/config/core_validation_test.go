@@ -2,9 +2,13 @@ package config
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
 func TestValidateCoreConfigBoundaries(t *testing.T) {
@@ -101,4 +105,35 @@ func coreValidationFields(err error) []string {
 		return fields
 	}
 	return []string{strings.Fields(err.Error())[0]}
+}
+
+func TestLogEnvironmentAndSlowThreshold(t *testing.T) {
+	t.Parallel()
+	for _, environment := range []env.Env{env.Dev, env.Test, env.Prod} {
+		for _, level := range []string{"debug", "info", "warn", "error", "dpanic", "panic", "fatal", " debug "} {
+			cfg := LogConfig{Level: level, Path: "./logs/app"}
+			err := validateLogConfig(environment, cfg, "")
+			rejected := environment == env.Prod && strings.TrimSpace(level) == "debug"
+			if (err != nil) != rejected {
+				t.Errorf("%s/%q err=%v", environment, level, err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		value   *int64
+		want    time.Duration
+		invalid bool
+	}{
+		{nil, 200 * time.Millisecond, false}, {new(int64(0)), 0, false}, {new(int64(17)), 17 * time.Millisecond, false},
+		{new(int64(-1)), 0, true}, {new(int64(math.MaxInt64)), 0, true},
+	} {
+		cfg := LogConfig{Level: "info", Path: "./logs/app", SQLSlowThresholdMS: tc.value}
+		err := validateLogConfig(env.Dev, cfg, "")
+		if (err != nil) != tc.invalid {
+			t.Fatalf("threshold=%v err=%v", tc.value, err)
+		}
+		if !tc.invalid && cfg.EffectiveSQLSlowThreshold() != tc.want {
+			t.Fatalf("threshold=%s want %s", cfg.EffectiveSQLSlowThreshold(), tc.want)
+		}
+	}
 }

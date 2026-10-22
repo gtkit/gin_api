@@ -93,13 +93,26 @@ func TestCacheCopiesGoJWTExpandedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	authTime := first.AuthTime.Time
-	first.Ext["tenant"].(map[string]any)["roles"].([]any)[0] = "admin"
+	firstTenant, ok := first.Ext["tenant"].(map[string]any)
+	if !ok {
+		t.Fatalf("tenant type %T", first.Ext["tenant"])
+	}
+	firstRoles, ok := firstTenant["roles"].([]any)
+	if !ok || len(firstRoles) != 1 {
+		t.Fatalf("roles=%v", firstTenant["roles"])
+	}
+	firstRoles[0] = "admin"
 	first.AuthTime.Time = time.Time{}
 	second, err := parser.ParseToken(t.Context(), token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Ext["tenant"].(map[string]any)["roles"].([]any)[0] != "user" || !second.AuthTime.Equal(authTime) {
+	secondTenant, ok := second.Ext["tenant"].(map[string]any)
+	if !ok {
+		t.Fatalf("cached tenant type %T", second.Ext["tenant"])
+	}
+	secondRoles, ok := secondTenant["roles"].([]any)
+	if !ok || len(secondRoles) != 1 || secondRoles[0] != "user" || !second.AuthTime.Equal(authTime) {
 		t.Fatal("caller mutation reached cached claims")
 	}
 }

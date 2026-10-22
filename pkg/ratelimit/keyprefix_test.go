@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -91,7 +92,9 @@ func TestKeyPrefixReachesTheBackend(t *testing.T) {
 				Scope: ScopeIP, Store: StoreRedis,
 				FailureMode: FailureClosed, MaxKeys: 100,
 			}
-			_, _ = backend.check(context.Background(), policy, tt.rawKey)
+			if _, err := backend.check(context.Background(), policy, tt.rawKey); err == nil || !strings.Contains(err.Error(), "probe stops here") {
+				t.Fatalf("capture fixture error: %v", err)
+			}
 
 			keys := client.captured()
 			if len(keys) == 0 {
