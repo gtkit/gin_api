@@ -15,6 +15,35 @@ import (
 
 type queryLogCapture struct{ entries []applog.LogEntry }
 
+func TestGormDisabledBackendDoesNotMaterializeQuery(t *testing.T) {
+	release, err := applog.Install(benchmarkQuerySink{enabled: false}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		err     error
+	}{
+		{"ordinary", 0, nil},
+		{"slow", time.Second, nil},
+		{"error", 0, errors.New("query failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			logger := NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
+			logger.Trace(t.Context(), time.Now().Add(-tc.elapsed), func() (string, int64) {
+				calls++
+				return "SELECT ?", 1
+			}, tc.err)
+			if calls != 0 {
+				t.Fatalf("formatted suppressed SQL %d times", calls)
+			}
+		})
+	}
+}
+
 func (c *queryLogCapture) Log(_ context.Context, e applog.LogEntry) { c.entries = append(c.entries, e) }
 func TestGormLoggerUsesSelectedImplementation(t *testing.T) {
 	sink := &queryLogCapture{}

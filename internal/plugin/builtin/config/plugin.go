@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gtkit/gin-api/internal/core"
 	schema "github.com/gtkit/gin-api/internal/platform/config"
@@ -18,9 +19,13 @@ type Loader func(context.Context) (*schema.Config, error)
 type Plugin struct {
 	load Loader
 	once sync.Once
-	mu   sync.RWMutex
-	cfg  *schema.Config
 	err  error
+	view atomic.Pointer[configurationSnapshot]
+}
+
+type configurationSnapshot struct {
+	cfg *schema.Config
+	err error
 }
 
 var _ core.Plugin = (*Plugin)(nil)
@@ -55,26 +60,25 @@ func (p *Plugin) Init(ctx context.Context) error {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = errors.Join(err, ctxErr)
 		}
-		p.mu.Lock()
-		defer p.mu.Unlock()
 		p.err = err
-		if err == nil {
-			p.cfg = cfg
+		if err != nil {
+			cfg = nil
 		}
+		p.view.Store(&configurationSnapshot{cfg: cfg, err: err})
 	})
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	return p.err
 }
 
 // Value returns the read-only validated snapshot, or a distinguishable error.
 func (p *Plugin) Value() (*schema.Config, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.cfg == nil {
-		return nil, errors.Join(plugin.ErrConfigurationUnavailable, p.err)
+	view := p.view.Load()
+	if view == nil {
+		return nil, errors.Join(plugin.ErrConfigurationUnavailable)
 	}
-	return p.cfg, nil
+	if view.cfg == nil {
+		return nil, errors.Join(plugin.ErrConfigurationUnavailable, view.err)
+	}
+	return view.cfg, nil
 }
 
 // Start verifies that configuration is ready; it starts no background work.

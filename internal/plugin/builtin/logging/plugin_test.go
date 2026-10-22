@@ -6,11 +6,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/gtkit/gin-api/internal/core"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
@@ -149,54 +148,48 @@ func (b *blockingStringer) String() string {
 	return "unblocked"
 }
 func TestStopWaitsForAdmittedWritesAndClosesOnce(t *testing.T) {
-	p := New(Options{Configuration: fixedConfiguration{&config.Config{Log: config.LogConfig{ConsoleStdout: 1}}}})
-	if err := p.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	block := &blockingStringer{entered: make(chan struct{}), release: make(chan struct{})}
-	done := make(chan struct{})
-	go func() {
-		p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Message: "inflight", Fields: []applog.Field{applog.Any("blocked", block)}})
-		close(done)
-	}()
-	<-block.entered
-	stopped := make(chan error, 1)
-	go func() { stopped <- p.Stop(context.Background()) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		p.gate.Lock()
-		closing := p.closing
-		p.gate.Unlock()
-		if closing {
-			break
+	synctest.Test(t, func(t *testing.T) {
+		p := New(Options{Configuration: fixedConfiguration{&config.Config{Log: config.LogConfig{ConsoleStdout: 1}}}})
+		if err := p.Init(t.Context()); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
+		block := &blockingStringer{entered: make(chan struct{}), release: make(chan struct{})}
+		var work sync.WaitGroup
+		work.Go(func() {
+			p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Message: "inflight", Fields: []applog.Field{applog.Any("blocked", block)}})
+		})
+		<-block.entered
+		stopped := make(chan error, 1)
+		work.Go(func() { stopped <- p.Stop(context.WithoutCancel(t.Context())) })
+		synctest.Wait()
+		select {
+		case err := <-stopped:
 			close(block.release)
+			work.Wait()
+			t.Fatalf("stop passed live write: %v", err)
+		default:
+		}
+		if !p.current.Load().closing.Load() {
+			close(block.release)
+			work.Wait()
 			t.Fatal("stop did not close admission")
 		}
-		runtime.Gosched()
-	}
-	select {
-	case err := <-stopped:
+		p.Log(t.Context(), applog.LogEntry{Message: "rejected"})
 		close(block.release)
-		t.Fatalf("stop passed live write: %v", err)
-	default:
-	}
-	p.Log(t.Context(), applog.LogEntry{Message: "rejected"})
-	close(block.release)
-	<-done
-	if err := <-stopped; err != nil {
-		t.Fatal(err)
-	}
-	var group sync.WaitGroup
-	for range 16 {
-		group.Go(func() {
-			if err := p.Stop(context.Background()); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	group.Wait()
+		work.Wait()
+		if err := <-stopped; err != nil {
+			t.Fatal(err)
+		}
+		var group sync.WaitGroup
+		for range 16 {
+			group.Go(func() {
+				if err := p.Stop(context.WithoutCancel(t.Context())); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+		group.Wait()
+	})
 }
 
 func TestInitCancellationAfterConstructionReleasesOwnedLogger(t *testing.T) {

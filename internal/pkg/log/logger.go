@@ -65,6 +65,13 @@ type Logger interface {
 	Log(context.Context, LogEntry)
 }
 
+// LevelEnabler is an optional hint for lazy log preparation. Implementations
+// query current levels and must permit concurrent calls; Log decides the final
+// write. Alerts bypass ordinary level queries.
+type LevelEnabler interface {
+	Enabled(Level, Stream) bool
+}
+
 var (
 	// ErrLoggerInstalled rejects replacing an active startup binding.
 	ErrLoggerInstalled = errors.New("a project logger is already installed")
@@ -77,6 +84,7 @@ var diagnosticContext = context.Background()
 
 type binding struct {
 	logger Logger
+	levels LevelEnabler
 	drain  func(context.Context) error
 }
 
@@ -95,16 +103,30 @@ func Install(logger Logger, drain func(context.Context) error) (func(), error) {
 		}
 	}
 	b := &binding{logger: logger, drain: drain}
+	b.levels, _ = logger.(LevelEnabler)
 	if !installed.CompareAndSwap(nil, b) {
 		return nil, ErrLoggerInstalled
 	}
 	return func() { installed.CompareAndSwap(b, nil) }, nil
 }
 
+// Enabled reports whether preparing an ordinary event is useful. Implementations
+// without the optional capability remain enabled. Unbound diagnostics retain
+// their existing Info-and-above stderr behavior.
+func Enabled(level Level, stream Stream) bool {
+	if current := installed.Load(); current != nil {
+		return current.levels == nil || current.levels.Enabled(level, stream)
+	}
+	return level >= LevelInfo
+}
+
 // Log forwards an event. Before installation and after release, diagnostics go
 // only to stderr: no default SDK, file creation or notification occurs.
 func Log(ctx context.Context, entry LogEntry) {
 	if current := installed.Load(); current != nil {
+		if !entry.Alert && current.levels != nil && !current.levels.Enabled(entry.Level, entry.Stream) {
+			return
+		}
 		current.logger.Log(ctx, entry)
 		return
 	}

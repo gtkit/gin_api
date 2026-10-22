@@ -15,6 +15,56 @@ type captureLogger struct {
 	ids     []string
 }
 
+type selectiveLogger struct {
+	captureLogger
+	enabled bool
+}
+
+func (s *selectiveLogger) Enabled(Level, Stream) bool { return s.enabled }
+
+func TestOptionalLevelCapabilityPreservesAlertsAndDynamicChanges(t *testing.T) {
+	sink := &selectiveLogger{}
+	release, err := Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	Infof("suppressed %d", 1)
+	if len(sink.entries) != 0 {
+		t.Fatal("forwarded an ordinary event disabled by the selected implementation")
+	}
+	HErrorf("alert %d", 2)
+	if len(sink.entries) != 1 || !sink.entries[0].Alert {
+		t.Fatal("level query suppressed alert intent")
+	}
+	sink.enabled = true
+	Info("visible")
+	if len(sink.entries) != 2 || sink.entries[1].Text() != "visible" {
+		t.Fatal("cached a static level decision")
+	}
+}
+
+func TestLevelQueriesPreserveLegacyAndUnboundDiagnostics(t *testing.T) {
+	if Enabled(LevelDebug, MainStream) || !Enabled(LevelInfo, AccessStream) {
+		t.Fatal("unbound diagnostics changed levels")
+	}
+	sink := new(captureLogger)
+	release, err := Install(sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, level := range []Level{LevelDebug, LevelInfo, LevelWarn, LevelError} {
+		if !Enabled(level, MainStream) || !Enabled(level, AccessStream) {
+			t.Fatal("filtered a legacy implementation without a level capability")
+		}
+	}
+	Debug("legacy debug")
+	if len(sink.entries) != 1 {
+		t.Fatal("legacy implementation lost an event")
+	}
+}
+
 func (c *captureLogger) Log(ctx context.Context, e LogEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

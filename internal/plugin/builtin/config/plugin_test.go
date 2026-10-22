@@ -164,3 +164,36 @@ func TestConfigurationPluginRejectsLateSuccess(t *testing.T) {
 		t.Fatalf("late snapshot published: %p, %v", got, err)
 	}
 }
+
+func TestConfigurationValueDuringPublicationAndStop(t *testing.T) {
+	cfg := validatedFixture(t)
+	p := New(func(context.Context) (*schema.Config, error) { return cfg, nil })
+	start := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 16 {
+		readers.Go(func() {
+			<-start
+			for range 1000 {
+				got, err := p.Value()
+				if got == nil {
+					if !errors.Is(err, plugin.ErrConfigurationUnavailable) {
+						t.Errorf("unpublished error=%v", err)
+					}
+				} else if got != cfg || err != nil || got.App.Port != "8008" {
+					t.Errorf("partial snapshot=%p err=%v", got, err)
+				}
+			}
+		})
+	}
+	close(start)
+	if err := p.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Stop(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	readers.Wait()
+	if got, err := p.Value(); got != cfg || err != nil {
+		t.Fatal("configuration unavailable during cleanup")
+	}
+}

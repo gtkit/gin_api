@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gtkit/gin-api/internal/core"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
@@ -30,24 +31,51 @@ type Options struct {
 // SDK Sync has no context or error return: deadlines are cooperative and true I/O
 // failures are reported by that SDK to stderr, not observable as a return value.
 type Plugin struct {
-	options                    Options
-	lifecycle                  sync.Mutex
-	initOnce                   sync.Once
-	initErr                    error
-	gate                       sync.Mutex
-	writes                     sync.WaitGroup
-	closing                    bool
-	ready                      bool
-	main, access               *sdk.Logger
-	mainForward, accessForward *sdk.Logger
-	previous                   *sdk.Logger
-	release                    func()
-	closeOnce                  sync.Once
-	closeErr                   error
+	options      Options
+	lifecycle    sync.Mutex
+	initOnce     sync.Once
+	initErr      error
+	stopped      bool
+	main, access *sdk.Logger
+	previous     *sdk.Logger
+	release      func()
+	closeOnce    sync.Once
+	closeErr     error
+	current      atomic.Pointer[logSnapshot]
+	fields       sync.Pool
+	gate         sync.Mutex
+	writes       sync.WaitGroup
+}
+
+const pooledFields = 8
+
+type fieldBuffer struct{ fields [pooledFields]zap.Field }
+
+// Logger views are immutable after publication. Closing is an advisory atomic
+// flag for level queries; gate serializes the authoritative check and writes.Add
+// with closing, so Stop cannot begin Wait while another Add is still possible.
+type logSnapshot struct {
+	main                 *sdk.Logger
+	mainCallers          [4]*sdk.Logger
+	accessForward        *sdk.Logger
+	mainCore, accessCore zapcore.Core
+	closing              atomic.Bool
+}
+
+func (s *logSnapshot) enabled(level applog.Level, stream applog.Stream) bool {
+	if s.closing.Load() {
+		return false
+	}
+	core := s.mainCore
+	if stream == applog.AccessStream {
+		core = s.accessCore
+	}
+	return core.Enabled(zapLevel(level))
 }
 
 var _ core.Plugin = (*Plugin)(nil)
 var _ plugin.Logger = (*Plugin)(nil)
+var _ applog.LevelEnabler = (*Plugin)(nil)
 
 // New selects factories without creating resources or reading configuration.
 func New(options Options) *Plugin {
@@ -66,10 +94,7 @@ func (p *Plugin) Init(ctx context.Context) error {
 	p.initOnce.Do(func() {
 		p.lifecycle.Lock()
 		defer p.lifecycle.Unlock()
-		p.gate.Lock()
-		closed := p.closing
-		p.gate.Unlock()
-		if closed {
+		if p.stopped {
 			p.initErr = fmt.Errorf("init logging after stop: %w", core.ErrPluginContractViolation)
 			return
 		}
@@ -105,9 +130,7 @@ func (p *Plugin) initialize(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	main, err := p.options.MainFactory(opts...)
-	p.gate.Lock()
 	p.main = main
-	p.gate.Unlock()
 	if err != nil {
 		return errors.Join(fmt.Errorf("build logger: %w", err), p.drainPartial(ctx))
 	}
@@ -115,27 +138,28 @@ func (p *Plugin) initialize(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("build logger: %w: nil instance", core.ErrPluginContractViolation)
 	}
 	access, err := p.options.AccessFactory(accessOptions(cfg)...)
-	p.gate.Lock()
 	p.access = access
-	p.gate.Unlock()
 	if err != nil {
 		return errors.Join(fmt.Errorf("build access logger: %w", err), p.drainPartial(ctx))
 	}
 	if access == nil {
 		return errors.Join(fmt.Errorf("build access logger: %w: nil instance", core.ErrPluginContractViolation), p.drainPartial(ctx))
 	}
-	p.gate.Lock()
-	p.mainForward = main.WithCallerSkip(4)
-	p.accessForward = access.WithCallerSkip(2)
+	snapshot := &logSnapshot{
+		main: main, accessForward: access.WithCallerSkip(2),
+		mainCore: main.Zap().Core(), accessCore: access.Zap().Core(),
+	}
+	for i := range snapshot.mainCallers {
+		snapshot.mainCallers[i] = main.WithCallerSkip(1 + i)
+	}
+	// Publish complete views before exposing this owner through the facade.
+	p.current.Store(snapshot)
 	release, err := applog.Install(p, p.Drain)
 	if err != nil {
-		p.gate.Unlock()
 		return errors.Join(err, p.drainPartial(ctx))
 	}
-	p.ready = true
 	p.release = release
 	sdk.SetDefault(main)
-	p.gate.Unlock()
 	return nil
 }
 
@@ -147,46 +171,51 @@ func (p *Plugin) drainPartial(ctx context.Context) error {
 }
 
 func (p *Plugin) Start(ctx context.Context) error {
-	p.gate.Lock()
-	defer p.gate.Unlock()
-	if !p.ready || p.closing {
+	p.lifecycle.Lock()
+	defer p.lifecycle.Unlock()
+	if p.stopped || p.current.Load() == nil {
 		return fmt.Errorf("start logging: %w", core.ErrPluginContractViolation)
 	}
 	return ctx.Err()
 }
 
 func (p *Plugin) Log(ctx context.Context, entry applog.LogEntry) {
-	p.gate.Lock()
-	if p.closing || !p.ready {
-		p.gate.Unlock()
+	snapshot := p.current.Load()
+	if snapshot == nil || (!entry.Alert && !snapshot.enabled(entry.Level, entry.Stream)) {
 		return
 	}
-	target := p.accessForward
-	if entry.Stream != applog.AccessStream {
-		target = p.mainForward
-		if entry.CallerSkip != 3 {
-			target = p.main.WithCallerSkip(1 + entry.CallerSkip)
-		}
+	p.gate.Lock()
+	if snapshot.closing.Load() {
+		p.gate.Unlock()
+		return
 	}
 	p.writes.Add(1)
 	p.gate.Unlock()
 	defer p.writes.Done()
-	level := zapcore.InfoLevel
-	switch entry.Level {
-	case applog.LevelDebug:
-		level = zapcore.DebugLevel
-	case applog.LevelWarn:
-		level = zapcore.WarnLevel
-	case applog.LevelError:
-		level = zapcore.ErrorLevel
-	}
-	if !entry.Alert && !target.Zap().Core().Enabled(level) {
-		return
+	target := snapshot.accessForward
+	if entry.Stream != applog.AccessStream {
+		if entry.CallerSkip >= 0 && entry.CallerSkip < len(snapshot.mainCallers) {
+			target = snapshot.mainCallers[entry.CallerSkip]
+		} else {
+			target = snapshot.main.WithCallerSkip(1 + entry.CallerSkip)
+		}
 	}
 	if entry.Channel != "" {
 		target = target.Channel(entry.Channel)
 	}
-	fields := make([]zap.Field, 0, len(entry.Fields))
+	var fields []zap.Field
+	if count := len(entry.Fields); count > 0 {
+		if count <= pooledFields {
+			buffer, _ := p.fields.Get().(*fieldBuffer)
+			if buffer == nil {
+				buffer = new(fieldBuffer)
+			}
+			defer p.releaseFields(buffer)
+			fields = buffer.fields[:0]
+		} else {
+			fields = make([]zap.Field, 0, count)
+		}
+	}
 	for _, field := range entry.Fields {
 		if field.Key != "" {
 			fields = append(fields, zap.Any(field.Key, field.Value))
@@ -212,6 +241,31 @@ func (p *Plugin) Log(ctx context.Context, entry applog.LogEntry) {
 	}
 }
 
+func (p *Plugin) releaseFields(buffer *fieldBuffer) {
+	// The fixed array bounds retained capacity; clearing releases user values.
+	clear(buffer.fields[:])
+	p.fields.Put(buffer)
+}
+
+// Enabled queries the dynamic SDK core without cloning a zap logger.
+func (p *Plugin) Enabled(level applog.Level, stream applog.Stream) bool {
+	snapshot := p.current.Load()
+	return snapshot != nil && snapshot.enabled(level, stream)
+}
+
+func zapLevel(level applog.Level) zapcore.Level {
+	switch level {
+	case applog.LevelDebug:
+		return zapcore.DebugLevel
+	case applog.LevelWarn:
+		return zapcore.WarnLevel
+	case applog.LevelError:
+		return zapcore.ErrorLevel
+	default:
+		return zapcore.InfoLevel
+	}
+}
+
 // Drain and Stop share one owner. No goroutine is abandoned to wrap SDK Sync.
 func (p *Plugin) Drain(ctx context.Context) error {
 	p.lifecycle.Lock()
@@ -222,12 +276,15 @@ func (p *Plugin) Drain(ctx context.Context) error {
 
 // closeOwned runs under lifecycle ownership, including partial Init failures.
 func (p *Plugin) closeOwned(ctx context.Context) error {
+	p.stopped = true
 	p.gate.Lock()
-	p.closing = true
-	release := p.release
+	snapshot := p.current.Load()
+	if snapshot != nil {
+		snapshot.closing.Store(true)
+	}
 	p.gate.Unlock()
-	if release != nil {
-		release()
+	if p.release != nil {
+		p.release()
 	}
 	p.writes.Wait()
 	if p.access != nil {

@@ -75,14 +75,23 @@ func (l *gormLogger) Trace(
 
 	switch {
 	case err != nil && l.logLevel >= gormlogger.Error && !recordNotFoundIgnored:
+		if !applog.Enabled(applog.LevelError, applog.MainStream) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
 		applog.Log(ctx, applog.LogEntry{Level: applog.LevelError, Message: "gorm query error", Fields: append(fields, applog.Err(err)), CallerSkip: 1})
 	case slowTime != 0 && elapsed > slowTime && l.logLevel >= gormlogger.Warn:
+		if !applog.Enabled(applog.LevelWarn, applog.MainStream) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
 		applog.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "gorm slow query", Fields: append(fields, applog.Duration("slow_threshold", slowTime)), CallerSkip: 1})
 	case l.logLevel == gormlogger.Info:
+		if !applog.Enabled(applog.LevelInfo, applog.MainStream) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
 		applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "gorm query", Fields: fields, CallerSkip: 1})
@@ -95,6 +104,9 @@ func (*gormLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string
 }
 
 func (l *gormLogger) emit(ctx context.Context, level applog.Level, message string, args []any) {
+	if !applog.Enabled(level, applog.MainStream) {
+		return
+	}
 	fields := []applog.Field{applog.String("source", callerSource())}
 	if id := applog.RequestIDFromContext(ctx); id != "" {
 		fields = append(fields, applog.String("trace_id", id))

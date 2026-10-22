@@ -114,6 +114,15 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 		}
 
 		status := c.Writer.Status()
+		level := applog.LevelInfo
+		if status >= 500 {
+			level = applog.LevelError
+		} else if status >= 400 {
+			level = applog.LevelWarn
+		}
+		if !applog.Enabled(level, applog.AccessStream) {
+			return
+		}
 		fields := []applog.Field{
 			applog.Int("status", status),
 			applog.String("method", method),
@@ -134,12 +143,6 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 				truncate(redactBody(w.Header().Get("Content-Type"), w.body.Bytes()), maxBodyLogSize)))
 		}
 
-		level := applog.LevelInfo
-		if status >= 500 {
-			level = applog.LevelError
-		} else if status >= 400 {
-			level = applog.LevelWarn
-		}
 		applog.Log(c.Request.Context(), applog.LogEntry{Level: level, Message: path, Fields: fields, Stream: applog.AccessStream})
 	}
 }
