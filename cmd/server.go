@@ -125,8 +125,7 @@ func newServerCmd(opts *rootOptions) *cobra.Command {
 			}
 
 			app, err := bootstrap.NewApp(ctx, bootstrap.Options{
-				Shutdown:        shutdown,
-				RegisterPlugins: registerServerPlugins,
+				Shutdown: shutdown,
 			})
 			if err != nil {
 				// 装配期收到信号：**纯取消**的错误树是中止的现象而非故障，

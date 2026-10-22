@@ -63,14 +63,14 @@ config/
 
 ## 通知通道与告警开关
 
-默认 server 和 migration 均显式注册 `notification.robot`、`notification.mail`、`notification.sms`、`notification`，再初始化 `logging`。构造发生在各插件 Init，不发送启动测试消息。配置校验与原规则一致；没有告警目标不等于无需提供已启用客户端的必填配置。
+默认 server 和 migration 均直接构造机器人、邮件、短信渠道及通知组合，再打开日志。构造发生在各组件 Open，不发送启动测试消息。配置校验与原规则一致；没有告警目标不等于无需提供已启用客户端的必填配置。
 
 | 字段 | 用途、启用与约束 | 留空/默认与关联 |
 |---|---|---|
 | `news.fsurl` | 默认文本告警 http(s) webhook；显式目标只覆盖本次机器人地址 | 空跳过默认机器人发送；已注册机器人仍支持显式目标，邮件/短信不受影响 |
 | `news.platform` | `feishu/dingtalk/wecom`；忽略大小写和首尾空白 | 空按飞书处理；沿用现有验证白名单 |
 | `news.secret` | 平台签名密钥，不写日志 | 空不配置签名；平台要求加签时须提供 |
-| `news.appid/appsecret` | 原图片资讯应用字段 | 默认空；文本通知不读取，`SendPicMsg` 保留 |
+| `news.appid/appsecret` | 图片消息应用凭据字段 | 默认空；文本通知不读取；图片调用方构造 msgbot/feishu.App 后传给 `SendPicMsg` |
 | `email.host` | SMTP 客户端开关；非空才构造 | 空禁用且其他 email 字段须为空；非空要求 from |
 | `email.port` | SMTP 端口，0..65535 | 0 用库默认 25；465 通常配 implicit_ssl=true |
 | `email.user/pass` | SMTP 认证账号/密码 | user 空不认证（仅可信中继）；pass 空不提供密码 |
@@ -86,7 +86,7 @@ config/
 
 三个通道依次尽力发送：机器人→邮件→逐个号码短信，每次有独立 10 秒预算，也受调用取消和关闭预算约束；不增加项目重试。日志只有一个 64 条待处理队列，满队列可丢弃，不能当作可靠消息存储。所有发送有真实副作用，短信可能计费；本地验收仅用替身和回环服务。
 
-纯日志组合可不注册通知插件且不传 `logging.Options.Notification`；默认入口仍选择现有通知实现。替换、资源边界及关闭限制见 [可观测性说明](../docs/observability.md#通知插件与替换方式)。本次没有新增配置项或部署数据迁移。
+纯日志组合可直接构造日志且不传 `logging.Options.Notification`；默认入口仍选择现有通知实现。替换、资源边界及关闭限制见 [可观测性说明](../docs/observability.md#通知渠道与替换方式)。本次没有新增配置项或部署数据迁移。
 
 ## 密钥规则
 

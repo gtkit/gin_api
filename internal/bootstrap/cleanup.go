@@ -38,7 +38,7 @@ func forceContext(parent context.Context, force <-chan struct{}) (context.Contex
 }
 
 // rollbackBudget is confined to sequential construction. Its deadline starts at
-// the first failure and is shared by module/provider and plugin cleanup.
+// the first failure and is shared by module/provider and resource cleanup.
 type rollbackBudget struct {
 	force  <-chan struct{}
 	ctx    context.Context

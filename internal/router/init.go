@@ -2,14 +2,11 @@
 package router
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/middleware"
-	"github.com/gtkit/gin-api/internal/plugin"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
@@ -19,8 +16,14 @@ import (
 
 // Options 是装配 engine 所需的进程级配置与依赖。
 type Options struct {
-	// Middleware supplies the selected global chain; Router never selects a default.
-	Middleware plugin.MiddlewareBuilder
+	// AllowedOrigins 为空时不挂载 CORS。
+	AllowedOrigins []string
+	// LogRequestBody 和 LogResponseBody 控制访问日志的正文采集。
+	LogRequestBody, LogResponseBody bool
+	// MaxBodyBytes 是整个请求链共享的正文上限。
+	MaxBodyBytes int64
+	// RequestIDFactory 可替换请求 ID 构造函数；nil 使用默认安全随机源。
+	RequestIDFactory func() (*middleware.RequestIDGenerator, error)
 	// TrustedProxies 是可信代理的 CIDR/IP 列表。**空 = 不信任任何代理**，
 	// 此时 ClientIP 只取真实 TCP peer 地址，客户端伪造的转发头一律忽略。
 	TrustedProxies []string
@@ -43,7 +46,7 @@ type Options struct {
 	RateLimits *ratelimit.Registry
 	// RateLimitKeys 生成限流键。有 RateLimits 就必须有它。
 	RateLimitKeys *ratelimit.KeyBuilder
-	// Metrics 是在遥测 provider 就绪后创建的最终仪表，传给所选中间件。
+	// Metrics 是在遥测 provider 就绪后创建的最终仪表。
 	Metrics *metrics.Recorder
 	// TracingEnabled 决定是否挂 OTel 的 HTTP 埋点中间件。
 	//
@@ -72,16 +75,11 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 		return nil, err
 	}
 
-	if opt.Middleware == nil {
-		return nil, errors.New("router: HTTP middleware capability is required")
-	}
-	chain, err := opt.Middleware.Build(plugin.MiddlewareDeps{Metrics: opt.Metrics, TracingEnabled: opt.TracingEnabled, ServiceName: opt.ServiceName})
+	chain, err := newGlobalMiddleware(opt)
 	if err != nil {
 		return nil, fmt.Errorf("build global HTTP middleware: %w", err)
 	}
-	if err := installGlobalMiddleware(engine, chain); err != nil {
-		return nil, err
-	}
+	engine.Use(chain...)
 
 	// 未匹配路由与未匹配方法的处置。
 	//
@@ -200,27 +198,6 @@ func noRoute(c *gin.Context) {
 // 这里再算一遍等于维护第二份同源事实。
 func noMethod(c *gin.Context) {
 	resp.NotAllowedMethod(c, "method not allowed")
-}
-
-// installGlobalMiddleware validates the complete chain before mutating the engine.
-func installGlobalMiddleware(engine *gin.Engine, chain []gin.HandlerFunc) error {
-	if len(engine.Handlers) > 0 {
-		return fmt.Errorf("router global middleware already installed: %w", core.ErrPluginContractViolation)
-	}
-	// Gin requires a combined chain < 63; reserve one final endpoint handler.
-	if len(chain) > 61 {
-		return fmt.Errorf("router global middleware chain exceeds Gin capacity: %w", core.ErrPluginContractViolation)
-	}
-	if len(chain) == 0 {
-		return fmt.Errorf("router empty middleware chain: %w", core.ErrPluginContractViolation)
-	}
-	for i, handler := range chain {
-		if handler == nil {
-			return fmt.Errorf("router middleware %d is nil: %w", i, core.ErrPluginContractViolation)
-		}
-	}
-	engine.Use(chain...)
-	return nil
 }
 
 // RateLimitStager 按策略标识取限流中间件，并**按作用域**分成认证前、认证后两组。

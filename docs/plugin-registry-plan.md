@@ -1,5 +1,7 @@
 # 编译期插件架构重构方案与实施计划
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 修订日期：2026-10-21（Asia/Taipei）。
 
 > 本版状态：阶段 1 已由用户提交，阶段 2–3 定向验收完成，阶段 4 双环境完整质量门禁、真实本地功能验收及隔离目录代码回退演练已通过。全部阶段 0–4 已完成并归档回读，证据见第 15–16 节。回滚与插件停止总预算各 30 秒；JSON 不插件化、不迁移版本。未执行 commit/push/tag/release、依赖升级或上游修改。
@@ -20,10 +22,10 @@
 
 ### 2.1 重构前已核对的工作树事实（历史基线，当前结果见第 14 节）
 
-- 当前分支为 `pluggable`。工作树已有代码修改、删除和未跟踪文件，包含 `internal/core/`、`internal/plugin/`、`internal/bootstrap/plugin_registration.go` 等；它们属于本轮开始前的工作内容，不能覆盖或作为可随意丢弃的临时文件。
+- 当前分支为 `pluggable`。工作树已有代码修改、删除和未跟踪文件，包含 `internal/core/`、历史路径「internal/plugin/」（已迁移或移除）、历史路径「internal/bootstrap/plugin_registration.go」（已迁移或移除） 等；它们属于本轮开始前的工作内容，不能覆盖或作为可随意丢弃的临时文件。
 - 模块为 `github.com/gtkit/gin-api`，`go.mod` 声明 Go 1.27.0。文档阶段记录的工具链为 go1.27.2、本仓 `go.work`；阶段 1 已重新核对工具链与定向测试，见第 13 节。
 - 当前服务装配链为 `cmd/server.go → bootstrap.NewApp → NewRuntime → 注册器 Init/Start → ResourcesFromClients → newProviders → App.Run`。旧版将 `data.NewResources` 写成当前主路径，已经不准确。
-- `internal/core/plugin.go` 已有四方法接口；注册器已有依赖校验、拓扑排序、状态和停止错误聚合代码。MySQL、Redis、响应缓存已有默认插件实现，但三者仍在同一个 `internal/plugin` 包。
+- 历史路径「internal/core/plugin.go」（已迁移或移除） 已有四方法接口；注册器已有依赖校验、拓扑排序、状态和停止错误聚合代码。MySQL、Redis、响应缓存已有默认插件实现，但三者仍在同一个 `internal/plugin` 包。
 - `NewRuntime` 在注册插件前固定调用 `config.Load` 和 `initProcessRuntime`；后者固定初始化主日志与访问日志。HTTP 全局链仍由 `internal/router/init.go` 的 `useGlobalMiddleware` 构建。
 - `Resources` 同时保留旧的自有连接路径和新的插件借用视图。新路径的 `Close` 不关闭连接；旧路径仍含 `ormx` 具体类型和资源创建责任，属于需要收敛的迁移兼容层。
 - `PluginRegistrar` 当前接收已经加载的完整配置，并返回数据库、Redis、缓存三项固定能力。这个签名不能直接表达“配置本身也是第一个插件”。
@@ -117,7 +119,7 @@ internal/pkg/log/                      项目日志门面；不构造/关闭默�
 pkg/、其他 internal/pkg/               普通工具，保持现有位置
 ```
 
-这是本版明确授权的拆分范围；阶段 2 已将旧 MySQL、Redis、缓存扁平实现迁入 `internal/plugin/builtin/` 相应子包并更新必要引用，配置/日志/中间件默认实现亦已独立，无第二套默认实现。完整 main/cmd 选择与生命周期接线仍属阶段 3。
+这是本版明确授权的拆分范围；阶段 2 已将旧 MySQL、Redis、缓存扁平实现迁入 历史路径「internal/plugin/builtin/」（已迁移或移除） 相应子包并更新必要引用，配置/日志/中间件默认实现亦已独立，无第二套默认实现。完整 main/cmd 选择与生命周期接线仍属阶段 3。
 
 依赖方向：组合根 → Core/能力接口/选中的实现/Bootstrap；Bootstrap → Core/能力接口/现有模块装配；默认实现 → Core/能力接口/所需 SDK 或工具。Core 不依赖 plugin 包，能力接口不依赖 builtin；业务 application 继续通过自己的 port 工作。
 
@@ -216,11 +218,11 @@ context 只能约束合作实现。对不接受 context 的数据库/日志关�
 
 | 文件/位置 | 拟改动与边界 |
 |---|---|
-| `internal/core/plugin.go`、`plugin_registry.go`、对应测试 | 保留四方法，修复清理集合、状态等待、预算和错误传播 |
-| `internal/plugin/interfaces.go`、拟新增六类契约文件及对应测试 | 固定最小能力与具名参数，去掉 Stager 和具体 tracker 的实现强制 |
+| 历史路径「internal/core/plugin.go」（已迁移或移除）、`plugin_registry.go`、对应测试 | 保留四方法，修复清理集合、状态等待、预算和错误传播 |
+| 历史路径「internal/plugin/interfaces.go」（已迁移或移除）、拟新增六类契约文件及对应测试 | 固定最小能力与具名参数，去掉 Stager 和具体 tracker 的实现强制 |
 | `internal/plugin/{mysql,redis,cache}.go`、`plugin_test.go` | 分别迁到第 5.1 节子包；原测试责任随实现迁移，不以删测试完成重构 |
 | 第 5.1 节六个 `builtin` 子包及各自测试 | 新增/迁入默认插件，不增加第七类扩展点 |
-| 原 schema 包 load.go、jwt_command.go 与测试（现 `internal/plugin/builtin/config/load.go` 及同包 JWT/加载测试） | 解析器与部分配置读取迁入默认配置子包；schema、默认值、校验留原包；共享辅助函数随真实调用关系一起迁移，禁止留下反向 import 的兼容 wrapper |
+| 原 schema 包 load.go、jwt_command.go 与测试（现 历史路径「internal/plugin/builtin/config/load.go」（已迁移或移除） 及同包 JWT/加载测试） | 解析器与部分配置读取迁入默认配置子包；schema、默认值、校验留原包；共享辅助函数随真实调用关系一起迁移，禁止留下反向 import 的兼容 wrapper |
 | `internal/platform/data/{open,redis,init,mysqlversion,resources,tracing}.go` 及对应测试 | 默认 opener/probe 移入所属默认子包；Resources 收敛为借用视图；探活/追踪消费能力；参数化 SQL 日志接选定 logger |
 | `internal/pkg/log/logger.go`、对应测试 | 收敛为项目门面，实例构造和 notifier 装配迁入默认 logging 子包；支持现有日志语义 |
 | `internal/pkg/httpcache/cache.go`、对应测试 | 默认响应缓存实现继续复用；消费端改接口，不反向选择默认实现 |
@@ -418,7 +420,7 @@ context 只能约束合作实现。对不接受 context 的数据库/日志关�
 - 本机 OpenSpec 入口为 `/Users/xiaozhaofu/.nvm/versions/node/v24.6.0/lib/node_modules/@fission-ai/openspec/bin/openspec.js`，版本 1.3.0；以当前 Node 执行，不安装新工具。以下 OpenSpec 命令统一带 `OPENSPEC_TELEMETRY=0`。
 - Go 检查统一使用 `GOCACHE=/tmp/gin-api-gocache`；lint 同时使用 `GOLANGCI_LINT_CACHE=/tmp/gin-api-golangci-lint`（已由 `golangci-lint cache status` 核对）。构建/vet 使用 `-p=4` 限制并行编译。
 - 原工作树/Core/plan/change/错误日志快照：`/tmp/gin-api-stage1-go53obnh`，含 `worktree-sha256.json` 和 `git-status.txt`。这是临时回退依据，不是提交或永久归档；未对工作树执行实际回退。
-- 本阶段代码：`internal/core/plugin.go`、`plugin_registry.go`、`plugin_registry_test.go`、新增 `plugin_registry_contract_test.go`、`plugin_registry_benchmark_test.go`。
+- 本阶段代码：历史路径「internal/core/plugin.go」（已迁移或移除）、`plugin_registry.go`、`plugin_registry_test.go`、新增 `plugin_registry_contract_test.go`、`plugin_registry_benchmark_test.go`。
 - 配套记录：本文、匹配 change 的 proposal/design/tasks/spec 及本次错误日志。对快照中所有阶段外脏文件逐一比对 SHA256，结果无变化；全仓 lint 报告的 `internal/platform/data/resources_test.go` 也与快照一致。
 
 ### 13.2 步骤验收与调用方核对
@@ -495,7 +497,7 @@ Core 无法硬中断不合作回调、Goexit、进程退出或插件的任意内
 
 ### 14.2 步骤 2.1 改动前细则与兼容清单（原计划，实际结果见 14.2.1）
 
-- 原范围：schema 包 load.go（现 `internal/plugin/builtin/config/load.go`）、jwt_command.go 及加载/环境/文件安全/JWT/分发模板测试迁至已批准的 `plugin/builtin/config`；原混合 load_test 的 Validate/fixture 留 schema 包，避免内部测试反向导入默认解析器。所有原测试断言与案例保留，仅因包/位置改变同步类型限定和模板相对路径。
+- 原范围：schema 包 load.go（现 历史路径「internal/plugin/builtin/config/load.go」（已迁移或移除））、jwt_command.go 及加载/环境/文件安全/JWT/分发模板测试迁至已批准的 `plugin/builtin/config`；原混合 load_test 的 Validate/fixture 留 schema 包，避免内部测试反向导入默认解析器。所有原测试断言与案例保留，仅因包/位置改变同步类型限定和模板相对路径。
 - 新契约：`plugin.ConfigurationProvider.Value() (*config.Config, error)`，只读已校验快照；未完成/失败返回可判别错误。默认包 `config.New(loader Loader) *Plugin`，`Loader` 为 `func(context.Context) (*config.Config, error)`，nil 使用既有 Load。构造/注册无 I/O；Init 使用 once 发布成功快照或失败结果，读写同步；Start 验证就绪，Stop 无资源工作；不创建 watch/goroutine，不热更新。自定义 Loader 结果仍要校验。
 - 运行配置来源：保持 `config/env/env.yml` 与 `resource.ResolvePath`；进程 `APP_ROOT` 参与路径定位但不映射为配置键；裸 APP_ 忽略；APP_ 命名空间未知键继续拒绝；双下划线分层、单下划线保留，YAML 后叠加环境。WeaklyTypedInput、duration/text hook、mapstructure tag、ErrorUnused、原 Validate 全部保持。无新配置项，无 example 值修改。
 - 安全：生产按最终 env 检查配置文件，保持拒绝符号链接和 group/other 可写权限；不读取真实配置文件或凭据作为重构材料。原内存读取辅助函数继续仅用于测试。

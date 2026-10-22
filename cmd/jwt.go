@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 
@@ -87,7 +87,7 @@ func generateConfiguredKeyPair(cmd *cobra.Command, kid, outDir string) (generate
 		}
 		return generateKeyPair(kid, outDir)
 	}
-	keys, err := defaultconfig.LoadJWTKeyConfigForCommand()
+	keys, err := config.LoadJWTKeyConfigForCommand()
 	if err != nil {
 		return generateResult{}, fmt.Errorf("load JWT generation paths: %w", err)
 	}

@@ -614,8 +614,8 @@ func TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail(t *testing.T) {
 	failure := errors.New("validator exploded")
 	initVerify = func(...verify.Option) error { return failure }
 	fixture := newLifecycleFixture(t)
-	if _, err := NewRuntime(t.Context(), Options{RegisterPlugins: fixture.register}); !errors.Is(err, failure) {
+	if _, err := NewRuntime(t.Context(), fixture.options()); !errors.Is(err, failure) {
 		t.Fatalf("validator failure lost: %v", err)
 	}
-	fixture.assertStopped(t, "middleware", "cache", "redis", "database", "logging", "config")
+	fixture.assertStopped(t, "cache", "redis", "database", "logging")
 }

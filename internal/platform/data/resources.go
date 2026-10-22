@@ -26,6 +26,19 @@ type RedisHandle interface {
 	HealthCheck(context.Context) error
 }
 
+// RedisClientProvider supplies borrowed clients without transferring closure.
+type RedisClientProvider interface {
+	Client(int) *redis.Client
+	DefaultClient() *redis.Client
+	Configured() bool
+}
+
+// RedisProvider combines the client and observation capabilities used at startup.
+type RedisProvider interface {
+	RedisClientProvider
+	RedisHandle
+}
+
 // Requirements 声明本次装配对**可选**资源的必需性。
 //
 // MySQL 不设开关：本脚手架的每条业务路径都落库，"MySQL 可选"没有对应的运行形态，

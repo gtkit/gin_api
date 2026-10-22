@@ -7,10 +7,10 @@ import (
 	"sync"
 
 	"github.com/gtkit/gin-api/internal/core"
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/gin-api/internal/plugin"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
@@ -20,11 +20,10 @@ import (
 // 字段全部私有：连接句柄一旦能被外部取走并各自持有，"谁负责关闭"就不再有唯一答案，
 // 而这正是资源泄漏的来源。
 type Runtime struct {
-	config     *config.Config
-	resources  *data.Resources
-	plugins    *core.PluginRegistry
-	cache      plugin.ResponseCache
-	middleware plugin.MiddlewareBuilder
+	config    *config.Config
+	resources *data.Resources
+	owners    *runtimeResources
+	cache     httpcache.ResponseCache
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt *jwtauth.Assembly
 	// The isolated drain and normal Stop share the selected logging owner.
@@ -35,7 +34,7 @@ type Runtime struct {
 	drainErr  error
 }
 
-// NewRuntime initializes only the explicitly registered plugins. Failure cleanup
+// NewRuntime initializes the fixed process resources. Failure cleanup
 // is independent of startup cancellation and has one shared 30 second budget.
 func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	budget := &rollbackBudget{force: opts.forceSignal()}
@@ -44,43 +43,32 @@ func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 }
 
 func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *Runtime, err error) {
-	if opts.RegisterPlugins == nil {
-		return nil, errors.New("register plugins: registrar is required")
+	ctx, finish := forceContext(ctx, opts.forceSignal())
+	defer finish()
+	ctx, cancel := context.WithTimeout(ctx, runtimeStartupTimeout)
+	defer cancel()
+	factories := defaultRuntimeFactories()
+	if opts.factories != nil {
+		factories = *opts.factories
 	}
-	registry := core.NewPluginRegistry()
-	if err := registry.SetForceSignal(opts.forceSignal()); err != nil {
-		return nil, err
-	}
-	set, err := opts.RegisterPlugins(registry)
+	cfg, err := openResource(ctx, "configuration", factories.loadConfig)
 	if err != nil {
-		return nil, fmt.Errorf("register plugins: %w", err)
-	}
-	if err := set.validate(); err != nil {
 		return nil, err
 	}
-	// Core owns partial Init/Start rollback as well as normal stopping.
-	if err := registry.Init(ctx); err != nil {
-		return nil, fmt.Errorf("init plugins: %w", err)
-	}
-	if err := registry.Start(ctx); err != nil {
-		return nil, fmt.Errorf("start plugins: %w", err)
+	ApplyRuntimeTimezone(cfg)
+	owners, err := openRuntimeResources(ctx, cfg, factories, false, budget)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, registry.Stop(budget.Context(ctx)))
+			err = errors.Join(err, owners.Close(budget.Context(ctx)))
 		}
 	}()
-	cfg, err := set.Configuration.Value()
-	if err != nil {
-		return nil, fmt.Errorf("read runtime configuration: %w", err)
-	}
-	if cfg == nil {
-		return nil, errors.New("runtime configuration is nil")
-	}
 	if err := initProcessRuntime(cfg); err != nil {
 		return nil, err
 	}
-	resources, err := data.ResourcesFromClients(set.Database, set.Redis, set.Redis.Configured())
+	resources, err := data.ResourcesFromClients(owners.database, owners.redis, owners.redis.Configured())
 	if err != nil {
 		return nil, fmt.Errorf("build resource view: %w", err)
 	}
@@ -96,10 +84,8 @@ func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *R
 		return nil, err
 	}
 	applog.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
-	return &Runtime{
-		config: cfg, resources: resources, plugins: registry, cache: set.Cache,
-		middleware: set.Middleware, jwt: jwtAssembly, drain: set.DrainLogs, force: opts.forceSignal(),
-	}, nil
+	return &Runtime{config: cfg, resources: resources, owners: owners, cache: owners.cache,
+		jwt: jwtAssembly, drain: owners.logs.Drain, force: opts.forceSignal()}, nil
 }
 
 // logResourceStates 在启动完成时把非健康的资源状态打印一次。
@@ -135,8 +121,8 @@ func (r *Runtime) Resources() *data.Resources {
 	return r.resources
 }
 
-// CachePlugin returns the response-cache lifecycle adapter for provider assembly.
-func (r *Runtime) CachePlugin() plugin.ResponseCache {
+// Cache returns the borrowed response cache used by explicit route assembly.
+func (r *Runtime) Cache() httpcache.ResponseCache {
 	if r == nil {
 		return nil
 	}
@@ -159,13 +145,13 @@ func (r *Runtime) TokenParser() jwtauth.TokenParser {
 	return r.jwt.Parser
 }
 
-// Close stops the registered owners once. It preserves caller cancellation and
+// Close releases resource owners once. It preserves caller cancellation and
 // deadlines; only the process entry point may detach a canceled run context.
 func (r *Runtime) Close(ctx context.Context) error {
-	if r == nil || r.plugins == nil {
+	if r == nil || r.owners == nil {
 		return nil
 	}
-	if err := r.plugins.Stop(ctx); err != nil {
+	if err := r.owners.Close(ctx); err != nil {
 		return fmt.Errorf("close runtime: %w", err)
 	}
 	return nil
@@ -184,8 +170,15 @@ func (r *Runtime) DrainLogs(ctx context.Context) error {
 		select {
 		case <-done:
 			return r.drainErr
+		default:
+		}
+		select {
+		case <-done:
+			return r.drainErr
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-r.force:
+			return context.Canceled
 		}
 	}
 	r.drainDone = make(chan struct{})
@@ -196,12 +189,17 @@ func (r *Runtime) DrainLogs(ctx context.Context) error {
 	err := func() (err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("logging drain panic: %v: %w", recovered, core.ErrPluginContractViolation)
+				err = fmt.Errorf("logging drain panic: %v: %w", recovered, core.ErrComponentState)
 			}
 		}()
 		return r.drain(drainCtx)
 	}()
 	err = errors.Join(err, drainCtx.Err())
+	select {
+	case <-r.force:
+		err = errors.Join(err, context.Canceled)
+	default:
+	}
 	r.drainMu.Lock()
 	r.drainErr = err
 	close(done)

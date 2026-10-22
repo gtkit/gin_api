@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -11,17 +12,14 @@ import (
 	"testing/synctest"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/gin-gonic/gin"
-	"github.com/gtkit/gin-api/internal/core"
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/plugin"
-	"github.com/gtkit/gin-api/internal/plugin/builtin/logging"
-	"github.com/gtkit/gin-api/internal/plugin/builtin/mail"
-	"github.com/gtkit/gin-api/internal/plugin/builtin/notification"
-	"github.com/gtkit/gin-api/internal/plugin/builtin/robot"
-	"github.com/gtkit/gin-api/internal/plugin/builtin/sms"
+	"github.com/gtkit/gin-api/internal/platform/logging"
+	"github.com/gtkit/gin-api/internal/platform/notification/dispatch"
+	"github.com/gtkit/gin-api/internal/platform/notification/mail"
+	"github.com/gtkit/gin-api/internal/platform/notification/robot"
+	"github.com/gtkit/gin-api/internal/platform/notification/sms"
 	"github.com/gtkit/gin-api/internal/testutil"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -49,24 +47,6 @@ func (r *notificationTrace) stops() []string {
 	return result
 }
 
-type tracedNotificationPlugin struct {
-	core.Plugin
-	trace *notificationTrace
-}
-
-func (p tracedNotificationPlugin) Init(ctx context.Context) error {
-	p.trace.add("init:" + p.Name())
-	return p.Plugin.Init(ctx)
-}
-func (p tracedNotificationPlugin) Start(ctx context.Context) error {
-	p.trace.add("start:" + p.Name())
-	return p.Plugin.Start(ctx)
-}
-func (p tracedNotificationPlugin) Stop(ctx context.Context) error {
-	p.trace.add("stop:" + p.Name())
-	return p.Plugin.Stop(ctx)
-}
-
 type notificationSender struct{ sends *atomic.Int32 }
 
 func (s notificationSender) Send(context.Context, string, string) error { s.sends.Add(1); return nil }
@@ -88,9 +68,9 @@ func (s notificationSMSSender) Send(context.Context, string, string, map[string]
 type notificationFixture struct {
 	base            *lifecycleFixture
 	trace           notificationTrace
-	logging         *logging.Plugin
-	notification    *notification.Plugin
-	channels        []core.Plugin
+	logging         *logging.Owner
+	notification    *dispatch.Owner
+	options         Options
 	sends, cleanups [3]atomic.Int32
 }
 
@@ -102,81 +82,81 @@ func newNotificationFixture(t *testing.T) *notificationFixture {
 	cfg.News.FSURL = "fixture-target"
 	cfg.Email = config.EmailConfig{Host: "fixture", AlertTo: []string{"fixture-recipient"}}
 	cfg.SMS = config.SMSConfig{Provider: "aliyun", AlertTemplate: "fixture", AlertPhones: []string{"fixture-phone"}}
-	configuration := f.base.components[0]
 	cleanup := func(i int) func(context.Context) error {
-		return func(context.Context) error { f.cleanups[i].Add(1); return nil }
+		return func(ctx context.Context) error {
+			if f.logging != nil && f.logging.Enabled(applog.LevelInfo, applog.MainStream) {
+				t.Error("channel closed before logging drained")
+			}
+			if f.notification != nil {
+				if err := f.notification.Notify(ctx, "", "cleanup probe"); !errors.Is(err, news.ErrStopped) {
+					t.Errorf("channel closed before notification admission stopped: %v", err)
+				}
+			}
+			f.trace.add("stop:" + []string{"robot", "mail", "sms"}[i])
+			f.cleanups[i].Add(1)
+			return nil
+		}
 	}
-	r := robot.New(robot.Options{Configuration: configuration, Open: func(context.Context, config.NewsConfig) (news.WebhookSender, func(context.Context) error, error) {
-		return notificationSender{&f.sends[0]}, cleanup(0), nil
-	}})
-	m := mail.New(mail.Options{Configuration: configuration, Open: func(context.Context, config.EmailConfig) (news.MailSender, func(context.Context) error, error) {
-		return notificationMailSender{&f.sends[1]}, cleanup(1), nil
-	}})
-	s := sms.New(sms.Options{Configuration: configuration, Open: func(context.Context, config.SMSConfig) (news.SMSSender, func(context.Context) error, error) {
-		return notificationSMSSender{&f.sends[2]}, cleanup(2), nil
-	}})
-	f.channels = []core.Plugin{r, m, s}
-	f.notification = notification.New(notification.Options{Configuration: configuration, Robot: r, Mail: m, SMS: s})
-	f.logging = logging.New(logging.Options{Configuration: configuration, Notification: f.notification})
+	factories := f.base.factories()
+	factories.logs = func(ctx context.Context, cfg *config.Config) (logOwner, error) {
+		p := &processLogs{}
+		var err error
+		p.robot, err = robot.Open(ctx, robot.Options{Config: cfg, Open: func(context.Context, config.NewsConfig) (news.WebhookSender, func(context.Context) error, error) {
+			return notificationSender{&f.sends[0]}, cleanup(0), nil
+		}})
+		if err != nil {
+			return p, err
+		}
+		p.mail, err = mail.Open(ctx, mail.Options{Config: cfg, Open: func(context.Context, config.EmailConfig) (news.MailSender, func(context.Context) error, error) {
+			return notificationMailSender{&f.sends[1]}, cleanup(1), nil
+		}})
+		if err != nil {
+			return p, err
+		}
+		p.sms, err = sms.Open(ctx, sms.Options{Config: cfg, Open: func(context.Context, config.SMSConfig) (news.SMSSender, func(context.Context) error, error) {
+			return notificationSMSSender{&f.sends[2]}, cleanup(2), nil
+		}})
+		if err != nil {
+			return p, err
+		}
+		p.notification, err = dispatch.Open(ctx, dispatch.Options{Config: cfg, Robot: p.robot, Mail: p.mail, SMS: p.sms})
+		f.notification = p.notification
+		if err != nil {
+			return p, err
+		}
+		p.logger, err = logging.Open(ctx, logging.Options{Config: cfg, Notification: p.notification})
+		f.logging = p.logger
+		return p, err
+	}
+	f.options = Options{factories: &factories}
 	return f
-}
-
-func (f *notificationFixture) register(r *core.PluginRegistry) (PluginSet, error) {
-	register := func(p core.Plugin, deps ...string) error {
-		return r.Register(tracedNotificationPlugin{Plugin: p, trace: &f.trace}, deps...)
-	}
-	p := f.base.components
-	if err := register(p[0]); err != nil {
-		return PluginSet{}, err
-	}
-	for _, channel := range f.channels {
-		if err := register(channel, p[0].Name()); err != nil {
-			return PluginSet{}, err
-		}
-	}
-	if err := register(f.notification, p[0].Name(), f.channels[0].Name(), f.channels[1].Name(), f.channels[2].Name()); err != nil {
-		return PluginSet{}, err
-	}
-	if err := register(f.logging, p[0].Name(), f.notification.Name()); err != nil {
-		return PluginSet{}, err
-	}
-	previous := f.logging.Name()
-	for _, component := range p[2:] {
-		if err := register(component, previous); err != nil {
-			return PluginSet{}, err
-		}
-		previous = component.Name()
-	}
-	return PluginSet{Configuration: p[0], Logging: f.logging, Database: p[2], Redis: p[3], Cache: p[4], Middleware: p[5], DrainLogs: f.logging.Drain}, nil
 }
 
 func (f *notificationFixture) assertClosed(t *testing.T) {
 	t.Helper()
 	stops := f.trace.stops()
-	logIndex := slices.Index(stops, "logging")
-	notificationIndex := slices.Index(stops, "notification")
-	if logIndex < 0 || notificationIndex <= logIndex {
-		t.Fatalf("invalid stop order=%v", stops)
+	if !slices.Equal(stops, []string{"sms", "mail", "robot"}) {
+		t.Fatalf("channel close order=%v", stops)
 	}
-	for i, channel := range f.channels {
-		if slices.Index(stops, channel.Name()) <= notificationIndex || f.cleanups[i].Load() != 1 {
-			t.Fatalf("invalid channel cleanup: stops=%v cleanups=%d", stops, f.cleanups[i].Load())
+	for i := range f.cleanups {
+		if f.cleanups[i].Load() != 1 {
+			t.Fatalf("channel %d cleanups=%d, want one", i, f.cleanups[i].Load())
 		}
 	}
 }
 
 func TestNotificationRuntimeRollsBackAndDrainsBeforeChannels(t *testing.T) {
-	for _, failure := range []string{"none", "init", "start"} {
+	for _, failure := range []string{"none", "open", "open with alert"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newNotificationFixture(t)
 			cause := errors.New("fixture failure")
-			if failure == "init" {
+			if failure == "open" {
 				f.base.components[2].init = func(context.Context) error { return cause }
 			}
-			if failure == "start" {
-				f.base.components[2].start = func(context.Context) error { applog.HErrorf("startup failure alert"); return cause }
+			if failure == "open with alert" {
+				f.base.components[2].init = func(context.Context) error { applog.HErrorf("startup failure alert"); return cause }
 			}
-			r, err := NewRuntime(t.Context(), Options{RegisterPlugins: f.register})
+			r, err := NewRuntime(t.Context(), f.options)
 			if failure == "none" {
 				if err != nil {
 					t.Fatal(err)
@@ -193,7 +173,7 @@ func TestNotificationRuntimeRollsBackAndDrainsBeforeChannels(t *testing.T) {
 			}
 			f.assertClosed(t)
 			want := int32(1)
-			if failure == "init" {
+			if failure == "open" {
 				want = 0
 			}
 			for i := range f.sends {
@@ -211,7 +191,7 @@ func TestNotificationRuntimeRollsBackAndDrainsBeforeChannels(t *testing.T) {
 func TestNotificationAppExitErrorIsSentBeforeCleanup(t *testing.T) {
 	testutil.RequireLoopback(t)
 	f := newNotificationFixture(t)
-	r, err := NewRuntime(t.Context(), Options{RegisterPlugins: f.register})
+	r, err := NewRuntime(t.Context(), f.options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,19 +224,20 @@ func TestNewAppNotificationRollbackPreservesCleanupErrors(t *testing.T) {
 	}
 	database := f.base.components[2]
 	database.db, database.sql = db, sqlDB
-	cause, closing := errors.New("middleware construction failed"), errors.New("database close failed")
+	closing := errors.New("database close failed")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	f.base.components[5].build = func(plugin.MiddlewareDeps) ([]gin.HandlerFunc, error) { cancel(); return nil, cause }
+	cfg.Proxy.TrustedProxies = []string{"invalid-proxy"}
 	database.stop = func(ctx context.Context) error {
+		cancel()
 		if ctx.Err() != nil {
 			t.Error("rollback inherited startup cancellation")
 		}
 		return errors.Join(sqlDB.Close(), closing)
 	}
 	mock.ExpectClose()
-	app, err := NewApp(ctx, Options{RegisterPlugins: f.register})
-	if app != nil || !errors.Is(err, cause) || !errors.Is(err, closing) {
+	app, err := NewApp(ctx, f.options)
+	if parseErr, ok := errors.AsType[*net.ParseError](err); app != nil || !ok || parseErr == nil || !errors.Is(err, closing) || !errors.Is(ctx.Err(), context.Canceled) {
 		t.Fatalf("app=%v err=%v", app, err)
 	}
 	f.assertClosed(t)
@@ -268,7 +249,7 @@ func TestNewAppNotificationRollbackPreservesCleanupErrors(t *testing.T) {
 func TestNotificationLiveWorkerOnlyDrainsLogging(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newNotificationFixture(t)
-		r, err := NewRuntime(t.Context(), Options{RegisterPlugins: f.register})
+		r, err := NewRuntime(t.Context(), f.options)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +276,7 @@ func TestNotificationLiveWorkerOnlyDrainsLogging(t *testing.T) {
 			t.Fatalf("close resources=%v", err)
 		}
 		if len(f.trace.stops()) != 0 {
-			t.Fatalf("registry stopped while worker alive: %v", f.trace.stops())
+			t.Fatalf("notification channels closed while worker alive: %v", f.trace.stops())
 		}
 		for i := range f.cleanups {
 			if f.cleanups[i].Load() != 0 {

@@ -9,10 +9,9 @@
 ## 目录结构
 
 ```
-cmd/                         → CLI 入口、默认插件选择和显式注册
+cmd/                         → CLI 入口，选择 server/migration/doctor 等固定运行方式
 internal/
-  core/                      → 编译期插件契约与依赖注册器，不持有具体基础设施实现
-  plugin/                    → 基础能力与通知契约；builtin/ 下为内置默认实现
+  core/                      → 资源状态错误，不持有具体基础设施实现
   appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
@@ -28,8 +27,12 @@ internal/
   middleware/                → Gin 中间件
   router/                    → 路由聚合、版本化模块注册、健康检查路由
   platform/
-    config/                  → 配置结构、默认值与校验（加载在 builtin/config）
+    config/                  → 配置结构、加载、默认值与校验
     data/                    → DB/Redis 借用视图、健康和追踪工具
+    mysql/、redis/           → 固定 SDK 连接的构造和关闭
+    responsecache/           → 响应缓存的构造和关闭
+    logging/                 → gtkit/logger 的 main/access 所有者
+    notification/            → 通知契约、接纳/排空及 robot/mail/sms/dispatch
     telemetry/               → OTel 导出装配
   pkg/                       → 项目内部共享包（仅本仓可 import）
   shared/                    → 跨模块共享的轻量语义
@@ -38,53 +41,35 @@ internal/
 pkg/                         → 对外可复用包（可被仓库外项目 import）
 ```
 
-### 编译期插件与资源所有权
+### 固定技术栈与资源所有权
 
-`internal/core` 只定义四方法 `Plugin` 契约（`Name`、`Init`、`Start`、`Stop`）和
-`PluginRegistry`。业务入口在编译期显式调用 `Register(plugin, dependencies...)`；注册器
-在初始化前校验重复名称、缺失依赖和循环依赖，按稳定拓扑顺序初始化/启动，按逆序停止并聚合
-错误。回调不在注册器锁内执行，重复停止是幂等的。
+配置在 `internal/platform/config` 直接加载与校验；时区在任何后台资源启动之前应用。
+`internal/bootstrap/resources.go` 以固定顺序构造通知通道、通知组合、日志、MySQL、Redis 和响应缓存。
+没有通用插件契约、依赖图、注册回调或运行时发现。命令入口只选择所需运行方式，
+业务 application 继续通过自己的窄端口访问仓储和外部服务。
 
-`internal/plugin` 定义原有六类基础能力及可选通知契约；`PluginSet` 的六个必填字段保持不变，
-`internal/plugin/builtin/` 提供默认实现。`cmd/plugins.go` 是默认选择的组合根：只构造和注册，
-配置读取、连接和日志实例创建都在 `Init`。Bootstrap 必须收到显式 registrar，消费具名能力，
-不回落到默认实现。替换只修改业务入口注册，不修改 Core；不使用 Go `plugin` 包、动态 `.so`
-或运行期发现。
+各具体资源用 `Open(ctx, Options)` 完成构造，成功返回拥有关闭权的 Owner；消费者只取得借用能力。
+`platform/data.Resources` 保存 DB/Redis 句柄与观测视图，不关闭连接。
+Runtime 先关闭缓存、Redis、MySQL，再排空日志，最后关闭通知组合、短信、邮件、机器人。
+部分构造失败会回收已取得的资源，清理错误与根因合并返回。
 
-默认通知依赖图（箭头从被依赖者指向使用方）为：
+server 启动总预算 30 秒，单次资源构造最多 10 秒，父 deadline 只能收紧。
+migration 的总启动预算为 15 秒，仅构造配置、通知/日志和数据库，使用迁移凭据及迁移专用 opener；
+DDL 的命令预算与连接启动预算分开。doctor/JWT/module 保持最小装配。
 
-```mermaid
-flowchart LR
-    config --> robot[notification.robot]
-    config --> mail[notification.mail]
-    config --> sms[notification.sms]
-    robot --> notification
-    mail --> notification
-    sms --> notification
-    notification --> logging
-    config --> logging
-    logging --> mysql
-    logging --> redis
-    redis --> cache
-    logging --> cache
-    logging --> middleware[http-middleware]
-```
+HTTP 中间件由 `internal/router/middleware.go` 在最终 metrics 就绪后直接构造，
+保持 Recovery、RequestID、可选 tracing、访问日志、metrics、内层 Recovery、安全头、
+错误处理、可选 CORS 和请求体上限的顺序。每个 engine 独立构造，无组件生命周期状态。
+缓存继续由具体路由显式挂载，带身份请求仍绕过缓存；Redis 必需性按已启用能力推导。
 
-MySQL、Redis、cache 和 HTTP 中间件仍直接依赖 config。cache 的静态 Redis 边不意味着内存/禁用缓存会访问 Redis，required/optional 规则按实际功能推导。migration 同样注册三个通知通道、组合、logging 和 MySQL，使用迁移凭据与 DDL 命令超时，不注册 Redis/cache/HTTP。doctor/JWT/module 保持最小装配。
+模块/扩展失败和 Runtime 回滚共享独立的 30 秒清理预算；正常关闭保留父取消、更短 deadline 和第二信号。
+重复关闭共享首次结果，等待者可独立取消；关闭错误或 panic 不跳过后续所有者。
+HTTP/worker 仍分阶段退出，存活 worker 导致共享资源关闭跳过并返回 ErrWorkerNotExited，
+此时仅尝试同一日志 owner 的 Drain，不关闭通知或其他共享资源。
 
-`news.New` 只组合借用的发送接口，默认客户端由各通道插件 Init 构造和拥有；不再存在 `news.NewWithConfig` 隐式工厂。日志只借用 `NotificationSink`。纯日志可只选择 config/logging。可用现有通道插件的 Open 替换一个 sender 并复用其接纳/取消/清理保护，不必改其他通道或 Core；配置白名单仍为原有供应商。具体例子见 [通知插件与替换方式](observability.md#通知插件与替换方式)。
-
-插件独占自己创建的连接和缓存 Store；`platform/data.Resources` 只保存不带 `Close` 权限的
-借用视图。HTTP 链由所选 builder 在最终 metrics 就绪后构建，保留外层 Recovery 到请求体限制
-的原有顺序。WorkerManager、遥测、时区、校验器和 JSON 是固定骨架/工具，不新增插件或 MQ 接口。
-
-插件回滚、停止总预算各 30 秒。Runtime.Close 保留父取消和更短 deadline；App/命令只在必要
-收尾边界建立独立预算并接第二信号。模块/扩展失败与插件回滚共享一个 30 秒截止时间。
-HTTP/worker 先分阶段退出，再逆序停止资源插件；随后 logging 排空、notification 关闭接纳、各通道释放资源。仍存活的 worker
-使共享插件停止被跳过，返回 ErrWorkerNotExited，仅尝试该 logger owner 的独立 Drain；不越权关闭通知及通道。
-
-context 需要实现合作：默认日志 SDK 的 void Sync、部分无 context 的 Close 无法硬中断。
-不以可遗弃 goroutine 隐藏未完成关闭，不把预算或 race 测试解释为任意插件隔离或永不 OOM。
+日志和通知的实际排空需要 SDK 与 sender 响应取消。SDK 的 void Sync、部分无 context 的 Close
+无法硬中断，不通过遗弃后台关闭 goroutine 隐藏尚未完成的 I/O。
+通知渠道的替换与关闭约束见 [通知渠道与替换方式](observability.md#通知渠道与替换方式)。
 
 ### `internal/pkg/` 与根 `pkg/` 的区别
 

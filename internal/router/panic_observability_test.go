@@ -17,7 +17,7 @@ import (
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	"github.com/gtkit/gin-api/internal/platform/logging"
 )
 
 func TestPanicRequestObservability(t *testing.T) {
@@ -32,15 +32,15 @@ func TestPanicRequestObservability(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			logging := defaultlogging.New(defaultlogging.Options{Configuration: middlewareConfiguration{&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "request"), Level: "info", FileStdout: 1}}}})
+			owner, err := logging.Open(t.Context(), logging.Options{Config: &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "request"), Level: "info", FileStdout: 1}}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() {
-				if err := logging.Stop(context.Background()); err != nil {
+				if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
 					t.Error(err)
 				}
 			})
-			if err := logging.Init(t.Context()); err != nil {
-				t.Fatal(err)
-			}
 			t.Cleanup(func() {
 				applog.SyncAccessLog()
 			})

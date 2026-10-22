@@ -230,9 +230,9 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 | 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
 | 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
-| 配置严格解码 | `internal/plugin/builtin/config` | 未知键即启动失败 |
-| 配置环境变量覆盖 | `internal/plugin/builtin/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
-| 数据库连接校验 | `internal/plugin/builtin/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
+| 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
+| 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
+| 数据库连接校验 | `internal/platform/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
 | AI 对话 | `internal/module/ai` + `modules.ai` 配置段 | 基于 `github.com/gtkit/go-llm-provider/v2`，配置驱动多厂商（DeepSeek / 通义千问 / 智谱 / Moonshot / 火山方舟 / 千帆 / 硅基流动）。**填了 api_key 的厂商才启用；一家都没填时整个模块不装配、路由不注册**（启动期提示一次）。含非流式与 SSE 流式两条对话路由、会话管理与厂商列表；每家厂商各带独立熔断与重试 |
 | 对话内容留存 | `ai_conversations` / `ai_messages` 表 | 明文保存用户提问与模型回复（可能含用户输入的个人信息）；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见 `internal/repository/aiconversation/README.md` 与该迁移的注释。`DELETE /ai/conversations/:id` 只软删会话头，不做物理清理 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |

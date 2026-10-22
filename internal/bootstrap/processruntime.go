@@ -22,7 +22,7 @@ var (
 )
 
 // initProcessRuntime initializes fixed process facilities after the selected
-// configuration and logging plugins are ready. The registry owns rollback.
+// configuration and logging are ready. Runtime owns failure rollback.
 func initProcessRuntime(cfg *config.Config) error {
 	installGinDiagnostics()
 	if err := initVerify(); err != nil {
@@ -67,8 +67,8 @@ func installGinDiagnostics() {
 	gin.DefaultErrorWriter = logWriter{logf: applog.Warnf}
 }
 
-// ApplyRuntimeTimezone configures time.Local during configuration Init, before
-// the logging plugin starts background goroutines. Call once during startup.
+// ApplyRuntimeTimezone configures time.Local after loading configuration, before
+// logging starts background goroutines. Call once during startup.
 func ApplyRuntimeTimezone(cfg *config.Config) {
 	if cfg == nil || strings.TrimSpace(cfg.App.Timezone) == "" {
 		return

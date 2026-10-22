@@ -27,7 +27,6 @@ require (
 	github.com/gtkit/logger/v2 v2.3.0
 	github.com/gtkit/migratex v0.4.0
 	github.com/gtkit/msgbot v1.4.0
-	github.com/gtkit/news v1.1.10
 	github.com/gtkit/ormx v1.6.0
 	github.com/gtkit/redisx v1.4.0
 	github.com/gtkit/smsx v1.1.0

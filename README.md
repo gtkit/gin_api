@@ -293,7 +293,7 @@ BUILD_COMMIT/BUILD_TIME可固定；COMPOSE_PROJECT默认APP_NAME，验收可指�
 ### 数据库集成测试（本地手动）
 
 `make test-integration`使用项目根之外的显式隔离APP_ROOT，先验证配置元数据再连接真实依赖；
-包含cmd插件套件和仓储事务回滚。Make强制PLUGIN_INTEGRATION=1，发布入口还设置
+包含命令装配套件和仓储事务回滚。Make强制PLUGIN_INTEGRATION=1，发布入口还设置
 REQUIRE_DB_INTEGRATION=1使缺依赖失败；日常check仍不依赖数据库。准备方法见`docs/testing.md`。
 
 ## 配置与性能

@@ -1,5 +1,7 @@
 # gin_api 验收问题整改方案与分阶段实施计划
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 日期：2026-10-22（Asia/Taipei）。
 
 **当前状态：2026-10-22 用户已指示“DB 和 Redis 暂不考虑集群，所有 error 不忽略，基于已更新 goerr 优化错误处理，其他按方案实施”。核心阶段1–6及X1按该指令执行；集群明确排除。阶段1–5核心源码和阶段6本地复测/报告已完成；X1源码与解析验证完成，容器运行未验证，归档保留检查点；实际证据见第12节及结果报告。** 上一轮仅文档的历史边界保留为历史记录；本轮授权、错误处理补充和进入条件以第11节为准，设计章节保留实施前候选措辞，执行状态以本轮记录及结果报告为准。后续命令在取得真实执行证据前均为待执行。
@@ -204,7 +206,7 @@ F08 在现有集成包发现范围加入 cmd，并增加可反驳的枚举/强�
 |---|---|
 | 1 缓存 | `internal/pkg/cache/cache.go`、`cache_test.go`；按需在同目录拟新增 `panic_test.go`；`docs/cache.md` |
 | 1 事务 | `internal/repository/dbtx/dbtx.go`、`dbtx_test.go`、`dbtx_ctx_test.go`、`integration_test.go`；`docs/testing.md` 的事务约定 |
-| 2 前缀 | `internal/platform/config/types.go`、`defaults.go`、`validate.go`、`redis_test.go`、`effective_test.go`；`internal/bootstrap/providers.go`、`ratelimit.go` 及其现有测试；`internal/plugin/builtin/cache/plugin.go`、`contract_test.go`；`config/env.yml.example`；认证/限流/缓存现有测试 |
+| 2 前缀 | `internal/platform/config/types.go`、`defaults.go`、`validate.go`、`redis_test.go`、`effective_test.go`；`internal/bootstrap/providers.go`、`ratelimit.go` 及其现有测试；历史路径「internal/plugin/builtin/cache/plugin.go」（已迁移或移除）、`contract_test.go`；`config/env.yml.example`；认证/限流/缓存现有测试 |
 | 3 协议 | `internal/pkg/response/response.go`、`response_test.go` 及相关响应测试；`internal/pkg/httpcache/cache.go`、`cache_test.go`，拟新增同目录 `envelope.go`、`envelope_test.go`；已确认使用统一信封与缓存的路由调用方；必要的现有 middleware/router 协议测试；已确认存在的 `docs/api-conventions.md` |
 | 3 日志配置 | `internal/platform/config/types.go`、`defaults.go`、`validate.go` 及现有日志/配置测试；`internal/platform/data/init.go`、`init_test.go`、`gorm_logger_contract_test.go`；`config/env.yml.example`、`docs/observability.md`；既有日志整改计划与历史证据保持 |
 | 4 诊断 | `internal/diagnostics/doctor.go`、`keyperm_unix.go`、`keyperm_windows.go`、`doctor_test.go`、`keyperm_unix_test.go`；`internal/pkg/jwtauth/keyset.go` 及其现有测试；`cmd/jwt_perm_unix_test.go`、`doctor_test.go`、`jwt_test.go`；必要的 JWT 使用说明 |
@@ -476,7 +478,7 @@ APP_ROOT="$TEST_ROOT" GOWORK=off GOFLAGS=-mod=readonly \
   事务故障矩阵拟新增于现有目录的 `internal/repository/dbtx/transaction_test.go`；复用已锁定sqlmock，不引入新依赖。
 - 阶段3：`internal/pkg/response/response.go`及测试；`internal/middleware/auth.go`、`audit.go`；`internal/router/health.go`；`internal/diagnostics/doctor.go`；`internal/pkg/log/logger.go`及现有输出/排空测试。原因树诊断在HTTP终结处，其他边界沿原日志API记录，不另造全局错误框架。
 - 阶段4：`cmd/jwt.go`、`jwt_reencode.go`、`project.go`、`modulepath.go`、`syncdir_unix.go`；`internal/scaffold/module_commit.go`、`module_templates.go`；`internal/projectinit/init.go`、`snapshot.go`；生成/回滚/解锁失败与主失败合并；改变签名时回审全部调用方与生成模板。
-- 阶段5：`.golangci.yml`，`internal/testutil/redisintegration.go`、`platform.go`，`pkg/ratelimit/redis.go`，`internal/plugin/builtin/mysql/mysqlversion.go`，`internal/pkg/credential/password.go`；新增严格检查引出的相关测试夹具逐个处理并登记。类型断言、bool和无error方法不伪装成error。
+- 阶段5：`.golangci.yml`，`internal/testutil/redisintegration.go`、`platform.go`，`pkg/ratelimit/redis.go`，历史路径「internal/plugin/builtin/mysql/mysqlversion.go」（已迁移或移除），`internal/pkg/credential/password.go`；新增严格检查引出的相关测试夹具逐个处理并登记。类型断言、bool和无error方法不伪装成error。
 - 阶段5严格检查实际清单（stage5-error-inventory：209条errcheck告警，含类型断言/预期结果，逐项分类，不能把计数等同真实缺陷数）：
   - `cmd/plugins_integration_test.go`
   - `internal/bootstrap/assembly_contract_test.go`
@@ -527,18 +529,18 @@ APP_ROOT="$TEST_ROOT" GOWORK=off GOFLAGS=-mod=readonly \
   - `internal/platform/data/gorm_logger_contract_test.go`
   - `internal/platform/data/tracing_test.go`
   - `internal/platform/telemetry/telemetry_test.go`
-  - `internal/plugin/builtin/cache/contract_test.go`
-  - `internal/plugin/builtin/httpmiddleware/plugin_test.go`
-  - `internal/plugin/builtin/logging/benchmark_test.go`
-  - `internal/plugin/builtin/logging/hotpath_contract_test.go`
-  - `internal/plugin/builtin/logging/options_test.go`
-  - `internal/plugin/builtin/logging/plugin.go`
-  - `internal/plugin/builtin/logging/plugin_test.go`
-  - `internal/plugin/builtin/mysql/contract_test.go`
-  - `internal/plugin/builtin/mysql/mysqlversion.go`
-  - `internal/plugin/builtin/mysql/open_test.go`
-  - `internal/plugin/builtin/mysql/plugin_test.go`
-  - `internal/plugin/builtin/redis/contract_test.go`
+  - 历史路径「internal/plugin/builtin/cache/contract_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/httpmiddleware/plugin_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/logging/benchmark_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/logging/hotpath_contract_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/logging/options_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/logging/plugin.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/logging/plugin_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/mysql/contract_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/mysql/mysqlversion.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/mysql/open_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/mysql/plugin_test.go」（已迁移或移除）
+  - 历史路径「internal/plugin/builtin/redis/contract_test.go」（已迁移或移除）
   - `internal/projectinit/init_test.go`
   - `internal/projectinit/validate.go`
   - `internal/router/panic_observability_test.go`
@@ -555,7 +557,7 @@ APP_ROOT="$TEST_ROOT" GOWORK=off GOFLAGS=-mod=readonly \
   - `pkg/ratelimit/ratelimit_test.go`
   - `pkg/ratelimit/redis.go`
   - `pkg/ratelimit/script_lua_test.go`
-- 阶段5额外配套：`internal/pkg/console/console_test.go`、`internal/testutil/loopback_test.go`、`internal/pkg/credential/password_test.go`、`internal/plugin/builtin/mysql/mysqlversion_test.go`、`pkg/ratelimit/observer.go`、`redis_test.go`、`probe_cleanup_test.go`、`README.md`和`internal/bootstrap/ratelimit.go`；复用`cmd/plugins_integration_test.go`及`scripts/check-make-entries.sh`验证隔离配置与集成接线。所有文件先读后改；不加全局豁免。
+- 阶段5额外配套：`internal/pkg/console/console_test.go`、`internal/testutil/loopback_test.go`、`internal/pkg/credential/password_test.go`、历史路径「internal/plugin/builtin/mysql/mysqlversion_test.go」（已迁移或移除）、`pkg/ratelimit/observer.go`、`redis_test.go`、`probe_cleanup_test.go`、`README.md`和`internal/bootstrap/ratelimit.go`；复用`cmd/plugins_integration_test.go`及`scripts/check-make-entries.sh`验证隔离配置与集成接线。所有文件先读后改；不加全局豁免。
 - X1：`compose.yaml`、`compose.env.example`、`Makefile`、`README.md`及必要的现有配置使用说明。保持现有dev-up依赖服务行为，应用采用显式profile/入口；非root、APP_ROOT、依赖host、挂载与ready规则同步。
 
 外部耦合约束：保留Go1.27、module路径、gtkit日志栈、错误码/HTTP映射、JWT算法、DB schema、Redis库号/key后缀/TTL与显式前缀回落；不得因“所有error处理”自动重试非幂等操作或改变事务提交含义。
@@ -647,7 +649,7 @@ projectinit当前仅将原文件字节保存在内存，且无条件清理快照
 
 测试夹具清理失败以t.Errorf报告并继续其他清理； setup/原本应成功的同步操作以有信息的Fatalf阻止无效后续；故意拒绝/取消/已关闭等按用例断言期望。无error返回值不虚构错误，现有不变量断言单独核对。能力探测把清理错误与“不具备能力”的跳过结果分开，前者使测试失败。
 
-阶段5定向回归补充文件：已确认存在的`internal/middleware/maxbody_test.go`、`internal/pkg/credential/password_test.go`、`internal/pkg/console/console_test.go`、`internal/plugin/builtin/mysql/mysqlversion_test.go`、`pkg/ratelimit/probe_cleanup_test.go`、`pkg/ratelimit/README.md`。验证双关闭错误可见、掩护哈希损坏与正常不匹配区分、console终结日志、版本整数溢出原因保留，以及清理错误只通知一次且不降级可用能力。
+阶段5定向回归补充文件：已确认存在的`internal/middleware/maxbody_test.go`、`internal/pkg/credential/password_test.go`、`internal/pkg/console/console_test.go`、历史路径「internal/plugin/builtin/mysql/mysqlversion_test.go」（已迁移或移除）、`pkg/ratelimit/probe_cleanup_test.go`、`pkg/ratelimit/README.md`。验证双关闭错误可见、掩护哈希损坏与正常不匹配区分、console终结日志、版本整数溢出原因保留，以及清理错误只通知一次且不降级可用能力。
 
 F08接线细化（待实施）：`make test-integration`先单独运行cmd中无连接的TestPluginIntegrationPrerequisites元数据检查，通过后才并发执行真实集成包，避免其他包在cmd拒绝配置根之前已经连接。现有`scripts/check-make-entries.sh`以临时Go模块实跑“cmd fixture存在→强制失败→移除cmd fixture后恢复”并断言PLUGIN_INTEGRATION=1；stub仅用来观察其他Make入口，不替代这个真实Go集成接线验证。外置APP_ROOT、项目根和配置symlink逃逸矩阵写在既有cmd集成测试文件，不改真实配置。
 
@@ -695,7 +697,7 @@ X1风险/回滚：UID不匹配或0600钥不可读时停止，不放宽私钥；h
 
 ### 阶段6：进行中
 
-当前先执行与容器许可无关的双workspace质量门禁、构建、调用方回审与报告证据整理；实际结果完成后逐项记录。当前工作区另有并行通知专项文件`docs/notification-channels-plan.md`、`internal/pkg/news/contracts.go`、`internal/plugin/notification.go`，本任务不读取其正文或修改，已保存发现时hash；整仓命令覆盖当时工作树，不将其实现归为本轮产出。
+当前先执行与容器许可无关的双workspace质量门禁、构建、调用方回审与报告证据整理；实际结果完成后逐项记录。当前工作区另有并行通知专项文件`docs/notification-channels-plan.md`、`internal/pkg/news/contracts.go`、历史路径「internal/plugin/notification.go」（已迁移或移除），本任务不读取其正文或修改，已保存发现时hash；整仓命令覆盖当时工作树，不将其实现归为本轮产出。
 
 阶段6调用方回审的说明修正：已读`internal/module/auth/application/ports.go`仍把CompareWithDummy注释写成“恒返回不匹配”，但接口既有饱和/取消及本轮损坏哈希都可返回基础设施失败；仅修正文档契约。`cmd/server.go`的newServerCmd说明需对齐本轮已实现的banner先验写出顺序；两处仅注释，随后常规受影响门禁统一覆盖，不新增运行行为。
 
@@ -719,7 +721,7 @@ X1风险/回滚：UID不匹配或0600钥不可读时停止，不放宽私钥；h
 
 补齐步骤：①计划保存/回读及源码库存；②缺失错误的逐项处理（测试中意外错误令测试失败；由标准库保证不失败的写法也显式检查，不用空分支）；③临时编译四工具，正常运行及以只读文件描述符注入输出失败，验证非零和哨兵不变；④独立脚本严格errcheck、应用sonic/scaffold/integration lint、双workspace make check和生成器、受影响完整race。新源文件先按真实库存登记，再编辑；任一失败根因未知或须修改冻结部署/安全判定规则时停止。交付为补齐后的源码/门禁、初次与最终退出码及报告范围说明；回滚仅撤本段工具/检查差异，不恢复被忽略错误为“通过”。原生功能已完成的证据保留，若进一步改变应用行为须重建并复测受影响真实接口。
 
-补齐实际库存（本轮strict-complete.yml，尚未整改）：应用22条，security工具8条，docrefs工具25条，packagevars工具7条，clean工具0条；62条诊断不能等同62个可发生缺陷，多数应用新增命中是标准库Builder/Buffer/HMAC保证不失败的写接口。应用文件：`internal/middleware/logger.go`、`internal/module/ai/application/service_test.go`、`internal/module/ai/transport/http/handler_test.go`、`internal/pkg/upload/background_error_test.go`、`internal/plugin/builtin/logging/plugin_test.go`、`internal/router/panic_observability_test.go`、`internal/runtime/module/ai/adapters.go`、`internal/scaffold/module.go`、`pkg/ratelimit/key.go`。沿用现有返回签名，能返回的写失败加入现有error；仅返回字符串的内存key拼接用等价字符串连接去掉无意义的error接口，HMAC的固定标准库实现若违背其nil-error契约则作为内部不变量失败panic（现有HTTP Recovery处理），绝不返回空key或未加密替代。工具的输出/清理检查须让defer实际执行：以main最后决定退出，内部正常返回error或仅向本工具边界传播受控失败，不在资源拥有函数中os.Exit跳过清理；主错与清理错并存保留。以上仍待实际实施及验证。
+补齐实际库存（本轮strict-complete.yml，尚未整改）：应用22条，security工具8条，docrefs工具25条，packagevars工具7条，clean工具0条；62条诊断不能等同62个可发生缺陷，多数应用新增命中是标准库Builder/Buffer/HMAC保证不失败的写接口。应用文件：`internal/middleware/logger.go`、`internal/module/ai/application/service_test.go`、`internal/module/ai/transport/http/handler_test.go`、`internal/pkg/upload/background_error_test.go`、历史路径「internal/plugin/builtin/logging/plugin_test.go」（已迁移或移除）、`internal/router/panic_observability_test.go`、`internal/runtime/module/ai/adapters.go`、`internal/scaffold/module.go`、`pkg/ratelimit/key.go`。沿用现有返回签名，能返回的写失败加入现有error；仅返回字符串的内存key拼接用等价字符串连接去掉无意义的error接口，HMAC的固定标准库实现若违背其nil-error契约则作为内部不变量失败panic（现有HTTP Recovery处理），绝不返回空key或未加密替代。工具的输出/清理检查须让defer实际执行：以main最后决定退出，内部正常返回error或仅向本工具边界传播受控失败，不在资源拥有函数中os.Exit跳过清理；主错与清理错并存保留。以上仍待实际实施及验证。
 
 补齐已执行：stage6-complete-lint-fixed（make tool，应用及4独立脚本，内置豁免已禁用）exit0；stage6-supplement-race受影响完整9组包/子包exit0。三个工具改main最终处理退出，内部return保证defer清理和Join；正常判据/文本/参数未改。stage6-tool-output-contracts首轮最后一项误套clean具体退出码，已按原契约只修夹具，ERR-066记实；修后26项完整exit0，包含三个旧工具只读stdout却exit0的真实反证、新工具stdout失败exit1、三个新main的stderr失败exit2及clean保持exit1，外部哨兵不变、self-test目录残留0。最终双口径/生成器与扩展标签lint仍待下轮命令实际完成，不用上述局部结果替代。
 

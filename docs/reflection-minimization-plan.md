@@ -1,5 +1,7 @@
 # 非必要反射清理方案与实施记录
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 日期：2026-10-22（Asia/Taipei）。来源：用户指出 `internal/pkg/log/logger.go:109–115`，要求整个项目能不用反射的地方坚决不用。本次独立处理该要求，不进入通知通道方案阶段 2。
 
 当前状态：R1–R3 已完成，命令、证据及剩余反射边界见本文执行记录。
@@ -16,11 +18,11 @@
 
 | 文件 | 具体改动 | 兼容与验证依据 |
 |---|---|---|
-| `internal/core/plugin_registry_test.go` | 3 处 DeepEqual 改为 slices.Equal，删除 reflect import | 均为非空期望的字符串事件序列；保留长度、顺序、内容要求；不更改并发夹具或生命周期实现 |
+| 历史路径「internal/core/plugin_registry_test.go」（已迁移或移除） | 3 处 DeepEqual 改为 slices.Equal，删除 reflect import | 均为非空期望的字符串事件序列；保留长度、顺序、内容要求；不更改并发夹具或生命周期实现 |
 | `internal/bootstrap/workers_rollback_test.go` | 1 处字符串序列比较改 slices.Equal | 保留逆序和不触碰旧回调的断言，不更改回滚实现 |
 | `internal/pkg/news/news_test.go` | 1 处图片通知目标序列比较改 slices.Equal | 保留非空目标、顺序和消息内容要求，不改发送行为 |
 | `internal/router/middleware_order_test.go` | 1 处比较改 slices.Equal | 保留中间件精确顺序；用于取函数身份的反射不改 |
-| `internal/plugin/builtin/httpmiddleware/plugin_test.go` | 1 处比较改 slices.Equal | 保留四种组合的精确中间件顺序与配置冻结校验 |
+| 历史路径「internal/plugin/builtin/httpmiddleware/plugin_test.go」（已迁移或移除） | 1 处比较改 slices.Equal | 保留四种组合的精确中间件顺序与配置冻结校验 |
 | `internal/runtime/module/ai/module_test.go` | 删除 reflect.TypeOf/typeName，改为对构造后 Chat 发出的请求检查路径与认证头 | v2.15.0 的两种实现均为未导出类型，不能直接类型断言；用注入 fake RoundTripper 截获请求，无外网、无真实 API Key。校验 DeepSeek 的 OpenAI 路径与 Anthropic 原生路径，不以类型名代替协议行为 |
 | `internal/platform/data/logcaller.go` | GORM 命名空间固定为 `gorm.io/`；移除对应 TypeFor 和无用 import；项目 adapterPackage 直接初始化 | 当前导入路径为 gorm.io/gorm，旧表达式取首个斜线前缀的结果逐字相同；项目包路径仍从类型派生，保持 gonew、trimpath、replace 兼容，不硬编码项目 module 路径 |
 | `internal/pkg/log/logger.go` | 仅解释 Install 中反射用于 typed nil 且不在写日志路径 | 保留 ErrInvalidLogger、任意 Logger 实现、绑定/释放、原子状态和原有判空结构；既有 TestLoggerBindingOwnershipAndNil 回归验证 |

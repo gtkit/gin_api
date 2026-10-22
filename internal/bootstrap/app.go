@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
-	"github.com/gtkit/gin-api/internal/plugin"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
@@ -27,9 +27,8 @@ type Options struct {
 	// 为 nil 时 App 自建一个（单测与不接信号的命令走这条路），行为不变。
 	Shutdown *ShutdownCoordinator
 
-	// RegisterPlugins lets the process entry point choose concrete compile-time
-	// implementations. It is required; registration performs no component I/O.
-	RegisterPlugins PluginRegistrar
+	// factories is a package-private acquisition seam for lifecycle tests.
+	factories *runtimeFactories
 }
 
 // defaultWorkerShutdownTimeout 是 worker drain 的独立预算。
@@ -53,9 +52,9 @@ type App struct {
 	// outbound 持有出站 HTTP 客户端；关停时释放空闲连接，否则它们会一直
 	// 挂到对端超时——滚动重启时旧实例仍占着下游的连接配额。
 	outbound *httpclient.Downstreams
-	// cache 是 Runtime Cache 插件提供的 typed view；关闭权属于插件注册器。
+	// cache 是 Runtime 持有的缓存提供的 typed view；关闭权属于 Runtime。
 	// App 只保留它以兼容现有装配结构，不直接调用 Close。
-	cache plugin.ResponseCache
+	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端；关停时释放它的连接。

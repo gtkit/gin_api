@@ -9,7 +9,7 @@ import (
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	"github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gin-api/internal/testutil"
 
 	"github.com/gtkit/logger/v2"
@@ -117,7 +117,7 @@ func TestSDKDrainWaitsForItsOwner(t *testing.T) {
 	applog.HErrorf("stuck alert")
 	waitClosed(t, block.entered, "messager did not receive alert")
 	runtime := &Runtime{drain: func(context.Context) error { drain(); return nil }}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	entered, done := make(chan struct{}), make(chan error, 1)
 	go func() { close(entered); done <- runtime.DrainLogs(ctx) }()
@@ -164,7 +164,7 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 			server := newTestHTTPServer()
 			app := newTestApp(t, server, tt.workers...)
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			errCh := make(chan error, 1)
 			go func() { errCh <- app.Run(ctx) }()
@@ -183,19 +183,16 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 	}
 }
 
-type loggingTestConfiguration struct{}
-
-func (loggingTestConfiguration) Value() (*config.Config, error) { return &config.Config{}, nil }
 func installTestLogger(t *testing.T, inst *logger.Logger) func() {
 	t.Helper()
-	p := defaultlogging.New(defaultlogging.Options{Configuration: loggingTestConfiguration{}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return inst, nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) {
+	owner, err := logging.Open(t.Context(), logging.Options{Config: &config.Config{}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return inst, nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) {
 		return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
 	}})
-	if err := p.Init(t.Context()); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	drain := func() {
-		if err := p.Stop(context.Background()); err != nil {
+		if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)
 		}
 	}

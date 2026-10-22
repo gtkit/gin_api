@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	defaultconfig "github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 
