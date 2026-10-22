@@ -33,7 +33,9 @@ func TestSharedNotificationRegistrationSendsThroughDefaultRobot(t *testing.T) {
 		mu.Lock()
 		messages = append(messages, message.Content.Text)
 		mu.Unlock()
-		_, _ = w.Write([]byte(`{"code":0,"msg":"success"}`))
+		if _, err := w.Write([]byte(`{"code":0,"msg":"success"}`)); err != nil {
+			t.Error(err)
+		}
 	}))
 	t.Cleanup(server.Close)
 	var loads int

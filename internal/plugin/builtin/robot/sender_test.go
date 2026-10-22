@@ -32,7 +32,9 @@ func TestSenderPreservesPlatformSigningAndPerCallTarget(t *testing.T) {
 				if strings.Contains(strings.ToLower(platform), "dingtalk") && r.URL.Query().Get("sign") == "" {
 					t.Error("missing dingtalk signature")
 				}
-				_, _ = w.Write([]byte(`{"code":0,"errcode":0,"msg":"ok","errmsg":"ok"}`))
+				if _, err := w.Write([]byte(`{"code":0,"errcode":0,"msg":"ok","errmsg":"ok"}`)); err != nil {
+					t.Error(err)
+				}
 			}))
 			s, cleanup, err := openSender(t.Context(), config.NewsConfig{Platform: platform, Secret: "test-secret"})
 			if err != nil {

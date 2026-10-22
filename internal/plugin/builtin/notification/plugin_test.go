@@ -69,9 +69,9 @@ func TestNotificationRegistryCompositionAndOwnership(t *testing.T) {
 	var targets []string
 	var composite *notification.Plugin
 	cleanup := func(name string) func(context.Context) error {
-		return func(context.Context) error {
+		return func(ctx context.Context) error {
 			closes[name]++
-			if err := composite.Notify(t.Context(), "late", "body"); !errors.Is(err, news.ErrStopped) {
+			if err := composite.Notify(ctx, "late", "body"); !errors.Is(err, news.ErrStopped) {
 				t.Errorf("notification still admitted during %s cleanup: %v", name, err)
 			}
 			return nil
@@ -184,7 +184,9 @@ func TestNotificationRejectsConfiguredMissingAndTypedNilProviders(t *testing.T) 
 			if err := p.Start(t.Context()); err == nil {
 				t.Fatal("failed Init could start")
 			}
-			_ = p.Stop(t.Context())
+			if err := p.Stop(t.Context()); err != nil {
+				t.Error(err)
+			}
 		})
 	}
 }
@@ -303,7 +305,9 @@ func TestRegistryRollsBackPartialFactoryAndUnstartedChannels(t *testing.T) {
 			if !startFailure && smsOpened != 0 {
 				t.Fatal("factory after failed predecessor ran")
 			}
-			_ = registry.Stop(t.Context())
+			if err := registry.Stop(t.Context()); (!startFailure && !errors.Is(err, closeFailure)) || (startFailure && err != nil) {
+				t.Errorf("cached cleanup=%v", err)
+			}
 			if robotClosed != 1 || mailClosed != 1 {
 				t.Fatal("rollback cleanup repeated")
 			}
@@ -387,7 +391,11 @@ func TestCompositeAndChannelKeepNonCooperatingResources(t *testing.T) {
 			}
 		}
 		var workers sync.WaitGroup
-		workers.Go(func() { _ = p.Notify(t.Context(), "", "body") })
+		workers.Go(func() {
+			if err := p.Notify(t.Context(), "", "body"); !errors.Is(err, context.Canceled) {
+				t.Errorf("canceled notify=%v", err)
+			}
+		})
 		<-entered
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()

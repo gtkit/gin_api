@@ -16,7 +16,7 @@
 // ── 覆盖范围 ────────────────────────────────────────────────────────────
 // 扫描**被 git 跟踪的** `*.md`，检查两类引用：
 //
-//  1. Markdown 行内链接 `[文字](相对路径)` —— 按 Markdown 语义相对文档所在目录解析。
+//  1. Markdown 行内链接：相对路径按文档目录解析，绝对文件路径直接检查目标。
 //  2. 反引号里的仓内路径 `docs/foo.md` —— 先按仓库根解析，再按文档所在目录解析，
 //     两者都不存在才算失败。
 //
@@ -365,7 +365,7 @@ func stripAnchor(s string) string {
 
 // resolves 报告引用是否指向一个真实存在的路径。
 //
-// 链接按 Markdown 语义只相对文档目录解析；反引号裸路径两种写法都常见，
+// 相对链接按文档目录解析，绝对链接直接检查目标；反引号裸路径两种写法都常见，
 // 因此先按仓库根再按文档目录试——只有两者都不存在才算失败。
 func resolves(root string, r ref) bool {
 	target := stripAnchor(r.text)
@@ -373,6 +373,10 @@ func resolves(root string, r ref) bool {
 		return true // 只有锚点，文件部分为空
 	}
 	target = strings.TrimSuffix(target, "/")
+	if filepath.IsAbs(target) {
+		_, err := os.Lstat(target)
+		return err == nil
+	}
 	docDir := filepath.Dir(r.doc)
 
 	candidates := []string{filepath.Join(root, docDir, target)}
@@ -452,7 +456,9 @@ func selfTest() (err error) {
 	}
 
 	if err := write("docs/probe.md", strings.Join([]string{
-		"[dead link](missing.md)",               // 应报：链接目标不存在
+		"[dead link](missing.md)", // 应报：链接目标不存在
+		"[absolute live](" + filepath.Join(dir, "docs/real.md") + "#section)",
+		"[absolute dead](" + filepath.Join(dir, "docs/absent.md") + ")",
 		"[live link](real.md)",                  // 不应报
 		"see `docs/missing.md` for details",     // 应报：反引号裸路径，仓库根解析失败
 		"see `docs/real.md` for details",        // 不应报：仓库根解析成功
@@ -495,8 +501,9 @@ func selfTest() (err error) {
 		got[r.kind+" "+r.text] = true
 	}
 
-	wantDead := []string{"link missing.md", "path docs/missing.md", "link gone.md#sec"}
+	wantDead := []string{"link missing.md", "path docs/missing.md", "link gone.md#sec", "link " + filepath.Join(dir, "docs/absent.md")}
 	wantAlive := []string{
+		"link " + filepath.Join(dir, "docs/real.md") + "#section",
 		"link real.md", "path docs/real.md", "path scripts/real.sh",
 		"path internal/pkg/log.AccessLog()", "path gorm.io/gorm",
 		"path cmd/{a,b}.go", "path docs/*.md",

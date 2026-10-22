@@ -35,7 +35,11 @@ func New(options Options) *Plugin {
 	}
 	report := options.Report
 	options.Report = func(delivery news.Delivery) {
-		defer func() { recover() }()
+		defer func() {
+			if recover() != nil {
+				return
+			}
+		}()
 		report(delivery)
 	}
 	return &Plugin{options: options}

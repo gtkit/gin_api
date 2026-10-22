@@ -4,7 +4,7 @@
 
 > 当前授权：用户已要求“把剩下所有的阶段都做完了，要保证代码能够安全高效稳定的运行在企业级线上”。阶段 1–2 的历史验收保留；本轮执行原编号阶段 3–5。
 >
-> lint、脚本 lint、vet、modern、race 与覆盖率继续暂停；全部功能完成后另行询问，只有明确允许才执行。普通相关测试显式 -vet=off；不以 make check 间接触发。真实供应商发送、生产操作、容量结论、提交发布不因本次实现授权自动获得许可。
+> 全部功能完成后，用户已单独允许双环境 lint、脚本 lint、vet、modern、全量 race 与覆盖率，当前正在完成门禁；另已批准仅修复 scripts/check-doc-refs.go 的绝对路径误判，见 19.5–19.6。真实供应商发送、生产操作、容量结论、提交发布仍未获授权。
 
 ## 1. 需求来源、目标与范围
 
@@ -706,7 +706,7 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 
 - 首轮 workspace lint 与 locked lint 并行争用 golangci-lint 共享锁，真实 exit 3；等待 locked runner 完成后仅串行重跑 workspace，真实 exit 0。没有删除锁、绕过检查或改 lint 配置。workspace 初次矩阵汇总进程仍为 exit 1，locked 为 exit 0；最新逐项结果通过不覆盖最初失败记录。ERR-20261022-059 已记录原因、防复发规则及重跑证据并关闭。
 - 架构脚本最初在既有 `internal/pkg/httpcache/envelope.go` 命中缺少 Unwrap，双环境 exit 1，期间停止将阶段验收判为通过。本阶段没有写此文件；随后实际哈希变化、源码已出现 `Unwrap() http.ResponseWriter`，项目另有 ERR-20261022-058 记录该问题和处理。只在观察到真实源码变化后复查，两环境 exit 0；不把该整改归为本阶段交付，也不代为关闭其错误记录。
-- 读取 OpenSpec 配置时误用不存在的 `openspec/config.yaml`，sed 明确失败；组合命令末尾的成功不能证明该读取成功。已记录并关闭 ERR-20261022-056，改用实际文件清单与 CLI 输出，不创建替代配置。
+- 读取 OpenSpec 配置时误用不存在的配置文件（openspec 目录中的 config.yaml），sed 明确失败；组合命令末尾的成功不能证明该读取成功。已记录并关闭 ERR-20261022-056，改用实际文件清单与 CLI 输出，不创建替代配置。
 - 不新增仅重复接口定义的测试；现有回归和编译检查覆盖本阶段声明的兼容影响。没有新生命周期实现，所以没有声称 A08–A14 的取消、在途、迟到回调或资源释放安全已经得到证明。
 - 本阶段不运行完整 make check、覆盖率、integration/scaffold 构建标签、回退演练、真实供应商或生产容量测试；这些不是本阶段通过项。未操作数据库/容器、未读取真实凭据或发送真实通知、未提交或发布。其他任务的开放错误及全仓门禁状态不由本记录覆盖。
 
@@ -755,7 +755,7 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 
 | 步骤 | 文件及具体职责 | 验收与停止条件 |
 |---|---|---|
-| 2.1 | 新增 `internal/plugin/notification_channel.go`：供三个通道及通知组合复用的实例级资源状态，无注册器或后台工作循环；Init/Start/Stop、同锁接纳与归还、完成 channel 等待、自有清理函数、迟到工厂结果清理。新增 `builtin/robot/{plugin,sender}.go`、`builtin/mail/plugin.go`、`builtin/sms/plugin.go`：依赖 ConfigurationProvider，实例级 Opener 返回 sender 与可选 context 清理函数，默认适配现有 SDK；按已有配置门控。 | New 不读配置、不调工厂；同一实例只构造一次；失败/取消保留原错误及清理错误。Stop 超时但在途未退出时返回未排空错误，保留资源，不启动遗弃等待 goroutine。 |
+| 2.1 | 新增 `internal/plugin/notification_channel.go`：供三个通道及通知组合复用的实例级资源状态，无注册器或后台工作循环；Init/Start/Stop、同锁接纳与归还、完成 channel 等待、自有清理函数、迟到工厂结果清理。新增 `builtin/robot/{plugin,sender}.go`、`internal/plugin/builtin/mail/plugin.go`、`internal/plugin/builtin/sms/plugin.go`：依赖 ConfigurationProvider，实例级 Opener 返回 sender 与可选 context 清理函数，默认适配现有 SDK；按已有配置门控。 | New 不读配置、不调工厂；同一实例只构造一次；失败/取消保留原错误及清理错误。Stop 超时但在途未退出时返回未排空错误，保留资源，不启动遗弃等待 goroutine。 |
 | 2.2 | 新增 `internal/pkg/news/delivery.go`：注入式 Options、发送结果分类、仅含通道/结果/耗时的诊断、边界 sender 验证与 context 扇出。修改 `news.go`：保留旧构造入口及图片辅助方法；Warn 委托同一 context 核心，复制目标、逐次复制参数，继续固定顺序和 10 秒单次预算。 | 旧有效输入字节/字段不变；默认 URL 空跳过；显式 URL 不影响邮件/SMS。逐 sender 隔离 panic/错误，诊断不拼接 SDK 原始错误或敏感负载。 |
 | 2.3 | `internal/plugin/notification.go` 增加三个借用 provider 契约。新增 `builtin/notification/{plugin,drain}.go`：Init 验证已启用配置对应 provider，构造唯一注入式 Notifier；只发布受生命周期保护的通知能力，BindDrain 只注册取消回调，release 幂等并等待自身回调。 | 生命周期不保存 Init context；组合不关闭借用 sender；Stop 先关闭接纳并取消在途。取消/解除/Stop 的屏障用例证明组件级行为，真实 SDK 日志 owner 接线不在本阶段。 |
 | 2.4 | 对上述文件新增同包或外部 `*_test.go`，包括注册器回滚三通道轨迹、工厂部分结果/typed nil/取消、发送/关闭竞争、未排空资源保留、独立超时、目标快照、诊断脱敏、drain 解除与迟到回调。 | 两环境相关普通测试与 build；逐项记录实际结果。未运行 race 不宣称已通过数据竞争检测；未接日志/两入口的 A09/A10/A15/A16/A17 总体场景仍待阶段 3/5。 |
@@ -893,3 +893,15 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 计划执行原 make check（含 scaffold 验证口径和完整 race 覆盖率）：workspace 与 GOWORK=off 分别执行，覆盖率输出写到独立证据目录，不覆盖旧 profile。已读取 Makefile 的 check 依赖、coverage、hook/入口自检脚本：不包含真实数据库、镜像拉取/构建或容器创建；不执行 release-check/check-restricted/test-integration。保留本机锁定 golangci-lint 2.14.0，临时 PATH 包装仅在 run 参数增加已核实官方 --allow-serial-runners，等待同机工具锁，不删除锁、不终止其他任务、不降低检查或替换退出码。单项失败保留原日志，修复本期引入问题后按实际影响复验。性能基准只量化现有日志微基准，不承诺生产容量。
 
 19.5 补救记录：首轮 make check 在包级变量传感器停止（exit2，原始日志保留），notification/plugin.go 中两处空赋值触发其 var _ 名称匹配。5.2 范围内消除该写法：直接 recover 保持诊断 panic 隔离；Warn 显式判定 Notify 错误并结束，诊断出口不重复。检查器、白名单、接口和资源协议不改；先重跑相关普通回归，再继续完整门禁。
+
+19.5 文档门禁：check-doc-refs 报告 110 条引用，3 条属于本文并已修正；其他 107 条属于三个与基线 SHA256 一致的历史文档（historical-doc-ref-scope.json）。不扩大到改写其他任务文档或传感器，原 make check 的 exit2 保留。后续显式运行剩余的镜像声明/发布接线/元信息/钩子/构建上下文/Make 入口自检、lint（含脚本）、vet、modern、全量 race 覆盖率；这些单项通过也不冒充完整 make check 通过。
+
+### 19.6 文档检查器的待授权补救方案
+
+实际核对：其余 107 个绝对路径目标全部存在；脚本将绝对路径再次拼接到 repo/doc 目录，导致误报。候选变更仅限 scripts/check-doc-refs.go：绝对目标直接 Lstat，保留相对目标原算法；自检新增“存在的绝对路径含锚点”与“不存在的绝对路径”两项，证明不漏检。不会改历史文档、白名单或运行时业务。
+
+候选已在独立证据目录形成 doc-ref-fix-preview.diff 与 check-doc-refs-preview.go。只运行临时候选：doc-preview-selftest exit0（4 个不存在目标被检出、17 种合法形式无误报）；doc-preview-current exit0（39 份文档、原有 2 条豁免）。实际仓库脚本尚未修改。因脚本不在原通知实现文件范围内，等待用户对这一个文件的扩围授权；获准后先回读本段/错误记录，再应用已验证补丁，并重跑脚本 lint 与完整门禁。不获准则保留全量门禁阻断。
+
+19.5 lint 补救（修改前）：真实报告 16 项，修正通知范围内的 error/recover 丢弃及测试回调 context；五个由独立服务 lifetime 引起的 contextcheck 报告逐行说明豁免，保留 life 不继承 Init/请求的设计。继续全部 lint，不改全局配置。Stop/Send 测试分别断言 nil、原清理错误或 context.Canceled，不以无条件忽略凑通过。
+
+19.6 授权更新：用户已明确同意“修复检查器并完成全量门禁”。已回读本段、全局规则和最新错误记录；现在只应用上述已验证的 scripts/check-doc-refs.go 补丁及两项自检，原来 107 个引用不作修改。完成后执行完整双环境门禁。

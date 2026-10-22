@@ -60,8 +60,8 @@ func (c *NotificationChannel[S]) Init(ctx context.Context, open func(context.Con
 	c.mu.Unlock()
 
 	openCtx, cancel := context.WithCancelCause(ctx)
-	release := linkNotificationCancel(life, cancel)
-	if cause := context.Cause(life); cause != nil {
+	release := linkNotificationCancel(life, cancel) //nolint:contextcheck // The service lifetime must outlive Init/request cancellation.
+	if cause := context.Cause(life); cause != nil { //nolint:contextcheck // Inspect the independently owned service lifetime, not the caller context.
 		cancel(cause)
 	}
 	client, configured, err := openNotification(openCtx, open)
@@ -169,7 +169,7 @@ func (c *NotificationChannel[S]) Use(ctx context.Context, send func(context.Cont
 	case ctx.Err() != nil:
 		err = ctx.Err()
 	case c.life.Err() != nil:
-		err = context.Cause(c.life)
+		err = context.Cause(c.life) //nolint:contextcheck // Service cancellation is independent of this send's caller.
 	}
 	if err != nil {
 		c.mu.Unlock()
@@ -195,9 +195,9 @@ func (c *NotificationChannel[S]) Use(ctx context.Context, send func(context.Cont
 
 	callCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	release := linkNotificationCancel(life, cancel)
+	release := linkNotificationCancel(life, cancel) //nolint:contextcheck // The service lifetime must outlive Init/request cancellation.
 	defer release()
-	if cause := context.Cause(life); cause != nil {
+	if cause := context.Cause(life); cause != nil { //nolint:contextcheck // Inspect the independently owned service lifetime, not the caller context.
 		cancel(cause)
 	}
 	if err := callCtx.Err(); err != nil {

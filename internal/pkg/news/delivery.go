@@ -195,7 +195,11 @@ func deliveryResult(err error) string {
 
 func (n *Notifier) emit(delivery Delivery) {
 	// A diagnostic callback is not allowed to interrupt the remaining channels.
-	defer func() { _ = recover() }()
+	defer func() {
+		if recover() != nil {
+			return
+		}
+	}()
 	if n.report != nil {
 		n.report(delivery)
 	}

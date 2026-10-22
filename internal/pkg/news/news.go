@@ -38,7 +38,9 @@ func (n *Notifier) Warn(url string, args ...string) {
 	}
 
 	// Per-channel failures have already been reported by WarnContext.
-	_ = n.WarnContext(context.Background(), url, args...)
+	if err := n.WarnContext(context.Background(), url, args...); err != nil {
+		return // Each failed channel has already emitted a non-alert diagnostic.
+	}
 }
 
 func (n *Notifier) ErrRecord(msg string) {

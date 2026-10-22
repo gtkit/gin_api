@@ -127,7 +127,9 @@ func TestNotificationChannelPartialFactoryResults(t *testing.T) {
 			if !tc.panic && (!errors.Is(err, closeErr) || closes != 1) {
 				t.Fatalf("cleanup err=%v closes=%d", err, closes)
 			}
-			_ = channel.Stop(t.Context())
+			if err := channel.Stop(t.Context()); (!tc.panic && !errors.Is(err, closeErr)) || (tc.panic && err != nil) {
+				t.Errorf("cached cleanup=%v", err)
+			}
 			if closes > 1 {
 				t.Fatalf("cleanup repeated %d times", closes)
 			}
@@ -221,7 +223,9 @@ func TestNotificationChannelUncooperativeSendRetainsResource(t *testing.T) {
 		}
 		var workers sync.WaitGroup
 		workers.Go(func() {
-			_ = channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.Send(ctx, "", "text") })
+			if err := channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.Send(ctx, "", "text") }); !errors.Is(err, context.Canceled) {
+				t.Errorf("canceled send=%v", err)
+			}
 		})
 		<-entered
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
