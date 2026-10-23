@@ -291,7 +291,10 @@ func TestAppRunOptionalWorkerFailureDoesNotStopProcess(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after optional failure and cancellation: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancellation")
 	}
@@ -372,7 +375,10 @@ func TestAppRunRequiredOneShotBlocksHTTP(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancellation")
 	}
@@ -513,7 +519,10 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 			}
 
 			select {
-			case <-errCh:
+			case err := <-errCh:
+				if (err == nil) != tt.driveShutdown {
+					t.Fatalf("Run error = %v, expected normal shutdown = %v", err, tt.driveShutdown)
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("Run did not return")
 			}

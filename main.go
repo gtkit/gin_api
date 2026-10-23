@@ -6,8 +6,6 @@ import (
 	"os"
 
 	"github.com/gtkit/gin-api/cmd"
-
-	"github.com/gtkit/json"
 )
 
 // Linker-owned build inputs. Version remains solely in version.go.
@@ -15,13 +13,6 @@ var (
 	BuildCommit = "unknown"
 	BuildTime   = "unknown"
 )
-
-// 全局启用 gtkit/json 的宽松解码（字符串/数字互转等容错）。
-// 进程级注册，必须在任何 JSON 解析前执行；原挂在顶层 config 包 init，
-// 随 config embed 的移除迁至程序入口。
-func init() {
-	json.RegisterFuzzyDecoders()
-}
 
 func main() {
 	// 不手工设置 GOMAXPROCS：Go 1.25+ 运行时会自动感知容器 cgroup CPU 限额并动态跟随。

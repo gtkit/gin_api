@@ -173,7 +173,9 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 				waitClosed(t, server.listenCalled, "server did not start")
 				cancel()
 			}
-			<-errCh
+			if err := <-errCh; (err != nil) != (tt.wantAlerts > 0) {
+				t.Fatalf("Run error = %v, expected error exit = %v", err, tt.wantAlerts > 0)
+			}
 
 			drain()
 			if got := countContaining(capture.snapshot(), "process exiting with error"); got != tt.wantAlerts {

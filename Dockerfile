@@ -2,7 +2,7 @@
 # 构建阶段：golang:1.27 + 静态编译
 # 依赖层缓存：先 COPY go.mod/go.sum 下载依赖，源码变更不重复拉依赖。
 # ============================================================================
-FROM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
+FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 # APP_NAME 决定 builder 阶段的产物名，来源是 project.mk（应用身份的唯一来源），
 # 由 `make image` 经 --build-arg 传入。它只在本阶段生效——容器内路径固定，见 stage 2。
@@ -29,7 +29,7 @@ RUN test -n "$APP_NAME" || { echo "APP_NAME build-arg is required (see project.m
 
 # CGO_ENABLED=0：纯 Go 依赖（gorm mysql 驱动无 cgo），产出静态二进制；
 # -trimpath 去除构建机路径，-s -w 去符号表减小体积。
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.BuildCommit=${BUILD_COMMIT} -X main.BuildTime=${BUILD_TIME}" -o "/out/${APP_NAME}" .
+RUN CGO_ENABLED=0 GOOS=linux go build -tags=sonic -trimpath -ldflags="-s -w -X main.BuildCommit=${BUILD_COMMIT} -X main.BuildTime=${BUILD_TIME}" -o "/out/${APP_NAME}" .
 
 # ============================================================================
 # 运行阶段：alpine + tzdata（application.timezone 需要）+ CA 证书（HTTPS 出站）
@@ -42,11 +42,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.BuildCom
 #   -v <RootPath>/config/pem:/app/config/pem:ro
 #   -v <RootPath>/logs:/app/logs
 # ============================================================================
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35
 
-# alpine:3.22 官方镜像标签尚未重新发布含 CVE-2026-14456（openssl QUIC DoS）修复的层，
-# apk 源已提供 3.5.8-r0，显式钉版本升级。
-RUN apk add --no-cache --upgrade libssl3=3.5.8-r0 libcrypto3=3.5.8-r0 \
+# Alpine 3.24 当前仓库的 OpenSSL 安全补丁版本；同步升级时核对该分支 APKINDEX。
+RUN apk add --no-cache --upgrade libssl3=3.5.9-r0 libcrypto3=3.5.9-r0 \
     && apk add --no-cache tzdata ca-certificates \
     && addgroup -S app && adduser -S -G app app
 

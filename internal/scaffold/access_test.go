@@ -3,6 +3,7 @@
 package scaffold
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,7 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 	}{
 		{name: "public", public: true, want: "g.GET(\"\", handler.List)"},
 		{name: "authenticated", access: AccessOptionAuthenticated, want: "g.Use(deps.Auth)"},
+		{name: "optional", access: AccessOptionOptional, want: "g.Use(deps.OptionalAuth)"},
 		{name: "admin", access: AccessOptionAdmin, want: `deps.Authorize("role.admin")`},
 		{name: "custom", access: AccessOptionCustom, want: `deps.Authorize("module.admin.custom")`},
 	}
@@ -152,6 +154,15 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 
 			assertFileContains(t,
 				root+"/internal/module/admin/transport/http/router.go", tt.want)
+			router, err := os.ReadFile(root + "/internal/module/admin/transport/http/router.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodyCheck := strings.Index(string(router), "g.Use(middleware.NoBody())")
+			accessChecks := strings.Index(string(router), "g.Use(preAuth...)")
+			if bodyCheck < 0 || accessChecks < 0 || bodyCheck > accessChecks {
+				t.Fatal("generated GET routes must reject request bodies before rate limiting and authentication")
+			}
 		})
 	}
 }

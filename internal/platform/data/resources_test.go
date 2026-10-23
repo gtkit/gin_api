@@ -2,7 +2,6 @@ package dao
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
@@ -31,7 +30,7 @@ func TestResourcesAccessorsOnZeroValue(t *testing.T) {
 	}
 }
 
-func TestResourcesFromClientsDoesNotOwnPluginClient(t *testing.T) {
+func TestResourcesFromClientsBorrowsDatabaseClient(t *testing.T) {
 	t.Parallel()
 
 	client, _ := newSQLMockOrmxClient(t)
@@ -39,14 +38,8 @@ func TestResourcesFromClientsDoesNotOwnPluginClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResourcesFromClients: %v", err)
 	}
-	if res.Mdb() == nil {
-		t.Fatal("ResourcesFromClients returned a view without the MySQL handle")
-	}
-	if err := res.Close(); err != nil {
-		t.Fatalf("view Close: %v", err)
-	}
-	if client.DB() == nil {
-		t.Fatal("view Close cleared the plugin-owned client")
+	if res.Mdb() != client.DB() {
+		t.Fatal("ResourcesFromClients did not borrow the owner's MySQL handle")
 	}
 	if err := client.Close(); err != nil {
 		t.Fatalf("client.Close: %v", err)
@@ -67,8 +60,6 @@ func (h fakeRedisHandle) GetClient(db int) (*redis.Client, bool) {
 func (h fakeRedisHandle) PoolStats() map[int]*redis.PoolStats { return h.stats }
 
 func (h fakeRedisHandle) HealthCheck(context.Context) error { return h.healthErr }
-
-func (h fakeRedisHandle) DB() *sql.DB { return nil }
 
 func TestResourcesFromClientsBuildsRedisViewAndProbesIt(t *testing.T) {
 	t.Parallel()
@@ -99,9 +90,6 @@ func TestResourcesFromClientsBuildsRedisViewAndProbesIt(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-	if err := resources.Close(); err != nil {
-		t.Fatalf("view Close: %v", err)
 	}
 	if err := redisClient.Close(); err != nil {
 		t.Fatalf("redis client Close: %v", err)

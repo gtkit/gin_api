@@ -10,7 +10,6 @@ import (
 	"time"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
-	"github.com/gtkit/stringx"
 )
 
 var (
@@ -118,7 +117,7 @@ func (n *Notifier) WarnContext(ctx context.Context, target string, args ...strin
 	if strings.TrimSpace(target) == "" {
 		n.emit(Delivery{Channel: "webhook", Result: "disabled"})
 	} else {
-		title := stringx.BuilderJoin([]string{n.envName, " time: ", n.now()})
+		title := n.envName + " time: " + n.now()
 		callArgs := append([]string{title}, args...)
 		result = errors.Join(result, n.deliver(ctx, "webhook", func(callCtx context.Context) error {
 			if n.webhookSender == nil {

@@ -232,17 +232,16 @@ func newProvidersWithBudget(
 		applog.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
-	// 3c. 响应缓存。Runtime 的 Cache 插件已按 Redis 可达性完成初始化；
+	// 3c. 响应缓存。Runtime 已按 Redis 可达性完成缓存初始化；
 	//     这里仅取得它的 typed view，默认关闭时仍产出透传中间件。
 	//     必须先于路由装配：模块在注册只读路由时就要挂上它。Redis 已配置
-	//     但启动期不可达时的禁用降级由插件完成，避免 providers 重复构造和关闭 Store。
-	cachePlugin := runtime.Cache()
-	if cachePlugin == nil {
-		return nil, errors.New("response cache plugin is not initialized")
+	//     但启动期不可达时由 owner 禁用，避免 providers 重复构造和关闭 Store。
+	responseCache := runtime.Cache()
+	if responseCache == nil {
+		return nil, errors.New("response cache is not initialized")
 	}
-	responseCache := cachePlugin
 	inf.cache = responseCache
-	if cachePlugin.Enabled() {
+	if responseCache.Enabled() {
 		applog.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
 			"explicitly mount the middleware, and requests carrying identity always bypass it",
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())

@@ -233,7 +233,7 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
 | 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
 | 数据库连接校验 | `internal/platform/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
-| AI 对话 | `internal/module/ai` + `modules.ai` 配置段 | 基于 `github.com/gtkit/go-llm-provider/v2`，配置驱动多厂商（DeepSeek / 通义千问 / 智谱 / Moonshot / 火山方舟 / 千帆 / 硅基流动）。**填了 api_key 的厂商才启用；一家都没填时整个模块不装配、路由不注册**（启动期提示一次）。含非流式与 SSE 流式两条对话路由、会话管理与厂商列表；每家厂商各带独立熔断与重试 |
+| AI 对话 | `internal/module/ai` + `modules.ai` 配置段 | 基于 `github.com/gtkit/go-llm-provider/v2`，配置驱动多厂商（DeepSeek / 通义千问 / 智谱 / Moonshot / 火山方舟 / 千帆 / 硅基流动）。**填了 api_key 的厂商才启用；一家都没填时整个模块不装配、路由不注册**（启动期提示一次）。含非流式与 SSE 流式两条对话路由、会话管理与厂商列表；每家厂商各带独立熔断与重试。SDK 解析前限制协议响应为 64 MiB，累计正文与推理合计 8 MiB；超限停止读取，不重试，已接受的流前缀按部分结果处理；心跳写失败取消上游，正常与 panic 路径均等待心跳退出 |
 | 对话内容留存 | `ai_conversations` / `ai_messages` 表 | 明文保存用户提问与模型回复（可能含用户输入的个人信息）；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见 `internal/repository/aiconversation/README.md` 与该迁移的注释。`DELETE /ai/conversations/:id` 只软删会话头，不做物理清理 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
 | 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态与失败原因，错误详情截断至 256 字节；**响应体含内网地址与数据库账号名，该端点不得对公网开放**（见下节） |

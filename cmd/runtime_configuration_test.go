@@ -14,7 +14,7 @@ import (
 	"github.com/gtkit/gin-api/internal/diagnostics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/testutil"
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 	"github.com/knadh/koanf/parsers/yaml"
 )
 

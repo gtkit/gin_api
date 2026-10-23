@@ -155,7 +155,7 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 // 只抄前缀而不是全量：日志要回答的是"这次请求大概发了什么"，而全量会让中间件
 // 持有的内存与请求体大小挂钩——一个刚好在上限内的大请求就能撑爆日志缓冲。
 //
-// Close 由内嵌的 ReadCloser 透传（上限中间件的 wrapper Close 幂等）。
+// Close 由内嵌的 ReadCloser 透传至原始请求体。
 type teeBody struct {
 	io.ReadCloser
 	captured []byte

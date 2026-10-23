@@ -50,6 +50,7 @@ func configWithRealKeysForDoctor(t *testing.T) *config.Config {
 
 	dir := t.TempDir()
 	cfg := validConfigForDoctor()
+	cfg.Log.Path = filepath.Join(dir, "logs", "app_client")
 	cfg.JWT.Active.PrivateKeyPath = filepath.Join(dir, "active.private.pem")
 	cfg.JWT.Active.PublicKeyPath = filepath.Join(dir, "active.public.pem")
 	for _, p := range []string{cfg.JWT.Active.PrivateKeyPath, cfg.JWT.Active.PublicKeyPath} {

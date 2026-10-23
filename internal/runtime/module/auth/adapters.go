@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
@@ -187,15 +186,6 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 	return err
 }
 
-// revocationList 把撤销表适配到 application 的端口。
-type revocationList struct {
-	list *tokenstore.RevocationList
-}
-
-func (l revocationList) Revoke(ctx context.Context, tokenID string, expiresAt time.Time) error {
-	return l.list.Revoke(ctx, tokenID, expiresAt)
-}
-
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
@@ -225,7 +215,7 @@ var (
 	_ authapp.CredentialRepository = credentialRepo{}
 	_ authapp.PasswordHasher       = passwordHasher{}
 	_ authapp.RefreshStore         = refreshStore{}
-	_ authapp.RevocationList       = revocationList{}
+	_ authapp.RevocationList       = (*tokenstore.RevocationList)(nil)
 	_ authapp.Auditor              = authAuditor{}
 	_ authapp.EventRecorder        = eventRecorder{}
 )

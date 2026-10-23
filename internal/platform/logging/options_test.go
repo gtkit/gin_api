@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,36 +65,16 @@ func TestOpenWithConfigOmitsZeroRetentionOptions(t *testing.T) {
 	}
 }
 
-// The locked SDK and the local workspace SDK differ for two disabled outputs:
-// the former falls back to stdout, the latter rejects it. The adapter preserves
-// the resolved dependency's contract without referring to newer SDK symbols.
+// The pinned SDK rejects two disabled outputs. A failed constructor must leave
+// the prior logger installed and allow a later valid initialization.
 func TestOpenWithConfigPreservesResolvedSDKOutputContract(t *testing.T) {
-	probe, sdkErr := logger.New(logger.WithConsole(false), logger.WithFile(false), logger.WithReplaceGlobals(false))
-	if probe != nil {
-		probe.Sync()
-	}
 	previous := logger.Default()
 	err := openDefaultForTest(t, nil)
-	if sdkErr != nil {
-		if err == nil {
-			t.Fatalf("SDK output rejection lost: SDK %v", sdkErr)
-		}
-		if logger.Default() != previous {
-			t.Fatal("failed initialization replaced the default logger")
-		}
-	} else {
-		if err != nil {
-			t.Fatalf("legacy SDK output fallback changed: %v", err)
-		}
-		if logger.Default() == previous {
-			t.Fatal("successful legacy fallback did not publish its owner")
-		}
-		if err := applog.Drain(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		if logger.Default() != previous {
-			t.Fatal("legacy output owner was not released")
-		}
+	if !errors.Is(err, logger.ErrNoOutput) {
+		t.Fatalf("SDK output rejection lost: %v", err)
+	}
+	if logger.Default() != previous {
+		t.Fatal("failed initialization replaced the default logger")
 	}
 	t.Cleanup(func() {
 		if err := applog.Drain(context.WithoutCancel(t.Context())); err != nil {

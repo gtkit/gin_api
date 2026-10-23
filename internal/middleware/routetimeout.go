@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -189,9 +190,9 @@ func IsTimeoutError(err error) bool {
 }
 
 // IsClientGone 报告错误是否为客户端主动断开。
-// 同样用纯错误树：混入真实故障的错误必须按故障处置，而不是静默不回包。
+// 纯中止错误树中取消优先于 deadline；混入真实故障时仍按故障处置。
 func IsClientGone(err error) bool {
-	return errx.IsPureCancellation(err)
+	return errx.IsPureAbort(err) && errors.Is(err, context.Canceled)
 }
 
 // respondGatewayTimeout 写 504 并中止链路。

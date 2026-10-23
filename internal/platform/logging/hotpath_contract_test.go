@@ -18,7 +18,7 @@ import (
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
 )
@@ -41,16 +41,8 @@ func newJSONOwner(t *testing.T, level string, alerts logger.Messager) (*Owner, s
 
 func setSDKLevel(t *testing.T, instance *logger.Logger, level string) {
 	t.Helper()
-	// The workspace SDK returns error; locked v2.3.0 has a void method.
-	switch setter := any(instance).(type) {
-	case interface{ SetLevel(string) error }:
-		if err := setter.SetLevel(level); err != nil {
-			t.Fatal(err)
-		}
-	case interface{ SetLevel(string) }:
-		setter.SetLevel(level)
-	default:
-		t.Fatal("resolved SDK has no supported SetLevel contract")
+	if err := instance.SetLevel(level); err != nil {
+		t.Fatal(err)
 	}
 }
 

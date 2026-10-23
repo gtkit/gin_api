@@ -32,6 +32,7 @@ func configWithRealKeys(t *testing.T) *config.Config {
 	}
 
 	cfg := validConfig()
+	cfg.Log.Path = filepath.Join(dir, "logs", "app_client")
 	cfg.JWT.Active.PrivateKeyPath = priv
 	cfg.JWT.Active.PublicKeyPath = pub
 	return cfg

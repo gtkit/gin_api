@@ -58,6 +58,18 @@ func TestWorkerContractValidation(t *testing.T) {
 			wantHint: "name must not be empty",
 		},
 		{
+			name:     "unknown kind rejected",
+			worker:   &funcWorker{name: "x", kind: WorkerKind(200), lifecycle: Lifecycle(200)},
+			wantErr:  true,
+			wantHint: "kind",
+		},
+		{
+			name:     "unknown lifecycle rejected",
+			worker:   &funcWorker{name: "x", kind: KindConsumer, lifecycle: Lifecycle(200)},
+			wantErr:  true,
+			wantHint: "lifecycle",
+		},
+		{
 			name:     "one-shot must be bootstrap",
 			worker:   &funcWorker{name: "x", kind: KindConsumer, lifecycle: LifecycleOneShot},
 			wantErr:  true,

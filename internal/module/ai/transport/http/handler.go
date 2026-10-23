@@ -153,9 +153,15 @@ func (h *Handler) ChatStream(c *gin.Context) {
 		defer close(hbDone)
 		if err := stream.Heartbeat(hbCtx, h.timeouts.Heartbeat); err != nil &&
 			!errors.Is(err, context.Canceled) {
+			cancel() // 停止读取上游，避免已无法写回时继续生成。
 			applog.Debugf("ai: sse heartbeat stopped: %v", err)
 		}
 	}()
+	stopAndWait := func() {
+		stopHeartbeat()
+		<-hbDone
+	}
+	defer stopAndWait() // panic 路径也必须在 Gin 回收 writer 前等待写入者退出。
 
 	result, err := h.service.StreamChat(ctx, application.ChatCommand{
 		UserID:         ginc.UserIDFromContext(c),
@@ -175,8 +181,7 @@ func (h *Handler) ChatStream(c *gin.Context) {
 	//     另一个请求的响应上。
 	//  2. 下面要读 stream.Started() 来决定走 JSON 还是走事件，而心跳自己
 	//     也会起流。不等它退出，这个判断就是个竞态。
-	stopHeartbeat()
-	<-hbDone
+	stopAndWait()
 
 	h.finishStream(c, stream, result, err)
 }

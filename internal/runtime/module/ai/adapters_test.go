@@ -69,6 +69,41 @@ func newClient(providers map[string]entry, def string) *llmClient {
 	return &llmClient{providers: providers, defaultName: def, names: sortedNames(providers)}
 }
 
+func TestStreamBoundsCombinedContentAndReasoning(t *testing.T) {
+	for _, reasoningOnly := range []bool{false, true} {
+		t.Run(map[bool]string{false: "combined", true: "reasoning only"}[reasoningOnly], func(t *testing.T) {
+			first := &llm.StreamChunk{Delta: "accepted"}
+			if reasoningOnly {
+				first = &llm.StreamChunk{ReasoningDelta: "accepted"}
+			}
+			provider := &fakeProvider{name: llm.ProviderDeepSeek, chunks: []*llm.StreamChunk{
+				first, {ReasoningDelta: strings.Repeat("x", 8<<20)},
+			}}
+			client := newClient(map[string]entry{"deepseek": {provider: provider}}, "deepseek")
+			var delivered string
+			reply, err := client.Stream(t.Context(), aiapp.ChatCall{}, func(delta string) error { delivered += delta; return nil })
+			if !errors.Is(err, aiapp.ErrUpstreamUnavailable) {
+				t.Errorf("oversized reply error = %v", err)
+			}
+			if reply.Content+reply.Reasoning != "accepted" {
+				t.Errorf("oversized chunk was retained: reply bytes=%d", len(reply.Content)+len(reply.Reasoning))
+			}
+			if (reasoningOnly && delivered != "") || (!reasoningOnly && delivered != "accepted") || !provider.closed {
+				t.Errorf("unsafe stream cleanup or delivery: delivered bytes=%d closed=%v", len(delivered), provider.closed)
+			}
+		})
+	}
+}
+
+func TestChatRejectsOversizedReply(t *testing.T) {
+	provider := &fakeProvider{name: llm.ProviderDeepSeek, resp: &llm.ChatResponse{Content: strings.Repeat("x", (8<<20)+1)}}
+	client := newClient(map[string]entry{"deepseek": {provider: provider}}, "deepseek")
+	reply, err := client.Chat(t.Context(), aiapp.ChatCall{})
+	if !errors.Is(err, aiapp.ErrUpstreamUnavailable) || reply.Content != "" {
+		t.Fatalf("oversized chat reply accepted: bytes=%d error=%v", len(reply.Content), err)
+	}
+}
+
 // TestProvidersReportsTheEffectiveModel 钉住厂商列表带上生效模型与默认标记。
 //
 // 生效模型必须自己存一份：llm.Provider 接口只有 Name/Chat/ChatStream，

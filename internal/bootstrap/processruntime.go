@@ -10,7 +10,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 	"github.com/gtkit/verify"
 )
 
@@ -18,7 +18,7 @@ import (
 var (
 	initJWTWithConfig = jwtauth.Assemble
 	initVerify        = verify.New
-	checkJSONRuntime  = json.CheckJSON
+	checkJSONRuntime  = func() { applog.Infof("JSON backend: %s", json.Package) }
 )
 
 // initProcessRuntime initializes fixed process facilities after the selected

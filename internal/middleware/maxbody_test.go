@@ -21,21 +21,20 @@ type failingBodyCloser struct {
 func (c *failingBodyCloser) Read([]byte) (int, error) { return 0, io.EOF }
 func (c *failingBodyCloser) Close() error             { c.calls++; return c.cause }
 
-func TestMaxBytesClosePreservesPrimaryAndCleanupFailures(t *testing.T) {
-	primary := errors.New("wrapped close failed")
-	cleanup := errors.New("underlying close failed")
-	wrapped := &failingBodyCloser{cause: primary}
-	original := &failingBodyCloser{cause: cleanup}
-	body := &maxBytesReaderWrapper{ReadCloser: wrapped, original: original}
-	err := body.Close()
-	if !errors.Is(err, primary) || !errors.Is(err, cleanup) {
-		t.Fatalf("lost close cause: %v", err)
-	}
-	if err := body.Close(); err != nil {
-		t.Fatalf("duplicate close: %v", err)
-	}
-	if wrapped.calls != 1 || original.calls != 1 {
-		t.Fatalf("close counts wrapped=%d original=%d", wrapped.calls, original.calls)
+func TestMaxBytesCloseClosesUnderlyingBodyOnce(t *testing.T) {
+	closeErr := errors.New("underlying close failed")
+	body := &failingBodyCloser{cause: closeErr}
+	engine := newMaxBytesTestEngine(1024, AccessLogOptions{}, func(c *gin.Context) {
+		if err := c.Request.Body.Close(); !errors.Is(err, closeErr) {
+			t.Errorf("lost close error: %v", err)
+		}
+		c.Status(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/upload", nil)
+	req.Body, req.ContentLength = body, -1
+	engine.ServeHTTP(httptest.NewRecorder(), req)
+	if body.calls != 1 {
+		t.Fatalf("underlying body closed %d times, want 1", body.calls)
 	}
 }
 

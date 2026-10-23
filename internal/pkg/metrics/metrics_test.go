@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -92,6 +93,51 @@ func TestUnmatchedRoutesCollapseIntoOneSeries(t *testing.T) {
 	if got := seriesCount(t, collect(t, reader, "http.server.requests")); got != 1 {
 		t.Fatalf("100 scanning requests produced %d series, want 1: unbounded series growth "+
 			"is how a monitoring backend gets taken down", got)
+	}
+}
+
+func TestUnknownHTTPMethodsShareOneSeries(t *testing.T) {
+	t.Parallel()
+	rec, reader := newTestRecorder(t)
+	for i := range 100 {
+		rec.RecordRequest(context.Background(), fmt.Sprintf("SCAN%d", i), UnmatchedRoute, 404, time.Millisecond)
+	}
+	for _, name := range []string{"http.server.requests", "http.server.request.duration"} {
+		m := collect(t, reader, name)
+		if got := seriesCount(t, m); got != 1 {
+			t.Fatalf("%s: unknown methods produced %d series, want 1", name, got)
+		}
+	}
+	sum, ok := collect(t, reader, "http.server.requests").Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatal("request counter has an unexpected data shape")
+	}
+	method, ok := sum.DataPoints[0].Attributes.Value("http.request.method")
+	if !ok || method.AsString() != "_OTHER" || sum.DataPoints[0].Value != 100 {
+		t.Fatalf("unexpected method aggregation: %+v", sum.DataPoints)
+	}
+}
+
+func TestKnownHTTPMethodsRemainDistinct(t *testing.T) {
+	t.Parallel()
+	methods := []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch, "QUERY"}
+	rec, reader := newTestRecorder(t)
+	for _, method := range methods {
+		rec.RecordRequest(context.Background(), method, UnmatchedRoute, 404, time.Millisecond)
+	}
+	sum, ok := collect(t, reader, "http.server.requests").Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatal("request counter has an unexpected data shape")
+	}
+	if len(sum.DataPoints) != len(methods) {
+		t.Fatalf("known methods produced %d series, want %d", len(sum.DataPoints), len(methods))
+	}
+	for _, dp := range sum.DataPoints {
+		method, ok := dp.Attributes.Value("http.request.method")
+		if !ok || method.AsString() == "_OTHER" {
+			t.Fatalf("known method lost: %+v", dp)
+		}
 	}
 }
 

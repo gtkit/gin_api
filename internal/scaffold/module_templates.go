@@ -51,7 +51,7 @@ import (
 	"time"
 
 {{- end }}
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 )
 
 type {{.StructName}} struct {
@@ -594,6 +594,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 	g := r.Group("/{{.RoutePath}}")
 	g.Use(middleware.Timeout({{.ServiceVar}}Deadline, {{.ServiceVar}}WriteGrace))
+	g.Use(middleware.NoBody())
 
 	// 限流策略在 config 的 ratelimit.policies 里定义；引用解析不到时装配失败，
 	// 不存在静默不限流的通道。

@@ -230,7 +230,7 @@ func (m *WorkerManager) prepareAll(ctx context.Context) error {
 		}
 
 		prepareCtx, cancel := withBoundedTimeout(ctx, m.budget.Prepare)
-		err := w.Prepare(prepareCtx)
+		err := invokeWorker(prepareCtx, w.Name(), w.Prepare)
 		cancel()
 
 		if err != nil {
@@ -267,7 +267,7 @@ func (m *WorkerManager) runRequiredOneShots(ctx context.Context) error {
 			return fmt.Errorf("worker startup budget exhausted before running %q: %w", w.Name(), err)
 		}
 
-		if err := m.runOnce(ctx, w); err != nil {
+		if err := invokeWorker(ctx, w.Name(), w.Run); err != nil {
 			return fmt.Errorf("required one-shot worker %q: %w", w.Name(), err)
 		}
 
@@ -280,14 +280,14 @@ func (m *WorkerManager) runRequiredOneShots(ctx context.Context) error {
 	return nil
 }
 
-// runOnce 同步执行一次 Run，并把 panic 转成错误。
-func (m *WorkerManager) runOnce(ctx context.Context, w Worker) (err error) {
+// invokeWorker 在三个生命周期边界统一保留 panic 的名称和栈。
+func invokeWorker(ctx context.Context, name string, phase func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = recoverWorkerPanic(w.Name(), r)
+			err = recoverWorkerPanic(name, r)
 		}
 	}()
-	return w.Run(ctx)
+	return phase(ctx)
 }
 
 // startBackgroundWorkers 启动 LongRunning 与 optional OneShot。
@@ -328,7 +328,7 @@ func (m *WorkerManager) supervise(ctx context.Context, rw *runningWorker) {
 	applog.Infof("starting worker %s (kind=%s lifecycle=%s required=%v)",
 		w.Name(), w.Kind(), w.Lifecycle(), w.Required())
 
-	err := m.runOnce(ctx, w)
+	err := invokeWorker(ctx, w.Name(), w.Run)
 
 	// 长期 worker 在 ctx 取消之前返回——**包括返回 nil**——一律是异常退出。
 	// 不做这个判定，一个静默返回 nil 的长期 worker 会让进程继续对外服务，
@@ -602,7 +602,7 @@ func (m *WorkerManager) cleanupEntry(ctx context.Context, entry *preparedWorker)
 		}()
 	}
 
-	return entry.worker.Cleanup(cleanupCtx)
+	return invokeWorker(cleanupCtx, entry.worker.Name(), entry.worker.Cleanup)
 }
 
 func (m *WorkerManager) snapshotPrepared() []*preparedWorker {
