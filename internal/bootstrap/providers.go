@@ -117,7 +117,9 @@ func newProvidersWithBudget(
 		return nil, err
 	}
 
-	// 1. 基础设施：数据库连接、配置文件、HTTP 配置、日志、消息队列、缓存、文件存储等。
+	// 1. 基础设施视图：从 Runtime 借用已初始化的配置、数据库与日志，
+	//    并据此派生 HTTP 配置。连接的关闭权仍属于 Runtime，
+	//    这里不重新创建连接，也不接管它们的生命周期。
 	inf, err := resolveInfra(runtime)
 	if err != nil {
 		return nil, err
@@ -141,9 +143,12 @@ func newProvidersWithBudget(
 
 	// 2a'. 数据层追踪埋点（GORM + 全部已初始化 Redis DB）。必须在 telemetry.New
 	//      之后：otelgorm 在构造期就从全局 TracerProvider 取 tracer，先挂后设
-	//      provider 与 2b 对 Meter 的顾虑是同一件事。埋点无条件挂载、不设开关，
-	//      未接导出时走全局 no-op tracer（「埋点与导出是两件事」，
-	//      docs/observability.md）；失败即装配失败——埋点缺失是静默的观测盲区。
+	//      provider 会让已有埋点继续使用旧 provider。埋点无条件挂载、不设开关，
+	//      未接导出时走全局 no-op tracer（见 docs/observability.md）。
+	//      初始埋点安装失败即装配失败，避免带着静默的观测盲区继续启动。
+	//      可选 Redis 首次不可达时，这一步还会通知 Owner tracing 已就绪，
+	//      由 Owner 启动唯一的受管恢复任务；后续候选完成各实际 DB 的埋点后
+	//      才能发布，不能把尚未埋点的客户端交给缓存或限流使用。
 	if err := inf.resources.InstrumentTracing(inf.cfg.Database.Name); err != nil {
 		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
 	}
@@ -187,10 +192,13 @@ func newProvidersWithBudget(
 		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
-	// 3c. 响应缓存。Runtime 已按 Redis 可达性完成缓存初始化；
-	//     这里仅取得它的 typed view，默认关闭时仍产出透传中间件。
-	//     必须先于路由装配：模块在注册只读路由时就要挂上它。Redis 已配置
-	//     但启动期不可达时由 owner 禁用，避免 providers 重复构造和关闭 Store。
+	// 3c. 响应缓存。Runtime 持有缓存 Owner，这里只取得可借用的 typed view，
+	//     不重复创建或关闭 Store。必须先于路由装配取得视图：模块注册只读路由
+	//     时就会挂上对应中间件，后续不会因为 Redis 恢复而重新注册路由。
+	//     默认关闭时中间件直接透传；Redis 已配置但首次不可达时，Owner 保留
+	//     配置和 provider，暂时透传并等待恢复。客户端恢复后，已有中间件包装
+	//     延迟接入同一个 Store，再使用原有的身份绕过、键、TTL 和响应准入规则。
+	//     因此此处的 Enabled 只用于报告当前状态，不能据此永久移除路由包装。
 	responseCache := runtime.Cache()
 	if responseCache == nil {
 		return nil, errors.New("response cache is not initialized")

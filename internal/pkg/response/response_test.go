@@ -370,8 +370,7 @@ func fmtErrorf(err error) error {
 
 // TestBindStructErrMapsValidationTo422 覆盖结构体绑定失败的映射。
 //
-// 422 而不是 400：客户端能区分"我发的 JSON 语法就不对"（400）与
-// "语法对但字段不合法"（422），两者的修法完全不同。
+// 绑定错误保持既有 422 契约，请求体超限另走 413。
 func TestBindStructErrMapsValidationTo422(t *testing.T) {
 	t.Parallel()
 
@@ -393,8 +392,8 @@ func TestBindErrMapsToValidation(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	if body := rec.Body.String(); !contains(body, "invalid query") {
-		t.Errorf("the response does not carry the validation detail: %s", body)
+	if body := decode(t, rec); body["msg"] != "请求参数格式错误" {
+		t.Errorf("msg = %v, want safe binding message", body["msg"])
 	}
 }
 

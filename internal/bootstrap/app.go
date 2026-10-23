@@ -15,7 +15,8 @@ import (
 )
 
 // Options defines runtime startup options.
-// 配置改为从固定 config/env.yml 读取后，启动不再需要环境名参数。
+// 服务配置由统一加载入口提供；这里仅接收进程级协作对象，
+// 不再通过启动选项重复指定运行环境或配置内容。
 type Options struct {
 	// Shutdown 是进程级关停协调器，由**唯一的信号监督者**（cmd 层）构造并注入：
 	// 信号在 NewApp 之前就可能到达，协调器因此必须比 App 更早存在。

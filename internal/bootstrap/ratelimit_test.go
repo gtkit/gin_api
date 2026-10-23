@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"gorm.io/gorm"
 )
 
 func policyConfig(mutate func(*config.RateLimitPolicyConfig)) config.RateLimitPolicyConfig {
@@ -308,8 +310,8 @@ func TestBuildRateLimitsRejectsRedisPolicyWithoutClient(t *testing.T) {
 	}
 }
 
-// TestUnreachableLimiterHonorsEachFailureMode 钉住"Redis 已配置但启动期
-// 不可达"时**按策略各自的降级模式**选执行体（resource-lifecycle spec）。
+// TestUnreachableLimiterHonorsEachFailureMode 钉住 Redis 初始缺席时共享后端
+// 仍按策略各自的降级模式处理请求。
 //
 // 两种模式要的东西不同：fail_open 要的是放行（限额不变，只是当下无法执行），
 // local_fallback 要的是一个真实的本地桶。给 local_fallback 一个恒不可用执行体
@@ -338,14 +340,22 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 				ID: "cfg.but.down", Rate: 1, Burst: 2, Scope: ratelimit.ScopeIP,
 				Store: ratelimit.StoreRedis, FailureMode: tt.mode, MaxKeys: 100,
 			}
-			limiter, err := unreachableLimiter(policy)
+			resources, err := data.ResourcesFromClients(&lifecycleComponent{db: &gorm.DB{}}, nil, true)
 			if err != nil {
-				t.Fatalf("unreachableLimiter: %v", err)
+				t.Fatal(err)
+			}
+			var backend *ratelimit.RedisBackend
+			limiter, err := buildLimiter(t.Context(), policy, resources, &backend, "test", true)
+			if err != nil {
+				t.Fatalf("buildLimiter: %v", err)
+			}
+			if backend == nil || backend.Health().Phase() != ratelimit.PhaseDegraded {
+				t.Fatal("shared backend was not retained")
 			}
 			defer limiter.Close()
 
 			decision, err := limiter.Check(context.Background(), "k")
-			if err != nil {
+			if err != nil && tt.mode != ratelimit.FailureOpen {
 				t.Fatalf("Check: %v", err)
 			}
 			if decision.Allowed() != tt.wantAllowed {
@@ -367,5 +377,14 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 				t.Fatalf("rejected after exhausting the burst = %v, want %v", rejected, tt.wantEnforced)
 			}
 		})
+	}
+}
+
+func TestRedisCommandAdapterReportsMissingClient(t *testing.T) {
+	adapter := redisCommands{}
+	if adapter.ScriptLoad(t.Context(), "return 1").Err() == nil ||
+		adapter.EvalSha(t.Context(), "sha", []string{"key"}, "arg").Err() == nil ||
+		adapter.Del(t.Context(), "key").Err() == nil {
+		t.Fatal("missing client was reported as a successful command")
 	}
 }

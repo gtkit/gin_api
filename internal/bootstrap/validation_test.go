@@ -12,6 +12,12 @@ import (
 	"github.com/gtkit/verify"
 )
 
+func newProviders(ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator) (*providerSet, error) {
+	budget := &rollbackBudget{force: shutdown.ForcedCh()}
+	defer budget.Close()
+	return newProvidersWithBudget(ctx, runtime, shutdown, budget)
+}
+
 // TestInitValidationFailureBlocksProviders 反证「初始化失败阻断启动」：
 // 把 initValidation 从装配链上摘掉，本测试必须失败。
 // runtime 传 nil 是安全的：校验翻译器是第 0 步，失败即返回，不触碰任何资源。

@@ -169,8 +169,8 @@ func TestRunDependencyChecksOneFailureDoesNotCancelOthers(t *testing.T) {
 	if got := results["redis"].Error; got != "" {
 		t.Fatalf("redis error = %q, want empty for a healthy dependency", got)
 	}
-	if got := results["database"].Error; got != "down" {
-		t.Fatalf("database error = %q, want the underlying failure reason", got)
+	if got := results["database"].Error; got != "dependency check failed" {
+		t.Fatalf("database error = %q, want safe failure message", got)
 	}
 }
 

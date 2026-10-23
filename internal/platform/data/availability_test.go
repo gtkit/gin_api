@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+func TestRecoverableDegradedProbeNeedsFurtherObservation(t *testing.T) {
+	tracker, err := newRecoverableDegradedTracker("redis", DefaultAvailabilityPolicy(), func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: tracker.nextProbeAt}
+	tracker.now = clock.Now
+	if probed, err := tracker.MaybeProbe(t.Context()); !probed || err != nil {
+		t.Fatalf("probe=%v err=%v", probed, err)
+	}
+	if tracker.State() != AvailabilityProbing {
+		t.Fatal("single success bypassed the recovery threshold")
+	}
+	if probed, err := tracker.MaybeProbe(t.Context()); probed || err != nil {
+		t.Fatal("probing state started another probe")
+	}
+	tracker.Observe(nil)
+	if tracker.State() != AvailabilityHealthy {
+		t.Fatal("real second observation did not complete recovery")
+	}
+}
+
 // newTestTracker 构造带固定时钟的跟踪器，让冷却与探测间隔可以确定性地推进。
 //
 // 用注入时钟而不是 time.Sleep：真实等待会让这组用例变成秒级，

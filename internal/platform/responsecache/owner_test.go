@@ -2,11 +2,16 @@ package responsecache
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/redis/go-redis/v9"
 )
@@ -32,8 +37,147 @@ func TestMemoryOwner(t *testing.T) {
 func TestRedisFailureDegrades(t *testing.T) {
 	t.Parallel()
 	p := mustOpen(t, Options{Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}}, Redis: cacheRedisProvider{configured: true}})
-	if p.store == nil || p.Enabled() {
-		t.Fatal("optional Redis failure did not disable cache")
+	if p.store != nil || p.Enabled() || !p.waiting {
+		t.Fatal("optional Redis failure did not keep a waiting cache")
+	}
+}
+
+type lateRedis struct{ current atomic.Pointer[redis.Client] }
+
+func (p *lateRedis) Client(int) *redis.Client     { return p.current.Load() }
+func (p *lateRedis) DefaultClient() *redis.Client { return p.current.Load() }
+func (*lateRedis) Configured() bool               { return true }
+
+type countedStore struct {
+	ownedStore
+	middlewareCalls atomic.Int32
+}
+
+func (s *countedStore) Middleware(time.Duration) gin.HandlerFunc {
+	s.middlewareCalls.Add(1)
+	return passthrough
+}
+
+func TestRecoveredCacheSharesStoreAndRetainsEachRouteMiddleware(t *testing.T) {
+	provider := new(lateRedis)
+	var factories atomic.Int32
+	store := new(countedStore)
+	p := mustOpen(t, Options{
+		Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}}, Redis: provider,
+		Factory: func(config.CacheConfig, *redis.Client, string) (Store, error) { factories.Add(1); return store, nil },
+	})
+	engine := gin.New()
+	for _, path := range []string{"/one", "/two"} {
+		engine.GET(path, p.Middleware(time.Second), func(c *gin.Context) { c.Status(http.StatusOK) })
+	}
+	client := redis.NewClient(&redis.Options{Addr: "unused"})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	provider.current.Store(client)
+	var requests sync.WaitGroup
+	for range 16 {
+		requests.Go(func() {
+			for _, path := range []string{"/one", "/two"} {
+				engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+			}
+		})
+	}
+	requests.Wait()
+	if factories.Load() != 1 || store.middlewareCalls.Load() != 2 {
+		t.Fatalf("store factories=%d route middleware factories=%d", factories.Load(), store.middlewareCalls.Load())
+	}
+	if err := p.Close(t.Context()); err != nil || store.closes.Load() != 1 {
+		t.Fatalf("close=%v count=%d", err, store.closes.Load())
+	}
+}
+
+func TestLateFactoryFailureIsTerminalAndClosesPartialStore(t *testing.T) {
+	for _, mode := range []string{"error", "typed-nil", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			provider := new(lateRedis)
+			client := redis.NewClient(&redis.Options{Addr: "unused"})
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			root, closing := errors.New("factory failed"), errors.New("partial store close failed")
+			store := &ownedStore{err: closing}
+			calls := 0
+			p, err := Open(t.Context(), Options{
+				Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}},
+				Redis:  provider,
+				Factory: func(cfg config.CacheConfig, got *redis.Client, _ string) (Store, error) {
+					calls++
+					if !cfg.Enabled || got != client {
+						t.Error("late factory lost config or borrowed client")
+					}
+					switch mode {
+					case "typed-nil":
+						var absent *ownedStore
+						return absent, nil
+					case "panic":
+						panic("factory")
+					default:
+						return store, root
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 0 {
+				t.Fatal("factory called before Redis was available")
+			}
+			engine := gin.New()
+			handlers := 0
+			engine.GET("/cache", p.Middleware(time.Second), func(c *gin.Context) { handlers++; c.Status(http.StatusOK) })
+			provider.current.Store(client)
+			for range 2 {
+				engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/cache", nil))
+			}
+			if calls != 1 || handlers != 2 || p.Enabled() {
+				t.Fatalf("calls=%d handlers=%d", calls, handlers)
+			}
+			closeErr := p.Close(t.Context())
+			if mode == "error" {
+				if !errors.Is(closeErr, root) || !errors.Is(closeErr, closing) || store.closes.Load() != 1 {
+					t.Fatalf("close=%v count=%d", closeErr, store.closes.Load())
+				}
+			} else if !errors.Is(closeErr, core.ErrComponentState) {
+				t.Fatalf("close=%v", closeErr)
+			}
+		})
+	}
+}
+
+func TestWaitingCacheCannotInitializeAfterClose(t *testing.T) {
+	provider := new(lateRedis)
+	p := mustOpen(t, Options{
+		Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}}, Redis: provider,
+		Factory: func(config.CacheConfig, *redis.Client, string) (Store, error) {
+			t.Error("late factory ran after close")
+			return new(ownedStore), nil
+		},
+	})
+	handler := p.Middleware(time.Second)
+	if err := p.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	client := redis.NewClient(&redis.Options{Addr: "unused"})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	provider.current.Store(client)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	handler(c)
+	if p.Enabled() {
+		t.Fatal("closed cache became enabled")
 	}
 }
 func TestNilAndEmptyOwnerMiddleware(t *testing.T) {

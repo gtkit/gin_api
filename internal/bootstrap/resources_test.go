@@ -3,13 +3,29 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	data "github.com/gtkit/gin-api/internal/platform/data"
+	redisowner "github.com/gtkit/gin-api/internal/platform/redis"
+	"github.com/gtkit/gin-api/internal/platform/responsecache"
+	"github.com/gtkit/gin-api/internal/testutil"
+	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 func TestRuntimeStartupSharesTotalAndPerResourceDeadlines(t *testing.T) {
@@ -36,6 +52,183 @@ func TestRuntimeStartupSharesTotalAndPerResourceDeadlines(t *testing.T) {
 			})
 		})
 	}
+}
+
+// The Redis server and sockets are outside the virtual clock; only owner and
+// limiter timers advance virtually. No real sleep guesses recovery timing.
+func TestOptionalRedisRecoveryReachesMountedCacheAndSharedLimiter(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := miniredis.RunT(t)
+	cfg := &config.Config{
+		Redis: config.RedisConfig{Addr: server.Addr(), DBs: []int{0, 3}, Prefix: "recovery-contract"},
+		Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis, RedisDB: 3, TTL: time.Minute},
+	}
+	client, err := redisowner.OpenRedis(t.Context(), cfg.Redis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner *redisowner.Owner
+	t.Cleanup(func() {
+		if owner == nil {
+			if err := client.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		if err := sqlDB.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: sqlDB, SkipInitializeWithVersion: true}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := tracetest.NewSpanRecorder()
+	tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(tracer)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		if err := tracer.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+			t.Error(err)
+		}
+	})
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		owner, err = redisowner.Open(t.Context(), redisowner.Options{Config: cfg, Open: func(context.Context, config.RedisConfig) (redisowner.Client, error) {
+			if calls.Add(1) == 1 {
+				return nil, errors.New("initially offline")
+			}
+			return client, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
+				t.Error(err)
+			}
+		}()
+		resources, err := data.ResourcesFromClients(&lifecycleComponent{db: db, sql: sqlDB}, owner, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache, err := responsecache.Open(t.Context(), responsecache.Options{Config: cfg, Redis: owner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := cache.Close(context.WithoutCancel(t.Context())); err != nil {
+				t.Error(err)
+			}
+		}()
+		engine := gin.New()
+		handlers := 0
+		engine.GET("/cached", cache.Middleware(7*time.Second), func(c *gin.Context) { handlers++; c.String(http.StatusOK, "shared response") })
+		request := func() {
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cached", nil))
+			if w.Code != http.StatusOK || w.Body.String() != "shared response" {
+				t.Fatalf("response=%d %s", w.Code, w.Body.String())
+			}
+		}
+		request()
+		var backend *ratelimit.RedisBackend
+		policy := ratelimit.Policy{ID: "recovery.open", Rate: 1, Burst: 2, Scope: ratelimit.ScopeIP, Store: ratelimit.StoreRedis, FailureMode: ratelimit.FailureOpen, MaxKeys: 100}
+		openLimiter, err := buildLimiter(t.Context(), policy, resources, &backend, cfg.EffectiveRedisPrefix(), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer openLimiter.Close()
+		shared := backend
+		policy.ID, policy.FailureMode = "recovery.fallback", ratelimit.FailureLocalFallback
+		fallback, err := buildLimiter(t.Context(), policy, resources, &backend, cfg.EffectiveRedisPrefix(), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fallback.Close()
+		if backend != shared {
+			t.Fatal("policies did not share a backend")
+		}
+		if decision, _ := openLimiter.Check(t.Context(), "open-key"); !decision.Allowed() || !decision.Degraded {
+			t.Fatal("fail_open did not degrade")
+		}
+		for i := range 3 {
+			decision, err := fallback.Check(t.Context(), "fallback-key")
+			if err != nil || !decision.Degraded || decision.Allowed() != (i < 2) {
+				t.Fatalf("fallback decision=%+v err=%v", decision, err)
+			}
+		}
+		if err := resources.InstrumentTracing("recovery"); err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.ConfigureTracing(); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+		clientDB3, exists := client.GetClient(3)
+		if calls.Load() != 2 || !exists || resources.Rdb(3) != clientDB3 {
+			t.Fatal("owner recovery did not reach borrowed resources")
+		}
+		if resources.RedisAvailability().State() != data.AvailabilityDegraded {
+			t.Fatal("publication fabricated health")
+		}
+		for range 2 {
+			if err := resources.PingRedis(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if resources.RedisAvailability().State() != data.AvailabilityHealthy {
+			t.Fatal("observations did not recover readiness")
+		}
+		request()
+		request()
+		if handlers != 2 {
+			t.Fatalf("mounted cache handler calls=%d", handlers)
+		}
+		before := len(recorder.Ended())
+		for _, db := range []int{0, 3} {
+			if err := resources.Rdb(db).Set(t.Context(), "trace-contract", "private-redis-value", time.Second).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sets := 0
+		for _, span := range recorder.Ended()[before:] {
+			if span.Name() == "set" {
+				sets++
+			}
+			for _, attribute := range span.Attributes() {
+				if strings.Contains(attribute.Value.String(), "private-redis-value") || attribute.Key == "db.statement" {
+					t.Fatal("Redis tracing exposed statement data")
+				}
+			}
+		}
+		if sets != 2 {
+			t.Fatalf("set spans=%d, want one per DB operation", sets)
+		}
+		time.Sleep(25 * time.Second)
+		if decision, err := openLimiter.Check(t.Context(), "open-key"); err != nil || !decision.Allowed() || decision.Degraded {
+			t.Fatalf("first recovered check=%+v err=%v", decision, err)
+		}
+		time.Sleep(5 * time.Second)
+		if decision, err := fallback.Check(t.Context(), "fallback-key"); err != nil || !decision.Allowed() || decision.Degraded {
+			t.Fatalf("fallback did not return to Redis: %+v %v", decision, err)
+		}
+		if backend.Health().Phase() != ratelimit.PhaseHealthy || calls.Load() != 2 {
+			t.Fatal("backend remained degraded or owner was replaced")
+		}
+	})
 }
 
 func TestCanceledStartupRollsBackWithFreshBudgetAndPreservesValues(t *testing.T) {

@@ -187,7 +187,8 @@ func TestRedisStoreBorrowingPrefixTTLAndAdmission(t *testing.T) {
 	cfg := &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis, RedisDB: 3, TTL: 7 * time.Second}}
 	cfg.App.Name = "same-application"
 	cfg.Redis.Prefix = "contract"
-	p := mustOpen(t, Options{Config: cfg, Redis: redisView{client: client, configured: true, wantDB: 3, t: t}})
+	provider := new(lateRedis)
+	p := mustOpen(t, Options{Config: cfg, Redis: provider})
 	t.Cleanup(func() {
 		if err := p.Close(context.WithoutCancel(t.Context())); err != nil {
 			t.Errorf("Stop: %v", err)
@@ -196,16 +197,21 @@ func TestRedisStoreBorrowingPrefixTTLAndAdmission(t *testing.T) {
 	engine := gin.New()
 	calls := 0
 	engine.GET("/public", p.Middleware(3*time.Second), func(c *gin.Context) { calls++; c.String(http.StatusOK, "public") })
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/public?b=2&a=1", nil))
+	if calls != 1 || p.Enabled() {
+		t.Fatal("waiting cache did not pass through")
+	}
+	provider.current.Store(client)
 	for range 2 {
 		engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/public?b=2&a=1", nil))
 	}
-	if calls != 1 {
+	if calls != 2 {
 		t.Fatalf("calls=%d", calls)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/public?b=2&a=1", nil)
 	request.Header.Set("App-Token", "identity-sentinel")
 	engine.ServeHTTP(httptest.NewRecorder(), request)
-	if calls != 2 {
+	if calls != 3 {
 		t.Fatal("identity request hit public cache")
 	}
 	keys, err := client.Keys(t.Context(), "contract:httpcache:*").Result()

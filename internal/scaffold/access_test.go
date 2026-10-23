@@ -294,6 +294,11 @@ func TestAdminAccessNoteMatchesTheRealAuthorizer(t *testing.T) {
 	if !strings.Contains(choice.Note, "user_roles") {
 		t.Errorf("admin 提示未点出权威角色源 user_roles\n提示全文: %s", choice.Note)
 	}
+	// 账号与角色源独立于可删除的 auth 模块；替换提示必须给出实际
+	// 组合根，不能继续指向 bootstrap 中已经删除的 svc.roles 字段。
+	if !strings.Contains(choice.Note, "internal/runtime/module/account/module.go") || strings.Contains(choice.Note, "svc.roles") {
+		t.Errorf("admin 提示未指向当前角色源组合根\n提示全文: %s", choice.Note)
+	}
 	// custom 选项确实是未注册的恒拒绝，它的提示**应当**保留那套表述——
 	// 缺了这条反向锚，一个把两个选项提示都改空的实现也能让上面的断言通过。
 	custom, err := ResolveAccessChoice(AccessOptionCustom, false, "demo")

@@ -18,6 +18,7 @@ cleanup(){
 }
 trap cleanup EXIT
 WIRING_GO="$(command -v go)" || { echo "go is required" >&2; exit 1; }
+WIRING_MAKE="$(command -v make)" || { echo "make is required" >&2; exit 1; }
 export WIRING_GO
 WIRING_LINT_VERSION="$(awk '/^GOLANGCI_LINT_VERSION[[:space:]]*=/ { print $3; exit }' "$ROOT/security/toolchain.mk")"
 [ -n "$WIRING_LINT_VERSION" ] || { echo "missing declared lint version" >&2; exit 1; }
@@ -26,6 +27,10 @@ fixture="$sandbox/work area"
 mkdir -p "$fixture/scripts" "$fixture/security" "$fixture/bin" "$fixture/.cache" "$sandbox/tools" "$sandbox/outside"
 cp "$ROOT/Makefile" "$fixture/Makefile"
 cp -R "$ROOT/make" "$fixture/make"
+for target in port kill-port; do
+  count="$(awk -v target="$target" '$0 ~ "^" target ":[[:space:]]*$" { n++ } END { print n+0 }' "$fixture/Makefile" "$fixture"/make/*.mk)"
+  [ "$count" = 1 ] || { echo "FAIL: $target has $count ordinary recipes" >&2; exit 1; }
+done
 cp "$ROOT/security/toolchain.mk" "$fixture/security/toolchain.mk"
 cp "$ROOT/scripts/clean.go" "$ROOT/scripts/check-tool-version.sh" "$fixture/scripts/"
 printf 'APP_NAME = fixture\nAPP_DISPLAY_NAME = Fixture\n' > "$fixture/project.mk"
@@ -133,6 +138,51 @@ compare_variables PORT= BIN_DIR= RUN= GO_TARGETS= LINT_TARGETS= GO_BUILD_TAGS= C
 compare_variables MAKECMDGOALS='migrate-migration create_fixture_table dev'
 compare_variables MAKECMDGOALS='migrate-status dev'
 compare_variables MAKECMDGOALS='migrate-status test'
+
+# Restrict PATH so an UPX installed on the host cannot affect the absent case.
+build_tools="$sandbox/build-tools"
+mkdir -p "$build_tools"
+ln -s "$(command -v mkdir)" "$build_tools/mkdir"
+cat > "$build_tools/go" <<'STUB'
+#!/bin/sh
+set -eu
+printf 'BUILD env=%s/%s/%s args=%s\n' "${CGO_ENABLED:-}" "${GOOS:-}" "${GOARCH:-}" "$*" >> "$MAKE_WIRING_TRACE"
+[ "${BUILD_WIRING_FAIL:-0}" = 0 ] || exit 21
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    shift
+    printf 'compiled fixture\n' > "$1"
+    exit 0
+  fi
+  shift
+done
+exit 22
+STUB
+chmod +x "$build_tools/go"
+: > "$MAKE_WIRING_TRACE"
+PATH="$build_tools" "$WIRING_MAKE" --no-print-directory build BIN_DIR=./build-bin BUILD_COMMIT=fixture BUILD_TIME=unknown > "$sandbox/build-no-upx.log" 2>&1
+grep -Fq 'UPX not found' "$sandbox/build-no-upx.log"
+grep -Fq 'BUILD env=0/linux/amd64 args=build -trimpath -tags=sonic' "$MAKE_WIRING_TRACE"
+[ "$(cat build-bin/fixture)" = 'compiled fixture' ]
+cat > "$build_tools/upx" <<'STUB'
+#!/bin/sh
+set -eu
+printf 'UPX %s\n' "$*" >> "$MAKE_WIRING_TRACE"
+[ "${UPX_WIRING_FAIL:-0}" = 0 ] || exit 23
+STUB
+chmod +x "$build_tools/upx"
+: > "$MAKE_WIRING_TRACE"
+PATH="$build_tools" "$WIRING_MAKE" --no-print-directory build BIN_DIR=./build-bin BUILD_COMMIT=fixture BUILD_TIME=unknown Linux='CGO_ENABLED=1 GOOS=darwin GOARCH=arm64' BUILD_FLAGS=-tags=custom
+grep -Fxq 'BUILD env=1/darwin/arm64 args=build -trimpath -tags=custom -o ./build-bin/fixture .' "$MAKE_WIRING_TRACE"
+grep -Fxq 'UPX -9 ./build-bin/fixture' "$MAKE_WIRING_TRACE"
+if PATH="$build_tools" UPX_WIRING_FAIL=1 "$WIRING_MAKE" --no-print-directory build BIN_DIR=./build-bin BUILD_COMMIT=fixture BUILD_TIME=unknown > "$sandbox/build-upx-failure.log" 2>&1; then
+  echo 'FAIL: UPX failure escaped the build target' >&2; exit 1
+fi
+: > "$MAKE_WIRING_TRACE"
+if PATH="$build_tools" BUILD_WIRING_FAIL=1 "$WIRING_MAKE" --no-print-directory build BIN_DIR=./build-bin BUILD_COMMIT=fixture BUILD_TIME=unknown > "$sandbox/build-compile-failure.log" 2>&1; then
+  echo 'FAIL: compiler failure escaped the build target' >&2; exit 1
+fi
+if grep -q '^UPX ' "$MAKE_WIRING_TRACE"; then echo 'FAIL: UPX ran after compiler failure' >&2; exit 1; fi
 
 # Override the metadata variable only; the sole executed goal is __inspect.
 # In particular, do not use -n/-q on release-check or other recursive recipes.

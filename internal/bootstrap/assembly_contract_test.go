@@ -1,13 +1,17 @@
 package bootstrap
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	redisowner "github.com/gtkit/gin-api/internal/platform/redis"
+	"github.com/gtkit/gin-api/internal/testutil"
 	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel"
 
@@ -18,6 +22,12 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 )
+
+func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, error) {
+	budget := &rollbackBudget{}
+	defer budget.Close()
+	return buildServicesWithBudget(ctx, inf, runtime, budget)
+}
 
 func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	cfg := jwtTestConfig(t)
@@ -58,7 +68,7 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if svc.auth.Service != nil || svc.accounts == nil || RedisRequired(cfg) {
+	if svc.auth.Service != nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil || RedisRequired(cfg) {
 		t.Fatalf("unexpected assembly: auth=%v accounts=%v", svc.auth.Service, svc.accounts)
 	}
 	mw, err := buildMiddlewares(svc, runtime)
@@ -114,6 +124,55 @@ func TestServiceAssemblyRejectsBrokenLocalAuth(t *testing.T) {
 	inf := infra{cfg: cfg, resources: &data.Resources{}, mysqlDB: &gorm.DB{}}
 	if _, err := buildServices(t.Context(), inf, &Runtime{config: cfg}); err == nil {
 		t.Fatal("broken assembly accepted")
+	}
+}
+
+// Local authentication and account authorization share infrastructure but keep
+// separate assemblies. Exercise the successful local branch as well as the
+// external branch above, so moving account construction into either branch
+// cannot silently remove User/VIP/Role verification from the other mode.
+func TestLocalIdentityAssemblyRetainsAllAccountPorts(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := miniredis.RunT(t)
+	cfg := jwtTestConfig(t)
+	cfg.App.Name = "local-identity-assembly"
+	cfg.Auth = config.AuthConfig{
+		Mode:                config.AuthModeLocal,
+		BcryptCost:          10,
+		RefreshReplaySecret: strings.Repeat("r", 32),
+	}
+	cfg.Redis = config.RedisConfig{Addr: server.Addr()}
+	client, err := redisowner.OpenRedis(t.Context(), cfg.Redis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	resources, err := data.ResourcesFromClients(&lifecycleComponent{db: &gorm.DB{}}, client, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwt, err := jwtauth.Assemble(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := buildServices(t.Context(), infra{cfg: cfg, resources: resources, mysqlDB: resources.Mdb()}, &Runtime{config: cfg, jwt: jwt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := svc.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if svc.auth.Service == nil || svc.auth.Revocation == nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil {
+		t.Fatalf("incomplete local identity assembly: %+v", svc)
+	}
+	if any(svc.accounts.Users) != any(svc.accounts.VIP) {
+		t.Fatal("local User and VIP ports do not share their account source")
 	}
 }
 

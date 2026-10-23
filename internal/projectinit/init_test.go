@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -348,7 +349,7 @@ func TestRunStandardInstantiation(t *testing.T) {
 	}
 
 	// 母版专属部署入口已删除，且给出了自备部署入口的提示。
-	for _, rel := range motherDeploymentFiles {
+	for _, rel := range []string{".gitlab-ci.yml", "deployment.sh", "REVIEW.md", "REVIEW-my.md"} {
 		if _, err := os.Lstat(filepath.Join(root, rel)); !os.IsNotExist(err) {
 			t.Fatalf("%s should be removed from derived projects, err=%v", rel, err)
 		}
@@ -507,6 +508,11 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	}
 	if len(result.Rewritten) == 0 || len(result.Deleted) == 0 {
 		t.Fatalf("dry-run should report planned changes, got rewritten=%v deleted=%v", result.Rewritten, result.Deleted)
+	}
+	for _, name := range []string{"REVIEW.md", "REVIEW-my.md"} {
+		if !slices.Contains(result.Deleted, name) {
+			t.Fatalf("dry-run omitted %s: %v", name, result.Deleted)
+		}
 	}
 	assertTreeUnchanged(t, root, before)
 }
@@ -699,6 +705,8 @@ var sentinelFiles = map[string]string{
 	"docs/design/overview.md":   "# design overview\n\nnested sentinel\n",
 	"docs/design/data.json":     "{\"sentinel\":true}\n",
 	"internal/keep/keep_me.txt": "sentinel inside internal\n",
+	"pprof/README.md":           "# retained profiling toolbox\n",
+	"pprof/scripts/collect.sh":  "#!/bin/sh\n# retained tool\n",
 }
 
 // assertSentinelsIntact 断言全部中性哨兵仍存在且内容逐字节未变。
@@ -770,6 +778,8 @@ const (
 		"Makefile":       fixtureMakefile,
 		".gitlab-ci.yml": "stages:\n  - deploy\n",
 		"deployment.sh":  "#!/bin/bash\necho deploy\n",
+		"REVIEW.md":      "# mother review\r\nprivate history\r\n",
+		"REVIEW-my.md":   "# mother manual review\n",
 	}
 	maps.Copy(files, sentinelFiles)
 
@@ -779,6 +789,11 @@ const (
 	// deployment.sh 是可执行文件；快照恢复必须连 +x 一起还原。
 	if err := os.Chmod(filepath.Join(root, "deployment.sh"), 0o755); err != nil {
 		t.Fatalf("chmod deployment.sh: %v", err)
+	}
+	for _, name := range []string{"REVIEW.md", "REVIEW-my.md"} {
+		if err := os.Chmod(filepath.Join(root, name), 0o640); err != nil {
+			t.Fatalf("chmod %s: %v", name, err)
+		}
 	}
 	return root
 }

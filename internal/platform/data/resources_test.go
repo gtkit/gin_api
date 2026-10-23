@@ -52,6 +52,60 @@ type fakeRedisHandle struct {
 	healthErr error
 }
 
+type recoveringRedisHandle struct {
+	*fakeRedisHandle
+	tracingCalls int
+}
+
+func (h *recoveringRedisHandle) ConfigureTracing() error { h.tracingCalls++; return nil }
+
+func TestResourcesRetainsOwnerBeforeFirstRedisConnection(t *testing.T) {
+	database, _ := newSQLMockOrmxClient(t)
+	handle := &recoveringRedisHandle{fakeRedisHandle: &fakeRedisHandle{healthErr: errors.New("offline")}}
+	resources, err := ResourcesFromClients(database, handle, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources.redis != handle || resources.RedisAvailability().State() != AvailabilityDegraded {
+		t.Fatal("recoverable owner was discarded")
+	}
+	if err := resources.InstrumentTracing("test"); err != nil || handle.tracingCalls != 1 {
+		t.Fatalf("tracing owner=%d err=%v", handle.tracingCalls, err)
+	}
+	if resources.PingRedis(t.Context()) == nil {
+		t.Fatal("offline owner reported healthy")
+	}
+	client := redis.NewClient(&redis.Options{Addr: "unused"})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	handle.clients = map[int]*redis.Client{0: client}
+	handle.stats = map[int]*redis.PoolStats{0: client.PoolStats()}
+	handle.healthErr = nil
+	if resources.Rdb(0) != client || resources.RedisAvailability().State() != AvailabilityDegraded {
+		t.Fatal("publication was lost or fabricated a healthy observation")
+	}
+	for _, want := range []AvailabilityState{AvailabilityProbing, AvailabilityHealthy} {
+		if err := resources.PingRedis(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got := resources.RedisAvailability().State(); got != want {
+			t.Fatalf("state=%s want=%s", got, want)
+		}
+	}
+	handle.healthErr = errors.New("disconnected again")
+	for range 3 {
+		if resources.PingRedis(t.Context()) == nil {
+			t.Fatal("disconnection was hidden")
+		}
+	}
+	if resources.RedisAvailability().State() != AvailabilityDegraded || resources.Rdb(0) != client {
+		t.Fatal("later disconnection replaced the client or bypassed the failure threshold")
+	}
+}
+
 func (h fakeRedisHandle) GetClient(db int) (*redis.Client, bool) {
 	client, ok := h.clients[db]
 	return client, ok

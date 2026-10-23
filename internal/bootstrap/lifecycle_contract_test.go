@@ -432,6 +432,30 @@ func TestDrainPanicIsPublishedToWaiters(t *testing.T) {
 	}
 }
 
+func TestDrainFailureDoesNotConsumeResourceClose(t *testing.T) {
+	var events []string
+	r := &Runtime{
+		drain: func(context.Context) error { panic("drain failed") },
+		owners: &runtimeResources{
+			cache:    &lifecycleComponent{name: "cache", events: &events},
+			redis:    &lifecycleComponent{name: "redis", events: &events},
+			database: &lifecycleComponent{name: "database", events: &events},
+			logs:     &lifecycleComponent{name: "logging", events: &events},
+		},
+	}
+	if err := r.DrainLogs(t.Context()); !errors.Is(err, core.ErrComponentState) {
+		t.Fatalf("drain = %v", err)
+	}
+	for range 2 {
+		if err := r.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(events, []string{"stop:cache", "stop:redis", "stop:database", "stop:logging"}) {
+		t.Fatalf("close order = %v", events)
+	}
+}
+
 func TestConcurrentFirstDrainAdmissionHasOneOwner(t *testing.T) {
 	var calls atomic.Int32
 	r := &Runtime{drain: func(context.Context) error { calls.Add(1); return nil }}

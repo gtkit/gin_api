@@ -201,11 +201,7 @@ func TestReadyEndpointNilChecker(t *testing.T) {
 	}
 }
 
-// TestReadyEndpointReportsErrorDetail 钉住依赖失败原因进响应体。
-//
-// 这是一次**有意的取舍反转**：此前该端点刻意隐藏错误串，2026-08-13 按用户决策
-// 改为回传，以免每次排障都要先登进机器翻日志。代价是响应体携带内网拓扑与账号信息，
-// 因此 /ready 不得对公网开放——见 SCAFFOLD.md 与 readiness-probe spec。
+// TestReadyEndpointReportsErrorDetail 钉住公开文案与内部原因的隔离。
 func TestReadyEndpointReportsErrorDetail(t *testing.T) {
 	const depErr = "dial tcp 10.0.0.5:3306: connection refused"
 	engine := newTestEngine(t, &stubChecker{dbErr: errors.New(depErr)})
@@ -226,29 +222,37 @@ func TestReadyEndpointReportsErrorDetail(t *testing.T) {
 	if got := body.Checks["database"].Status; got != statusUnavailable {
 		t.Fatalf("database status = %q, want %q", got, statusUnavailable)
 	}
-	if got := body.Checks["database"].Error; got != depErr {
-		t.Fatalf("database error = %q, want the underlying reason %q", got, depErr)
+	if got := body.Checks["database"].Error; got != "dependency check failed" {
+		t.Fatalf("database error = %q, want safe failure message", got)
+	}
+	if strings.Contains(w.Body.String(), depErr) {
+		t.Fatal("readiness leaked the underlying reason")
 	}
 }
 
-// TestReadyEndpointBoundsErrorDetail 钉住错误串的字节上限。
-//
-// err.Error() 的长度不受本项目控制（驱动可能塞进整条 SQL 或上游的 HTML 错误页）。
-// 不设界的话，探针响应会在故障期膨胀到下游拒绝解析——正好在最需要它的时候失效。
-func TestReadyEndpointBoundsErrorDetail(t *testing.T) {
-	longErr := strings.Repeat("x", maxDepErrorBytes*3)
-	engine := newTestEngine(t, &stubChecker{dbErr: errors.New(longErr)})
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
-	engine.ServeHTTP(w, req)
-
-	var body ReadinessResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("a truncated body must stay parseable: %v", err)
-	}
-	if got := len(body.Checks["database"].Error); got != maxDepErrorBytes {
-		t.Fatalf("error detail length = %d, want %d", got, maxDepErrorBytes)
+func TestReadyEndpointHidesRedisErrorDetail(t *testing.T) {
+	const private = "10.0.3.12 password=secret-user SELECT token FROM private_table /srv/private"
+	for _, required := range []bool{false, true} {
+		engine := newTestEngineWith(t, Options{
+			HealthChecker: &stubChecker{redisErr: errors.New(strings.Repeat(private, 20))},
+			RedisRequired: required,
+		})
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+		wantCode, wantStatus := http.StatusOK, statusDegraded
+		if required {
+			wantCode, wantStatus = http.StatusServiceUnavailable, statusUnavailable
+		}
+		var body ReadinessResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != wantCode || body.Checks["redis"].Status != wantStatus || body.Checks["redis"].Error != "dependency check failed" {
+			t.Fatalf("required=%v status=%d body=%+v", required, w.Code, body)
+		}
+		if strings.Contains(w.Body.String(), private) {
+			t.Fatal("readiness leaked private data")
+		}
 	}
 }
 

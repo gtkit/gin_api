@@ -180,7 +180,7 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	if !slices.Equal(names, want) {
 		t.Fatalf("registered provider resources = %v, want %v", names, want)
 	}
-	if app.cache != f.components[4] {
+	if app.runtime.Cache() != f.components[4] {
 		t.Fatal("App did not retain Runtime's borrowed cache view")
 	}
 	cancelStartup()
