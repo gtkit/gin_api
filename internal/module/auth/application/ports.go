@@ -96,6 +96,6 @@ const (
 // 撤销失败，都是安全排查的起点。分级与 worker 的 Auditor 同理——
 // 失败与成功共用一个级别，告警规则就只能靠解析文本。
 type Auditor interface {
-	Auditf(format string, args ...any)
-	Failf(format string, args ...any)
+	Auditf(ctx context.Context, format string, args ...any)
+	Failf(ctx context.Context, format string, args ...any)
 }

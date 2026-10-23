@@ -36,24 +36,15 @@ import (
 )
 
 type providerSet struct {
-	moduleCleanup func() error
-	httpConfig    HTTPConfig
-	httpServer    httpServer
-	workers       *WorkerManager
-	shutdown      *ShutdownCoordinator
-	rateLimits    rateLimitAssembly
-	// outbound 是具名出站执行入口（客户端 + 熔断）；未声明 clients 时为空入口。
-	outbound *httpclient.Downstreams
-	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
+	cleanup    *providerCleanup
+	httpConfig HTTPConfig
+	httpServer httpServer
+	workers    *WorkerManager
+	shutdown   *ShutdownCoordinator
+	// cache 只借用 Runtime 的 typed view，关闭权仍属于 Runtime。
 	cache httpcache.ResponseCache
-	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
-	telemetry *telemetry.Provider
-	// tasksProducer 是异步任务入队端，供各模块注入。
-	tasksProducer *tasks.Producer
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
-	// metricsCleanup 注销指标的异步回调，由 App 在关停时调用。
-	metricsCleanup []func() error
 }
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
@@ -133,12 +124,11 @@ func newProvidersWithBudget(
 	// 失败回滚：装配已产生的进程级副作用（指标回调、限流注册表）逆序撤销。
 	// 只关 Runtime 是不够的——指标回调挂在进程级 MeterProvider 上持有已关闭
 	// 连接池的引用，限流执行体的后台 goroutine 仍在运行。
-	// 成功路径 discard：这些副作用的释放归 App 的关停序列。
-	rb := &rollbackStack{}
+	// 成功时把同一份登记交给 App，不再维护第二份关闭清单。
+	cleanup := &providerCleanup{}
 	defer func() {
 		if err != nil {
-			budget.Context(ctx)
-			err = errors.Join(err, rb.unwind())
+			err = errors.Join(err, cleanup.rollback(budget.Context(ctx)))
 		}
 	}()
 
@@ -165,7 +155,7 @@ func newProvidersWithBudget(
 		return nil, fmt.Errorf("build telemetry: %w", err)
 	}
 	inf.telemetry = telemetryProvider
-	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(budget.Context(ctx)) })
+	cleanup.push("telemetry", cleanupTelemetry, telemetryProvider.Shutdown)
 	if telemetryProvider.Enabled() {
 		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
@@ -192,7 +182,7 @@ func newProvidersWithBudget(
 		return nil, fmt.Errorf("register db pool metrics: %w", dbErr)
 	} else if unregister != nil {
 		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
-		rb.push("db pool metrics", unregister)
+		cleanup.push("db pool metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
 
 	// 3. 限流。必须先于 service 与路由装配：认证模块的账号维度限流要从
@@ -203,7 +193,7 @@ func newProvidersWithBudget(
 		return nil, fmt.Errorf("build rate limits: %w", err)
 	}
 	inf.rateLimits = rateLimits
-	rb.push("rate limits", func() error { return closeRateLimits(rateLimits) })
+	cleanup.push("rate limits", cleanupExtensions, func(context.Context) error { return closeRateLimits(rateLimits) })
 
 	// 3b. 出站执行入口：具名客户端 + 按同一批下游名登记的熔断实例
 	//     （outbound-http-resilience spec）。必须先于 service 装配：下游集合
@@ -214,7 +204,7 @@ func newProvidersWithBudget(
 		return nil, fmt.Errorf("build outbound downstreams: %w", err)
 	}
 	inf.outbound = outbound
-	rb.push("outbound http clients", outbound.Close)
+	cleanup.push("outbound http clients", cleanupExtensions, func(context.Context) error { return outbound.Close() })
 	if names := outbound.Names(); len(names) > 0 {
 		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
@@ -242,14 +232,16 @@ func newProvidersWithBudget(
 		return nil, fmt.Errorf("build task producer: %w", err)
 	}
 	inf.tasksProducer = tasksProducer
-	rb.push("task producer", func() error { return tasksProducer.Shutdown(budget.Context(ctx)) })
+	cleanup.push("task producer", cleanupExtensions, tasksProducer.Shutdown)
 
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServicesWithBudget(ctx, inf, runtime, budget)
 	if err != nil {
 		return nil, err
 	}
-	rb.push("modules", svc.cleanup)
+	if svc.cleanup != nil {
+		cleanup.push("modules", cleanupModules, func(context.Context) error { return svc.cleanup() })
+	}
 
 	// 5. 中间件：鉴权、日志、限流、缓存等。
 	// 豁免理由：contextcheck 跟进的是 Authenticate **返回的闭包**——那段代码在
@@ -265,14 +257,16 @@ func newProvidersWithBudget(
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
 	//    worker 健康指标的注销回调由 buildWorkers 追加进 inf.metricsCleanup，
-	//    按长度差把增量纳入回滚栈。
+	//    只在构造成功后按长度差把增量纳入清理登记。
 	cleanupsBefore := len(inf.metricsCleanup)
 	workers, err := buildWorkers(&inf)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
 	}
 	for _, unregister := range inf.metricsCleanup[cleanupsBefore:] {
-		rb.push("worker metrics", unregister)
+		if unregister != nil {
+			cleanup.push("worker metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+		}
 	}
 	// 协调器优先用注入的那个：信号在 NewApp 之前就可能到达，唯一的信号监督者
 	// （cmd 层）因此比装配更早构造它。未注入时自建，行为不变。
@@ -295,21 +289,14 @@ func newProvidersWithBudget(
 	}
 
 	// 装配成功：副作用的释放所有权移交 App 的关停序列。
-	rb.discard()
-
 	return &providerSet{
-		moduleCleanup:  svc.cleanup,
-		httpConfig:     inf.httpConfig,
-		httpServer:     newHTTPServer(engine, inf.httpConfig),
-		workers:        workers,
-		shutdown:       coordinator,
-		rateLimits:     rateLimits,
-		outbound:       outbound,
-		cache:          responseCache,
-		telemetry:      telemetryProvider,
-		tasksProducer:  tasksProducer,
-		status:         status,
-		metricsCleanup: inf.metricsCleanup,
+		cleanup:    cleanup,
+		httpConfig: inf.httpConfig,
+		httpServer: newHTTPServer(engine, inf.httpConfig),
+		workers:    workers,
+		shutdown:   coordinator,
+		cache:      responseCache,
+		status:     status,
 	}, nil
 }
 

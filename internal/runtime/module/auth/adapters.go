@@ -189,11 +189,15 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
-func (authAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }
+func (authAuditor) Auditf(ctx context.Context, format string, args ...any) {
+	logger.InfoCtx(ctx, fmt.Sprintf(format, args...))
+}
 
 // Failf 走 Warn：登录失败、重用检测、撤销失败都是安全排查的起点，
 // 与"某某登录成功"共用一个级别，告警规则就只能靠解析文本。
-func (authAuditor) Failf(format string, args ...any) { logger.Warnf(format, args...) }
+func (authAuditor) Failf(ctx context.Context, format string, args ...any) {
+	logger.WarnCtx(ctx, fmt.Sprintf(format, args...))
+}
 
 // eventRecorder 把认证事件转发给指标仪表。
 type eventRecorder struct {

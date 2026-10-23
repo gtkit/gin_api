@@ -64,10 +64,15 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var cleanupCalls int
 			app := &App{
 				runtime:    &Runtime{owners: &runtimeResources{logs: &processLogs{logger: owner}}, drain: owner.Drain},
 				httpServer: server.Config, httpConfig: HTTPConfig{ShutdownTimeout: 20 * time.Millisecond},
 				httpStarted: true, workers: manager, shutdown: NewShutdownCoordinator(),
+				cleanup: newRecordingProviderCleanup(func(context.Context, string) error {
+					cleanupCalls++
+					return nil
+				}),
 			}
 			switch mode {
 			case "forced":
@@ -89,6 +94,9 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 			}
 			if app.httpDrained {
 				t.Fatal("live handler reported drained")
+			}
+			if err := app.closeExtensions(t.Context()); err == nil || cleanupCalls != 0 || app.extClosed.Load() {
+				t.Fatalf("extensions closed before HTTP drained: calls=%d err=%v", cleanupCalls, err)
 			}
 			if err := app.closeResources(t.Context()); err == nil {
 				t.Fatal("unconfirmed producer did not prevent resource close")
@@ -128,6 +136,9 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 			app.httpDrained = true
 			if err := app.closeExtensions(t.Context()); err != nil {
 				t.Fatal(err)
+			}
+			if cleanupCalls != 7 {
+				t.Fatalf("late extension cleanup calls=%d, want 7", cleanupCalls)
 			}
 			if err := app.closeResources(t.Context()); err != nil {
 				t.Fatal(err)

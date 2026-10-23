@@ -191,13 +191,13 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 		return TokenPair{}, fmt.Errorf("auth: create account: %w", err)
 	}
 
-	s.audit("account registered: uid=%d", uid)
+	s.audit(ctx, "account registered: uid=%d", uid)
 	pair, err := s.issuePair(ctx, uid)
 	if err != nil {
 		// 账号已建、令牌未签发：必须显式表达这次部分成功。
 		// 审计走告警级——它意味着令牌基础设施（Redis/签发器）在注册路径上
 		// 出了问题，且已经产生了一个"注册成功但没拿到令牌"的用户。
-		s.fail("account registered but token issuance failed: uid=%d: %v", uid, err)
+		s.fail(ctx, "account registered but token issuance failed: uid=%d: %v", uid, err)
 		return TokenPair{}, fmt.Errorf("%w (uid=%d): %w", ErrRegisteredLoginRequired, uid, err)
 	}
 	return pair, nil
@@ -233,14 +233,14 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		if err := s.hasher.CompareWithDummy(ctx, password); err != nil && !errors.Is(err, ErrInvalidCredentials) {
 			return TokenPair{}, fmt.Errorf("auth: compare password: %w", err)
 		}
-		s.fail("login rejected: no account for the supplied phone")
+		s.fail(ctx, "login rejected: no account for the supplied phone")
 		s.event(ctx, EventLoginFailed)
 		return TokenPair{}, ErrInvalidCredentials
 	}
 
 	if err := s.hasher.Compare(ctx, cred.PasswordHash, password); err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
-			s.fail("login rejected: wrong password for uid=%d", cred.UserID)
+			s.fail(ctx, "login rejected: wrong password for uid=%d", cred.UserID)
 			s.event(ctx, EventLoginFailed)
 			return TokenPair{}, ErrInvalidCredentials
 		}
@@ -252,13 +252,17 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 	// 状态检查放在密码校验**之后**：放在之前，一个被禁用账号会比不存在的
 	// 账号更快返回，账号是否存在因此又从时间上泄漏了出去。
 	if !cred.Active {
-		s.fail("login rejected: uid=%d is not active", cred.UserID)
+		s.fail(ctx, "login rejected: uid=%d is not active", cred.UserID)
 		return TokenPair{}, ErrAccountInactive
 	}
 
-	s.audit("login succeeded: uid=%d", cred.UserID)
+	pair, err := s.issuePair(ctx, cred.UserID)
+	if err != nil {
+		return TokenPair{}, err
+	}
+	s.audit(ctx, "login succeeded: uid=%d", cred.UserID)
 	s.event(ctx, EventLoginSucceeded)
-	return s.issuePair(ctx, cred.UserID)
+	return pair, nil
 }
 
 // Refresh 用刷新令牌换取新的令牌对。
@@ -306,14 +310,14 @@ func (s *Service) refreshRejected(ctx context.Context, refreshToken string, err 
 		// 重用是安全事件，必须以告警级别留痕：它意味着某个令牌被复制了
 		// 出去，而普通的"过期/找不到"只是日常。两者共用一条日志的话，
 		// 真正需要有人看的那条会淹没在噪音里。
-		s.fail("refresh token reuse detected, the whole token family was revoked: %v", err)
+		s.fail(ctx, "refresh token reuse detected, the whole token family was revoked: %v", err)
 		s.event(ctx, EventRefreshReused)
 		// **撤销必须真的发生**：只读判定不改状态，撤销与检测的原子绑定在
 		// Consume 内。不补这一次调用，重用就只是被记了一笔而没有任何处置。
 		// 它的结果必然仍是重用，因此只在失败时留痕，不改变对外错误。
 		if _, _, revokeErr := s.refresh.Consume(ctx, refreshToken); revokeErr != nil &&
 			!errors.Is(revokeErr, ErrRefreshReused) {
-			s.fail("revoking the reused refresh token family failed: %v", revokeErr)
+			s.fail(ctx, "revoking the reused refresh token family failed: %v", revokeErr)
 		}
 		return ErrRefreshRejected
 	case errors.Is(err, ErrRefreshRejected):
@@ -352,11 +356,11 @@ func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Tim
 	}
 
 	if refreshToken == "" {
-		s.audit("logout: access token revoked, no refresh token supplied")
+		s.audit(ctx, "logout: access token revoked, no refresh token supplied")
 		return nil
 	}
 
-	s.audit("logout: refresh family and access token revoked")
+	s.audit(ctx, "logout: refresh family and access token revoked")
 	s.event(ctx, EventLogout)
 	return nil
 }
@@ -380,15 +384,15 @@ func (s *Service) issuePair(ctx context.Context, uid int64) (TokenPair, error) {
 	}, nil
 }
 
-func (s *Service) audit(format string, args ...any) {
+func (s *Service) audit(ctx context.Context, format string, args ...any) {
 	if s.auditor != nil {
-		s.auditor.Auditf(format, args...)
+		s.auditor.Auditf(ctx, format, args...)
 	}
 }
 
-func (s *Service) fail(format string, args ...any) {
+func (s *Service) fail(ctx context.Context, format string, args ...any) {
 	if s.auditor != nil {
-		s.auditor.Failf(format, args...)
+		s.auditor.Failf(ctx, format, args...)
 	}
 }
 
@@ -410,7 +414,7 @@ func (s *Service) gateAccount(ctx context.Context, account, action string) error
 		return nil
 	}
 	// 审计不落账号明文：账号维度键已经过 HMAC，日志同样不能把明文漏出去。
-	s.fail("%s rejected: account dimension rate limited", action)
+	s.fail(ctx, "%s rejected: account dimension rate limited", action)
 	s.event(ctx, EventLoginFailed)
 	return ErrAccountRateLimited
 }
