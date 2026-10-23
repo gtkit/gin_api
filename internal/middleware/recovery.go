@@ -70,7 +70,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			// 这类错误通常发生在服务端写响应时，客户端已经提前关闭连接；
 			// 此时继续写 JSON 没有意义，直接记录日志并终止当前上下文即可。
 			if isBrokenConnectionError(panicErr) {
-				logger.Warn("[Recovery] client connection closed",
+				logger.WarnCtx(requestCtx(c), "[Recovery] client connection closed",
 					buildRecoveryLogFields(
 						c,
 						panicErr,
@@ -89,7 +89,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			// Step 4: 如果响应已经开始写出，就不能再安全地改成统一 JSON 结构了。
 			// 比如 SSE / 流式响应 / 已经写出部分 body 的接口，这时只能记录日志并中止后续处理。
 			if c.Writer != nil && c.Writer.Written() {
-				logger.Error("[Recovery] panic recovered after response started",
+				logger.ErrorCtx(requestCtx(c), "[Recovery] panic recovered after response started",
 					buildRecoveryLogFields(
 						c,
 						panicErr,
@@ -106,7 +106,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			}
 
 			// Step 5: 普通 panic 记录完整上下文，并返回统一的 500 响应。
-			logger.Error("[Recovery] panic recovered",
+			logger.ErrorCtx(requestCtx(c), "[Recovery] panic recovered",
 				buildRecoveryLogFields(
 					c,
 					panicErr,

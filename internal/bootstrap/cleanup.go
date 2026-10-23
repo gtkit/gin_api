@@ -2,11 +2,57 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
 
 const cleanupBudget = 30 * time.Second
+
+// onceCleanup shares one completed cleanup while each waiter keeps its own
+// cancellation. fn must contain the caller's component-specific panic handling.
+type onceCleanup struct {
+	mu   sync.Mutex
+	done chan struct{}
+	err  error
+}
+
+func (o *onceCleanup) do(ctx context.Context, force <-chan struct{}, fn func(context.Context) error) error {
+	o.mu.Lock()
+	if done := o.done; done != nil {
+		o.mu.Unlock()
+		select {
+		case <-done:
+			return o.err
+		default:
+		}
+		select {
+		case <-done:
+			return o.err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-force:
+			return context.Canceled
+		}
+	}
+	o.done = make(chan struct{})
+	done := o.done
+	o.mu.Unlock()
+	cleanupCtx, finish := cleanupContext(ctx, force)
+	defer finish()
+	err := fn(cleanupCtx)
+	// Observe force synchronously; its context observer may not have run yet.
+	select {
+	case <-force:
+		err = errors.Join(err, context.Canceled)
+	default:
+	}
+	o.mu.Lock()
+	o.err = err
+	close(done)
+	o.mu.Unlock()
+	return err
+}
 
 // cleanupContext preserves a tighter parent deadline and joins its one optional
 // force observer. Callbacks run on their caller, never in an abandoned goroutine.

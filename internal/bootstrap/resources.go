@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/core"
@@ -112,9 +111,7 @@ type runtimeResources struct {
 	redis    redisOwner
 	cache    cacheOwner
 	force    <-chan struct{}
-	closeMu  sync.Mutex
-	closed   chan struct{}
-	closeErr error
+	cleanup  onceCleanup
 }
 
 func openRuntimeResources(ctx context.Context, cfg *config.Config, f runtimeFactories, migration bool, budget *rollbackBudget) (_ *runtimeResources, err error) {
@@ -197,54 +194,22 @@ func (r *runtimeResources) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	r.closeMu.Lock()
-	if done := r.closed; done != nil {
-		r.closeMu.Unlock()
-		select {
-		case <-done:
-			return r.closeErr
-		default:
+	return r.cleanup.do(ctx, r.force, func(ctx context.Context) error {
+		var errs []error
+		if !nilResource(r.cache) {
+			errs = append(errs, closeResource(ctx, "cache", r.cache.Close))
 		}
-		select {
-		case <-done:
-			return r.closeErr
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-r.force:
-			return context.Canceled
+		if !nilResource(r.redis) {
+			errs = append(errs, closeResource(ctx, "redis", r.redis.Close))
 		}
-	}
-	r.closed = make(chan struct{})
-	done := r.closed
-	r.closeMu.Unlock()
-	ctx, finish := cleanupContext(ctx, r.force)
-	defer finish()
-	var errs []error
-	if !nilResource(r.cache) {
-		errs = append(errs, closeResource(ctx, "cache", r.cache.Close))
-	}
-	if !nilResource(r.redis) {
-		errs = append(errs, closeResource(ctx, "redis", r.redis.Close))
-	}
-	if !nilResource(r.database) {
-		errs = append(errs, closeResource(ctx, "database", r.database.Close))
-	}
-	if !nilResource(r.logs) {
-		errs = append(errs, closeResource(ctx, "logging", r.logs.Close))
-	}
-	// Observe a force signal synchronously before publishing the shared result;
-	// its context observer may still be waiting for a scheduler turn.
-	select {
-	case <-r.force:
-		errs = append(errs, context.Canceled)
-	default:
-	}
-	err := errors.Join(errs...)
-	r.closeMu.Lock()
-	r.closeErr = err
-	close(done)
-	r.closeMu.Unlock()
-	return err
+		if !nilResource(r.database) {
+			errs = append(errs, closeResource(ctx, "database", r.database.Close))
+		}
+		if !nilResource(r.logs) {
+			errs = append(errs, closeResource(ctx, "logging", r.logs.Close))
+		}
+		return errors.Join(errs...)
+	})
 }
 
 // processLogs keeps notification owners alive until the logger finishes draining.

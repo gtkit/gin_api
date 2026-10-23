@@ -59,7 +59,14 @@ func ResourcesFromClients(
 		return nil, errors.New("resources: mysql client is required")
 	}
 	var redisState *AvailabilityTracker
-	if redis == nil || len(redis.PoolStats()) == 0 {
+	_, recoverable := redis.(interface{ ConfigureTracing() error })
+	if redis != nil && len(redis.PoolStats()) == 0 && redisConfigured && recoverable {
+		tracker, err := newRecoverableDegradedTracker("redis", DefaultAvailabilityPolicy(), redis.HealthCheck)
+		if err != nil {
+			return nil, fmt.Errorf("resources: build recovering redis tracker: %w", err)
+		}
+		redisState = tracker
+	} else if redis == nil || len(redis.PoolStats()) == 0 {
 		redis = nil
 		redisState = NewPermanentlyDegradedTracker("redis")
 	} else {
@@ -120,7 +127,7 @@ func (r *Resources) RedisConfigured() bool {
 
 // RedisAvailability 返回 Redis 的可用性跟踪器。
 //
-// 永不为 nil（启动失败时是永久降级的跟踪器），因此消费方不需要判空。
+// 已构造资源视图中永不为 nil；可恢复 Owner 从 Degraded 开始接受真实观测。
 func (r *Resources) RedisAvailability() *AvailabilityTracker {
 	if r == nil {
 		return nil
@@ -130,7 +137,7 @@ func (r *Resources) RedisAvailability() *AvailabilityTracker {
 
 // PingRedis 执行一次 Redis 健康检查并把结果计入可用性状态。
 //
-// Redis 从未建立时直接返回错误，且不影响永久降级状态。
+// 可恢复 Owner 的真实结果推进状态；真正缺失的句柄保持永久降级。
 func (r *Resources) PingRedis(ctx context.Context) error {
 	if r == nil || r.redis == nil {
 		return errors.New("redis is not available in this process")

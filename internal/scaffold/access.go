@@ -106,7 +106,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 				"权威角色源，表里有 admin 角色行的账号即通行。" +
 				"未建表或表为空时一律拒绝，因此空库上的表现仍是 403——" +
 				"但不要据此以为这条路由是关着的。" +
-				"换成 IAM / IdP 同步表时只改 providers.go 里 svc.roles 的构造，路由代码无需改动。" +
+				"换成 IAM / IdP 同步表时只改 internal/runtime/module/account/module.go 里的角色源构造，路由代码无需改动。" +
 				"绝不要改成仅凭 JWT 的 role claim 放行——那是一次签发当成持续有效的高权限。",
 		}, nil
 	case AccessOptionCustom:

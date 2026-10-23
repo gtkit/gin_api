@@ -79,6 +79,8 @@ make project-init NAME=your_project
 - 删除母版所属环境的专属部署入口（`.gitlab-ci.yml` 与 `deployment.sh`）。它们绑定母版环境的
   进程管理服务名、部署根路径与分支，不存在参数化后通用的形态，保留等于分发一条必然断裂的部署链——
   **派生项目需自备部署入口**；
+- 精确删除母版历史验收报告 `REVIEW.md`、`REVIEW-my.md`；保留 `pprof/` 工具箱和其他文档。
+  dry-run、删除与失败回滚共用同一文件清单，失败时按原契约恢复字节、权限及存在性；
 - 以指定分支（`--branch`，默认 `main`）初始化 git 并建立首个提交；
 - 收尾自检 `go build ./...` + `make check`。
 
@@ -164,12 +166,22 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
 
 | 能力 | 启动时已配置但不可达 | 运行中不可用 | 恢复方式 |
 |---|---|---|---|
-| Redis 限流 `fail_open` | 若无其他必需能力，可降级启动并放行 | 后端故障时放行 | 启动时没有客户端：重启后恢复；已有客户端：由健康探测恢复 |
+| Redis 限流 `fail_open` | 若无其他必需能力，可降级启动并放行 | 后端故障时放行 | Owner 首次恢复后，原共享限流后端按既有健康阈值恢复 |
 | Redis 限流 `fail_closed` | Redis 必需，启动失败 | 拒绝，现有中间件返回 429 | 由已有客户端的健康探测恢复；readiness 同时反映必需 Redis 状态 |
-| Redis 限流 `local_fallback` | 若无其他必需能力，改用本地桶启动 | 切到本地影子桶 | 启动时没有客户端：重启后恢复；已有客户端：健康探测恢复后切回 Redis |
+| Redis 限流 `local_fallback` | 若无其他必需能力，使用本地影子桶启动 | 切到本地影子桶 | Owner 首次恢复后，共享后端健康探测通过再切回 Redis，不迁移本地配额 |
 | 本地认证撤销/刷新 | Redis 必需，启动失败 | 撤销查询失败返回 503，不把故障当成“未撤销”；刷新/登出不能视为成功 | 已有客户端恢复后重试；不提供撤销 fail-open 开关 |
-| Redis GET 响应缓存 | 无其他必需能力时，本进程禁用缓存并告警 | 读取失败回源，写入失败记录错误；读/写分别有 1s/2s 上限 | 启动时被禁用：重启后恢复；已有客户端：后续成功操作重新使用缓存 |
+| Redis GET 响应缓存 | 无其他必需能力时，暂时透传并等待恢复 | 读取失败回源，写入失败记录错误；读/写分别有 1s/2s 上限 | Owner 恢复后，已挂载路由延迟共用一个 Store；正常构造后后续请求可命中缓存 |
 | 任务队列 | 启用时 Redis 必需，启动失败 | 入队错误返回调用方，处理/重试继续按队列原契约执行；必需 Redis 状态影响 readiness | 依赖恢复后按队列重试/调用方策略恢复，不承诺已失败入队自动补发 |
+
+可选 Redis 的首次恢复由 Owner 统一管理：数据 tracing 就绪后等待 5 秒开始尝试，失败后从尝试结束
+再等 5 秒；每次传入 10 秒 context 预算，实际返回还受客户端拨号/读写超时约束，不是 10 秒硬时限。
+每次沿用配置和 redisx 默认值，完整客户端及全部实际 DB 的 tracing 就绪后一次发布；首次成功后不再替换客户端。
+资源可用性仍需真实观测推进（连续失败 3 次降级、成功 2 次恢复），限流沿用自身的共享健康状态与冷却节奏。
+未配置的 Redis 不启动恢复，必需 Redis 初始失败仍阻止启动，DB 声明错误仍由配置校验拒绝。
+
+构造器异常、无效客户端、tracing 失败或候选清理失败会停止自动重试，并保留错误供诊断。
+缓存延迟构造失败也只诊断一次并保持透传，不反复构造。关闭先封闭客户端发布，再取消并等待恢复任务；
+某次关闭调用超时只代表该调用没有等到最终结果，不能当作资源已成功关闭。
 
 `failure_mode` 必须显式填写，没有适用于所有业务的默认值。`local_fallback` 不迁移桶状态：
 每个副本独立计额，切换后可能多放行一个 Burst，不能用作精确业务配额。
@@ -369,17 +381,17 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
 | 数据库连接校验 | `internal/platform/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
-| 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态与失败原因，错误详情截断至 256 字节；**响应体含内网地址与数据库账号名，该端点不得对公网开放**（见下节） |
+| 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态，失败时使用固定安全文案；原始原因进入服务端限频日志，该端点仍需限制访问（见下节） |
 
 ### 就绪探针的暴露面约束
 
-`/ready` 的响应体按依赖分列状态与**失败原因**：
+`/ready` 的响应体按依赖分列状态，失败时返回固定文案：
 
 ```json
 {
   "status": "unavailable",
   "checks": {
-    "database": { "status": "unavailable", "error": "dial tcp 10.0.3.12:3306: connect: connection refused" },
+    "database": { "status": "unavailable", "error": "dependency check failed" },
     "redis": { "status": "ok" }
   }
 }
@@ -389,17 +401,13 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 失败是 `unavailable` + 503；optional 依赖失败是 `degraded` + 200，实例仍接流量。
 整体 `status` 取最严重的那一项。
 
-带错误原因是为了让排障止步于探针，不必每次都登进机器翻日志。代价是响应体会带出
-内网拓扑与账号信息——`dial tcp 10.0.3.12:3306` 暴露内网地址与端口，
-`Access denied for user 'appuser'@'10.0.3.12'` 连账号名一起给出。
+原始依赖错误仅进入服务端日志：首次失败、错误变化和恢复立即记录，同类持续失败
+最多每 30 秒记录一次。客户端和监控应按 HTTP 状态码及结构化状态判断，不解析错误原文。
+绑定错误保持 HTTP 422；已初始化的校验翻译器继续提供中文字段提示，其余绑定错误统一返回
+`请求参数格式错误`，原始错误仍保留为服务端诊断 cause；请求体超限仍优先返回 413。
 
-**因此该端点只应对编排器与内网可达，不得暴露到公网。** 探针本就不该对公网开放，
-带上错误详情后代价更高。反向代理侧按路径拦掉 `/ready` 的外部访问即可，
+**该端点只应对编排器与内网可达，不得暴露到公网。** 反向代理侧按路径拦掉 `/ready` 的外部访问即可，
 代码层不做限制：探针必须能被编排器无凭据访问，加鉴权会让它在正常部署中失效。
-
-错误详情截断至 256 字节。`err.Error()` 的长度不受本项目控制——驱动可能把整条 SQL、
-TLS 证书链或上游返回的 HTML 错误页放进去，而一个膨胀到下游拒绝解析的探针响应，
-恰好在最需要它的时候失效。
 
 ### 认证：两种模式二选一（`auth.mode`，无默认值）
 
@@ -586,7 +594,7 @@ telemetry:
 |------|---------|
 | 后台任务 | 在 `providers.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
 | 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
-| `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `providers.go` 里 `svc.roles` 的构造，authorizer 与路由都不用动 |
+| `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
 | 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
@@ -623,9 +631,9 @@ telemetry:
 | 内容 | 说明 |
 |------|------|
 | `auth` 模块 | 本地认证（注册/登录/刷新/登出）。`auth.mode: external` 使用外部身份来源；JWT 验签与账号状态校验独立保留 |
-| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `entitlement.vip` authorizer 与 `VIPVerifier`（`internal/bootstrap/providers.go`）；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
+| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `internal/bootstrap/providers.go` 的 `entitlement.vip` 注册、`internal/bootstrap/authorizers.go` 的会员授权实现、`internal/shared/auth` 的 `VIPVerifier` 及 `internal/runtime/module/account/module.go` 的 `Assembly.VIP` 接线；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
-| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `providers.go` 里 `services.roles` 字段及其构造，并把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
+| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `internal/runtime/module/account/module.go` 里的 `Assembly.Roles` 字段及角色源构造，并在 `internal/bootstrap/providers.go` 把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
 | `users` 表的基线迁移 | 与 `auth` 模块配套；替换身份模型时一并重做 |
 
 ### 【内部支撑包 — 不构成能力，无需接线】

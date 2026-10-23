@@ -102,8 +102,7 @@ func EnableValidationTranslation() { validationTranslationReady.Store(true) }
 // bindErrResponse 是 BindErr / BindStructErr 的共用收口。
 // 校验类错误（validator.ValidationErrors）在翻译器就绪时输出中文、
 // 按对外 json 字段名组织的消息；多字段失败时取字段名排序后的第一条。
-// 翻译器未就绪或错误非校验类（如 JSON 语法错误）时保持既有渲染，
-// 不因翻译能力引入新的失败模式。
+// 翻译器未就绪或错误非校验类时返回固定文案，原始错误保留为诊断 cause。
 func bindErrResponse(c *gin.Context, err error) {
 	if payloadTooLargeFromBind(c, err) {
 		return
@@ -116,11 +115,7 @@ func bindErrResponse(c *gin.Context, err error) {
 			return
 		}
 	}
-	message := "bad request"
-	if err != nil {
-		message = err.Error()
-	}
-	Err(c, goerr.New(err, goerr.StatusValidateParams(), message))
+	Err(c, goerr.New(err, goerr.StatusValidateParams(), "请求参数格式错误"))
 }
 
 // MapErr 通过 mapper 解析业务错误并返回统一响应。

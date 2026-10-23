@@ -32,9 +32,12 @@ func (r *Resources) InstrumentTracing(dbName string) error {
 	}
 
 	if r.redis == nil {
-		// Redis 未配置或启动期不可达（永久降级）：没有可挂载的客户端。
+		// Redis 未配置或没有可恢复的句柄：没有可挂载的客户端。
 		// 这不是错误——可降级能力的缺席不该阻断启动（resource-lifecycle spec）。
 		return nil
+	}
+	if owner, ok := r.redis.(interface{ ConfigureTracing() error }); ok {
+		return owner.ConfigureTracing()
 	}
 
 	// DB 集合经 PoolStats 的键枚举：那是 redisx 实际初始化的集合。
@@ -46,11 +49,20 @@ func (r *Resources) InstrumentTracing(dbName string) error {
 		if !ok {
 			return fmt.Errorf("instrument redis tracing: db %d reported by pool stats but has no client", db)
 		}
-		if err := instrumentRedis(client, nil); err != nil {
+		if err := InstrumentRedisClient(client); err != nil {
 			return fmt.Errorf("instrument redis tracing (db %d): %w", db, err)
 		}
 	}
 	return nil
+}
+
+// InstrumentRedisClient installs tracing with the same fixed safe options used
+// during startup. Owners must call it once, before publishing each client.
+func InstrumentRedisClient(client *redis.Client) error {
+	if client == nil {
+		return errors.New("instrument redis tracing: nil client")
+	}
+	return instrumentRedis(client, nil)
 }
 
 // instrumentGorm 挂 otelgorm 插件。

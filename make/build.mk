@@ -1,15 +1,19 @@
 clean: ## 仅清理默认受管二进制与覆盖率文件，拒绝越界和symlink
 	go run ./scripts/clean.go --bin-dir "$(BIN_DIR)" --app-name "$(APP_NAME)" --coverage-profile "$(COVERAGE_PROFILE)"
 
-## 构建mac版本,需要安装upx
 # 多个 tag 的正确写法: 多个 tag 之间用逗号或空格分隔
 #go build -tags=sonic,debug ./...
 #go build -tags="sonic debug" ./...
 
-## 构建linux版本,需要安装upx
+## 默认构建 linux/amd64；保留 Linux/BUILD_FLAGS 覆写，UPX 可选
 build:
-	@mkdir -p $(BIN_DIR)
-	$(Linux) go build $(BUILD_FLAGS) -o $(BIN_DIR)/$(APP_NAME) . && upx -9 $(BIN_DIR)/$(APP_NAME)
+	@mkdir -p "$(BIN_DIR)"
+	$(Linux) go build -trimpath $(BUILD_FLAGS) -o "$(BIN_DIR)/$(APP_NAME)" .
+	@if command -v upx >/dev/null 2>&1; then \
+		upx -9 "$(BIN_DIR)/$(APP_NAME)"; \
+	else \
+		printf '%s\n' 'UPX not found; keeping the uncompressed binary'; \
+	fi
 
 image: ## Build the Docker image locally, tagged with the current commit short sha (requires Docker; servers do not run Docker)
 	## APP_NAME 只决定 builder 阶段的产物名；容器内路径固定为 /app/bin/server（exec-form

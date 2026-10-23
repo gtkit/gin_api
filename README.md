@@ -16,6 +16,10 @@ make project-init NAME=your_project                  # 执行
 
 私有模块的临时/持久配置、访问权限与内部代理说明见 [前提](SCAFFOLD.md#前提)；完整流程、护栏说明、CORS 请求头清理及可选依赖精简见 [`SCAFFOLD.md`](SCAFFOLD.md)。
 
+派生初始化精确移除母版部署入口及 `REVIEW.md`、`REVIEW-my.md`，保留 `pprof/` 和其他文档。
+`make build` 默认生成 linux/amd64 二进制并启用 `-trimpath`；保留 `Linux`、`BUILD_FLAGS` 覆写。
+UPX 已安装时执行压缩，未安装时保留未压缩产物；编译或压缩失败仍返回失败。
+
 ## 快速开始
 
 1. 创建本地配置：
@@ -58,6 +62,8 @@ make project-init NAME=your_project                  # 执行
 Redis认证、限流与响应缓存统一使用 `redis.prefix`；省略或空串时原样回落 `application.name`，不补分隔符。存量升级须保持旧实际namespace：旧版忽略的非空prefix若不同于旧应用名，须先改为原namespace再升级；直接改名会使撤销/刷新状态失联。本次不搬迁key、不扩展DB/Redis集群。
 
 Redis 各能力的启动、故障和恢复语义见 [Redis 故障与恢复](SCAFFOLD.md#redis-故障与恢复)。
+仅可降级能力启用时，首次不可达会在同一进程内重试恢复；已挂载的缓存与共享限流后端随之恢复。
+本地认证、fail-closed Redis 限流和任务队列仍要求 Redis 在启动时可用。
 
 ## 架构
 

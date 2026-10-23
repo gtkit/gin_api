@@ -10,6 +10,7 @@ import (
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gtkit/logger/v2"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -96,26 +97,10 @@ func buildLimiter(
 	}
 
 	if *redisBackend == nil {
-		client := resources.Rdb(0)
-		if client == nil {
-			// 两种"拿不到客户端"必须分开处置（resource-lifecycle spec）。
-			//
-			// 未配置 = 配置矛盾（声明用 redis 却没给地址），一律启动失败。
-			if !resources.RedisConfigured() {
-				return nil, fmt.Errorf(
-					"rate limit policy %q uses the redis store but redis is not configured: "+
-						"either set redis.addr or switch the policy to the local store", policy.ID)
-			}
-			// 已配置但启动期不可达 = 运行期故障。存在 fail_closed 策略时仍失败
-			//（那种模式下不可达只能拒绝请求，实例不该被判为 ready）；
-			// 全是降级模式时按各策略自己的 FailureMode 顶替真实后端。
-			if !degradedStartAllowed {
-				return nil, fmt.Errorf(
-					"rate limit policy %q is fail_closed over the redis store but redis is "+
-						"unreachable at startup: that policy could only reject every request, "+
-						"so the instance must not come up", policy.ID)
-			}
-			return unreachableLimiter(policy)
+		if !resources.RedisConfigured() {
+			return nil, fmt.Errorf(
+				"rate limit policy %q uses the redis store but redis is not configured: "+
+					"either set redis.addr or switch the policy to the local store", policy.ID)
 		}
 		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),
@@ -127,7 +112,7 @@ func buildLimiter(
 		if degradedStartAllowed {
 			backendOpts = append(backendOpts, ratelimit.WithDegradedStart())
 		}
-		backend, err := ratelimit.NewRedisBackend(ctx, client, backendOpts...)
+		backend, err := ratelimit.NewRedisBackend(ctx, redisCommands{resources: resources}, backendOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
 		}
@@ -144,31 +129,35 @@ func buildLimiter(
 	return ratelimit.NewRedisLimiter(*redisBackend, policy)
 }
 
-// unreachableLimiter 为"Redis 已配置但启动期不可达"的策略选执行体。
-//
-// 两种降级模式要的东西不同，不能一视同仁：
-//
-//	fail_open      → 恒不可用执行体：它按 FailureMode 放行并置 Degraded，
-//	                 限额不变（只是当下无法执行）。
-//	local_fallback → 真实的本地桶：这个模式的语义就是"后端没了就用本地的"，
-//	                 给恒不可用执行体会落到保守方向（拒绝），把一个要求
-//	                 可用性的策略变成全量拒绝。
-//
-// 本地桶的代价是配额按副本各算一份（N 个副本 = N 倍总量）——这正是
-// local_fallback 已经接受的代价，与运行期回落到影子桶完全一致。
-//
-// 这条路径**不会自行恢复**：没有后端连接可探测，恢复靠进程重启。
-func unreachableLimiter(policy ratelimit.Policy) (ratelimit.Limiter, error) {
-	if policy.FailureMode == ratelimit.FailureLocalFallback {
-		logger.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
-			"bucket for this process lifetime (quota counts per replica; restart after redis recovers)",
-			policy.ID)
-		return ratelimit.NewLocalBackend(policy)
-	}
+// redisCommands borrows the current DB 0 client once per command. Recovery and
+// ownership stay with Resources; algorithm, keys and retry policy stay in ratelimit.
+type redisCommands struct{ resources *data.Resources }
 
-	logger.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
-		"process lifetime (restart after redis recovers)", policy.ID, policy.FailureMode)
-	return ratelimit.NewUnavailableLimiter(policy), nil
+func (r redisCommands) ScriptLoad(ctx context.Context, script string) *redis.StringCmd {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.ScriptLoad(ctx, script)
+	}
+	cmd := redis.NewStringCmd(ctx)
+	cmd.SetErr(errors.New("redis is unavailable"))
+	return cmd
+}
+
+func (r redisCommands) EvalSha(ctx context.Context, sha string, keys []string, args ...any) *redis.Cmd {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.EvalSha(ctx, sha, keys, args...)
+	}
+	cmd := redis.NewCmd(ctx)
+	cmd.SetErr(errors.New("redis is unavailable"))
+	return cmd
+}
+
+func (r redisCommands) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.Del(ctx, keys...)
+	}
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetErr(errors.New("redis is unavailable"))
+	return cmd
 }
 
 // toRateLimitPolicy 把配置形态翻译成强类型策略。

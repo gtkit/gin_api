@@ -24,8 +24,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
-	"github.com/gtkit/gin-api/internal/repository/useraccount"
-	"github.com/gtkit/gin-api/internal/repository/userrole"
+	"github.com/gtkit/gin-api/internal/runtime/module/account"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 
@@ -41,8 +40,6 @@ type providerSet struct {
 	httpServer httpServer
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
-	// cache 只借用 Runtime 的 typed view，关闭权仍属于 Runtime。
-	cache httpcache.ResponseCache
 	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
 	status *processStatus
 }
@@ -83,17 +80,8 @@ type services struct {
 	// 零值可用是有意的：外部身份模式下这些端点不存在，而"不存在"应当表达为
 	// 一个不被注册的模块，不是一个注册了却永远报错的模块。
 	auth authruntime.Assembly
-	// accounts 是账号状态源：鉴权中间件每个带令牌的请求都要用它确认账号仍然可用，
-	// entitlement.vip 也从它读会员资格。
-	//
-	// 它是 port 的集合而非某个模块的 service：这两项判定没有业务规则，
-	// 而把它们挂在某个业务模块上，会让"删掉那个模块"连带打断鉴权链路。
-	accounts *useraccount.Repository
-	// roles 是权威角色源，供 role.admin 判定使用。
-	//
-	// **示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。它是 port 而非具体仓储：
-	// 换成 IAM / IdP 同步表时只改这一处的构造，authorizer 与路由都不用动。
-	roles sharedauth.RoleVerifier
+	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
+	accounts account.Assembly
 	// scaffold:module-service-fields
 }
 
@@ -106,16 +94,6 @@ type middlewares struct {
 	// 装配期就绑定注册表：让模块路由拿一个只需传标识的函数，模块因此不必
 	// 认识注册表，也不可能拿到一个未绑定注册表的授权中间件。
 	authorizeByID func(string) gin.HandlerFunc
-}
-
-// newProviders 按基础设施、遥测与指标、限流/出站/缓存/入队、service、
-// 中间件、worker/协调器、路由引擎的依赖顺序装配，并管理失败回滚。
-func newProviders(
-	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator,
-) (_ *providerSet, err error) {
-	budget := &rollbackBudget{force: shutdown.ForcedCh()}
-	defer budget.Close()
-	return newProvidersWithBudget(ctx, runtime, shutdown, budget)
 }
 
 func newProvidersWithBudget(
@@ -295,7 +273,6 @@ func newProvidersWithBudget(
 		httpServer: newHTTPServer(engine, inf.httpConfig),
 		workers:    workers,
 		shutdown:   coordinator,
-		cache:      responseCache,
 		status:     status,
 	}, nil
 }
@@ -329,14 +306,7 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	}, nil
 }
 
-// buildServices 把基础设施翻译成各模块的 application service，传递最小依赖。
-// 新增模块时在此追加一行 service 构造（scaffold 生成器经 module-services 标记注入）。
-func buildServices(ctx context.Context, inf infra, runtime *Runtime) (_ services, err error) {
-	budget := &rollbackBudget{}
-	defer budget.Close()
-	return buildServicesWithBudget(ctx, inf, runtime, budget)
-}
-
+// buildServicesWithBudget 装配模块，按 module-services 标记接入生成代码。
 func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, budget *rollbackBudget) (_ services, err error) {
 	var svc services
 	modules := &rollbackStack{}
@@ -386,15 +356,11 @@ func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, b
 		svc.auth = assembly
 	}
 
-	// 账号状态源。直接构造仓储而不经模块 application：这两项判定没有业务规则，
-	// 加一层 service 只会多一个纯转发。
-	svc.accounts = useraccount.New(inf.mysqlDB)
-
-	// 权威角色源。**示例装配，可按需删除**（删除清单见 SCAFFOLD.md）。
-	//
-	// 直接构造仓储而不经模块 application：角色判定没有业务规则，
-	// 加一层 service 只会多一个纯转发。接入 IAM / IdP 同步表时替换这一行即可。
-	svc.roles = userrole.New(inf.mysqlDB)
+	accounts, accountErr := account.New(inf.mysqlDB)
+	if accountErr != nil {
+		return services{}, fmt.Errorf("build account sources: %w", accountErr)
+	}
+	svc.accounts = accounts
 
 	// scaffold:module-services
 
@@ -421,7 +387,7 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 	}
 
 	authOpts := middleware.AuthOptions{
-		Verifier:   svc.accounts,
+		Verifier:   svc.accounts.Users,
 		Parser:     tokenParser,
 		Revocation: revocation,
 	}
@@ -456,13 +422,13 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	//
 	// 未接入角色数据时（表空或未建），判定一律拒绝，因此**替换恒拒绝占位没有放宽默认行为**。
 	if err := reg.Register("role.admin",
-		newRoleAuthorizer(svc.roles, adminRoleName)); err != nil {
+		newRoleAuthorizer(svc.accounts.Roles, adminRoleName)); err != nil {
 		return nil, err
 	}
 
 	// entitlement.vip 是共享的会员资格判定，供多个模块路由按 ID 引用，
 	// 不复制进任何模板——复制会让"会员判定"出现多份可能不一致的实现。
-	if err := reg.Register("entitlement.vip", newVIPAuthorizer(svc.accounts)); err != nil {
+	if err := reg.Register("entitlement.vip", newVIPAuthorizer(svc.accounts.VIP)); err != nil {
 		return nil, err
 	}
 

@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/logger/v2"
@@ -43,9 +42,6 @@ type App struct {
 	httpServer httpServer
 	workers    *WorkerManager
 	shutdown   *ShutdownCoordinator
-	// cache 是 Runtime 持有的缓存提供的 typed view；关闭权属于 Runtime。
-	// App 只保留它以兼容现有装配结构，不直接调用 Close。
-	cache httpcache.ResponseCache
 	// drainWait 是停 producer 之后、关 HTTP 之前的等待时长，
 	// 用于让负载均衡器观察到 /ready 的 503 并把本实例摘出转发目标。
 	drainWait time.Duration
@@ -92,7 +88,6 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 		httpServer: providers.httpServer,
 		workers:    providers.workers,
 		shutdown:   providers.shutdown,
-		cache:      providers.cache,
 		drainWait:  drainWaitFrom(runtime.Config()),
 		status:     providers.status,
 	}, nil

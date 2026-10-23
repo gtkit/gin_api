@@ -41,7 +41,7 @@ const projectMkPath = "project.mk"
 // appmetaPath 是由 project.mk 生成的身份常量文件。
 const appmetaPath = "internal/appmeta/meta.go"
 
-// motherDeploymentFiles 是母版所属环境的专属部署入口。
+// motherOnlyFiles 是派生项目须精确移除的母版部署入口与历史验收报告。
 //
 // 它们被 git 跟踪 → 进 module zip → 被 gonew 复制进派生项目，而其中绑定了母版环境的
 // 进程管理服务名、部署根路径与分支等具体事实。派生项目二进制名不同，复制来的脚本必然
@@ -49,13 +49,13 @@ const appmetaPath = "internal/appmeta/meta.go"
 //
 // 这些文件本身是外部冻结契约：母版内不修改、不参数化，也不为派生项目内置替代 CD
 // （没有目标环境事实的默认 CD 同样必然失败）。
-var motherDeploymentFiles = []string{".gitlab-ci.yml", "deployment.sh"}
+var motherOnlyFiles = []string{".gitlab-ci.yml", "deployment.sh", "REVIEW.md", "REVIEW-my.md"}
 
 // laravelRemovalNote 收尾提示：Laravel 兼容层需按文档手动移除（不自动源码手术）。
 const laravelRemovalNote = "如无需 Laravel 存量 token 兼容，请按 SCAFFOLD.md 的「移除 Laravel 兼容层」清单手动移除 Laravel 兼容层。"
 
 // deploymentNote 说明派生项目为何不再包含母版的部署入口。
-const deploymentNote = "已删除母版所属环境的专属部署入口（CI 配置与部署脚本）：它们绑定母版环境的进程管理服务名、部署根路径与分支，不存在参数化后通用的形态。派生项目需自备部署入口。"
+const deploymentNote = "已删除母版专属部署入口（CI 配置与部署脚本）及 REVIEW.md、REVIEW-my.md 历史验收报告；保留 pprof 工具箱和其他文档。部署入口绑定母版环境的服务名、路径与分支，派生项目需自备部署入口。"
 
 // noCommitNote 提示 --no-commit 下尚未提交。
 const noCommitNote = "已初始化仓库并暂存全部文件，但未提交：请自行 review 后执行 git commit。"
@@ -263,7 +263,7 @@ func (i *Initializer) validateInputs(opts Options) (branch string, gitState gitE
 // planDryRun 只列出将发生的改动，不触碰磁盘。
 func (i *Initializer) planDryRun(opts Options, result *Result) error {
 	result.Rewritten = append(result.Rewritten, projectMkPath, appmetaPath)
-	for _, rel := range motherDeploymentFiles {
+	for _, rel := range motherOnlyFiles {
 		if _, err := os.Lstat(filepath.Join(i.root, rel)); err == nil {
 			result.Deleted = append(result.Deleted, rel)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -284,7 +284,7 @@ func (i *Initializer) takeSnapshot(gitState gitEntryState, opts Options) (*snaps
 		return nil, err
 	}
 
-	affected := append([]string{projectMkPath, appmetaPath}, motherDeploymentFiles...)
+	affected := append([]string{projectMkPath, appmetaPath}, motherOnlyFiles...)
 	for _, rel := range affected {
 		if err := snap.capture(rel); err != nil {
 			return nil, errors.Join(err, snap.cleanup())
@@ -322,7 +322,7 @@ func (i *Initializer) transformFiles(opts Options, result *Result) error {
 	}
 	result.Rewritten = append(result.Rewritten, appmetaPath)
 
-	for _, rel := range motherDeploymentFiles {
+	for _, rel := range motherOnlyFiles {
 		full := filepath.Join(i.root, rel)
 		if _, err := os.Lstat(full); err != nil {
 			if errors.Is(err, os.ErrNotExist) {

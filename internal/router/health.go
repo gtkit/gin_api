@@ -1,10 +1,8 @@
 package router
 
 import (
-	"cmp"
 	"context"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
 
@@ -24,12 +22,6 @@ const (
 	readyGlobalDeadline = 2 * time.Second
 )
 
-// 探针的请求级超时预算。
-//
-// 刻意比业务路由短得多：探针的意义是快速回答"我还行吗"，
-// 一个要等好几秒才失败的探针会让编排器的判定同样迟钝，摘流也就跟着变慢。
-const ()
-
 // 状态标签的取值集合固定，不随错误种类变化。
 //
 // 失败原因走 DependencyCheck.Error 单独承载，不拼进标签——标签是编排器
@@ -41,13 +33,7 @@ const (
 	statusUnavailable = "unavailable"
 )
 
-// maxDepErrorBytes 是响应体中单条依赖错误的字节上限。
-//
-// err.Error() 的长度不受本项目控制：驱动可能把整条 SQL、TLS 证书链或上游返回的
-// HTML 错误页放进去。探针必须在故障期保持可用，而一个膨胀到 LB 拒绝解析的响应
-// 恰好在最需要它的时候失效。256 字节足以容纳
-// `dial tcp <addr>: connect: connection refused` 这类典型错误的完整信息。
-const maxDepErrorBytes = 256
+const dependencyFailureMessage = "dependency check failed"
 
 // depFailureLogInterval 是同一依赖同一错误类别的重复失败日志间隔。
 //
@@ -102,11 +88,7 @@ type LivenessResponse struct {
 // Status 保持固定取值集合，Error 是独立的附加信息。
 type DependencyCheck struct {
 	Status string `json:"status"`
-	// Error 是检查失败的原因，仅失败时出现，长度受 maxDepErrorBytes 约束。
-	//
-	// **该字段会携带内网拓扑与账号信息**（典型如
-	// `Access denied for user 'appuser'@'10.0.3.12'`）。这是为缩短排障路径
-	// 作出的取舍，代价是 /ready 不得对公网开放——见 SCAFFOLD.md 的说明。
+	// Error 仅在失败时携带固定安全文案；原始原因只进入服务端日志。
 	Error string `json:"error,omitempty"`
 }
 
@@ -206,29 +188,11 @@ type depOutcome struct {
 	failed   bool
 }
 
-// truncateDepError 把错误文本收敛到 maxDepErrorBytes 以内。
-//
-// 按字节而不是按字符截断，可能切断多字节字符的中间。这里可接受：错误串是给人读的
-// 排障线索，不是需要精确往返的数据；且 encoding/json 会把非法 UTF-8 字节编码为
-// U+FFFD 而不是报错，响应因此仍然可解析——而"响应可解析"正是设上限要保住的东西。
-func truncateDepError(err error) string {
-	if err == nil {
-		return ""
-	}
-	detail := err.Error()
-	if len(detail) <= maxDepErrorBytes {
-		return detail
-	}
-	return detail[:maxDepErrorBytes]
-}
-
 // runDependencyChecks 在全局预算内**并发**执行全部依赖检查。
 //
 // 并发而不是串行：串行时最坏耗时随依赖数量线性增长，很快就会超过探针超时，
 // 于是探针本身成了故障源。单项预算取 min(单项上限, 全局预算剩余)，
 // 保证任何一项都不能吃掉别人的预算。
-//
-// 结果按依赖名**稳定排序**收集：JSON 字段顺序抖动会干扰比对与告警去重。
 func runDependencyChecks(
 	parent context.Context, deps []dependency, limiter *depFailureLogLimiter,
 ) (map[string]DependencyCheck, bool, bool) {
@@ -257,12 +221,12 @@ func runDependencyChecks(
 				// 可选依赖的失败不是"不可用"，而是"这台实例少了一项能力"。
 				outcomes[i] = depOutcome{
 					name: dep.name, status: statusDegraded,
-					detail: truncateDepError(err), failed: true,
+					detail: dependencyFailureMessage, failed: true,
 				}
 			default:
 				outcomes[i] = depOutcome{
 					name: dep.name, status: statusUnavailable,
-					detail: truncateDepError(err), required: true, failed: true,
+					detail: dependencyFailureMessage, required: true, failed: true,
 				}
 			}
 		})
@@ -270,8 +234,6 @@ func runDependencyChecks(
 	// 一个依赖失败不取消其余依赖的检查——
 	// 那会让 readiness 的输出取决于哪个依赖先失败。
 	group.Wait()
-
-	slices.SortFunc(outcomes, func(a, b depOutcome) int { return cmp.Compare(a.name, b.name) })
 
 	results := make(map[string]DependencyCheck, len(outcomes))
 	var anyRequiredFailed, anyOptionalFailed bool

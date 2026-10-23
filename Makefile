@@ -85,20 +85,6 @@ run lint test:
 	@:
 endif
 
-## 查看监听在 $(PORT) 端口的进程
-port:
-	lsof -nP -iTCP:$(PORT) -sTCP:LISTEN
-
-## 杀掉监听在 $(PORT) 端口的进程
-kill-port:
-	@pids=$$(lsof -nP -iTCP:$(PORT) -sTCP:LISTEN -t); \
-	if [ -z "$$pids" ]; then \
-		echo "no process is listening on :$(PORT)"; \
-	else \
-		echo "killing pid(s) on :$(PORT): $$pids"; \
-		kill -9 $$pids; \
-	fi
-
 include make/build.mk
 include make/dev.mk
 include make/quality.mk
@@ -115,7 +101,7 @@ include make/release.mk
 port:
 	@lsof -nP -iTCP:$(PORT) -sTCP:LISTEN || echo "端口 $(PORT) 未被占用"
 
-## 结束占用服务端口(默认 9090)的监听进程
+## 结束占用服务端口(默认 8008)的监听进程
 kill-port:
 	@pids=$$(lsof -nP -iTCP:$(PORT) -sTCP:LISTEN -t); \
 	if [ -z "$$pids" ]; then \

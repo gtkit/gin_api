@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
@@ -27,11 +26,9 @@ type Runtime struct {
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt *jwtauth.Assembly
 	// Abnormal file flush and normal Close share the native logging owner.
-	drain     func(context.Context) error
-	force     <-chan struct{}
-	drainMu   sync.Mutex
-	drainDone chan struct{}
-	drainErr  error
+	drain        func(context.Context) error
+	force        <-chan struct{}
+	drainCleanup onceCleanup
 }
 
 // NewRuntime initializes the fixed process resources. Failure cleanup
@@ -102,7 +99,7 @@ func logResourceStates(resources *data.Resources) {
 		return
 	}
 	logger.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
-		"until the process restarts", state.Name(), state.State())
+		"until Redis recovery and their own health checks succeed", state.Name(), state.State())
 }
 
 // Config returns the typed runtime configuration.
@@ -164,45 +161,15 @@ func (r *Runtime) DrainLogs(ctx context.Context) error {
 	if r == nil || r.drain == nil {
 		return nil
 	}
-	r.drainMu.Lock()
-	if done := r.drainDone; done != nil {
-		r.drainMu.Unlock()
-		select {
-		case <-done:
-			return r.drainErr
-		default:
-		}
-		select {
-		case <-done:
-			return r.drainErr
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-r.force:
-			return context.Canceled
-		}
-	}
-	r.drainDone = make(chan struct{})
-	done := r.drainDone
-	r.drainMu.Unlock()
-	drainCtx, finish := cleanupContext(ctx, r.force)
-	defer finish()
-	err := func() (err error) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("logging drain panic: %v: %w", recovered, core.ErrComponentState)
-			}
+	return r.drainCleanup.do(ctx, r.force, func(drainCtx context.Context) error {
+		err := func() (err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = fmt.Errorf("logging drain panic: %v: %w", recovered, core.ErrComponentState)
+				}
+			}()
+			return r.drain(drainCtx)
 		}()
-		return r.drain(drainCtx)
-	}()
-	err = errors.Join(err, drainCtx.Err())
-	select {
-	case <-r.force:
-		err = errors.Join(err, context.Canceled)
-	default:
-	}
-	r.drainMu.Lock()
-	r.drainErr = err
-	close(done)
-	r.drainMu.Unlock()
-	return err
+		return errors.Join(err, drainCtx.Err())
+	})
 }
