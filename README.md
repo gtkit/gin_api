@@ -7,14 +7,14 @@
 用 `gonew` 复制并改名，再用 `project init` 收尾：
 
 ```bash
-export GOPRIVATE=github.com/gtkit/*
+export GOPRIVATE='github.com/gtkit/*'
 gonew github.com/gtkit/gin-api@latest example.com/yourorg/your-project ./your-project
 cd ./your-project
 make project-init NAME=your_project ARGS=--dry-run   # 预览
 make project-init NAME=your_project                  # 执行
 ```
 
-完整流程、护栏说明与「移除 Laravel 兼容层」手动清单见 [`SCAFFOLD.md`](SCAFFOLD.md)。
+私有模块的临时/持久配置、访问权限与内部代理说明见 [前提](SCAFFOLD.md#前提)；完整流程、护栏说明、CORS 请求头清理及可选依赖精简见 [`SCAFFOLD.md`](SCAFFOLD.md)。
 
 ## 快速开始
 
@@ -102,27 +102,9 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
-`ai`（仅当 `modules.ai.providers` 里至少有一家填了 `api_key` 时注册；一家都没填时
-这些端点整个不存在，启动日志会提示一次——"端点不存在"比"端点存在但每次都 503"
-更容易被判断成配置问题）：
-
-- `POST /api/v1/ai/chat`：一次性返回完整回复与 token 用量。
-- `POST /api/v1/ai/chat/stream`：SSE 流式增量输出，事件为 `delta` / `done` / `error`。
-- `GET /api/v1/ai/providers`：已启用的厂商与其生效默认模型。
-- `GET /api/v1/ai/conversations`：会话分页列表。
-- `GET /api/v1/ai/conversations/:id`：会话详情 + 消息分页。
-- `PATCH /api/v1/ai/conversations/:id`：改标题。
-- `DELETE /api/v1/ai/conversations/:id`：软删会话。
-
-全部端点要求认证，会话按用户归属（归属条件写在 SQL 的 WHERE 里，不靠取回后比对）。
-底层是 [`github.com/gtkit/go-llm-provider/v2`](https://github.com/gtkit/go-llm-provider)，
-配置驱动多厂商：DeepSeek、通义千问、智谱 GLM、Moonshot、火山方舟、百度千帆、硅基流动。
-每家厂商各带独立的连接池、熔断器与重试。
-
-**SSE 的注意事项**：认证中间件禁止 SSE 请求用 query 传令牌（query 会进访问日志、
-Referer 与浏览器历史），因此前端不能用原生 `EventSource`，要用 `fetch` + `Authorization` 头
-读流。流式路由不挂路由级超时中间件（那会掐断正常生成中的长流），整体预算由
-`modules.ai.stream_total_timeout` 给出，保活由 `heartbeat_interval` 控制。
+AI 对话与会话管理模块已移除，原 `/api/v1/ai/*` 接口不再注册。升级时删除
+`modules.ai` 配置和 `APP_MODULES__AI__*` 环境变量；未知配置仍会导致启动失败。
+历史 SQL 和现有数据保留，旧迁移在新库仍可能创建 AI 表，详见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
 
 基础探针：
 

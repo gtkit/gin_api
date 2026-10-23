@@ -169,8 +169,6 @@ github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0 h1:nC1s95o6DvFJvbhg2jB
 github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0/go.mod h1:qXLXN4FLXX8ZdwDNDNoHtPjF+LVwVOliFYqmnzDMuH4=
 github.com/gtkit/ginx v1.2.0 h1:H2Evm/iCOYMUrqBKA1tHTEDqNweR4tpzGwjh0/owifo=
 github.com/gtkit/ginx v1.2.0/go.mod h1:TM3zFFE21+Zn8Ok2JYrtI8q0jskiY/UEVRmuFqbWCpI=
-github.com/gtkit/go-llm-provider/v2 v2.18.0 h1:Amm1Z+RnTUmPm27tt5dApLQWdI539r2oPlonVsYOOTU=
-github.com/gtkit/go-llm-provider/v2 v2.18.0/go.mod h1:cEL4wWWYWPoHS66XcMjiiXhOeQt3lCtWCzLogZxF7UY=
 github.com/gtkit/goerr v1.5.0 h1:X8yUkUaRebQX3Crm2Hm+lvjXkL/X9EEcYa4EhP4lDaQ=
 github.com/gtkit/goerr v1.5.0/go.mod h1:aPBCLAT+lpfu0i9GgFcjGc8WTjko8hDlBoClVyBUS4Q=
 github.com/gtkit/gojwt v1.2.0 h1:oKk5J88qHAmRFdb0UYNg0r9RYP2suiGL7ej20DbFbuA=
@@ -201,8 +199,6 @@ github.com/gtkit/smsx v1.1.0 h1:4SMoZ8VDd1BoRYorO/eg56iWiKvDclMncsSDlxNDcFQ=
 github.com/gtkit/smsx v1.1.0/go.mod h1:b5fj6cioX8jOTfRpJtilBhyCO8XTLf2T96bhvvvOX5A=
 github.com/gtkit/smsx/providers/aliyun v1.1.0 h1:7v15asJKe83I1ixQ9du/ctaBrMBxk2aKnyvvJcmk+8w=
 github.com/gtkit/smsx/providers/aliyun v1.1.0/go.mod h1:B7+f1nBnaoZsQTdCb843LGPcEFzhrcLRjSPhe665Dhc=
-github.com/gtkit/ssex v0.2.2 h1:VuFjAgqx2WZLBv6nGTk4/SJJS0jWoTeWSOT8A/gqMR0=
-github.com/gtkit/ssex v0.2.2/go.mod h1:XweyF0lOt1rn7arbnCjo2ZZduogQ5LdqzUa81cfPX1s=
 github.com/gtkit/stringx v1.1.6 h1:Hj9dE+651mvCDMsOA+mtv958QNa7JiKSlph6CtgKxR4=
 github.com/gtkit/stringx v1.1.6/go.mod h1:O/RaLUCBP0rlqD6wV/BTfV2juUyF85Y1Fe5GcjREn/o=
 github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037 h1:yfMi9EioWhZpWiE3bkwQNjTn4yyS+S0PQ4r4+0uTLSA=
@@ -310,8 +306,6 @@ github.com/rogpeppe/go-internal v1.16.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52Z
 github.com/rs/xid v1.6.0 h1:fV591PaemRlL6JfRxGDEPl69wICngIQ3shQtzfy2gxU=
 github.com/rs/xid v1.6.0/go.mod h1:7XoLgs4eV+QndskICGsho+ADou8ySMSjJKDIan90Nz0=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/sashabaranov/go-openai v1.43.0 h1:HNRpO8TAQ01ssO7aPXO/68QRlcCCYQQ5GfHbFceRZcY=
-github.com/sashabaranov/go-openai v1.43.0/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
 github.com/sethvargo/go-retry v0.5.0 h1:JYfFKmVJ8ER06GReN1efzc5cm52BrVsFVzmcHiKJwfY=
 github.com/sethvargo/go-retry v0.5.0/go.mod h1:tvsjdKG6xfiCx4LSiUZ06kcv38xvdVQwv8R6/VnnVWg=
 github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d/go.mod h1:OnSkiWE9lh6wB0YB77sQom3nweQdgAjqCqsofrRNTgc=

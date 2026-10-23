@@ -557,10 +557,7 @@ func createProjectFixture(t *testing.T) string {
 
 import (
 	"github.com/gtkit/gin-api/internal/middleware"
-	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
-	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	"github.com/gtkit/gin-api/internal/router"
-	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
 	// scaffold:module-imports
 )
 
@@ -570,7 +567,6 @@ type infra struct {
 }
 
 type services struct {
-	ai *aiapp.Service
 	// scaffold:module-service-fields
 }
 
@@ -580,14 +576,12 @@ type middlewares struct {
 
 func buildServices(inf infra) services {
 	var svc services
-	svc.ai = airuntime.NewService(inf.mysqlDB)
 	// scaffold:module-services
 	return svc
 }
 
 func buildEngine(svc services, mw middlewares) {
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		aihttp.Register(v1, aihttp.Deps{Service: svc.ai, Auth: mw.auth, RateLimit: rateLimitByID})
 		// scaffold:modules
 	}
 	_ = middleware.Auth

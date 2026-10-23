@@ -30,11 +30,6 @@ func initProcessRuntime(cfg *config.Config) error {
 	}
 	checkJSONRuntime()
 
-	// 一家 LLM 厂商都没配：AI 端点整个不注册，而那与"路由写错了"从外部看一样。
-	for _, w := range cfg.AIWarnings() {
-		applog.Warn(w)
-	}
-
 	for _, w := range cfg.Proxy.Warnings(cfg.Env) {
 		applog.Warn(w)
 	}

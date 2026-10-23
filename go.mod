@@ -17,7 +17,6 @@ require (
 	github.com/gtkit/gincache v1.3.1
 	github.com/gtkit/gincache/persist/ristrettoadapter v1.1.0
 	github.com/gtkit/ginx v1.2.0
-	github.com/gtkit/go-llm-provider/v2 v2.18.0
 	github.com/gtkit/goerr v1.5.0
 	github.com/gtkit/gojwt v1.2.0
 	github.com/gtkit/golimit/v2 v2.3.0
@@ -31,7 +30,6 @@ require (
 	github.com/gtkit/redisx v1.4.0
 	github.com/gtkit/smsx v1.1.0
 	github.com/gtkit/smsx/providers/aliyun v1.1.0
-	github.com/gtkit/ssex v0.2.2
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
 	github.com/gtkit/verify v1.2.5
 	github.com/knadh/koanf/parsers/yaml v1.1.1
@@ -124,7 +122,6 @@ require (
 	github.com/redis/go-redis/extra/rediscmd/v9 v9.23.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
-	github.com/sashabaranov/go-openai v1.43.0 // indirect
 	github.com/sethvargo/go-retry v0.5.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

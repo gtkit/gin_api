@@ -50,9 +50,7 @@ func Timeout(deadline, writeGrace time.Duration) gin.HandlerFunc {
 // 流式响应没有固定的总时长，能约束的是"多久没有写出任何东西"。
 // handler 每写一块后调用 RenewStreamDeadline 续期。
 //
-// **不要用在 SSE 上**：gtkit/ssex 自己管连接级写 deadline——起流时解除
-// 全局 WriteTimeout，每次写出前后临时设置与恢复。再挂本中间件等于两套
-// 机制互相覆盖，谁最后设的谁生效，行为无法推理。
+// 不要与自行管理连接级写 deadline 的流式响应实现叠加，避免两套机制互相覆盖。
 //
 // 适用的是那些直接往 c.Writer 写的长响应：大文件下载、自研的分块推送。
 func StreamTimeout(idleWrite time.Duration) gin.HandlerFunc {

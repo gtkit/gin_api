@@ -42,11 +42,12 @@ config/
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
 - `email`、`sms`、`aliyun`、`news`、`baidu`：外部服务配置。
 - `pay`：微信支付和支付宝配置；未启用时不要求密钥。
-- `llm`：provider、模型、超时和会话配置。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 
 字段结构以 `internal/platform/config/types.go` 和 `config/env.yml.example` 为准。
+AI 模块已移除，存量部署须删除 `modules.ai` 配置和 `APP_MODULES__AI__*` 环境变量；
+这些键不再被识别，保留它们会导致严格配置加载失败。
 
 ## 核心字段校验
 
@@ -60,6 +61,24 @@ config/
 校验只检查配置，不修改原值；多项错误仍一次聚合返回。连接池与 Redis 规则保持原样：
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
+
+## MySQL 预编译语句与 ProxySQL
+
+`internal/platform/mysql/open.go` 的 `buildOpenOptions` 固定传入 `ormx.WithPrepareStmt(true)`，
+服务连接和迁移连接都使用这组选项。当前 YAML **没有** `database.prepare_stmt` 等开关，
+不能通过增加一个未被读取的字段来关闭它。
+
+ProxySQL 支持 MySQL 预编译语句，不能把启用 PrepareStmt 一概判定为不兼容。
+需要关注的是预编译语句生命周期与后端连接复用：按
+[ProxySQL 官方说明](https://proxysql.com/documentation/mysql-prepared-statements-pooling-and-caching)，
+持有未关闭的预编译语句会限制相应客户端会话的后端连接复用；长期缓存语句会影响连接共享效率。
+SQL 文本 `PREPARE` 与驱动使用的二进制预编译协议还有不同的复用约束。
+
+接入具体部署前，应记录 ProxySQL/MySQL 版本、路由规则、连接池上限和超时，验证参数化查询、
+事务、连接回收/重连和后端切换，并观察实际后端连接占用及预编译语句统计。
+`database.maxopenconn` 是单个应用连接池上限，不能据此直接推断 ProxySQL 的总后端连接需求。
+本仓没有针对指定 ProxySQL 部署的联调结果，不承诺任意版本/配置兼容，也不因缺少说明而认定现有查询会失败。
+若部署验证表明需要关闭缓存，再单独实施配置与代码变更，并同步示例和验收；本文不改变当前默认行为。
 
 ## 通知通道与告警开关
 
@@ -120,6 +139,34 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 `jwt.active.kid` 和两条密钥路径必填，路径可为绝对路径或相对 `APP_ROOT` 的路径；
 无隐式默认密钥。现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
 `jwt.previous` 仅配置仍需验签的旧公钥（最多 8 个）；`issuer` 与 `audiences` 必填。
+
+### JWT 文件权限与启动校验
+
+`server` 在 `bootstrap.NewApp → newRuntime → jwtauth.Assemble` 中读取密钥，
+进入 `App.Run` 提供服务之前就会校验；不依赖操作者先执行 `doctor`。
+`internal/pkg/jwtauth/assemble.go` 按有效配置的 `env` 决定私钥是否严格检查，
+实际文件检查位于 `internal/pkg/jwtauth/keyset.go`。
+
+| 文件/环境 | server 的现有规则 | 部署建议 |
+|---|---|---|
+| active 私钥，`env: prod` | `mode & 0077` 必须为 0，即 group/other 无任何权限；失败阻断启动 | 使用 0600，或服务进程可读的 0400；不要求权限值恰好等于 0600 |
+| active 私钥，`env: dev/test` | 不强制上述权限位条件；仍校验文件存在、可读、普通文件及密钥格式 | 同样建议收紧到 0600，不把开发放宽当成生产规则 |
+| active 与 previous 公钥，Unix 各环境 | `mode & 0022` 必须为 0，禁止 group/other 写入；允许他人只读 | 使用 0644 或可读的 0444，防止验签公钥被其他账户改写 |
+
+符号链接会先解析到实际目标，再检查目标文件类型、权限与内容。目录、设备等非普通文件会被拒绝；
+私钥须为 Ed25519 PKCS#8 PEM，公钥须为 Ed25519 PKIX PEM，active 密钥还必须配对。
+这些校验在 dev/test 下也保留。
+
+`doctor` 的 `jwt_keys` 只看元数据：Unix 下不分环境，私钥都要求 group/other 无权限，
+公钥都禁止 group/other 写入。因此 dev/test 的宽权限私钥可能通过 server 的权限分支，
+却被 doctor 标为失败；doctor 也不能证明 PEM 内容有效或公私钥配对。
+
+以上权限位规则以 Unix 为准。Windows 使用 ACL，doctor 只保留存在性/普通文件检查，
+不检查 ACL；server 的 prod 私钥权限位判断也不能作为 Windows ACL 安全证明。
+生产交付平台为 Linux，部署时应在目标平台确认文件归属、可读性与权限，
+不能把 Windows 本地生成或 doctor 通过视为生产权限验收。
+
+### 令牌寿命与旧密钥转换
 
 `jwt.token_ttl_hours` 正值覆盖访问令牌寿命，<=0 时 `auth.mode=local` 默认 1 小时、
 `external` 默认 720 小时。`auth.refresh_ttl` 仍控制本地认证的独立刷新令牌，

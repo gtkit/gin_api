@@ -210,6 +210,11 @@ log:
 			extra:   "aliyun:\n  sms_access_id: access-id\n",
 			wantKey: "aliyun",
 		},
+		{
+			name:    "removed ai module rejected",
+			extra:   "modules:\n  ai:\n    default_provider: deepseek\n",
+			wantKey: "ai",
+		},
 	}
 
 	for _, tt := range tests {
@@ -229,5 +234,17 @@ log:
 				t.Fatalf("error = %q, want containing key %q", err.Error(), tt.wantKey)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsRemovedAIEnvironmentOverride(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("APP_ROOT", root)
+	writeJWTCommandConfig(t, root, minimalConfigYAML())
+	t.Setenv("APP_MODULES__AI__PROVIDERS__DEEPSEEK__API_KEY", "removed-provider-key")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("removed AI environment override accepted")
 	}
 }

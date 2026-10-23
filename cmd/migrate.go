@@ -58,8 +58,6 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 			&models.User{},
 			&models.UserRole{},
 			&models.OperationAudit{},
-			&models.AIConversation{},
-			&models.AIMessage{},
 			// scaffold:migrate-models
 		),
 		migrate.WithTimeout(5*time.Minute),

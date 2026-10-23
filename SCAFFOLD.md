@@ -4,12 +4,42 @@
 
 ## 前提
 
-母版是私有托管，`gonew` 需要能解析它。使用方在环境里设置：
+母版与部分 `github.com/gtkit/*` 依赖是私有托管，`gonew` 和后续构建都需要访问权限。
+直接从 Git 仓库获取私有模块时，在当前终端设置：
 
 ```bash
-export GOPRIVATE=github.com/gtkit/*
-# 若走内部 GOPROXY，另按团队约定配置 GOPROXY / GONOSUMCHECK
+export GOPRIVATE='github.com/gtkit/*'
 ```
+
+这个 `export` 只影响当前终端及其子进程。希望之后打开的终端也生效，可选择在 shell 启动文件中设置，
+或使用 Go 的用户级持久配置：
+
+```bash
+go env -w GOPRIVATE='github.com/gtkit/*'
+```
+
+两种方式择一即可；进程环境中的同名变量优先于 `go env -w` 的配置。以上示例适用于原值为空、
+或只需要这一个私有模块前缀的环境；已有其他组织的规则时，先用 `go env GOPRIVATE GONOPROXY GONOSUMDB`
+查看，将 `github.com/gtkit/*` 合并到逗号分隔的清单，保留原有规则。
+
+`GOPRIVATE` 决定哪些模块不使用公共代理和公共校验和数据库，**不授予仓库读取权限**。
+直接访问时，Git 仍须通过团队批准的 HTTPS 凭据管理器或 SSH 方式完成认证，并拥有母版及依赖仓库的读取权限；
+凭据不写进本仓库、模块地址或命令示例。使用 SSH 时，Git 的 URL 映射也应遵循团队配置。
+
+默认情况下，`GONOPROXY` 和 `GONOSUMDB` 都回落到 `GOPRIVATE`；前者控制绕过代理，后者控制绕过公共校验和数据库。
+若团队提供**同时托管公共和私有模块**的可信内部代理，则应按团队要求覆盖代理选择，例如：
+
+```bash
+export GOPRIVATE='github.com/gtkit/*'
+export GOPROXY='https://proxy.example.com'
+export GONOPROXY='none'
+```
+
+`proxy.example.com` 是占位地址，须换成实际代理；此例让私有模块也经内部代理下载。
+未单独设置 `GONOSUMDB` 时它仍继承 `GOPRIVATE`；若已有显式值，须合并对应私有前缀。
+代理的认证和上游仓库权限由团队配置。仅代理部分模块、允许回落的环境应使用团队给定的代理链，
+不要直接套用这个单代理示例。这里的正确变量名是 `GONOSUMDB`，不是 `GONOSUMCHECK`。
+详细语义见 [Go 私有模块文档](https://go.dev/ref/mod#private-modules)。
 
 安装 gonew（Go 官方模板工具）：
 
@@ -94,10 +124,12 @@ make project-init NAME=your_project
 go run . jwt generate --kid k2026b --out-dir config/pem
 ```
 
-**产物权限在 Windows 上不成立**：生成逻辑给私钥 0600、公钥 0644，但 NTFS 的访问控制是
-ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限保护，`doctor` 的 `jwt_keys`
-也只能校验存在性（权限判定见 `internal/diagnostics/keyperm_windows.go`）。
+生成命令给私钥 0600、公钥 0644。`server` 在生产环境启动时会强制检查私钥权限，
+Unix 下还会检查 active/previous 公钥不可被 group/other 写入；无需先运行 doctor 才生效。
+dev/test 私钥权限分支较宽，doctor 的 Unix 检查仍严格。
+NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windows 的 doctor 只检查存在性/普通文件。
 **生产用密钥请在 Linux 上生成**；Windows 上的生成能力只供本地开发。
+完整规则、符号链接及格式检查见 [JWT 文件权限与启动校验](config/README.md#jwt-文件权限与启动校验)。
 
 **轮换步骤**：
 
@@ -133,6 +165,32 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 2. **draining 阶段独立 drain**：向每个连接发 close frame，超时后强制 `Close()`。它排在分相关停的哪一步取决于该端点是生产者还是消费者语义，需在该 change 里明确。
 
 超时侧同样要注意：WS 走 `TimeoutStreaming`（可续期的写空闲超时），**不能**用 `TimeoutClientVisible`——那个 wrapper 会缓存响应且不透明，Hijack 拿不到底层连接。
+
+## CORS 请求头清理清单
+
+当前请求头白名单位于 `internal/middleware/cors.go` 的 `allowedRequestHeaders` 和
+`allowHeadersValue`，共八项。CORS 白名单只决定浏览器预检能否通过；允许一个头，
+不表示认证中间件会读取它，也不表示该头传来的身份可信。
+
+| 请求头 | 当前用途或已知边界 | 精简前确认 |
+|---|---|---|
+| `Content-Type` | 声明请求体类型，JSON API 使用 | 保留仍需跨域提交 JSON 等请求体的客户端支持 |
+| `Authorization` | 默认 JWT 认证的主要载体，使用 `Bearer` | 保留默认认证路径；变更须同步全部客户端和网关 |
+| `App-Token` | 默认 JWT 认证的存量兼容载体 | 所有旧客户端迁移到 `Authorization: Bearer` 后才可考虑移除 |
+| `AccessToken` | 存量 CORS 放行项；默认 JWT 认证不读取 | 真实客户端/网关用途未确认，须核对后决定 |
+| `X-CSRF-Token` | 存量 CORS 放行项；默认 JWT 认证不读取 | 核对派生项目是否另有 CSRF 中间件或客户端提交 |
+| `Token` | 存量 CORS 放行项；默认 JWT 认证不读取 | 真实客户端/网关用途未确认，须核对后决定 |
+| `X-Token` | 存量 CORS 放行项；默认 JWT 认证不读取 | 真实客户端/网关用途未确认，须核对后决定 |
+| `X-User-Id` | 存量 CORS 放行项；默认 JWT 认证不以它建立身份 | 核对业务读取与网关注入；身份仍以验签结果为准 |
+
+默认认证的实现见 `internal/middleware/auth.go`：同时提交 `Authorization` 与 `App-Token`
+且值不一致会拒绝，同名头出现不一致的多个值也会拒绝。移除某个 CORS 放行项只会收窄浏览器跨域请求，
+不会替代服务端认证逻辑。
+
+派生项目要清理时，先核对网页、移动端和网关的实际请求头；再同步修改上述两个白名单、
+`internal/middleware/cors_test.go`、`internal/middleware/cors_preflight_test.go` 及本文。
+验证保留头的预检成功、删除头的预检被拒绝，并检查仍在支持期内的客户端。
+本表记录当前状态，没有在母版删除任何请求头；外部客户端用途尚未确认的项不能据此直接删除。
 
 ## 移除 Laravel 兼容层（手动清单）
 
@@ -187,6 +245,63 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 > `internal/pkg/metrics` 的工程，改动面是它的全部调用方
 > （`grep -rl "internal/pkg/metrics" internal` 枚举）。
 
+## 按能力精简 gtkit 依赖
+
+下面按当前源码导入列出裁剪入口，版本统一以 `go.mod` 为准。**运行时关闭能力仍会保留源码导入和模块依赖**；
+`project init` 也不会自动裁剪这些能力。本节供派生项目决定裁剪范围。
+
+AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `APP_MODULES__AI__*`，
+历史 SQL 与现有数据保留，见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
+
+### 可按业务需求评估的能力
+
+| 能力与 gtkit 模块 | 当前源码入口 | 保留条件与移除关联 |
+|---|---|---|
+| 上传：`gouploader` | `internal/pkg/upload/` | 派生项目接入文件上传或对象存储时保留。未接入时可评估移除封装及其测试；已接入时还须核对业务路由、存储策略和 Uploader 的 Close 调用。不要假定业务上传配置在母版已有统一字段。 |
+| 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
+| 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
+| 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
+| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者/消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。`internal/pkg/singleton` 直接使用 Redis，不随 asynqx 自动移除。 |
+| HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
+| 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
+
+通知渠道的所有权说明见 [通知渠道与替换方式](docs/observability.md#通知渠道与替换方式)：
+dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。裁剪某渠道必须同时处理创建和关闭引用，
+不能只删 `go.mod` 条目或从 `processLogs` 去掉一个字段。
+
+### 默认基础依赖
+
+下列模块已经用于默认服务链路，精简可选能力时应保留；替换它们属于对应能力的独立改造。
+
+| gtkit 模块 | 当前用途与主要入口 |
+|---|---|
+| `logger/v2` | `internal/platform/logging/` 的日志实例与排空，`internal/pkg/log/` 为项目门面 |
+| `gojwt` | `internal/pkg/jwtauth/` 的签发、验签、claims 与 PEM 工具；切换 `auth.mode` 不会自动替换验签器 |
+| `ormx` | `internal/platform/mysql/open.go` 的 MySQL 装配及仓储分页 |
+| `redisx` | `internal/platform/redis/open.go` 的 Redis 装配；Redis 是否必需由已启用能力决定 |
+| `golimit/v2` | `pkg/ratelimit/local.go` 的本地限流；选择 Redis 存储不表示本地能力可以直接删除 |
+| `httpc` | `internal/pkg/httpclient/` 的出站调用、重试与下游客户端装配 |
+| `ginx` | auth HTTP handler 的绑定/响应辅助 |
+| `goerr` | 中间件、响应、事务及缓存的错误处理 |
+| `verify` | `internal/bootstrap/validation.go` 的校验注册与中文消息，以及响应校验 |
+| `json/v2` | 进程 JSON 后端、模型及生成器模板 |
+
+### 裁剪顺序
+
+1. 先确定保留能力和兼容范围，再从上表入口查全部调用方，包括 `_test.go`、构建标签、生成器模板和派生项目代码。
+   例如核对文件上传和短信 SDK 引用：
+
+   ```bash
+   rg -n --glob '*.go' 'github\.com/gtkit/(gouploader|smsx)' .
+   ```
+
+2. 在单独获准的代码变更中同步处理装配、功能源码、配置字段/校验/示例/说明和对应测试。
+   配置还被其他能力使用时保留共享部分；部署数据及历史迁移另行确认。
+3. 所有残留导入处理完后再运行 `go mod tidy`，回读 `go.mod`/`go.sum` 差异。
+   间接依赖能否消失取决于剩余依赖图，不能逐项保证；可用 `go mod why -m <完整模块路径>` 查保留原因。
+4. 按裁剪范围验证保留功能、默认构建和受影响的构建标签；受控检查按项目授权规则执行。
+   有本机 `go.work` 时还要核对 `GOWORK=off` 的独立模块结果，避免本地替换掩盖缺失依赖。
+
 ## 预置能力清单
 
 逐项标注状态，避免"以为它已经在工作"或"以为它是示例可以删"两类误解。
@@ -233,8 +348,6 @@ ACL，不映射到 Unix 权限位——在该平台生成的密钥不受权限�
 | 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
 | 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
 | 数据库连接校验 | `internal/platform/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
-| AI 对话 | `internal/module/ai` + `modules.ai` 配置段 | 基于 `github.com/gtkit/go-llm-provider/v2`，配置驱动多厂商（DeepSeek / 通义千问 / 智谱 / Moonshot / 火山方舟 / 千帆 / 硅基流动）。**填了 api_key 的厂商才启用；一家都没填时整个模块不装配、路由不注册**（启动期提示一次）。含非流式与 SSE 流式两条对话路由、会话管理与厂商列表；每家厂商各带独立熔断与重试。SDK 解析前限制协议响应为 64 MiB，累计正文与推理合计 8 MiB；超限停止读取，不重试，已接受的流前缀按部分结果处理；心跳写失败取消上游，正常与 panic 路径均等待心跳退出 |
-| 对话内容留存 | `ai_conversations` / `ai_messages` 表 | 明文保存用户提问与模型回复（可能含用户输入的个人信息）；**保留期限、到期清理与库账号读取权限须由使用方按所在司法辖区确定后再上线**，见 `internal/repository/aiconversation/README.md` 与该迁移的注释。`DELETE /ai/conversations/:id` 只软删会话头，不做物理清理 |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
 | 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态与失败原因，错误详情截断至 256 字节；**响应体含内网地址与数据库账号名，该端点不得对公网开放**（见下节） |
 
@@ -489,7 +602,7 @@ telemetry:
 
 | 内容 | 说明 |
 |------|------|
-| `auth` 模块 | 本地认证（注册/登录/刷新/登出）。AI 对话按用户身份归属会话，删除它需要另行提供身份来源 |
+| `auth` 模块 | 本地认证（注册/登录/刷新/登出）。`auth.mode: external` 使用外部身份来源；JWT 验签与账号状态校验独立保留 |
 | `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `entitlement.vip` authorizer 与 `VIPVerifier`（`internal/bootstrap/providers.go`）；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
 | `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `providers.go` 里 `services.roles` 字段及其构造，并把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
@@ -513,7 +626,7 @@ telemetry:
 | `internal/pkg/jwtauth` | JWT 签发/验签与多密钥轮换（见上文「JWT 密钥轮换操作手册」） |
 | `internal/pkg/credential` / `internal/pkg/tokenstore` | 本地认证模式的口令哈希与刷新令牌存储（见「认证：两种模式二选一」；切到 `external` 后可整体删除） |
 | `internal/pkg/singleton` | 基于 Redis 租约的单实例执行（见上文「后台任务的单实例执行」） |
-| `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，当前唯一构造点在 `internal/pkg/news`（见上文「告警扇出的对外副作用」） |
+| `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，由 `internal/platform/notification/mail` / `internal/platform/notification/sms` 的 Owner 构造；`internal/pkg/news` 借用发送能力（见上文「告警扇出的对外副作用」） |
 
 配置里的 `application` / `ssl` / `cors` / `log` / `database` / `redis` / `env` 是进程与连接的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。
 

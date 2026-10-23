@@ -11,8 +11,6 @@ import (
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 
 	"github.com/gtkit/gin-api/internal/middleware"
-	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
-	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
@@ -28,7 +26,6 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 	"github.com/gtkit/gin-api/internal/repository/useraccount"
 	"github.com/gtkit/gin-api/internal/repository/userrole"
-	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 
@@ -89,17 +86,6 @@ type infra struct {
 // 新增模块时在此追加一个具名字段（scaffold 生成器经 module-service-fields 标记注入）。
 type services struct {
 	cleanup func() error
-	// aiTimeouts 是 ai 对话两条路由的生效时长，由模块装配层补齐默认值后交出。
-	aiTimeouts aihttp.Timeouts
-	// ai 是 ai 对话模块的 application service；一家厂商都没配时为 nil。
-	//
-	// 名字对齐**模块**而不是它当下的某一项用途：叫 chatter 时，
-	// 每次给该 service 加一个与"对话"无关的能力，字段名就多错一分，
-	// 而生成器给新模块产出的字段一律是 <模块名>Service。
-	//
-	// nil 可用是有意的：没有密钥就没有可用的上游，而"端点不存在"比
-	// "端点存在但每次都 503"更容易被判断成配置问题。
-	ai *aiapp.Service
 	// auth 是本地认证模块的装配产物；auth.mode 为 external 时是零值。
 	//
 	// 零值可用是有意的：外部身份模式下这些端点不存在，而"不存在"应当表达为
@@ -366,25 +352,6 @@ func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, b
 	}()
 	svc.cleanup = modules.unwind
 
-	// AI 对话模块按厂商密钥条件装配：一家都没配就整个不装配。
-	// 装配失败直接上抛：依赖不全的 service 不允许进入运行期。
-	if inf.cfg.Modules.AI.Enabled() {
-		assembly, aiErr := airuntime.New(airuntime.Deps{
-			DB:     inf.mysqlDB,
-			Config: inf.cfg.Modules.AI,
-		})
-		if aiErr != nil {
-			return services{}, fmt.Errorf("build ai module: %w", aiErr)
-		}
-		svc.ai = assembly.Service
-		modules.push("ai", assembly.Close)
-		svc.aiTimeouts = aihttp.Timeouts{
-			Request:     assembly.Timeouts.Request,
-			StreamTotal: assembly.Timeouts.StreamTotal,
-			Heartbeat:   assembly.Timeouts.Heartbeat,
-		}
-	}
-
 	// 本地认证按模式条件装配。
 	//
 	// 外部身份模式下整个模块不存在——那种部署里令牌由外部签发，
@@ -564,26 +531,11 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	// 若被静默跳过/丢弃，配置漏项、拼写错误或作用域误配都会让保护
 	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
 	rateLimitStager, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
+	_ = rateLimitStager // 供 scaffold:modules 注入的业务路由使用。
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		// AI 模块只在配了至少一家厂商密钥时注册。没有可用上游时这些端点
-		// 不存在，而不是注册一组永远 503 的路由。
-		if svc.ai != nil {
-			aihttp.Register(v1, aihttp.Deps{
-				Service:   svc.ai,
-				Auth:      mw.auth,
-				RateLimit: rateLimitStager,
-				Timeouts:  svc.aiTimeouts,
-				// 响应缓存注入口（cache-preset spec）：路由显式挂载才生效，
-				// 关闭态是透传中间件，模块无需判空。
-				//
-				// 本模块当前不挂：全部路由都要求身份，而带身份的请求在中间件内
-				// 一律绕过缓存，挂上等于没挂。字段保留是装配契约。
-				Cache: inf.cache.Middleware,
-			})
-		}
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
 		if svc.auth.Service != nil {

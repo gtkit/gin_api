@@ -213,7 +213,6 @@ func TestNewAppNotificationRollbackPreservesCleanupErrors(t *testing.T) {
 	f := newNotificationFixture(t)
 	cfg := f.base.components[0].cfg
 	cfg.Auth.Mode = config.AuthModeExternal
-	cfg.Modules.AI = config.AIModuleConfig{}
 	sqlDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)

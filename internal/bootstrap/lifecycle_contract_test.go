@@ -265,7 +265,6 @@ func TestNewAppRollsBackResourcesAfterRouterFailure(t *testing.T) {
 	f := newLifecycleFixture(t)
 	cfg := f.components[0].cfg
 	cfg.Auth.Mode = config.AuthModeExternal
-	cfg.Modules.AI = config.AIModuleConfig{}
 	cfg.Proxy.TrustedProxies = []string{"invalid proxy"}
 	sqlDB, mock, err := sqlmock.New()
 	if err != nil {

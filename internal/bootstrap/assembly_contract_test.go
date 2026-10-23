@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"go.opentelemetry.io/otel"
 
@@ -22,10 +23,6 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	cfg.Env = "test"
 	cfg.App.Name = "assembly-contract"
 	cfg.Auth.Mode = config.AuthModeExternal
-	cfg.Modules.AI = config.AIModuleConfig{
-		DefaultProvider: "deepseek",
-		Providers:       map[string]config.AIProviderConfig{"deepseek": {APIKey: "test"}},
-	}
 	cfg.RateLimit = config.RateLimitConfig{KeyHMACSecret: strings.Repeat("x", 32), Policies: []config.RateLimitPolicyConfig{
 		{ID: "default.ip", Scope: "ip", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
 		{ID: "default.user", Scope: "user", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
@@ -60,8 +57,8 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if svc.ai == nil || svc.auth.Service != nil || svc.accounts == nil || RedisRequired(cfg) {
-		t.Fatalf("unexpected assembly: ai=%v auth=%v accounts=%v", svc.ai, svc.auth.Service, svc.accounts)
+	if svc.auth.Service != nil || svc.accounts == nil || RedisRequired(cfg) {
+		t.Fatalf("unexpected assembly: auth=%v accounts=%v", svc.auth.Service, svc.accounts)
 	}
 	mw, err := buildMiddlewares(svc, runtime)
 	if err != nil {
@@ -79,19 +76,30 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		path string
-		want int
+		method string
+		path   string
+		want   int
 	}{
-		{"/api/v1/ai/providers", http.StatusUnauthorized},
-		{"/api/v1/auth/login", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/ai/chat", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/ai/chat/stream", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/providers", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/conversations", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodPatch, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodDelete, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/auth/login", http.StatusNotFound},
+		{http.MethodGet, "/health", http.StatusOK},
 	} {
-		w := httptest.NewRecorder()
-		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
-		if w.Code != tc.want {
-			t.Fatalf("%s = %d, want %d", tc.path, w.Code, tc.want)
-		}
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != tc.want {
+				t.Fatalf("%s %s = %d, want %d", tc.method, tc.path, w.Code, tc.want)
+			}
+		})
 	}
-	// 同一个模块的缺失限流引用必须仍使装配失败，不能因 Redis 可选而放宽。
+	// 本地认证的缺失限流引用仍须使装配失败，不能因 Redis 可选而放宽。
+	svc.auth.Service = &authapp.Service{}
 	inf.rateLimits = rateLimitAssembly{}
 	installMetricsFixture(t, &inf)
 	if _, err := buildEngine(inf, svc, mw, nil); err == nil || !strings.Contains(err.Error(), "rate limit policy") {
@@ -99,27 +107,12 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	}
 }
 
-func TestServiceAssemblyErrorPaths(t *testing.T) {
+func TestServiceAssemblyRejectsBrokenLocalAuth(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name     string
-		provider string
-		local    bool
-	}{
-		{"later auth failure", "deepseek", true},
-		{"invalid ai provider", "unknown", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{Auth: config.AuthConfig{Mode: config.AuthModeExternal}}
-			cfg.Modules.AI = config.AIModuleConfig{DefaultProvider: tc.provider, Providers: map[string]config.AIProviderConfig{tc.provider: {APIKey: "test"}}}
-			if tc.local {
-				cfg.Auth.Mode = config.AuthModeLocal
-			}
-			inf := infra{cfg: cfg, resources: &data.Resources{}, mysqlDB: &gorm.DB{}}
-			if _, err := buildServices(t.Context(), inf, &Runtime{config: cfg}); err == nil {
-				t.Fatal("broken assembly accepted")
-			}
-		})
+	cfg := &config.Config{Auth: config.AuthConfig{Mode: config.AuthModeLocal}}
+	inf := infra{cfg: cfg, resources: &data.Resources{}, mysqlDB: &gorm.DB{}}
+	if _, err := buildServices(t.Context(), inf, &Runtime{config: cfg}); err == nil {
+		t.Fatal("broken assembly accepted")
 	}
 }
 
