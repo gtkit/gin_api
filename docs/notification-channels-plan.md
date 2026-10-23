@@ -905,3 +905,9 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 19.5 lint 补救（修改前）：真实报告 16 项，修正通知范围内的 error/recover 丢弃及测试回调 context；五个由独立服务 lifetime 引起的 contextcheck 报告逐行说明豁免，保留 life 不继承 Init/请求的设计。继续全部 lint，不改全局配置。Stop/Send 测试分别断言 nil、原清理错误或 context.Canceled，不以无条件忽略凑通过。
 
 19.6 授权更新：用户已明确同意“修复检查器并完成全量门禁”。已回读本段、全局规则和最新错误记录；现在只应用上述已验证的 scripts/check-doc-refs.go 补丁及两项自检，原来 107 个引用不作修改。完成后执行完整双环境门禁。
+
+### 19.7 最终日志基准的补充核对（执行前记录）
+
+双环境完整 make check 已分别 exit0。现有日志微基准的顺序采样（每组 10 次、100ms）分配量不变，但 filtered/fields6 时延分别增加 6.31%/13.35%，不能据此写“性能无回归”。原始 stdout/stderr 中 SDK 对 /dev/null 的 Sync 诊断打断采样行，首次 benchstat 丢失样本；ERR-20261022-090 已记录。保留原始日志，只去除完全匹配的诊断后另存派生文件，每个场景均确认 10 项采样，未改测量数字。
+
+后续只补充同机交错复测：基线/当前各编译一次独立测试二进制，仍使用现有 BenchmarkLogHotPath 的 filtered/enabled/fields6 serial，GOMAXPROCS=2、PGO 关闭；以 AB/BA 交替顺序完成各 10 次、每项 300ms，分别保留 stdout/stderr。核对每项采样数后用原生 benchstat 对比，记录差异和不确定性；不修改业务代码、基准、SDK 或机器配置，也不将 /dev/null 微基准推成生产容量结论。
