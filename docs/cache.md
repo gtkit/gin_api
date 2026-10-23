@@ -36,20 +36,9 @@ v1.GET("/public/hot", cacheStager.Middleware(5*time.Second), handler)  // 覆盖
 键含方法与排序后的查询串；`memory` 后端走 ristretto（有界准入/淘汰），
 `redis` 后端的有界性由 Redis 的 maxmemory 策略负责。
 
-### 挂载者必须自己保证的三条
+### 响应准入
 
-底层的缓存判据是**请求期**的，拿不到响应头，而缓存写入发生在 handler 返回之后。
-因此下面三条无法由中间件兜住：
-
-1. **handler 不得设置 `Set-Cookie`**——它会被缓存并原样发给后续所有请求，
-   即第一个用户的会话被发给其他人。
-2. **不得依赖 `Cache-Control: private` / `no-store` 阻止缓存**——底层不看这个头，
-   声明了也照缓存。
-3. **不得依赖 `Vary`**——缓存键里没有它列出的请求头，同一 URL 对不同
-   `Accept-Language` / `Accept-Encoding` 会回放同一份。
-
-本包在缓存中间件外层加了一道**响应期审计**：命中上述任一条即记 Error 日志。
-它**挡不住泄漏**，只能让误用在日志里可见。
+响应阶段拒绝 Set-Cookie、Cache-Control 的 private/no-store/no-cache，以及除 Origin 外的 Vary；命中回放也会复检。带 Origin 的请求在请求阶段绕过，因此 Vary: Origin 可以与同源缓存组合。外层审计用于提示不适合挂缓存的路由，不替代准入。
 
 ## 进程内缓存（`internal/pkg/cache`）
 

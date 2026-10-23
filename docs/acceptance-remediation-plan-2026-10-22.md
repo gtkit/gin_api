@@ -1,6 +1,6 @@
 # gin_api 验收问题整改方案与分阶段实施计划
 
-> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md)。
 
 日期：2026-10-22（Asia/Taipei）。
 
