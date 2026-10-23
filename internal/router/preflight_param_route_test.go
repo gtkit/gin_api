@@ -13,7 +13,7 @@ func newParamRouteEngine(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		AllowedOrigins: []string{"https://example.com"},
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -135,7 +135,7 @@ func TestEmptyRemoteIPHeadersDoesNotFallBackToFrameworkDefaults(t *testing.T) {
 	const proxyIP = "192.0.2.10"
 
 	var seenIP string
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		// 把请求来源声明为可信代理，否则转发头根本不会进入取值路径。
 		TrustedProxies: []string{proxyIP + "/32"},
 		// 显式留空：这正是随仓样例的出厂值。
@@ -182,7 +182,7 @@ func TestPreflightDefersToRegisteredOptionsHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var optionsHandlerRan bool
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		AllowedOrigins: []string{"https://example.com"},
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusOK) })

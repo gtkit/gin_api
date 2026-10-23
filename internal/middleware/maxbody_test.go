@@ -24,7 +24,7 @@ func (c *failingBodyCloser) Close() error             { c.calls++; return c.caus
 func TestMaxBytesCloseClosesUnderlyingBodyOnce(t *testing.T) {
 	closeErr := errors.New("underlying close failed")
 	body := &failingBodyCloser{cause: closeErr}
-	engine := newMaxBytesTestEngine(1024, AccessLogOptions{}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 1024, AccessLogOptions{}, func(c *gin.Context) {
 		if err := c.Request.Body.Close(); !errors.Is(err, closeErr) {
 			t.Errorf("lost close error: %v", err)
 		}
@@ -39,19 +39,20 @@ func TestMaxBytesCloseClosesUnderlyingBodyOnce(t *testing.T) {
 }
 
 // newMaxBytesTestEngine 组装与生产一致的相关中间件链（ErrorHandler → MaxBytesLimit → GinLogger）。
-func newMaxBytesTestEngine(maxBytes int64, accessLog AccessLogOptions, handler gin.HandlerFunc) *gin.Engine {
+func newMaxBytesTestEngine(t *testing.T, maxBytes int64, accessLog AccessLogOptions, handler gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(ErrorHandler())
 	engine.Use(MaxBytesLimit(MaxBytesLimitConfig{MaxBytes: maxBytes, ErrorMessage: "请求体过大"}))
-	engine.Use(GinLogger(accessLog))
+	access, _ := newNativeTestLogger(t, "info")
+	engine.Use(GinLogger(access, accessLog))
 	engine.POST("/upload", handler)
 	return engine
 }
 
 func TestMaxBytesLimitRejectsDeclaredLengthBeforeHandler(t *testing.T) {
 	handlerCalled := false
-	engine := newMaxBytesTestEngine(4, AccessLogOptions{}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 4, AccessLogOptions{}, func(c *gin.Context) {
 		handlerCalled = true
 		c.Status(http.StatusOK)
 	})
@@ -80,7 +81,7 @@ func TestMaxBytesLimitRejectsDeclaredLengthBeforeHandler(t *testing.T) {
 }
 
 func TestMaxBytesLimitReturns413ForChunkedBodyViaBind(t *testing.T) {
-	engine := newMaxBytesTestEngine(4, AccessLogOptions{}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 4, AccessLogOptions{}, func(c *gin.Context) {
 		var payload struct {
 			Name string `json:"name"`
 		}
@@ -115,7 +116,7 @@ func TestMaxBytesLimitReturns413ForChunkedBodyViaBind(t *testing.T) {
 // 未受约束的流；换句话说，它测的是一条本身就有缺陷的路径。
 func TestMaxBytesLimitReturns413WhenRequestBodyLoggingEnabled(t *testing.T) {
 	handlerCalled := false
-	engine := newMaxBytesTestEngine(4, AccessLogOptions{LogRequestBody: true}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 4, AccessLogOptions{LogRequestBody: true}, func(c *gin.Context) {
 		handlerCalled = true
 		if _, err := io.ReadAll(c.Request.Body); err != nil {
 			// 与生产 handler 同一口径：绑定路径识别 MaxBytesError 并映射 413。
@@ -139,7 +140,7 @@ func TestMaxBytesLimitReturns413WhenRequestBodyLoggingEnabled(t *testing.T) {
 }
 
 func TestMaxBytesLimitAllowsBodyWithinLimit(t *testing.T) {
-	engine := newMaxBytesTestEngine(1024, AccessLogOptions{}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 1024, AccessLogOptions{}, func(c *gin.Context) {
 		var payload struct {
 			Name string `json:"name"`
 		}
@@ -160,7 +161,7 @@ func TestMaxBytesLimitAllowsBodyWithinLimit(t *testing.T) {
 }
 
 func TestMaxBytesLimitKeeps422ForInvalidJSONWithinLimit(t *testing.T) {
-	engine := newMaxBytesTestEngine(1024, AccessLogOptions{}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 1024, AccessLogOptions{}, func(c *gin.Context) {
 		var payload struct {
 			Name string `json:"name"`
 		}

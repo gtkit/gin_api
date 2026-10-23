@@ -24,7 +24,7 @@ func (c *unconfiguredRedisChecker) PingRedis(context.Context) error {
 
 func TestReadinessSkipsUnconfiguredRedis(t *testing.T) {
 	checker := &unconfiguredRedisChecker{}
-	engine := newTestEngine(checker)
+	engine := newTestEngine(t, checker)
 	w := httptest.NewRecorder()
 	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	var body ReadinessResponse

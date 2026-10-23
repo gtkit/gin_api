@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
@@ -16,6 +17,8 @@ import (
 
 // Options 是装配 engine 所需的进程级配置与依赖。
 type Options struct {
+	// AccessLogger is borrowed from the process log owner; the router never closes it.
+	AccessLogger *logger.Logger
 	// AllowedOrigins 为空时不挂载 CORS。
 	AllowedOrigins []string
 	// LogRequestBody 和 LogResponseBody 控制访问日志的正文采集。

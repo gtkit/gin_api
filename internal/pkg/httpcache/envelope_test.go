@@ -1,7 +1,6 @@
 package httpcache
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,9 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gincache"
+	"github.com/gtkit/logger/v2"
 )
 
 type envelopeDeadlineTransport struct {
@@ -51,7 +50,7 @@ func envelopeEngine(cached gin.HandlerFunc, handler gin.HandlerFunc) *gin.Engine
 	var sequence atomic.Int64
 	engine.Use(func(c *gin.Context) {
 		id := fmt.Sprintf("request-%d", sequence.Add(1))
-		c.Request = c.Request.WithContext(applog.ContextWithRequestID(c.Request.Context(), id))
+		c.Request = c.Request.WithContext(logger.ContextWithRequestID(c.Request.Context(), id))
 		c.Header("X-Request-ID", id)
 		c.Next()
 	})
@@ -324,30 +323,19 @@ type failingEnvelopeHTTPWriter struct {
 
 func (w failingEnvelopeHTTPWriter) Write([]byte) (int, error) { return 0, w.failure }
 
-type envelopeLogCapture struct{ entries []applog.LogEntry }
-
-func (s *envelopeLogCapture) Log(_ context.Context, e applog.LogEntry) {
-	s.entries = append(s.entries, e)
-}
-
 func TestEnvelopeCacheObservesAnIgnoredReplayWriteError(t *testing.T) {
-	sink := &envelopeLogCapture{}
-	release, err := applog.Install(sink, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
+	_, read := newNativeTestLogger(t, "info")
 	stager := newTestStager(t)
 	engine := envelopeEngine(stager.Middleware(0), func(c *gin.Context) { resp.Ok(c, "cached") })
 	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/items", nil))
 	failure := errors.New("socket write failed")
 	engine.ServeHTTP(failingEnvelopeHTTPWriter{httptest.NewRecorder(), failure}, httptest.NewRequest(http.MethodGet, "/items", nil))
-	if len(sink.entries) != 1 {
-		t.Fatalf("write error events=%d", len(sink.entries))
+	if len(read()) != 1 {
+		t.Fatalf("write error events=%d", len(read()))
 	}
 	found := false
-	for _, f := range sink.entries[0].Fields {
-		if text, ok := f.Value.(string); ok && strings.Contains(text, "socket write failed") {
+	for _, value := range read()[0] {
+		if text, ok := value.(string); ok && strings.Contains(text, "socket write failed") {
 			found = true
 		}
 	}

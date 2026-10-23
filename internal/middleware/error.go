@@ -8,8 +8,9 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 // ErrorHandler captures errors and returns a consistent JSON error response.
@@ -40,8 +41,8 @@ func ErrorHandler() gin.HandlerFunc {
 		// 连接已经没了，写只会产生一条无意义的错误日志；更糟的是它会把
 		// "客户端走了"记成一次服务端错误，污染错误率指标。
 		if IsClientGone(err) {
-			applog.Debug("client disconnected before the response was written",
-				applog.String("path", requestPath(c)))
+			logger.Debug("client disconnected before the response was written",
+				zap.String("path", requestPath(c)))
 			return
 		}
 
@@ -67,38 +68,38 @@ func logContextError(c *gin.Context, err error) {
 	if resp.ErrorWasLogged(c, err) {
 		return
 	}
-	fields := append(resp.ErrorLogFields(err), applog.String("path", requestPath(c)))
+	fields := append(resp.ErrorLogFields(err), zap.String("path", requestPath(c)))
 
 	// Step 1: 对请求体超限这种明确的客户端错误单独降级为 warn，
 	// 避免它们被误判成服务故障噪音。超限统一以标准库错误类型表示
 	// （http.MaxBytesReader 超限时 Read 返回 *http.MaxBytesError）。
 	if maxBytesErr, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		fields = append(fields,
-			applog.Int("http_status", http.StatusRequestEntityTooLarge),
-			applog.Int32("error_code", resp.PayloadTooLargeCode),
-			applog.Int64("max_bytes", maxBytesErr.Limit),
+			zap.Int("http_status", http.StatusRequestEntityTooLarge),
+			zap.Int32("error_code", resp.PayloadTooLargeCode),
+			zap.Int64("max_bytes", maxBytesErr.Limit),
 		)
-		applog.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+		logger.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 		return
 	}
 
 	// Step 2: 如果错误本身带有 goerr 语义，就按它的 HTTP 状态码区分日志级别。
 	if appErr, ok := errors.AsType[goerr.Error](err); ok {
 		fields = append(fields,
-			applog.Int("http_status", appErr.HTTPCode()),
-			applog.Int("error_code", int(appErr.Code())),
+			zap.Int("http_status", appErr.HTTPCode()),
+			zap.Int("error_code", int(appErr.Code())),
 		)
 		if isServerSideAppError(appErr) {
-			applog.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+			logger.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 			return
 		}
 
-		applog.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+		logger.WarnCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 		return
 	}
 
 	// Step 3: 其余未知错误默认按服务端错误记录。
-	applog.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
+	logger.ErrorCtx(requestCtx(c), "[ErrorHandler] request failed", fields...)
 }
 
 func isServerSideAppError(err goerr.Error) bool {

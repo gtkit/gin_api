@@ -13,9 +13,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/logger/v2"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -72,7 +72,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 	if cfg.Enabled && strings.TrimSpace(cfg.Store) == config.CacheStoreRedis && options.Redis != nil {
 		client = options.Redis.Client(cfg.RedisDB)
 		if client == nil && options.Redis.Configured() {
-			applog.Warnf("response cache disabled for this process lifetime: redis (db %d) is configured but unreachable at startup; restart after redis recovers to re-enable it", cfg.RedisDB)
+			logger.Warnf("response cache disabled for this process lifetime: redis (db %d) is configured but unreachable at startup; restart after redis recovers to re-enable it", cfg.RedisDB)
 			cfg.Enabled = false
 		}
 	}

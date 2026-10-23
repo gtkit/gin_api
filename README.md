@@ -57,6 +57,8 @@ make project-init NAME=your_project                  # 执行
 
 Redis认证、限流与响应缓存统一使用 `redis.prefix`；省略或空串时原样回落 `application.name`，不补分隔符。存量升级须保持旧实际namespace：旧版忽略的非空prefix若不同于旧应用名，须先改为原namespace再升级；直接改名会使撤销/刷新状态失联。本次不搬迁key、不扩展DB/Redis集群。
 
+Redis 各能力的启动、故障和恢复语义见 [Redis 故障与恢复](SCAFFOLD.md#redis-故障与恢复)。
+
 ## 架构
 
 ```text

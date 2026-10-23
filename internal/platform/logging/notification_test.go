@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/core"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	notification "github.com/gtkit/gin-api/internal/platform/notification/dispatch"
@@ -39,7 +39,7 @@ func TestPureLoggingDoesNotConstructNotificationClients(t *testing.T) {
 	// composition must neither validate them nor create any outbound resources.
 	cfg := &config.Config{Log: config.LogConfig{ConsoleStdout: 1}, News: config.NewsConfig{Platform: "unknown"}, Email: config.EmailConfig{Host: "invalid"}, SMS: config.SMSConfig{Provider: "unknown"}}
 	p := mustOpen(t, Options{Config: cfg})
-	applog.HErrorf("local alert")
+	logger.HError(fmt.Sprintf("local alert"))
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -62,12 +62,12 @@ func TestAlertQueueRemainsBoundedAt64(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	applog.HErrorf("first")
+	logger.HError(fmt.Sprintf("first"))
 	<-entered
 	for range 64 {
-		applog.HErrorf("queued")
+		logger.HError(fmt.Sprintf("queued"))
 	}
-	applog.HErrorf("overflow")
+	logger.HError(fmt.Sprintf("overflow"))
 	if got := p.main.DroppedMessages(); got != 1 {
 		t.Fatalf("queue dropped=%d, want one after 64 pending", got)
 	}
@@ -152,7 +152,7 @@ func TestDrainAndPartialOpenBindTheRealCleanupContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			if p != nil {
-				if err := p.Drain(ctx); err != nil {
+				if err := p.Close(ctx); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -180,11 +180,11 @@ func TestCleanupCancellationReachesRealQueuedSend(t *testing.T) {
 		notifier := mustOpenNotification(t, notification.Options{Config: configuration, Robot: channel})
 		p := mustOpen(t, Options{Config: configuration, Notification: notifier})
 
-		applog.HErrorf("in flight")
+		logger.HError(fmt.Sprintf("in flight"))
 		<-entered
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		if err := p.Drain(ctx); !errors.Is(err, context.Canceled) {
+		if err := p.Close(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatalf("drain=%v", err)
 		}
 		if cleanup.Load() != 0 {
@@ -228,12 +228,12 @@ func TestResolvedSDKLateCallbacksCannotUseStoppedChannels(t *testing.T) {
 			return logger.New(append(opts, logger.WithMessager(delayed))...)
 		}})
 
-		applog.HErrorf("first")
+		logger.HError(fmt.Sprintf("first"))
 		<-delayed.entered
-		applog.HErrorf("queued")
+		logger.HError(fmt.Sprintf("queued"))
 		done := make(chan error, 1)
 		var group sync.WaitGroup
-		group.Go(func() { done <- p.Drain(t.Context()) })
+		group.Go(func() { done <- p.Close(t.Context()) })
 		synctest.Sleep(6 * time.Second)
 		stopChannels := func() {
 			if err := notifier.Close(t.Context()); err != nil {
@@ -284,7 +284,17 @@ func TestNotificationFailureDiagnosticsAreRedactedAndNonrecursive(t *testing.T) 
 	}
 	previous := os.Stderr
 	os.Stderr = stderr
+	// SDK defaults capture their output at construction. Select a real previous
+	// instance here so restoration is observable without mutating SDK internals.
+	previousDefault := logger.Default()
+	previousStdout := os.Stdout
+	os.Stdout = stderr
+	restored := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	os.Stdout = previousStdout
+	logger.SetDefault(restored)
 	t.Cleanup(func() {
+		logger.SetDefault(previousDefault)
+		restored.Sync()
 		os.Stderr = previous
 		if err := stderr.Close(); err != nil {
 			t.Error(err)
@@ -302,10 +312,10 @@ func TestNotificationFailureDiagnosticsAreRedactedAndNonrecursive(t *testing.T) 
 	if err := notifier.Notify(t.Context(), "", "first"); err == nil {
 		t.Fatal("provider failure disappeared")
 	}
-	if err := p.Drain(t.Context()); err != nil {
+	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	// The facade has been released: diagnostics now use its ordinary fallback.
+	// The native default has been restored before closing: late diagnostics use it.
 	if err := notifier.Notify(t.Context(), "", "second"); err == nil {
 		t.Fatal("provider failure disappeared after drain")
 	}
@@ -342,4 +352,41 @@ func mustOpenNotification(t *testing.T, options notification.Options) *notificat
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestAbnormalFlushDoesNotDrainOrCancelNotification(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		var first sync.Once
+		var binds, delivered atomic.Int32
+		sink := &callbackNotification{
+			warn: func(string, ...string) { first.Do(func() { close(entered) }); <-release; delivered.Add(1) },
+			bind: func(context.Context) func() { binds.Add(1); return func() {} },
+		}
+		// logrotate owns a process-global worker, so this synctest bubble uses
+		// console output; file flush behavior is covered outside the bubble.
+		cfg := &config.Config{Log: config.LogConfig{ConsoleStdout: 1}}
+		p := mustOpen(t, Options{Config: cfg, Notification: sink})
+		main := logger.Default()
+		logger.HError("before flush")
+		<-entered
+		canceled, cancel := context.WithCancel(t.Context())
+		cancel()
+		if err := p.Drain(canceled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("flush=%v", err)
+		}
+		if binds.Load() != 0 || delivered.Load() != 0 || logger.Default() != main {
+			t.Fatal("flush drained or canceled notification")
+		}
+		logger.HError("after flush")
+		unblock()
+		if err := p.Close(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Load() != 2 || binds.Load() != 1 {
+			t.Fatalf("delivered=%d binds=%d", delivered.Load(), binds.Load())
+		}
+	})
 }

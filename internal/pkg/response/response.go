@@ -12,9 +12,10 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
+	"github.com/gtkit/logger/v2"
 	"github.com/gtkit/verify"
+	"go.uber.org/zap"
 )
 
 // ResResult 统一响应信封。
@@ -225,20 +226,20 @@ func logError(c *gin.Context, root error, item goerr.Error, httpCode int) {
 	fields := ErrorLogFields(root)
 	if c.Request != nil {
 		fields = append(fields,
-			applog.String("method", c.Request.Method),
-			applog.String("path", c.Request.URL.Path),
+			zap.String("method", c.Request.Method),
+			zap.String("path", c.Request.URL.Path),
 		)
 	}
 	fields = append(fields,
-		applog.Int("http_status", httpCode),
-		applog.Int("error_code", int(item.Code())),
+		zap.Int("http_status", httpCode),
+		zap.Int("error_code", int(item.Code())),
 	)
 
 	if httpCode >= http.StatusInternalServerError {
-		applog.ErrorCtx(requestCtx(c), "[Response] request failed", fields...)
+		logger.ErrorCtx(requestCtx(c), "[Response] request failed", fields...)
 		return
 	}
-	applog.WarnCtx(requestCtx(c), "[Response] request failed", fields...)
+	logger.WarnCtx(requestCtx(c), "[Response] request failed", fields...)
 }
 
 // NewResponse 创建自定义 code 的响应，供中间件直接用 c.AbortWithStatusJSON 时使用。
@@ -372,7 +373,7 @@ func WriteJSON(c *gin.Context, httpCode int, data *ResResult) {
 	}
 	c.Abort()
 	envelope := *data
-	envelope.RequestID = applog.RequestIDFromContext(requestCtx(c))
+	envelope.RequestID = logger.RequestIDFromContext(requestCtx(c))
 	c.Set(envelopeWriteKey, true)
 	defer c.Set(envelopeWriteKey, false)
 	c.JSON(httpCode, &envelope)
@@ -408,11 +409,11 @@ func requestCtx(c *gin.Context) context.Context {
 
 // ErrorLogFields projects goerr's diagnostic into internal log fields. It never
 // exposes the diagnostic as an HTTP payload, nor captures another stack.
-func ErrorLogFields(err error) []applog.Field {
+func ErrorLogFields(err error) []zap.Field {
 	diagnostic, inspectErr := goerr.Inspect(err)
 	if inspectErr != nil {
-		return []applog.Field{applog.String("error_type", fmt.Sprintf("%T", err)),
-			applog.String("error_diagnostic_failure", inspectErr.Error())}
+		return []zap.Field{zap.String("error_type", fmt.Sprintf("%T", err)),
+			zap.String("error_diagnostic_failure", inspectErr.Error())}
 	}
 	causes := make([]map[string]any, 0, len(diagnostic.Causes))
 	for _, cause := range diagnostic.Causes {
@@ -422,7 +423,7 @@ func ErrorLogFields(err error) []applog.Field {
 		}
 		causes = append(causes, map[string]any{"parent": cause.Parent, "has_code": cause.HasCode, "code": cause.Code, "frames": frames})
 	}
-	return []applog.Field{applog.String("error", diagnostic.Error), applog.Any("error_causes", causes)}
+	return []zap.Field{zap.String("error", diagnostic.Error), zap.Any("error_causes", causes)}
 }
 
 // ObserveError logs an error at a terminal boundary after a response was committed.

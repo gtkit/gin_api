@@ -6,70 +6,40 @@ import (
 	"testing"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
-// BenchmarkLogHotPath uses the real SDK encoder/caller and a /dev/null console
-// sink. It measures forwarding/encoding, not file rotation or disk throughput.
+// BenchmarkLogHotPath measures native SDK encoding to /dev/null, not disk throughput.
 func BenchmarkLogHotPath(b *testing.B) {
-	fields := []applog.Field{
-		applog.String("name", "worker"), applog.Int("count", 42),
-		applog.Duration("elapsed", time.Millisecond), applog.Any("ok", true),
-		applog.Int64("rows", 7), applog.String("sql", "SELECT ?"),
-	}
-	large := make([]applog.Field, 16)
-	for i := range large {
-		large[i] = applog.Int("value", i)
-	}
-	for _, tc := range []struct {
-		name      string
-		threshold string
-		entry     applog.LogEntry
-		requestID bool
-	}{
-		{"filtered", "info", applog.LogEntry{Level: applog.LevelDebug, Message: "value %d", Format: true, Args: []any{42}, CallerSkip: 3}, false},
-		{"filtered_fields", "info", applog.LogEntry{Level: applog.LevelDebug, Fields: fields, CallerSkip: 1}, false},
-		{"enabled", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", CallerSkip: 3}, false},
-		{"field1", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: fields[:1], CallerSkip: 3}, false},
-		{"fields6", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: fields, CallerSkip: 3}, false},
-		{"fields16", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: large, CallerSkip: 3}, false},
-		{"gorm_caller1", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: fields, CallerSkip: 1}, false},
-		{"gorm_caller2", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: fields, CallerSkip: 2}, false},
-		{"access", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "/api", Fields: fields, Stream: applog.AccessStream}, false},
-		{"request_id", "info", applog.LogEntry{Level: applog.LevelInfo, Message: "event", Fields: fields, CallerSkip: 3}, true},
-	} {
-		for _, parallel := range []bool{false, true} {
-			mode := "serial"
-			if parallel {
-				mode = "parallel"
+	fields := []zap.Field{zap.String("name", "worker"), zap.Int("count", 42), zap.Duration("elapsed", time.Millisecond), zap.Bool("ok", true), zap.Int64("rows", 7), zap.String("sql", "SELECT ?")}
+	for _, name := range []string{"filtered", "enabled", "fields6", "access", "request_id"} {
+		b.Run(name, func(b *testing.B) {
+			owner := benchmarkOwner(b, "info")
+			ctx := b.Context()
+			if name == "request_id" {
+				ctx = logger.ContextWithRequestID(ctx, "benchmark-request")
 			}
-			b.Run(tc.name+"/"+mode, func(b *testing.B) {
-				benchmarkOwner(b, tc.threshold)
-				ctx := b.Context()
-				if tc.requestID {
-					ctx = applog.ContextWithRequestID(ctx, "benchmark-request")
+			access := owner.AccessLogger()
+			b.ReportAllocs()
+			for b.Loop() {
+				switch name {
+				case "filtered":
+					logger.Debugf("value %d", 42)
+				case "enabled":
+					logger.Info("event")
+				case "access":
+					access.InfoCtx(ctx, "/api", fields...)
+				default:
+					logger.InfoCtx(ctx, "event", fields...)
 				}
-				b.ReportAllocs()
-				if parallel {
-					b.ResetTimer()
-					b.RunParallel(func(pb *testing.PB) {
-						for pb.Next() {
-							applog.Log(ctx, tc.entry)
-						}
-					})
-					return
-				}
-				for b.Loop() {
-					applog.Log(ctx, tc.entry)
-				}
-			})
-		}
+			}
+		})
 	}
 }
 
-func benchmarkOwner(b *testing.B, level string) {
+func benchmarkOwner(b *testing.B, level string) *Owner {
 	b.Helper()
 	output, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -97,4 +67,5 @@ func benchmarkOwner(b *testing.B, level string) {
 			b.Error(err)
 		}
 	})
+	return p
 }

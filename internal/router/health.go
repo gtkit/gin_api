@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 const (
@@ -142,7 +143,7 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		// fail-closed：未配置 checker 属装配错误，报"未就绪"而非"就绪"，
 		// 避免错误装配的实例仍被纳入流量。
 		if checker == nil {
-			applog.Warn("readiness checker not configured; reporting not ready")
+			logger.Warn("readiness checker not configured; reporting not ready")
 			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{Status: statusUnavailable})
 			return
 		}
@@ -338,7 +339,7 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 
 	if err == nil {
 		if st.lastCategory != "" {
-			applog.Info("readiness dependency recovered", applog.String("dependency", name))
+			logger.Info("readiness dependency recovered", zap.String("dependency", name))
 			st.lastCategory = ""
 			st.lastLoggedAt = time.Time{}
 		}
@@ -351,8 +352,8 @@ func (l *depFailureLogLimiter) observe(name string, err error) {
 		return
 	}
 
-	applog.Error("readiness dependency check failed",
-		applog.String("dependency", name), applog.Err(err))
+	logger.Error("readiness dependency check failed",
+		zap.String("dependency", name), zap.Error(err))
 	st.lastCategory = category
 	st.lastLoggedAt = now
 }

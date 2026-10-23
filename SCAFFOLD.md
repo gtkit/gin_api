@@ -155,6 +155,26 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
 
 另：`ratelimit.key_hmac_secret` 的轮换语义是**桶全部重算 = 一次性限额重置**（不做双密钥灰度）。换密钥意味着所有主体重新拿到一个满桶，选在低峰期操作。
 
+## Redis 故障与恢复
+
+`RedisRequired` 是已启用能力的推导结果，不是忽略 Redis 错误的总开关。本地认证、任一
+`redis + fail_closed` 限流策略、任务队列启用时，Redis 都是必需资源；其启动失败会阻止服务启动。
+仅使用可降级能力时，已配置但不可达的 Redis 才允许降级启动。启用了 Redis 消费能力却没有配置
+地址或所需 DB 编号属于配置错误，不按临时故障放行。
+
+| 能力 | 启动时已配置但不可达 | 运行中不可用 | 恢复方式 |
+|---|---|---|---|
+| Redis 限流 `fail_open` | 若无其他必需能力，可降级启动并放行 | 后端故障时放行 | 启动时没有客户端：重启后恢复；已有客户端：由健康探测恢复 |
+| Redis 限流 `fail_closed` | Redis 必需，启动失败 | 拒绝，现有中间件返回 429 | 由已有客户端的健康探测恢复；readiness 同时反映必需 Redis 状态 |
+| Redis 限流 `local_fallback` | 若无其他必需能力，改用本地桶启动 | 切到本地影子桶 | 启动时没有客户端：重启后恢复；已有客户端：健康探测恢复后切回 Redis |
+| 本地认证撤销/刷新 | Redis 必需，启动失败 | 撤销查询失败返回 503，不把故障当成“未撤销”；刷新/登出不能视为成功 | 已有客户端恢复后重试；不提供撤销 fail-open 开关 |
+| Redis GET 响应缓存 | 无其他必需能力时，本进程禁用缓存并告警 | 读取失败回源，写入失败记录错误；读/写分别有 1s/2s 上限 | 启动时被禁用：重启后恢复；已有客户端：后续成功操作重新使用缓存 |
+| 任务队列 | 启用时 Redis 必需，启动失败 | 入队错误返回调用方，处理/重试继续按队列原契约执行；必需 Redis 状态影响 readiness | 依赖恢复后按队列重试/调用方策略恢复，不承诺已失败入队自动补发 |
+
+`failure_mode` 必须显式填写，没有适用于所有业务的默认值。`local_fallback` 不迁移桶状态：
+每个副本独立计额，切换后可能多放行一个 Burst，不能用作精确业务配额。
+`auth.mode: external` 默认不在本服务做本地撤销查询，由 IdP 承担撤销；这与 Redis 故障时放行已有撤销检查不同。
+
 ## 引入 WebSocket 端点时的强制约束
 
 母版**不含任何 WebSocket 端点**，因此也没有连接注册表——按"无消费者不建机制"的原则，现在建它只是一个没人用的抽象。
@@ -571,7 +591,7 @@ telemetry:
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
-| 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 连续失败与最后成功时间、DB 连接池、认证事件。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
+| 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 实际执行次数/耗时、连续失败与最后成功时间、DB 连接池、认证事件。执行指标覆盖 OneShot、singleton 和队列处理尝试，具体口径见 `docs/observability.md`。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |

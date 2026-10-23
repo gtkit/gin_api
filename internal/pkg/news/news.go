@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // alertSendTimeout 是单次告警发送的独立超时：告警发生在日志调用路径上，
@@ -47,7 +47,7 @@ func (n *Notifier) ErrRecord(msg string) {
 		return
 	}
 
-	applog.Error(msg)
+	logger.Error(msg)
 	n.Warn("", msg)
 }
 
@@ -59,7 +59,7 @@ func SendPicMsg(ctx context.Context, newsApp ImageMessageSender, openids, shotna
 			continue
 		}
 		if err := newsApp.SendImageMessage(ctx, openid, shotname); err != nil {
-			applog.Errorf("send image message error:%v, openid:%s", err, openid)
+			logger.Errorf("send image message error:%v, openid:%s", err, openid)
 		}
 	}
 	return nil

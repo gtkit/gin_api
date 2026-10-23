@@ -10,7 +10,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/platform/logging"
@@ -21,6 +20,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/notification/sms"
 	"github.com/gtkit/gin-api/internal/platform/redis"
 	"github.com/gtkit/gin-api/internal/platform/responsecache"
+	"github.com/gtkit/logger/v2"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -42,6 +42,7 @@ type cacheOwner interface {
 	Close(context.Context) error
 }
 type logOwner interface {
+	AccessLogger() *logger.Logger
 	Drain(context.Context) error
 	Close(context.Context) error
 }
@@ -288,6 +289,13 @@ func (p *processLogs) Drain(ctx context.Context) error {
 	return p.logger.Drain(ctx)
 }
 
+func (p *processLogs) AccessLogger() *logger.Logger {
+	if p.logger == nil {
+		return nil
+	}
+	return p.logger.AccessLogger()
+}
+
 func (p *processLogs) Close(ctx context.Context) error {
 	var errs []error
 	if p.logger != nil {
@@ -312,7 +320,7 @@ func migrationCredentials(cfg config.DatabaseConfig) config.DBCredentials {
 	if creds, ok := cfg.MigrationCredentials(); ok {
 		return creds
 	}
-	applog.Warn(migrationFallbackWarning)
+	logger.Warn(migrationFallbackWarning)
 	return cfg.RuntimeCredentials()
 }
 

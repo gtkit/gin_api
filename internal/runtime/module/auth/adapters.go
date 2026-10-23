@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"golang.org/x/sync/semaphore"
 
@@ -189,11 +189,11 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
-func (authAuditor) Auditf(format string, args ...any) { applog.Infof(format, args...) }
+func (authAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }
 
 // Failf 走 Warn：登录失败、重用检测、撤销失败都是安全排查的起点，
 // 与"某某登录成功"共用一个级别，告警规则就只能靠解析文本。
-func (authAuditor) Failf(format string, args ...any) { applog.Warnf(format, args...) }
+func (authAuditor) Failf(format string, args ...any) { logger.Warnf(format, args...) }
 
 // eventRecorder 把认证事件转发给指标仪表。
 type eventRecorder struct {
@@ -260,7 +260,7 @@ func (l accountLimiter) Allow(ctx context.Context, account string) bool {
 	decision, err := l.limiter.Check(ctx, key)
 	if err != nil {
 		// 与路由限流中间件同款留痕：不留的话，一次长时间的降级不会有任何记录。
-		applog.Warnf("account rate limit backend error; the policy's failure mode decided "+
+		logger.Warnf("account rate limit backend error; the policy's failure mode decided "+
 			"the outcome (policy=%s outcome=%s): %v", policy.ID, decision.Outcome, err)
 	}
 	if l.recorder != nil {

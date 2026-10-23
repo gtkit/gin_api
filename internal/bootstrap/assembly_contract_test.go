@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"github.com/gtkit/logger/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,6 +139,8 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 
 func installMetricsFixture(t *testing.T, inf *infra) {
 	t.Helper()
+	inf.accessLogger = logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	t.Cleanup(inf.accessLogger.Sync)
 	recorder, err := metrics.New(otel.Meter("assembly-contract"))
 	if err != nil {
 		t.Fatal(err)

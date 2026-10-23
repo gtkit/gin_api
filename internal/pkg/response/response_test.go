@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 func TestMain(m *testing.M) {
@@ -450,50 +450,40 @@ func TestErrorIsAnAliasOfErr(t *testing.T) {
 	}
 }
 
-type diagnosticCapture struct{ entries []applog.LogEntry }
-
-func (d *diagnosticCapture) Log(_ context.Context, e applog.LogEntry) {
-	d.entries = append(d.entries, e)
-}
-
 func TestErrorDiagnosticsPreserveTheWholeRootAndClientContract(t *testing.T) {
-	sink := &diagnosticCapture{}
-	release, err := applog.Install(sink, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
+	_, read := newNativeTestLogger(t, "info")
 	first, cleanup := errors.New("private primary"), errors.New("private cleanup")
 	root := fmt.Errorf("outer operation: %w", errors.Join(goerr.New(first, goerr.StatusNotFound(), "public message"), goerr.WithStack(cleanup)))
 	c, rec := newCtx()
-	c.Request = c.Request.WithContext(applog.ContextWithRequestID(c.Request.Context(), "generated-id"))
+	c.Request = c.Request.WithContext(logger.ContextWithRequestID(c.Request.Context(), "generated-id"))
 	Err(c, root)
 	ObserveError(c, root)
-	if rec.Code != 404 || len(sink.entries) != 1 {
-		t.Fatalf("status=%d entries=%d", rec.Code, len(sink.entries))
+	if rec.Code != 404 || len(read()) != 1 {
+		t.Fatalf("status=%d entries=%d", rec.Code, len(read()))
 	}
-	fields := map[string]any{}
-	for _, field := range sink.entries[0].Fields {
-		fields[field.Key] = field.Value
-	}
+	fields := read()[0]
 	text, ok := fields["error"].(string)
 	if !ok || !strings.Contains(text, "outer operation") || !strings.Contains(text, "private cleanup") {
 		t.Fatalf("root lost: %v", fields)
 	}
-	causes, ok := fields["error_causes"].([]map[string]any)
+	causes, ok := fields["error_causes"].([]any)
 	if !ok || len(causes) < 5 {
 		t.Fatalf("cause tree lost: %v", fields)
 	}
 	frames := 0
-	for i, cause := range causes {
-		parent, ok := cause["parent"].(int)
+	for i, value := range causes {
+		cause, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("cause type %T", value)
+		}
+		parent, ok := cause["parent"].(float64)
 		if !ok {
 			t.Fatalf("parent has type %T", cause["parent"])
 		}
-		if parent >= i {
+		if parent >= float64(i) {
 			t.Fatal("invalid parent")
 		}
-		causeFrames, ok := cause["frames"].([]map[string]any)
+		causeFrames, ok := cause["frames"].([]any)
 		if !ok {
 			t.Fatalf("frames have type %T", cause["frames"])
 		}
@@ -509,23 +499,18 @@ func TestErrorDiagnosticsPreserveTheWholeRootAndClientContract(t *testing.T) {
 }
 
 func TestDiagnosticFailureDoesNotChangeTheBusinessResponse(t *testing.T) {
-	sink := &diagnosticCapture{}
-	release, err := applog.Install(sink, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
+	_, read := newNativeTestLogger(t, "info")
 	c, rec := newCtx()
 	Err(c, goerr.New(errors.New(strings.Repeat("x", 17000)), goerr.StatusNotLoggedIn(), "please authenticate"))
-	if rec.Code != 401 || decode(t, rec)["msg"] != "please authenticate" || len(sink.entries) != 1 {
+	if rec.Code != 401 || decode(t, rec)["msg"] != "please authenticate" || len(read()) != 1 {
 		t.Fatalf("response changed: %s", rec.Body.String())
 	}
 	found := false
-	for _, f := range sink.entries[0].Fields {
-		if f.Key == "error_diagnostic_failure" {
+	for key := range read()[0] {
+		if key == "error_diagnostic_failure" {
 			found = true
 		}
-		if f.Key == "error" {
+		if key == "error" {
 			t.Fatal("failed inspection was represented as a complete snapshot")
 		}
 	}

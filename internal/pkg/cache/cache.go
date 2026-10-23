@@ -22,8 +22,9 @@ import (
 	"sync"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -249,8 +250,8 @@ func (c *Cache[T]) GetOrLoad(
 				}
 				result = zero
 				loadErr = goerr.New(failure, goerr.StatusInternalServer())
-				applog.ErrorCtx(loadCtx, "cache loader panic recovered",
-					applog.String("stack", string(debug.Stack())))
+				logger.ErrorCtx(loadCtx, "cache loader panic recovered",
+					zap.String("stack", string(debug.Stack())))
 			}
 		}()
 

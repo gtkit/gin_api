@@ -13,7 +13,8 @@ import (
 func newLoggerEngine(t *testing.T, opts AccessLogOptions) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(GinLogger(opts))
+	access, _ := newNativeTestLogger(t, "info")
+	engine.Use(GinLogger(access, opts))
 	// echo handler：读取请求体并原样写回，用于验证 body 透传未被中间件破坏。
 	echo := func(c *gin.Context) {
 		body, err := io.ReadAll(c.Request.Body)

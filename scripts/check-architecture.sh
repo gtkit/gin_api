@@ -298,12 +298,9 @@ if [ -s "$dao_backdoor_hits" ]; then
 fi
 rm -f "$dao_backdoor_hits"
 
-while IFS= read -r -d '' file; do
-  if grep -qE 'func .*mdbCtx' "$file" && ! grep -q 'dbtx.DB(ctx, r.db)' "$file"; then
-    echo "FAIL: $file mdbCtx does not call dbtx.DB(ctx, r.db)"
-    fail=1
-  fi
-done < <(find internal/repository -type f -name '*.go' ! -name '*_test.go' -print0)
+if ! go run ./scripts/check-repository-context.go; then
+  fail=1
+fi
 
 # go.mod 不得含 replace。
 #

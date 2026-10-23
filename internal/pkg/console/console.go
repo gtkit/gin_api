@@ -6,7 +6,8 @@ import (
 	"io"
 	"os"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 // ANSI SGR 序列。自实现而非依赖第三方库：本包对颜色的全部需求就是这三种，
@@ -62,7 +63,7 @@ func ExitIf(err error) {
 // 加检测是行为变更，与本次「只换实现、不改行为」的目标冲突。
 func colorOut(message, color string) {
 	if _, err := fmt.Fprintln(consoleWriter, color+message+colorReset); err != nil {
-		applog.Error("write console message failed", applog.Err(err))
+		logger.Error("write console message failed", zap.Error(err))
 	}
 }
 

@@ -14,6 +14,9 @@ func newGlobalMiddleware(opt Options) ([]gin.HandlerFunc, error) {
 	if opt.Metrics == nil {
 		return nil, errors.New("HTTP middleware requires final metrics recorder")
 	}
+	if opt.AccessLogger == nil {
+		return nil, errors.New("HTTP middleware requires access logger")
+	}
 	factory := opt.RequestIDFactory
 	if factory == nil {
 		factory = middleware.NewRequestIDGenerator
@@ -31,7 +34,7 @@ func newGlobalMiddleware(opt Options) ([]gin.HandlerFunc, error) {
 		chain = append(chain, otelgin.Middleware(opt.ServiceName))
 	}
 	chain = append(chain,
-		middleware.GinLogger(middleware.AccessLogOptions{LogRequestBody: opt.LogRequestBody, LogResponseBody: opt.LogResponseBody}),
+		middleware.GinLogger(opt.AccessLogger, middleware.AccessLogOptions{LogRequestBody: opt.LogRequestBody, LogResponseBody: opt.LogResponseBody}),
 		middleware.Metrics(opt.Metrics),
 		middleware.GinRecovery(true),
 		middleware.SecurityHeaders(),

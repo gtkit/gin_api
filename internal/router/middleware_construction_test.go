@@ -2,6 +2,7 @@ package router
 
 import (
 	"errors"
+	"github.com/gtkit/logger/v2"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,7 +23,7 @@ func TestRouterReturnsRequestIDConstructionFailure(t *testing.T) {
 		{name: "nil generator", factory: func() (*middleware.RequestIDGenerator, error) { return nil, nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			engine, err := newRouterForTest("test", Options{RequestIDFactory: tc.factory})
+			engine, err := newRouterForTest(t, "test", Options{RequestIDFactory: tc.factory})
 			if engine != nil || err == nil || (tc.want != nil && !errors.Is(err, tc.want)) {
 				t.Fatalf("New = (%v, %v), want no engine and construction failure %v", engine, err, tc.want)
 			}
@@ -47,7 +48,9 @@ func TestRouterConstructsRequestIDForEachEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	opt := Options{Metrics: recorder, RequestIDFactory: func() (*middleware.RequestIDGenerator, error) {
+	access := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	t.Cleanup(access.Sync)
+	opt := Options{AccessLogger: access, Metrics: recorder, RequestIDFactory: func() (*middleware.RequestIDGenerator, error) {
 		calls++
 		return middleware.NewRequestIDGenerator()
 	}}
@@ -69,7 +72,7 @@ func TestRouterConstructsRequestIDForEachEngine(t *testing.T) {
 
 func TestRouterCopiesAllowedOrigins(t *testing.T) {
 	origins := []string{"https://example.com"}
-	engine, err := newRouterForTest("test", Options{AllowedOrigins: origins})
+	engine, err := newRouterForTest(t, "test", Options{AllowedOrigins: origins})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,5 +91,20 @@ func TestRouterCopiesAllowedOrigins(t *testing.T) {
 		if response.Code != http.StatusOK || response.Header().Get("Access-Control-Allow-Origin") != tc.wantOrigin {
 			t.Fatalf("origin %q: status = %d, allowed origin = %q, want %q", tc.origin, response.Code, response.Header().Get("Access-Control-Allow-Origin"), tc.wantOrigin)
 		}
+	}
+}
+
+func TestRouterRejectsMissingAccessBeforeRequestIDConstruction(t *testing.T) {
+	recorder, err := metrics.New(otel.Meter("missing-access"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	engine, err := New("test", Options{Metrics: recorder, RequestIDFactory: func() (*middleware.RequestIDGenerator, error) {
+		calls++
+		return middleware.NewRequestIDGenerator()
+	}})
+	if engine != nil || err == nil || calls != 0 {
+		t.Fatalf("engine=%v err=%v factory calls=%d", engine, err, calls)
 	}
 }

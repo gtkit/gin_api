@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/logger/v2"
 	"gorm.io/gorm"
 )
 
@@ -57,7 +57,7 @@ func NewMigrationRuntime(ctx context.Context, opts MigrationOptions) (_ *Migrati
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	applog.Infof("migration runtime initialized with env=%s", cfg.Env)
+	logger.Infof("migration runtime initialized with env=%s", cfg.Env)
 	return &MigrationRuntime{cfg: cfg, owners: owners}, nil
 }
 

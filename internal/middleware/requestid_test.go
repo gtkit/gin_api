@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // requestIDPattern 是定长小写十六进制的判据，长度直接取自导出的契约常量——
@@ -112,7 +112,7 @@ func TestRequestIDReachesGoContext(t *testing.T) {
 	engine := gin.New()
 	engine.Use(mw)
 	engine.GET("/probe", func(c *gin.Context) {
-		fromGoCtx = applog.RequestIDFromContext(c.Request.Context())
+		fromGoCtx = logger.RequestIDFromContext(c.Request.Context())
 		c.Status(http.StatusOK)
 	})
 

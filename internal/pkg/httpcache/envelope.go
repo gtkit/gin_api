@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/goerr"
+	"github.com/gtkit/logger/v2"
 )
 
 const (
@@ -129,7 +129,7 @@ func (w *envelopeWriter) Write(data []byte) (int, error) {
 			w.fail(errors.Join(ErrInvalidEnvelope, err))
 			return 0, w.err
 		}
-		envelope.RequestID = applog.RequestIDFromContext(w.ctx.Request.Context())
+		envelope.RequestID = logger.RequestIDFromContext(w.ctx.Request.Context())
 		encoded, err := json.Marshal(envelope)
 		if err != nil {
 			w.fail(fmt.Errorf("encode response envelope: %w", err))
@@ -138,7 +138,7 @@ func (w *envelopeWriter) Write(data []byte) (int, error) {
 		output = encoded
 	}
 	stripEnvelopeHeaders(w.Header())
-	id := applog.RequestIDFromContext(w.ctx.Request.Context())
+	id := logger.RequestIDFromContext(w.ctx.Request.Context())
 	if id != "" {
 		w.Header().Set("X-Request-ID", id)
 	} else {

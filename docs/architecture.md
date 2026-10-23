@@ -50,7 +50,9 @@ pkg/                         → 对外可复用包（可被仓库外项目 impo
 
 各具体资源用 `Open(ctx, Options)` 完成构造，成功返回拥有关闭权的 Owner；消费者只取得借用能力。
 `platform/data.Resources` 保存 DB/Redis 句柄与观测视图，不关闭连接。
-Runtime 先关闭缓存、Redis、MySQL，再排空日志，最后关闭通知组合、短信、邮件、机器人。
+main 直接使用 `gtkit/logger/v2` 包级 API；access 原生实例经 bootstrap → router → middleware 注入。
+`platform/logging` 只管理构造和生命周期，不提供每条日志的转发、字段转换或接纳层。
+正常关停确认日志源结束后，Runtime 先关闭缓存、Redis、MySQL，再关闭日志，最后关闭通知组合、短信、邮件、机器人。
 部分构造失败会回收已取得的资源，清理错误与根因合并返回。
 
 server 启动总预算 30 秒，单次资源构造最多 10 秒，父 deadline 只能收紧。
@@ -64,8 +66,10 @@ HTTP 中间件由 `internal/router/middleware.go` 在最终 metrics 就绪后直
 
 模块/扩展失败和 Runtime 回滚共享独立的 30 秒清理预算；正常关闭保留父取消、更短 deadline 和第二信号。
 重复关闭共享首次结果，等待者可独立取消；关闭错误或 panic 不跳过后续所有者。
-HTTP/worker 仍分阶段退出，存活 worker 导致共享资源关闭跳过并返回 ErrWorkerNotExited，
-此时仅尝试同一日志 owner 的 Drain，不关闭通知或其他共享资源。
+HTTP/worker 仍分阶段退出，存活 worker 导致共享资源关闭跳过并返回 ErrWorkerNotExited。
+HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留仍被使用的资源。
+此时同一日志 owner 的 Drain 仅 `Zap().Sync()` 刷文件缓冲，不关闭 SDK 或通知渠道，
+不保证通知队列排空；日志源后来结束仍可正常 Close。
 
 日志和通知的实际排空需要 SDK 与 sender 响应取消。SDK 的 void Sync、部分无 context 的 Close
 无法硬中断，不通过遗弃后台关闭 goroutine 隐藏尚未完成的 I/O。

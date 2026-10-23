@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/gtkit/logger/v2"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 )
 
 type lifecycleComponent struct {
+	access    *logger.Logger
 	sql       *sql.DB
 	name      string
 	events    *[]string
@@ -56,6 +58,7 @@ func (p *lifecycleComponent) Close(ctx context.Context) error {
 	})
 	return p.closeErr
 }
+func (p *lifecycleComponent) AccessLogger() *logger.Logger        { return p.access }
 func (p *lifecycleComponent) Drain(ctx context.Context) error     { return p.Close(ctx) }
 func (p *lifecycleComponent) DB() *gorm.DB                        { return p.db }
 func (p *lifecycleComponent) SQLDB() *sql.DB                      { return p.sql }
@@ -80,8 +83,10 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 	t.Helper()
 	cfg := jwtTestConfig(t)
 	f := &lifecycleFixture{}
+	access := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	t.Cleanup(access.Sync)
 	for _, name := range []string{"configuration", "logging", "database", "redis", "cache"} {
-		f.components = append(f.components, &lifecycleComponent{name: name, events: &f.events, cfg: cfg, db: &gorm.DB{}})
+		f.components = append(f.components, &lifecycleComponent{access: access, name: name, events: &f.events, cfg: cfg, db: &gorm.DB{}})
 	}
 	return f
 }

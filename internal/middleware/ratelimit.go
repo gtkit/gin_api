@@ -10,7 +10,8 @@ import (
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 // 限流响应头。
@@ -55,8 +56,8 @@ func RateLimit(
 		if err != nil {
 			// 取不到主体标识说明装配有误（如 user scope 挂在公开路由上）。
 			// 唯一安全的行为是拒绝——放行等于这条路由完全没有限流。
-			applog.Error("rate limit subject unavailable; rejecting",
-				applog.String("policy", policy.ID), applog.Err(err))
+			logger.Error("rate limit subject unavailable; rejecting",
+				zap.String("policy", policy.ID), zap.Error(err))
 			recorder.RecordRateLimitDecision(c.Request.Context(), policy.ID, metrics.RateLimitFailure)
 			rejectRateLimited(c, ratelimit.Decision{Limit: policy.Burst})
 			return
@@ -68,10 +69,10 @@ func RateLimit(
 		if checkErr != nil {
 			// 后端故障已由执行体按 FailureMode 翻译成最终判定，
 			// 这里只负责留痕——不留的话，一次长时间的降级不会有任何记录。
-			applog.Warn("rate limit backend error; the policy's failure mode decided the outcome",
-				applog.String("policy", policy.ID),
-				applog.String("outcome", decision.Outcome.String()),
-				applog.Err(checkErr))
+			logger.Warn("rate limit backend error; the policy's failure mode decided the outcome",
+				zap.String("policy", policy.ID),
+				zap.String("outcome", decision.Outcome.String()),
+				zap.Error(checkErr))
 		}
 
 		// **每次判定都记**，不只记拒绝：没有分母就算不出拒绝率，

@@ -21,13 +21,13 @@ func (s *stubChecker) PingDB(_ context.Context) error    { return s.dbErr }
 func (s *stubChecker) PingRedis(_ context.Context) error { return s.redisErr }
 
 // newTestEngine 走生产 router.New 的装配路径，包含全局中间件与系统探针。
-func newTestEngine(checker HealthChecker) *gin.Engine {
-	return newTestEngineWith(Options{HealthChecker: checker})
+func newTestEngine(t *testing.T, checker HealthChecker) *gin.Engine {
+	return newTestEngineWith(t, Options{HealthChecker: checker})
 }
 
-func newTestEngineWith(opts Options) *gin.Engine {
+func newTestEngineWith(t *testing.T, opts Options) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	engine, err := newRouterForTest("test", opts)
+	engine, err := newRouterForTest(t, "test", opts)
 	if err != nil {
 		panic(err)
 	}
@@ -46,7 +46,7 @@ func (s *stubStatus) DegradedCapabilities() []string { return s.degraded }
 func (s *stubStatus) FailedRequirements() []string   { return s.failed }
 
 func TestHealthEndpointReturns200(t *testing.T) {
-	engine := newTestEngine(&stubChecker{})
+	engine := newTestEngine(t, &stubChecker{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -58,7 +58,7 @@ func TestHealthEndpointReturns200(t *testing.T) {
 }
 
 func TestReadyEndpointAllHealthy(t *testing.T) {
-	engine := newTestEngine(&stubChecker{})
+	engine := newTestEngine(t, &stubChecker{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -70,7 +70,7 @@ func TestReadyEndpointAllHealthy(t *testing.T) {
 }
 
 func TestReadyEndpointDBDown(t *testing.T) {
-	engine := newTestEngine(&stubChecker{dbErr: errors.New("connection refused")})
+	engine := newTestEngine(t, &stubChecker{dbErr: errors.New("connection refused")})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -100,7 +100,7 @@ func TestReadyEndpointRedisFollowsRequiredness(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := newTestEngineWith(Options{
+			engine := newTestEngineWith(t, Options{
 				HealthChecker: &stubChecker{redisErr: errors.New("timeout")},
 				RedisRequired: tc.redisRequired,
 			})
@@ -124,7 +124,7 @@ func TestReadyEndpointRedisFollowsRequiredness(t *testing.T) {
 // 并 kill 它，在飞请求被直接截断——优雅关停的全部工作白做。
 // 同时 /ready 必须是 503，让 LB 立刻停止转发新请求。
 func TestHealthStays200WhileDraining(t *testing.T) {
-	engine := newTestEngineWith(Options{
+	engine := newTestEngineWith(t, Options{
 		HealthChecker: &stubChecker{},
 		ProcessStatus: &stubStatus{draining: true},
 	})
@@ -170,7 +170,7 @@ func TestReadyReflectsProcessCapabilities(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := newTestEngineWith(Options{
+			engine := newTestEngineWith(t, Options{
 				HealthChecker: &stubChecker{},
 				ProcessStatus: tc.status,
 			})
@@ -189,7 +189,7 @@ func TestReadyReflectsProcessCapabilities(t *testing.T) {
 }
 
 func TestReadyEndpointNilChecker(t *testing.T) {
-	engine := newTestEngine(nil)
+	engine := newTestEngine(t, nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -208,7 +208,7 @@ func TestReadyEndpointNilChecker(t *testing.T) {
 // 因此 /ready 不得对公网开放——见 SCAFFOLD.md 与 readiness-probe spec。
 func TestReadyEndpointReportsErrorDetail(t *testing.T) {
 	const depErr = "dial tcp 10.0.0.5:3306: connection refused"
-	engine := newTestEngine(&stubChecker{dbErr: errors.New(depErr)})
+	engine := newTestEngine(t, &stubChecker{dbErr: errors.New(depErr)})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -237,7 +237,7 @@ func TestReadyEndpointReportsErrorDetail(t *testing.T) {
 // 不设界的话，探针响应会在故障期膨胀到下游拒绝解析——正好在最需要它的时候失效。
 func TestReadyEndpointBoundsErrorDetail(t *testing.T) {
 	longErr := strings.Repeat("x", maxDepErrorBytes*3)
-	engine := newTestEngine(&stubChecker{dbErr: errors.New(longErr)})
+	engine := newTestEngine(t, &stubChecker{dbErr: errors.New(longErr)})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -256,7 +256,7 @@ func TestReadyEndpointBoundsErrorDetail(t *testing.T) {
 //
 // 回空串会让消费者需要区分"没有错误"与"错误是空的"，而后者本就不该出现。
 func TestReadyEndpointOmitsErrorWhenHealthy(t *testing.T) {
-	engine := newTestEngine(&stubChecker{})
+	engine := newTestEngine(t, &stubChecker{})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)

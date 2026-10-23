@@ -1,19 +1,12 @@
 package middleware
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 )
-
-type benchmarkAccessSink struct{ enabled bool }
-
-func (s benchmarkAccessSink) Enabled(applog.Level, applog.Stream) bool { return s.enabled }
-func (benchmarkAccessSink) Log(context.Context, applog.LogEntry)       {}
 
 func BenchmarkAccessLogHotPath(b *testing.B) {
 	gin.SetMode(gin.TestMode)
@@ -23,13 +16,13 @@ func BenchmarkAccessLogHotPath(b *testing.B) {
 			name = "enabled"
 		}
 		b.Run(name, func(b *testing.B) {
-			release, err := applog.Install(benchmarkAccessSink{enabled}, nil)
-			if err != nil {
-				b.Fatal(err)
+			level := "fatal"
+			if enabled {
+				level = "info"
 			}
-			defer release()
+			access, _ := newNativeTestLogger(b, level)
 			engine := gin.New()
-			engine.Use(GinLogger(AccessLogOptions{}))
+			engine.Use(GinLogger(access, AccessLogOptions{}))
 			engine.GET("/benchmark", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 			request := httptest.NewRequestWithContext(b.Context(), http.MethodGet, "/benchmark?token=secret&name=worker", nil)
 			b.ReportAllocs()

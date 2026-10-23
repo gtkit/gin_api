@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
@@ -58,10 +58,11 @@ type providerSet struct {
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
 type infra struct {
-	resources  *data.Resources
-	cfg        *config.Config
-	mysqlDB    *gorm.DB
-	httpConfig HTTPConfig
+	accessLogger *logger.Logger
+	resources    *data.Resources
+	cfg          *config.Config
+	mysqlDB      *gorm.DB
+	httpConfig   HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
 	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
@@ -166,7 +167,7 @@ func newProvidersWithBudget(
 	inf.telemetry = telemetryProvider
 	rb.push("telemetry", func() error { return telemetryProvider.Shutdown(budget.Context(ctx)) })
 	if telemetryProvider.Enabled() {
-		applog.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
+		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
 	}
 
@@ -215,7 +216,7 @@ func newProvidersWithBudget(
 	inf.outbound = outbound
 	rb.push("outbound http clients", outbound.Close)
 	if names := outbound.Names(); len(names) > 0 {
-		applog.Infof("outbound downstreams assembled with circuit breakers: %v", names)
+		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
 	// 3c. 响应缓存。Runtime 已按 Redis 可达性完成缓存初始化；
@@ -228,7 +229,7 @@ func newProvidersWithBudget(
 	}
 	inf.cache = responseCache
 	if responseCache.Enabled() {
-		applog.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
+		logger.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
 			"explicitly mount the middleware, and requests carrying identity always bypass it",
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
 	}
@@ -324,12 +325,20 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	}
 
 	cfg := runtime.Config()
+	if runtime.owners == nil || nilResource(runtime.owners.logs) {
+		return infra{}, errors.New("runtime logging is not initialized")
+	}
+	access := runtime.owners.logs.AccessLogger()
+	if access == nil {
+		return infra{}, errors.New("runtime access logger is not initialized")
+	}
 
 	return infra{
-		resources:  resources,
-		cfg:        cfg,
-		mysqlDB:    mysqlDB,
-		httpConfig: newHTTPConfig(cfg),
+		accessLogger: access,
+		resources:    resources,
+		cfg:          cfg,
+		mysqlDB:      mysqlDB,
+		httpConfig:   newHTTPConfig(cfg),
 	}, nil
 }
 
@@ -367,7 +376,7 @@ func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, b
 			}
 		}
 		if accounts == nil {
-			applog.Warnf("account-dimension credential rate limiting is off: define ratelimit "+
+			logger.Warnf("account-dimension credential rate limiting is off: define ratelimit "+
 				"policy %q to guard against distributed password spraying", authruntime.AccountRateLimitPolicyID)
 		}
 
@@ -477,7 +486,7 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	for _, id := range reg.IDs() {
 		if a, ok := reg.Lookup(id); ok {
 			if deny, isDeny := a.(sharedauth.DenyAllAuthorizer); isDeny {
-				applog.Warnf("authorizer %q denies every request: %s", id, deny.Reason)
+				logger.Warnf("authorizer %q denies every request: %s", id, deny.Reason)
 			}
 		}
 	}
@@ -495,7 +504,7 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 	return func(id string) gin.HandlerFunc {
 		authorizer, ok := reg.Lookup(id)
 		if !ok {
-			applog.Errorf("authorizer %q is not registered; denying every request to the routes "+
+			logger.Errorf("authorizer %q is not registered; denying every request to the routes "+
 				"that reference it (register it at the scaffold:module-authorizers marker)", id)
 			authorizer = sharedauth.DenyAll(fmt.Sprintf("authorizer %q is not registered", id))
 		}
@@ -509,6 +518,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	cfg := inf.cfg
 
 	opt := router.Options{
+		AccessLogger:    inf.accessLogger,
 		AllowedOrigins:  cfg.CORS.AllowedOrigins,
 		LogRequestBody:  cfg.Log.AccessRequestBody,
 		LogResponseBody: cfg.Log.AccessResponseBody,
@@ -592,8 +602,8 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	// 处理器由使用者在下方标记处按 tasks.Registrar 追加。没有处理器就不注册
 	// 消费者——一个空转的 worker 只会让关停多等一轮、让监控里多一个永远
 	// 空闲的实例，而不会处理任何东西。
-	if consumer := newAsynqConsumerWorker(tasks.NewConsumer(
-		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-consumer",
+	if consumer := newAsynqConsumerWorker(tasks.NewObservedConsumer(
+		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-consumer", inf.recorder,
 		// scaffold:task-handlers
 	)); consumer != nil {
 		workers = append(workers, consumer)
@@ -618,7 +628,12 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 
 	// scaffold:module-workers
 
-	return NewWorkerManager(DefaultWorkerBudget(), workers...)
+	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
+	if err != nil {
+		return nil, err
+	}
+	manager.recorder = inf.recorder
+	return manager, nil
 }
 
 // rollbackWorkerMetricCleanups 逆序执行 cleanupsBefore 之后追加的指标注销

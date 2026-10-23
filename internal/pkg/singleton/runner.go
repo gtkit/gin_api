@@ -7,7 +7,8 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 // Guarantee 声明任务在"两个实例同时运行"时靠什么保证正确。
@@ -101,16 +102,23 @@ type Observer interface {
 	TaskFailed(task string, err error)
 }
 
+// ExecutionObserver optionally observes actual task invocations. Lease
+// acquisition, renewal and release are outside this timing boundary.
+// Implementations follow Observer's non-blocking, concurrency-safe contract.
+type ExecutionObserver interface {
+	TaskFinished(ctx context.Context, task string, elapsed time.Duration, err error, panicked bool)
+}
+
 type loggingObserver struct{}
 
 func (loggingObserver) LeaseAcquired(string, int64) {}
 func (loggingObserver) LeaseSkipped(string)         {}
 func (loggingObserver) TaskSucceeded(string)        {}
 func (loggingObserver) LeaseLost(task string, err error) {
-	applog.Error("singleton lease failed", applog.String("task", task), applog.Err(err))
+	logger.Error("singleton lease failed", zap.String("task", task), zap.Error(err))
 }
 func (loggingObserver) TaskFailed(task string, err error) {
-	applog.Error("singleton task failed", applog.String("task", task), applog.Err(err))
+	logger.Error("singleton task failed", zap.String("task", task), zap.Error(err))
 }
 
 // Config 是 Runner 的配置。
@@ -258,7 +266,7 @@ func (r *Runner) runOnce(ctx context.Context) {
 		<-renewDone
 	}()
 
-	taskErr := r.task(taskCtx, held)
+	taskErr := r.invokeTask(taskCtx, held)
 
 	cancel()
 	<-renewDone
@@ -277,6 +285,21 @@ func (r *Runner) runOnce(ctx context.Context) {
 	default:
 		r.observer.TaskFailed(r.lease.name, taskErr)
 	}
+}
+
+func (r *Runner) invokeTask(ctx context.Context, held Held) (err error) {
+	observer, observed := r.observer.(ExecutionObserver)
+	if !observed {
+		return r.task(ctx, held)
+	}
+	started := time.Now()
+	returned := false
+	defer func() {
+		observer.TaskFinished(ctx, r.lease.name, time.Since(started), err, !returned)
+	}()
+	err = r.task(ctx, held)
+	returned = true
+	return err
 }
 
 // keepAlive 周期性续租，失去租约时取消任务。

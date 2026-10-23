@@ -12,7 +12,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // Runtime represents process-wide runtime dependencies.
@@ -26,7 +26,7 @@ type Runtime struct {
 	cache     httpcache.ResponseCache
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt *jwtauth.Assembly
-	// The isolated drain and normal Stop share the selected logging owner.
+	// Abnormal file flush and normal Close share the native logging owner.
 	drain     func(context.Context) error
 	force     <-chan struct{}
 	drainMu   sync.Mutex
@@ -83,7 +83,7 @@ func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *R
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	applog.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
+	logger.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
 	return &Runtime{config: cfg, resources: resources, owners: owners, cache: owners.cache,
 		jwt: jwtAssembly, drain: owners.logs.Drain, force: opts.forceSignal()}, nil
 }
@@ -101,7 +101,7 @@ func logResourceStates(resources *data.Resources) {
 	if state == nil || state.State() == data.AvailabilityHealthy {
 		return
 	}
-	applog.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
+	logger.Warnf("resource %s is %s at startup: capabilities depending on it stay unavailable "+
 		"until the process restarts", state.Name(), state.State())
 }
 
@@ -157,9 +157,9 @@ func (r *Runtime) Close(ctx context.Context) error {
 	return nil
 }
 
-// DrainLogs drains the selected logging owner when live workers prevent stopping
-// shared resources. Concurrent callers share the result; a waiter can cancel its
-// own wait without starting a second drain. SDK calls still require cooperation.
+// DrainLogs flushes file buffers without closing SDK instances or notification
+// queues when producers prevent resource shutdown. Concurrent callers share the
+// result; this does not consume the owner's subsequent normal Close.
 func (r *Runtime) DrainLogs(ctx context.Context) error {
 	if r == nil || r.drain == nil {
 		return nil

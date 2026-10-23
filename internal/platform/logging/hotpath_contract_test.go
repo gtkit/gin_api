@@ -12,15 +12,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/json/v2"
 	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func newJSONOwner(t *testing.T, level string, alerts logger.Messager) (*Owner, string) {
@@ -57,23 +57,23 @@ func (panicValueContext) Value(any) any { panic("context value failure") }
 func TestFilteringPrecedesValuesAndTracksDynamicStreams(t *testing.T) {
 	p, dir := newJSONOwner(t, "error", nil)
 	value := new(countedValue)
-	applog.Debugf("filtered %s", value)
-	p.Log(panicValueContext{t.Context()}, applog.LogEntry{Level: applog.LevelInfo, Message: "filtered", Fields: []applog.Field{applog.Any("value", value)}})
-	if value.calls.Load() != 0 || p.Enabled(applog.LevelInfo, applog.MainStream) {
+	logger.Debugf("filtered %s", value)
+	logger.InfoCtx(panicValueContext{t.Context()}, "filtered", zap.Any("value", value))
+	if value.calls.Load() != 0 || p.main.Zap().Core().Enabled(zapcore.InfoLevel) {
 		t.Fatal("suppressed values were materialized")
 	}
 	setSDKLevel(t, p.main, "debug")
-	if !p.Enabled(applog.LevelDebug, applog.MainStream) || p.Enabled(applog.LevelDebug, applog.AccessStream) {
+	if !p.main.Zap().Core().Enabled(zapcore.DebugLevel) || p.access.Zap().Core().Enabled(zapcore.DebugLevel) {
 		t.Fatal("cached a static level or mixed main/access levels")
 	}
-	applog.Debugf("enabled %s", value)
+	logger.Debugf("enabled %s", value)
 	if value.calls.Load() != 1 {
 		t.Fatal("dynamic level did not enable formatting")
 	}
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if p.Enabled(applog.LevelError, applog.MainStream) || !strings.Contains(readLogs(t, dir), "enabled value") {
+	if !strings.Contains(readLogs(t, dir), "enabled value") {
 		t.Fatal("dynamic output/closed capability mismatch")
 	}
 }
@@ -81,10 +81,10 @@ func TestFilteringPrecedesValuesAndTracksDynamicStreams(t *testing.T) {
 func TestAlertSurvivesOrdinaryErrorFiltering(t *testing.T) {
 	alerts := new(messages)
 	p, _ := newJSONOwner(t, "fatal", alerts)
-	if applog.Enabled(applog.LevelError, applog.MainStream) {
+	if logger.Default().Zap().Core().Enabled(zapcore.ErrorLevel) {
 		t.Fatal("test did not suppress ordinary errors")
 	}
-	applog.HErrorf("must deliver %d", 7)
+	logger.HError(fmt.Sprintf("must deliver %d", 7))
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -124,29 +124,29 @@ func jsonRecords(t *testing.T, dir string) map[string]map[string]any {
 	return entries
 }
 
-func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
+func TestNativeCallerFieldsRequestIDAndStreams(t *testing.T) {
 	p, dir := newJSONOwner(t, "debug", nil)
-	ctx := applog.ContextWithRequestID(t.Context(), "caller-request")
+	ctx := logger.ContextWithRequestID(t.Context(), "caller-request")
 	_, file, facadeLine, _ := runtime.Caller(0)
-	applog.Info("facade", applog.String("name", "first"))
+	logger.Info("facade", zap.String("name", "first"))
 	_, _, directLine, _ := runtime.Caller(0)
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "direct", Fields: []applog.Field{{}, applog.String("name", "second"), applog.String("secret", "private-value")}})
+	logger.InfoCtx(ctx, "direct", zap.Skip(), zap.String("name", "second"), zap.String("secret", "private-value"))
 	_, _, forwardedLine, _ := runtime.Caller(0)
-	applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "forwarded", CallerSkip: 1})
+	logger.InfoCtx(ctx, "forwarded")
 	_, _, accessLine, _ := runtime.Caller(0)
-	applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "access", Stream: applog.AccessStream})
+	p.AccessLogger().InfoCtx(ctx, "access")
 	gormLogger := data.NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
 	_, _, traceLine, _ := runtime.Caller(0)
 	gormLogger.Trace(ctx, time.Now(), func() (string, int64) { return "SELECT ?", 1 }, nil)
 	_, _, infoLine, _ := runtime.Caller(0)
 	gormLogger.Info(ctx, "gorm info %d", 1)
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "channel", Channel: "contract", Fields: []applog.Field{applog.Int("count", 9)}})
-	large := make([]applog.Field, pooledFields+1)
+	logger.Default().Channel("contract").WarnCtx(ctx, "channel", zap.Int("count", 9))
+	large := make([]zap.Field, 9)
 	for i := range large {
-		large[i] = applog.Int(fmt.Sprintf("field%d", i), i)
+		large[i] = zap.Int(fmt.Sprintf("field%d", i), i)
 	}
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "large", Fields: large})
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "empty"})
+	logger.InfoCtx(ctx, "large", large...)
+	logger.InfoCtx(ctx, "empty")
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -208,153 +208,52 @@ func TestCachedCallerFieldsRequestIDAndStreams(t *testing.T) {
 	}
 }
 
-func TestFieldBuffersReleaseAllReferences(t *testing.T) {
-	p := new(Owner)
-	buffer := new(fieldBuffer)
-	for i := range buffer.fields {
-		buffer.fields[i] = zap.Any("value", map[string]string{"retained": "request"})
-	}
-	p.releaseFields(buffer)
-	for _, field := range buffer.fields {
-		if field != (zap.Field{}) {
-			t.Fatal("pooled buffer retains request data")
-		}
-	}
-}
-
-func TestPanicReleasesAdmittedWrite(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		p, _ := newJSONOwner(t, "info", nil)
-		recovered := false
-		func() {
-			defer func() { recovered = recover() != nil }()
-			p.Log(panicValueContext{t.Context()}, applog.LogEntry{Level: applog.LevelInfo, Fields: []applog.Field{applog.String("value", "request")}})
-		}()
-		if !recovered {
-			t.Fatal("panic fixture did not enter admitted write")
-		}
-		drained := make(chan struct{})
-		var waiter sync.WaitGroup
-		waiter.Go(func() { p.writes.Wait(); close(drained) })
-		synctest.Wait()
-		select {
-		case <-drained:
-		default:
-			// Let the intentionally broken counterexample clean up its resources.
-			p.writes.Done()
-			waiter.Wait()
-			t.Fatal("panic retained an admitted write")
-		}
-		waiter.Wait()
-		if err := p.Close(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
-func TestStaleSnapshotCannotWriteAfterClose(t *testing.T) {
+func TestConcurrentNativeWritesAndDynamicLevelsFinishBeforeClose(t *testing.T) {
 	p, _ := newJSONOwner(t, "info", nil)
-	snapshot := p.current.Load()
-	if err := p.Close(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if !snapshot.closing.Load() {
-		t.Fatal("old snapshot stayed open")
-	}
-	// Alert bypasses the advisory Enabled check and must still be rejected by
-	// the authoritative gate before touching this panic context or the SDK.
-	p.Log(panicValueContext{t.Context()}, applog.LogEntry{Level: applog.LevelInfo, Alert: true})
-}
-
-type replacementLogger struct{ calls atomic.Int32 }
-
-func (r *replacementLogger) Log(context.Context, applog.LogEntry) { r.calls.Add(1) }
-
-func TestClosingOwnerPreservesNewBinding(t *testing.T) {
-	p, _ := newJSONOwner(t, "info", nil)
-	block := &blockingStringer{entered: make(chan struct{}), release: make(chan struct{})}
-	var work sync.WaitGroup
-	work.Go(func() {
-		p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Fields: []applog.Field{applog.Any("blocked", block)}})
-	})
-	<-block.entered
-	work.Go(func() {
-		if err := p.Close(context.WithoutCancel(t.Context())); err != nil {
-			t.Errorf("p.Close(context.WithoutCancel(t.Context())): %v", err)
-		}
-	})
-	deadline := time.Now().Add(5 * time.Second)
-	for !p.current.Load().closing.Load() {
-		if time.Now().After(deadline) {
-			close(block.release)
-			work.Wait()
-			t.Fatal("owner never closed admission")
-		}
-		runtime.Gosched()
-	}
-	// Release is idempotent even if Stop's release overlaps this one.
-	p.release()
-	next := new(replacementLogger)
-	release, err := applog.Install(next, nil)
-	if err != nil {
-		close(block.release)
-		work.Wait()
-		t.Fatal(err)
-	}
-	defer release()
-	applog.Info("new owner before old drain")
-	close(block.release)
-	work.Wait()
-	p.release()
-	applog.Info("new owner after old drain")
-	if next.calls.Load() != 2 || !p.current.Load().closing.Load() {
-		t.Fatal("old owner removed new binding or reopened admission")
-	}
-}
-
-func TestConcurrentLogLevelChangesAndStop(t *testing.T) {
-	p, _ := newJSONOwner(t, "info", nil)
-	start := make(chan struct{})
 	var writers sync.WaitGroup
 	for range 16 {
 		writers.Go(func() {
-			<-start
 			for range 50 {
-				p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Message: "concurrent", Fields: []applog.Field{applog.Int("count", 1)}})
+				logger.InfoCtx(t.Context(), "concurrent", zap.Int("count", 1))
 			}
 		})
 	}
 	writers.Go(func() {
-		<-start
 		for range 50 {
 			setSDKLevel(t, p.main, "error")
 			setSDKLevel(t, p.main, "info")
 		}
 	})
-	close(start)
+	writers.Wait()
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	writers.Wait()
-	if !p.current.Load().closing.Load() {
-		t.Fatal("admission stayed open after Stop")
+}
+
+func TestDuplicateOpenPreservesOwnerAndDefault(t *testing.T) {
+	p, _ := newJSONOwner(t, "info", nil)
+	main := logger.Default()
+	constructions := 0
+	factory := func(...logger.Option) (*logger.Logger, error) { constructions++; return newConsoleLogger(), nil }
+	other, err := Open(t.Context(), Options{Config: &config.Config{}, MainFactory: factory, AccessFactory: factory})
+	if other != nil || !errors.Is(err, core.ErrComponentState) || constructions != 0 || logger.Default() != main {
+		t.Fatalf("duplicate open: owner=%v err=%v constructions=%d", other, err, constructions)
+	}
+	if err := p.Close(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestInstallConflictPreservesExistingOwner(t *testing.T) {
-	existing := new(replacementLogger)
-	release, err := applog.Install(existing, nil)
-	if err != nil {
+func TestCloseDoesNotReplaceSuccessorDefault(t *testing.T) {
+	p, _ := newJSONOwner(t, "info", nil)
+	previous := p.previous
+	next := newConsoleLogger()
+	logger.SetDefault(next)
+	defer func() { logger.SetDefault(previous); next.Sync() }()
+	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	defer release()
-	factory := func(...logger.Option) (*logger.Logger, error) { return newConsoleLogger(), nil }
-	p, err := Open(t.Context(), Options{Config: &config.Config{}, MainFactory: factory, AccessFactory: factory})
-	if p != nil || !errors.Is(err, applog.ErrLoggerInstalled) {
-		t.Fatalf("owner=%v conflicting open=%v", p, err)
-	}
-	applog.Info("existing owner still installed")
-	if existing.calls.Load() != 1 {
-		t.Fatal("failed Open removed existing owner")
+	if logger.Default() != next {
+		t.Fatal("old owner replaced new default")
 	}
 }

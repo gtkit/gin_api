@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"runtime/debug"
 	"syscall"
 
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/goerr"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 const (
@@ -68,7 +70,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			// 这类错误通常发生在服务端写响应时，客户端已经提前关闭连接；
 			// 此时继续写 JSON 没有意义，直接记录日志并终止当前上下文即可。
 			if isBrokenConnectionError(panicErr) {
-				applog.Warn("[Recovery] client connection closed",
+				logger.Warn("[Recovery] client connection closed",
 					buildRecoveryLogFields(
 						c,
 						panicErr,
@@ -87,7 +89,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			// Step 4: 如果响应已经开始写出，就不能再安全地改成统一 JSON 结构了。
 			// 比如 SSE / 流式响应 / 已经写出部分 body 的接口，这时只能记录日志并中止后续处理。
 			if c.Writer != nil && c.Writer.Written() {
-				applog.Error("[Recovery] panic recovered after response started",
+				logger.Error("[Recovery] panic recovered after response started",
 					buildRecoveryLogFields(
 						c,
 						panicErr,
@@ -104,7 +106,7 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 			}
 
 			// Step 5: 普通 panic 记录完整上下文，并返回统一的 500 响应。
-			applog.Error("[Recovery] panic recovered",
+			logger.Error("[Recovery] panic recovered",
 				buildRecoveryLogFields(
 					c,
 					panicErr,
@@ -190,22 +192,22 @@ func buildRecoveryLogFields(
 	dumpErr error,
 	recoveryCode int32,
 	includeStack bool,
-) []applog.Field {
-	fields := []applog.Field{
-		applog.Int32("recovery_code", recoveryCode),
-		applog.String("path", requestPath(c)),
-		applog.Err(panicErr),
-		applog.Any("panic_value", recovered),
+) []zap.Field {
+	fields := []zap.Field{
+		zap.Int32("recovery_code", recoveryCode),
+		zap.String("path", requestPath(c)),
+		zap.Error(panicErr),
+		zap.Any("panic_value", recovered),
 	}
 
 	if requestDump != "" {
-		fields = append(fields, applog.String("request", requestDump))
+		fields = append(fields, zap.String("request", requestDump))
 	}
 	if dumpErr != nil {
-		fields = append(fields, applog.NamedError("request_dump_error", dumpErr))
+		fields = append(fields, zap.NamedError("request_dump_error", dumpErr))
 	}
 	if includeStack {
-		fields = append(fields, applog.Stack("stack"))
+		fields = append(fields, zap.String("stack", string(debug.Stack())))
 	}
 
 	return fields

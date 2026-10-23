@@ -56,7 +56,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 			if tc.tracing {
 				want = slices.Insert(want, 2, "Middleware")
 			}
-			engine, err := newRouterForTest("test", opt)
+			engine, err := newRouterForTest(t, "test", opt)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -74,7 +74,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 func TestCorsIsOptional(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{})
+	engine, err := newRouterForTest(t, "test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestCorsIsOptional(t *testing.T) {
 func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{})
+	engine, err := newRouterForTest(t, "test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 func TestModulesAreMountedUnderTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing", func(c *gin.Context) { c.Status(http.StatusOK) })
 		},
@@ -138,7 +138,7 @@ func TestTrustedProxiesMustBeExplicit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var gotIP string
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/ip", func(c *gin.Context) {
 				gotIP = c.ClientIP()

@@ -3,18 +3,19 @@ package logging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"testing/synctest"
 
 	"github.com/gtkit/gin-api/internal/core"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 func TestOpenFailures(t *testing.T) {
@@ -72,14 +73,14 @@ func TestOwnerWritesStreamsFieldsAndAlerts(t *testing.T) {
 			t.Errorf("p.Close(context.WithoutCancel(t.Context())): %v", err)
 		}
 	})
-	ctx := applog.ContextWithRequestID(t.Context(), "request-123")
-	applog.ErrorCtx(ctx, "ordinary error", applog.String("key", "value"), applog.Err(errors.New("problem")))
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "access-event", Stream: applog.AccessStream})
-	p.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "channel-event", Channel: "contract"})
-	applog.Debug("debug-event")
-	applog.Infof("info %d", 2)
-	applog.Warn("warn-event")
-	applog.HErrorf("alert %d", 1)
+	ctx := logger.ContextWithRequestID(t.Context(), "request-123")
+	logger.ErrorCtx(ctx, "ordinary error", zap.String("key", "value"), zap.Error(errors.New("problem")))
+	p.AccessLogger().InfoCtx(ctx, "access-event")
+	logger.Default().Channel("contract").WarnCtx(ctx, "channel-event")
+	logger.Debug("debug-event")
+	logger.Infof("info %d", 2)
+	logger.Warn("warn-event")
+	logger.HError(fmt.Sprintf("alert %d", 1))
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -92,10 +93,7 @@ func TestOwnerWritesStreamsFieldsAndAlerts(t *testing.T) {
 			t.Errorf("missing %q in %s", value, all)
 		}
 	}
-	p.Log(ctx, applog.LogEntry{Message: "late-write"})
-	if got := readLogs(t, dir); got != all {
-		t.Fatal("late write reached stopped SDK")
-	}
+
 }
 
 type messages struct{ values []string }
@@ -124,56 +122,40 @@ func readLogs(t *testing.T, dir string) string {
 	return out.String()
 }
 
-type blockingStringer struct {
-	entered, release chan struct{}
-	once             sync.Once
-}
-
-func (b *blockingStringer) String() string {
-	b.once.Do(func() { close(b.entered) })
-	<-b.release
-	return "unblocked"
-}
-func TestStopWaitsForAdmittedWritesAndClosesOnce(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		p := mustOpen(t, Options{Config: &config.Config{Log: config.LogConfig{ConsoleStdout: 1}}})
-		block := &blockingStringer{entered: make(chan struct{}), release: make(chan struct{})}
-		var work sync.WaitGroup
-		work.Go(func() {
-			p.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Message: "inflight", Fields: []applog.Field{applog.Any("blocked", block)}})
+func TestDrainKeepsNativeInstancesUsableUntilClose(t *testing.T) {
+	p, dir := newJSONOwner(t, "info", nil)
+	main, access := logger.Default(), p.AccessLogger()
+	logger.Info("before flush")
+	access.Info("access before flush")
+	if err := p.Drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if logger.Default() != main {
+		t.Fatal("flush replaced the active default")
+	}
+	logger.Info("after flush")
+	access.Info("access after flush")
+	if err := p.Drain(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	records := jsonRecords(t, dir)
+	for _, message := range []string{"before flush", "access before flush", "after flush", "access after flush"} {
+		if records[message] == nil {
+			t.Fatalf("missing %q after flush", message)
+		}
+	}
+	var callers sync.WaitGroup
+	for range 16 {
+		callers.Go(func() {
+			if err := p.Close(context.WithoutCancel(t.Context())); err != nil {
+				t.Error(err)
+			}
 		})
-		<-block.entered
-		stopped := make(chan error, 1)
-		work.Go(func() { stopped <- p.Close(context.WithoutCancel(t.Context())) })
-		synctest.Wait()
-		select {
-		case err := <-stopped:
-			close(block.release)
-			work.Wait()
-			t.Fatalf("stop passed live write: %v", err)
-		default:
-		}
-		if !p.current.Load().closing.Load() {
-			close(block.release)
-			work.Wait()
-			t.Fatal("stop did not close admission")
-		}
-		p.Log(t.Context(), applog.LogEntry{Message: "rejected"})
-		close(block.release)
-		work.Wait()
-		if err := <-stopped; err != nil {
-			t.Fatal(err)
-		}
-		var group sync.WaitGroup
-		for range 16 {
-			group.Go(func() {
-				if err := p.Close(context.WithoutCancel(t.Context())); err != nil {
-					t.Error(err)
-				}
-			})
-		}
-		group.Wait()
-	})
+	}
+	callers.Wait()
+	if logger.Default() == main {
+		t.Fatal("safe close did not restore previous default")
+	}
 }
 
 func TestOpenCancellationAfterConstructionReleasesOwnedLogger(t *testing.T) {
@@ -195,4 +177,53 @@ func mustOpen(t *testing.T, options Options) *Owner {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestNativeFallbackWritesOnlyStderr(t *testing.T) {
+	const marker = "GIN_API_TEST_NATIVE_FALLBACK"
+	if os.Getenv(marker) == "1" {
+		logger.InfoCtx(logger.ContextWithRequestID(t.Context(), "startup-request"), "native startup diagnostic", zap.String("operation", "startup"))
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	command := exec.CommandContext(t.Context(), executable, "-test.run=^TestNativeFallbackWritesOnlyStderr$")
+	command.Dir = dir
+	command.Env = append(os.Environ(), marker+"=1")
+	var stdout, stderr strings.Builder
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("fallback child: %v: %s", err, stderr.String())
+	}
+	for _, value := range []string{"native startup diagnostic", "startup-request", "operation"} {
+		if !strings.Contains(stderr.String(), value) {
+			t.Fatalf("missing %q in stderr: %s", value, stderr.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "native startup diagnostic") {
+		t.Fatal("fallback wrote to stdout")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("fallback created files: %v", entries)
+	}
+}
+
+func TestExplicitAlertFormatsOnceForOutputAndNotification(t *testing.T) {
+	messages := new(messages)
+	p, dir := newJSONOwner(t, "info", messages)
+	value := new(countedValue)
+	logger.HError(fmt.Sprintf("alert %s", value))
+	if err := p.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if value.calls.Load() != 1 || len(messages.values) != 1 || messages.values[0] != "alert value" || !strings.Contains(readLogs(t, dir), "alert value") {
+		t.Fatalf("format calls=%d messages=%v", value.calls.Load(), messages.values)
+	}
 }

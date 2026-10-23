@@ -3,11 +3,11 @@ package logging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/logger/v2"
 )
@@ -76,11 +76,7 @@ func TestOpenWithConfigPreservesResolvedSDKOutputContract(t *testing.T) {
 	if logger.Default() != previous {
 		t.Fatal("failed initialization replaced the default logger")
 	}
-	t.Cleanup(func() {
-		if err := applog.Drain(context.WithoutCancel(t.Context())); err != nil {
-			t.Error(err)
-		}
-	})
+
 	if err := openDefaultForTest(t, &config.Config{Log: config.LogConfig{ConsoleStdout: 1}}); err != nil {
 		t.Fatalf("previous output initialization left an installed binding: %v", err)
 	}
@@ -99,12 +95,12 @@ func TestOpenWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	applog.Infof("bridge main %d", 7)
-	applog.Log(t.Context(), applog.LogEntry{Level: applog.LevelInfo, Stream: applog.AccessStream, Message: "bridge access"})
-	applog.HErrorf("default alert %d", 1)
+	logger.Infof("bridge main %d", 7)
+	p.AccessLogger().InfoCtx(t.Context(), "bridge access")
+	logger.HError(fmt.Sprintf("default alert %d", 1))
 	adapter := &News{notifier: sink}
 	adapter.SendTo("explicit", "explicit alert 2")
-	if err := p.Drain(t.Context()); err != nil {
+	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if logger.Default() != previous {

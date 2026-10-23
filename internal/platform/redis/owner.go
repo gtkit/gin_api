@@ -10,9 +10,9 @@ import (
 	"sync"
 
 	"github.com/gtkit/gin-api/internal/core"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/logger/v2"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -100,7 +100,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 		if required || contractErr != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || closeErr != nil {
 			return nil, errors.Join(fmt.Errorf("open redis: %w", err), closeErr)
 		}
-		applog.Warnf("redis is configured but unreachable at startup; optional capabilities stay degraded until restart: %v", err)
+		logger.Warnf("redis is configured but unreachable at startup; optional capabilities stay degraded until restart: %v", err)
 	}
 	return owner, nil
 }

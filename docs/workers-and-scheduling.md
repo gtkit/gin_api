@@ -96,6 +96,19 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 - required worker 运行期异常会触发全进程优雅关停并非零退出，不做静默重启。
   纯治理型任务若不希望拖垮进程，应在内部记日志后继续，向外返回 nil。
 
+## 执行指标
+
+默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；singleton 使用
+`singletonObserver` 的可选 `ExecutionObserver` 回调；队列消费者通过
+`tasks.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
+原 `tasks.NewConsumer` 与 `singleton.Observer` 接口继续可用，不强制自定义实现升级。
+
+实际任务每次结束记录 `worker.executions` 与 `worker.execution.duration`（秒），
+按装配期 worker 名、kind、有限 outcome 聚合。未获租约不计执行，续租/释放不计入耗时；
+队列重试各计一次。自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
+不要把进程存活时间当任务耗时。标签和旧 `worker.runs` 的口径见
+[Worker 单次执行](observability.md#worker-单次执行)。
+
 ## 单实例执行
 
 多副本部署下定时任务在每个实例上都会跑。`internal/pkg/singleton` 提供基于 Redis 租约的

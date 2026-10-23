@@ -14,7 +14,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 const (
@@ -64,7 +64,7 @@ type pprofHandle struct {
 // 未启用时返回 (nil, nil)，调用方须判空。
 func startPprofServer(cfg config.PprofConfig) (*pprofHandle, error) {
 	if !cfg.Enabled {
-		applog.Info("pprof endpoint disabled")
+		logger.Info("pprof endpoint disabled")
 		return nil, nil //nolint:nilnil // 未启用是正常状态，不是错误
 	}
 
@@ -89,11 +89,11 @@ func startPprofServer(cfg config.PprofConfig) (*pprofHandle, error) {
 	// 这两项是**进程全局状态**，端点消失后不清零就等于白白付出采样开销。
 	if cfg.BlockProfileRate > 0 {
 		runtime.SetBlockProfileRate(cfg.BlockProfileRate)
-		applog.Infof("pprof block profile enabled, rate=%d", cfg.BlockProfileRate)
+		logger.Infof("pprof block profile enabled, rate=%d", cfg.BlockProfileRate)
 	}
 	if cfg.MutexProfileFraction > 0 {
 		runtime.SetMutexProfileFraction(cfg.MutexProfileFraction)
-		applog.Infof("pprof mutex profile enabled, fraction=%d", cfg.MutexProfileFraction)
+		logger.Infof("pprof mutex profile enabled, fraction=%d", cfg.MutexProfileFraction)
 	}
 
 	h := &pprofHandle{
@@ -110,7 +110,7 @@ func startPprofServer(cfg config.PprofConfig) (*pprofHandle, error) {
 	go func() {
 		// 打**实际绑定地址**而不是配置值：端口配 0 时由内核分配，
 		// 打配置值会得到一条 `http://127.0.0.1:0/...` 的无用日志。
-		applog.Infof("pprof endpoint starting on http://%s/debug/pprof/", listener.Addr())
+		logger.Infof("pprof endpoint starting on http://%s/debug/pprof/", listener.Addr())
 		serveErr := h.server.Serve(listener)
 		if errors.Is(serveErr, http.ErrServerClosed) {
 			serveErr = nil
@@ -119,7 +119,7 @@ func startPprofServer(cfg config.PprofConfig) (*pprofHandle, error) {
 			// 运行期异常退出：标记状态并清零采样，端点已经不在了。
 			h.exited.Store(true)
 			h.cleanup()
-			applog.Errorf("pprof endpoint exited: %v", serveErr)
+			logger.Errorf("pprof endpoint exited: %v", serveErr)
 		}
 		h.errCh <- serveErr
 	}()

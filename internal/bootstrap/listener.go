@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // certExpiryWarnWindow 是证书临期告警窗口。
@@ -98,7 +98,7 @@ func loadAndVerifyCertificate(cfg HTTPConfig) (*tls.Certificate, error) {
 		return nil, fmt.Errorf(
 			"tls certificate expired at %s; every handshake would fail", leaf.NotAfter.UTC())
 	case leaf.NotAfter.Sub(now) < certExpiryWarnWindow:
-		applog.Warnf("tls certificate expires at %s (in %s); renew it before then",
+		logger.Warnf("tls certificate expires at %s (in %s); renew it before then",
 			leaf.NotAfter.UTC(), leaf.NotAfter.Sub(now).Truncate(time.Hour))
 	}
 

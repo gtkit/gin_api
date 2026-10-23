@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"strings"
@@ -12,7 +13,6 @@ import (
 	"testing/synctest"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/logging"
@@ -21,6 +21,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/notification/robot"
 	"github.com/gtkit/gin-api/internal/platform/notification/sms"
 	"github.com/gtkit/gin-api/internal/testutil"
+	"github.com/gtkit/logger/v2"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -69,6 +70,7 @@ type notificationFixture struct {
 	base            *lifecycleFixture
 	trace           notificationTrace
 	logging         *logging.Owner
+	loggingMain     *logger.Logger
 	notification    *dispatch.Owner
 	options         Options
 	sends, cleanups [3]atomic.Int32
@@ -84,7 +86,7 @@ func newNotificationFixture(t *testing.T) *notificationFixture {
 	cfg.SMS = config.SMSConfig{Provider: "aliyun", AlertTemplate: "fixture", AlertPhones: []string{"fixture-phone"}}
 	cleanup := func(i int) func(context.Context) error {
 		return func(ctx context.Context) error {
-			if f.logging != nil && f.logging.Enabled(applog.LevelInfo, applog.MainStream) {
+			if f.logging != nil && logger.Default() == f.loggingMain {
 				t.Error("channel closed before logging drained")
 			}
 			if f.notification != nil {
@@ -126,6 +128,9 @@ func newNotificationFixture(t *testing.T) *notificationFixture {
 		}
 		p.logger, err = logging.Open(ctx, logging.Options{Config: cfg, Notification: p.notification})
 		f.logging = p.logger
+		if p.logger != nil {
+			f.loggingMain = logger.Default()
+		}
 		return p, err
 	}
 	f.options = Options{factories: &factories}
@@ -154,14 +159,14 @@ func TestNotificationRuntimeRollsBackAndDrainsBeforeChannels(t *testing.T) {
 				f.base.components[2].init = func(context.Context) error { return cause }
 			}
 			if failure == "open with alert" {
-				f.base.components[2].init = func(context.Context) error { applog.HErrorf("startup failure alert"); return cause }
+				f.base.components[2].init = func(context.Context) error { logger.HError(fmt.Sprintf("startup failure alert")); return cause }
 			}
 			r, err := NewRuntime(t.Context(), f.options)
 			if failure == "none" {
 				if err != nil {
 					t.Fatal(err)
 				}
-				applog.HErrorf("shutdown alert")
+				logger.HError(fmt.Sprintf("shutdown alert"))
 				if err := r.Close(t.Context()); err != nil {
 					t.Fatal(err)
 				}
@@ -270,7 +275,7 @@ func TestNotificationLiveWorkerOnlyDrainsLogging(t *testing.T) {
 			t.Fatalf("stop worker=%v", err)
 		}
 		app := &App{runtime: r, workers: manager, shutdown: NewShutdownCoordinator()}
-		applog.HErrorf("live worker exit alert")
+		logger.HError(fmt.Sprintf("live worker exit alert"))
 		if err := app.closeResources(t.Context()); !errors.Is(err, ErrWorkerNotExited) {
 			t.Fatalf("close resources=%v", err)
 		}

@@ -3,15 +3,14 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gin-api/internal/testutil"
-
 	"github.com/gtkit/logger/v2"
 )
 
@@ -114,7 +113,7 @@ func TestSDKDrainWaitsForItsOwner(t *testing.T) {
 	inst := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithMessager(block), logger.WithReplaceGlobals(false))
 	drain := installTestLogger(t, inst)
 	defer drain()
-	applog.HErrorf("stuck alert")
+	logger.HError(fmt.Sprintf("stuck alert"))
 	waitClosed(t, block.entered, "messager did not receive alert")
 	runtime := &Runtime{drain: func(context.Context) error { drain(); return nil }}
 	ctx, cancel := context.WithCancel(t.Context())

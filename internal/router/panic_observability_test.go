@@ -14,7 +14,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/logging"
@@ -41,9 +40,7 @@ func TestPanicRequestObservability(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			t.Cleanup(func() {
-				applog.SyncAccessLog()
-			})
+
 			reader := sdkmetric.NewManualReader()
 			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 			t.Cleanup(func() {
@@ -55,7 +52,7 @@ func TestPanicRequestObservability(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine, err := newRouterForTest("test", Options{Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
+			engine, err := newRouterForTest(t, "test", Options{AccessLogger: owner.AccessLogger(), Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
 				v1.GET("/observe", func(c *gin.Context) {
 					if tc.name == "success" {
 						c.String(http.StatusOK, "ok")
@@ -101,7 +98,9 @@ func TestPanicRequestObservability(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("request count = %d, want 1", count)
 			}
-			applog.SyncAccessLog()
+			if err := owner.Drain(t.Context()); err != nil {
+				t.Fatal(err)
+			}
 			var logs strings.Builder
 			if err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
 				if err != nil {

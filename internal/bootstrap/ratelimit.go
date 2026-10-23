@@ -9,7 +9,8 @@ import (
 	data "github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 // rateLimitAssembly 是限流的装配产物。
@@ -74,7 +75,7 @@ func buildRateLimits(
 	// 失去确定答案，也让审计无从下手。
 	registry.Freeze()
 
-	applog.Infof("rate limiting enabled with %d policies: %v", len(registry.IDs()), registry.IDs())
+	logger.Infof("rate limiting enabled with %d policies: %v", len(registry.IDs()), registry.IDs())
 	return rateLimitAssembly{registry: registry, keys: keys}, nil
 }
 
@@ -120,7 +121,7 @@ func buildLimiter(
 			ratelimit.WithKeyPrefix(keyPrefix),
 			ratelimit.WithObserver(rateLimitObserver{}),
 			ratelimit.WithProbeCleanupErrorHandler(func(err error) {
-				applog.Warn("rate limit probe cleanup failed; artifacts retain their TTL", applog.Err(err))
+				logger.Warn("rate limit probe cleanup failed; artifacts retain their TTL", zap.Error(err))
 			}),
 		}
 		if degradedStartAllowed {
@@ -131,7 +132,7 @@ func buildLimiter(
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
 		}
 		if backend.Health().Phase() == ratelimit.PhaseDegraded {
-			applog.Warnf("redis rate limit backend started degraded (redis unavailable at startup); " +
+			logger.Warnf("redis rate limit backend started degraded (redis unavailable at startup); " +
 				"degraded-mode policies apply their failure modes until the recovery probe succeeds")
 		}
 		*redisBackend = backend
@@ -159,13 +160,13 @@ func buildLimiter(
 // 这条路径**不会自行恢复**：没有后端连接可探测，恢复靠进程重启。
 func unreachableLimiter(policy ratelimit.Policy) (ratelimit.Limiter, error) {
 	if policy.FailureMode == ratelimit.FailureLocalFallback {
-		applog.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
+		logger.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
 			"bucket for this process lifetime (quota counts per replica; restart after redis recovers)",
 			policy.ID)
 		return ratelimit.NewLocalBackend(policy)
 	}
 
-	applog.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
+	logger.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
 		"process lifetime (restart after redis recovers)", policy.ID, policy.FailureMode)
 	return ratelimit.NewUnavailableLimiter(policy), nil
 }
@@ -272,15 +273,15 @@ type rateLimitObserver struct{}
 //
 // 低基数事件，每次都记：它是排查"限流为什么突然放宽或收紧"的第一手线索。
 func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
-	applog.Warn("rate limit backend phase changed",
-		applog.String("from", from.String()), applog.String("to", to.String()))
+	logger.Warn("rate limit backend phase changed",
+		zap.String("from", from.String()), zap.String("to", to.String()))
 }
 
 // FellBackToLocal 在首次降级到本地影子桶时记录一次。
 //
 // 只记一次：故障期间每个请求都打一条会把日志刷满，而信息量只有第一条。
 func (rateLimitObserver) FellBackToLocal(policyID string) {
-	applog.Warn("rate limit fell back to the local shadow bucket; "+
+	logger.Warn("rate limit fell back to the local shadow bucket; "+
 		"the model is the same but the state is not carried over, so up to one burst may pass through",
-		applog.String("policy", policyID))
+		zap.String("policy", policyID))
 }

@@ -9,7 +9,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // signalSupervisor 是进程内**唯一**的 OS 信号监督者
@@ -69,14 +69,14 @@ func (s *signalSupervisor) watch(signals <-chan os.Signal, done <-chan struct{})
 		select {
 		case sig := <-signals:
 			if first {
-				applog.Infof("received %s: starting graceful shutdown", sig)
+				logger.Infof("received %s: starting graceful shutdown", sig)
 				s.shutdown.RequestShutdown(nil)
 				// 取消 ctx：装配期的 I/O 与启动屏障都靠它中止。
 				s.cancel()
 				first = false
 				continue
 			}
-			applog.Warnf("received %s again: forcing shutdown", sig)
+			logger.Warnf("received %s again: forcing shutdown", sig)
 			s.shutdown.Force()
 			return
 		case <-done:

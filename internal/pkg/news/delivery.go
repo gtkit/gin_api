@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 var (
@@ -100,7 +100,7 @@ func ReportDelivery(delivery Delivery) {
 	if delivery.Result == "success" || delivery.Result == "disabled" {
 		return
 	}
-	applog.Errorf("alert %s send failed: result=%s duration_ms=%d",
+	logger.Errorf("alert %s send failed: result=%s duration_ms=%d",
 		delivery.Channel, delivery.Result, delivery.Duration.Milliseconds())
 }
 

@@ -15,7 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
 	"github.com/gin-gonic/gin"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 const (
@@ -141,7 +141,7 @@ func httpServerErrorLog() *log.Logger {
 type httpErrorWriter struct{}
 
 func (httpErrorWriter) Write(message []byte) (int, error) {
-	applog.Error(strings.TrimSuffix(string(message), "\n"))
+	logger.Error(strings.TrimSuffix(string(message), "\n"))
 	return len(message), nil
 }
 
@@ -166,11 +166,11 @@ func serveHTTPServer(server httpServer, cfg HTTPConfig, listener net.Listener) e
 			return fmt.Errorf(
 				"tls enabled on %s but no certificate loaded: the validated certificate from prebind was not injected", addr)
 		}
-		applog.Infof("https server starting on %s", addr)
+		logger.Infof("https server starting on %s", addr)
 		return normalizeServeError(server.ServeTLS(listener, "", ""))
 	}
 
-	applog.Infof("http server starting on %s", addr)
+	logger.Infof("http server starting on %s", addr)
 	return normalizeServeError(server.Serve(listener))
 }
 
@@ -178,7 +178,7 @@ func shutdownHTTPServer(ctx context.Context, server httpServer, cfg HTTPConfig) 
 	shutdownCtx, cancel := context.WithTimeout(ctx, cfg.ShutdownTimeout)
 	defer cancel()
 
-	applog.Info("http server shutting down")
+	logger.Info("http server shutting down")
 	return normalizeServeError(server.Shutdown(shutdownCtx))
 }
 

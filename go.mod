@@ -32,6 +32,7 @@ require (
 	github.com/gtkit/smsx/providers/aliyun v1.1.0
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
 	github.com/gtkit/verify v1.2.5
+	github.com/hibiken/asynq v0.26.0
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/env v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
@@ -93,7 +94,6 @@ require (
 	github.com/gtkit/json v1.0.0 // indirect
 	github.com/gtkit/logrotate v1.1.3 // indirect
 	github.com/gtkit/stringx v1.1.6 // indirect
-	github.com/hibiken/asynq v0.26.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect

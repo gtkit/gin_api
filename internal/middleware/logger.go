@@ -10,7 +10,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // maxBodyLogSize 记录 request/response body 的最大字节数，
@@ -65,7 +67,10 @@ func (r responseBodyWriter) Unwrap() http.ResponseWriter {
 //
 // body 记录由 opts 控制且默认关闭：只有显式开启对应开关时才读取请求体 /
 // 包装响应体，且落盘前一律经敏感字段脱敏。query string 无论开关如何都脱敏后记录。
-func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
+func GinLogger(access *logger.Logger, opts AccessLogOptions) gin.HandlerFunc {
+	if access == nil {
+		panic("access logger is required")
+	}
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
@@ -117,36 +122,43 @@ func GinLogger(opts AccessLogOptions) gin.HandlerFunc {
 		}
 
 		status := c.Writer.Status()
-		level := applog.LevelInfo
+		level := zapcore.InfoLevel
 		if status >= 500 {
-			level = applog.LevelError
+			level = zapcore.ErrorLevel
 		} else if status >= 400 {
-			level = applog.LevelWarn
+			level = zapcore.WarnLevel
 		}
-		if !applog.Enabled(level, applog.AccessStream) {
+		if !access.Zap().Core().Enabled(level) {
 			return
 		}
-		fields := []applog.Field{
-			applog.Int("status", status),
-			applog.String("method", method),
-			applog.String("path", path),
-			applog.String("query", redactQuery(c.Request.URL.RawQuery)),
-			applog.String("ip", ginc.ClientIP(c)),
-			applog.Duration("latency", time.Since(start)),
-			applog.String("requestId", RequestIDFromContext(c)),
-			applog.String("userAgent", c.GetHeader("User-Agent")),
+		fields := []zap.Field{
+			zap.Int("status", status),
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.String("query", redactQuery(c.Request.URL.RawQuery)),
+			zap.String("ip", ginc.ClientIP(c)),
+			zap.Duration("latency", time.Since(start)),
+			zap.String("requestId", RequestIDFromContext(c)),
+			zap.String("userAgent", c.GetHeader("User-Agent")),
 		}
 
 		if logReqBody {
-			fields = append(fields, applog.String("requestBody",
+			fields = append(fields, zap.String("requestBody",
 				truncate(redactBody(requestBodyType, requestBody), maxBodyLogSize)))
 		}
 		if logRespBody {
-			fields = append(fields, applog.String("responseBody",
+			fields = append(fields, zap.String("responseBody",
 				truncate(redactBody(w.Header().Get("Content-Type"), w.body.Bytes()), maxBodyLogSize)))
 		}
 
-		applog.Log(c.Request.Context(), applog.LogEntry{Level: level, Message: path, Fields: fields, Stream: applog.AccessStream})
+		switch level {
+		case zapcore.ErrorLevel:
+			access.ErrorCtx(c.Request.Context(), path, fields...)
+		case zapcore.WarnLevel:
+			access.WarnCtx(c.Request.Context(), path, fields...)
+		default:
+			access.InfoCtx(c.Request.Context(), path, fields...)
+		}
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // Options defines runtime startup options.
@@ -75,6 +75,11 @@ type App struct {
 	// extClosed 保证扩展产物（限流注册表、指标回调）恰好释放一次，
 	// 正常关停序列与启动失败的提前返回共用（见 closeExtensions）。
 	extClosed atomic.Bool
+	// Only a successful Shutdown proves all HTTP log producers have returned.
+	httpStarted   bool
+	httpDrained   bool
+	extensionsErr error
+	pprofErr      error
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
@@ -253,7 +258,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 			// 混入清理/回滚失败或其他故障的错误树必须保留上报——
 			// errors.Is 对 Join 任一成员命中即真，不能用它整体判定。
 			if IsPureCancellation(startErr) {
-				applog.Infof("startup barrier canceled by a shutdown request: %v", startErr)
+				logger.Infof("startup barrier canceled by a shutdown request: %v", startErr)
 				return errors.Join(a.shutdown.Cause(), pprofErr)
 			}
 			return errors.Join(a.shutdown.Cause(), fmt.Errorf("start workers: %w", startErr), pprofErr)
@@ -267,12 +272,13 @@ func (a *App) Run(ctx context.Context) (err error) {
 		a.shutdown.RequestShutdown(nil)
 	}
 	if a.shutdownRequested() {
-		applog.Info("shutdown requested during startup: skipping http serve")
+		logger.Info("shutdown requested during startup: skipping http serve")
 		return a.gracefulShutdown(ctx, nil, true, pprofEndpoint)
 	}
 
 	// ③ HTTP。监听器所有权自此转交给 server，由 Shutdown/Close 关闭。
 	prebindClosed = true
+	a.httpStarted = true
 	serverErrCh := make(chan error, 1)
 	go func() {
 		serverErrCh <- serveHTTPServer(a.httpServer, a.httpConfig, bound.listener)
@@ -291,6 +297,10 @@ func (a *App) Run(ctx context.Context) (err error) {
 // 幂等（CAS 保证恰好一次）：gracefulShutdown 在正常序列的正确位置调用它，
 // Run 的 defer 兜住全部提前返回——两处共用，不存在只被一条路径覆盖的释放。
 func (a *App) closeExtensions(ctx context.Context) error {
+	if a.httpStarted && !a.httpDrained {
+		a.extensionsErr = errors.New("skipping extension close: HTTP handlers are not confirmed stopped")
+		return a.extensionsErr
+	}
 	if !a.extClosed.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -308,7 +318,8 @@ func (a *App) closeExtensions(ctx context.Context) error {
 	for _, unregister := range a.metricsCleanup {
 		errs = append(errs, unregister())
 	}
-	return errors.Join(errs...)
+	a.extensionsErr = errors.Join(errs...)
+	return a.extensionsErr
 }
 
 // closeModules 排在共享依赖之前；仍存活的 worker 可能使用模块客户端，不能提前关闭。
@@ -331,7 +342,7 @@ func alertExitError(err error) {
 	if err == nil {
 		return
 	}
-	applog.HErrorf("process exiting with error: %v", err)
+	logger.HError(fmt.Sprintf("process exiting with error: %v", err))
 }
 
 // shutdownRequested 非阻塞探测是否已有关停请求。
@@ -396,7 +407,7 @@ func (a *App) gracefulShutdown(
 		}
 	}
 
-	applog.Infof("shutdown phase=%s", a.shutdown.Phase())
+	logger.Infof("shutdown phase=%s", a.shutdown.Phase())
 
 	// 1. 停 producer：不再产生新任务。
 	collect(a.stopKindWithBudget(base, KindProducer))
@@ -406,10 +417,12 @@ func (a *App) gracefulShutdown(
 	a.shutdown.WaitOrForce(a.drainWait)
 
 	// 3. 关主 HTTP 并等在途请求收尾。
-	if !serverExited {
+	if a.httpStarted || !serverExited {
 		collect(a.shutdownHTTP(base))
-		if err := <-serverErrCh; err != nil {
-			collect(err)
+		if !serverExited {
+			if err := <-serverErrCh; err != nil {
+				collect(err)
+			}
 		}
 	}
 
@@ -466,8 +479,9 @@ func (a *App) stopKindWithBudget(base context.Context, kind WorkerKind) error {
 // Shutdown 会等在途请求收尾，而强制路径的前提正是"已经等不下去了"——
 // 此时继续 Shutdown 只会让进程在故障关停中无限滞留。
 func (a *App) shutdownHTTP(base context.Context) error {
+	a.httpStarted = true
 	if a.shutdown.Forced() {
-		applog.Warn("forced shutdown: closing http server without draining in-flight requests")
+		logger.Warn("forced shutdown: closing http server without draining in-flight requests")
 		return a.httpServer.Close()
 	}
 
@@ -475,9 +489,10 @@ func (a *App) shutdownHTTP(base context.Context) error {
 	defer finish()
 
 	if err := shutdownHTTPServer(shutdownCtx, a.httpServer, a.httpConfig); err != nil {
-		applog.Warnf("graceful http shutdown failed (%v); closing listeners", err)
+		logger.Warnf("graceful http shutdown failed (%v); closing listeners", err)
 		return errors.Join(err, a.httpServer.Close())
 	}
+	a.httpDrained = true
 	return nil
 }
 
@@ -499,7 +514,7 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 		return nil
 	}
 	if endpoint.Exited() {
-		applog.Warn("pprof endpoint had already exited before shutdown; " +
+		logger.Warn("pprof endpoint had already exited before shutdown; " +
 			"the capability was degraded for part of this process lifetime")
 	}
 
@@ -507,7 +522,8 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 	defer cancel()
 
 	if err := endpoint.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown pprof endpoint: %w", err)
+		a.pprofErr = fmt.Errorf("shutdown pprof endpoint: %w", err)
+		return a.pprofErr
 	}
 	return nil
 }
@@ -520,14 +536,17 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 // 全部提前返回分支。
 func (a *App) closeResources(ctx context.Context) error {
 	if live := a.workers.LiveWorkers(); len(live) > 0 {
-		// 连接不关，**但日志照排空**：两者是不同的事，共用一个开关会让
-		// "现在不能关连接"顺带把退出告警与错误日志一起丢掉——而这条
-		// 异常退出路径恰恰是最需要留痕的那条。
+		// Live producers retain the native instances and notification channels.
+		// Only file buffers can be flushed safely here.
 		return errors.Join(fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
 			len(live), strings.Join(live, ", "), ErrWorkerNotExited), a.runtime.DrainLogs(ctx))
 	}
 	if a.runtime == nil {
 		return nil
+	}
+	if (a.httpStarted && !a.httpDrained) || a.extensionsErr != nil || a.pprofErr != nil {
+		return errors.Join(errors.New("skipping resource close: log producers are not confirmed stopped"),
+			a.runtime.DrainLogs(ctx))
 	}
 	return a.runtime.Close(ctx)
 }

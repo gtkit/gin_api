@@ -238,7 +238,8 @@ func TestWriteDeadlineSurvivesResponseBodyLogging(t *testing.T) {
 
 	engine := gin.New()
 	// 关键：开启响应体日志，让 responseBodyWriter 进入 writer 链。
-	engine.Use(GinLogger(AccessLogOptions{LogResponseBody: true}))
+	access, _ := newNativeTestLogger(t, "info")
+	engine.Use(GinLogger(access, AccessLogOptions{LogResponseBody: true}))
 	engine.POST("/probe", timeoutMW, func(c *gin.Context) {
 		rc := http.NewResponseController(c.Writer)
 		e := rc.SetWriteDeadline(time.Now().Add(time.Second))
