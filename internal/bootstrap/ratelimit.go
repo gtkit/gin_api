@@ -147,13 +147,12 @@ func (r redisCommands) ScriptLoad(ctx context.Context, script string) *redis.Str
 	return cmd
 }
 
-func (r redisCommands) EvalSha(ctx context.Context, sha string, keys []string, args ...any) *redis.Cmd {
+func (r redisCommands) Process(ctx context.Context, cmd redis.Cmder) error {
 	if client := r.resources.Rdb(0); client != nil {
-		return client.EvalSha(ctx, sha, keys, args...)
+		return client.Process(ctx, cmd)
 	}
-	cmd := redis.NewCmd(ctx)
 	cmd.SetErr(errRedisUnavailable)
-	return cmd
+	return errRedisUnavailable
 }
 
 func (r redisCommands) Del(ctx context.Context, keys ...string) *redis.IntCmd {

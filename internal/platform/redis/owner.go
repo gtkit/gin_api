@@ -207,7 +207,21 @@ func (p *Owner) instrumentCandidate(client Client) (err error) {
 }
 
 func (p *Owner) recoverClient(ctx context.Context) {
-	defer close(p.recoveryDone)
+	recovered := false
+	var terminalErr error
+	defer func() {
+		// Use this task's outcome: Close may already have cleared p.client.
+		// Log outside p.mu and before waking callers waiting for cleanup.
+		switch {
+		case recovered:
+			logger.Info("redis recovery succeeded")
+		case terminalErr != nil:
+			logger.Errorf("redis recovery stopped after terminal failure: %v", terminalErr)
+		default:
+			logger.Infof("redis recovery stopped: %v", ctx.Err())
+		}
+		close(p.recoveryDone)
+	}()
 	timer := time.NewTimer(recoveryInterval)
 	defer timer.Stop()
 	for {
@@ -229,6 +243,7 @@ func (p *Owner) recoverClient(ctx context.Context) {
 			if err == nil {
 				p.client, p.lastErr = candidate, nil
 				p.mu.Unlock()
+				recovered = true
 				return
 			}
 		}
@@ -245,6 +260,9 @@ func (p *Owner) recoverClient(ctx context.Context) {
 		p.lastErr = err
 		closed := p.closed
 		p.mu.Unlock()
+		if terminal {
+			terminalErr = err
+		}
 		if closed || ctx.Err() != nil || terminal {
 			return
 		}

@@ -128,7 +128,7 @@ func (r *Runtime) Cache() httpcache.ResponseCache {
 
 // TokenIssuer 返回轮换签发器。
 func (r *Runtime) TokenIssuer() jwtauth.RotatingTokenIssuer {
-	if r == nil || r.jwt == nil {
+	if r == nil || r.jwt == nil || r.jwt.Issuer == nil {
 		return nil
 	}
 	return r.jwt.Issuer

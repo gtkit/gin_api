@@ -2,7 +2,12 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -10,6 +15,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/logger/v2"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -221,5 +227,143 @@ func TestUnavailableAccessorsAreSafe(t *testing.T) {
 	}
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRecoveryOutcomeLogs(t *testing.T) {
+	for _, mode := range []string{"recovered", "terminal", "canceled", "canceled-cleanup-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			// Capture the real console encoder outside the virtual-time bubble.
+			// File rotation owns global goroutines and must not cross bubbles.
+			path := filepath.Join(t.TempDir(), "recovery.jsonl")
+			output, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := output.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			instance, err := func() (*logger.Logger, error) {
+				previous := os.Stdout
+				os.Stdout = output
+				defer func() { os.Stdout = previous }()
+				return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithOutJSON(true), logger.WithLevel("info"), logger.WithReplaceGlobals(false))
+			}()
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := logger.Default()
+			logger.SetDefault(instance)
+			t.Cleanup(func() { logger.SetDefault(previous); instance.Sync() })
+
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				client := &ownedRedis{clients: make(map[int]*goredis.Client)}
+				for _, db := range []int{0, 3} {
+					client.clients[db] = goredis.NewClient(&goredis.Options{
+						Addr: "127.0.0.1:0", DB: db,
+						Dialer: func(context.Context, string, string) (net.Conn, error) {
+							return nil, errors.New("network disabled in recovery log test")
+						},
+					})
+				}
+				failure := errors.New("candidate cleanup failed")
+				entered, release := make(chan struct{}), make(chan struct{})
+				p, err := Open(t.Context(), Options{
+					Config: &config.Config{Redis: config.RedisConfig{Addr: "unused"}},
+					Open: func(context.Context, config.RedisConfig) (Client, error) {
+						calls++
+						if calls <= 2 {
+							return nil, errors.New("temporarily offline")
+						}
+						if mode == "terminal" {
+							return nil, nil
+						}
+						if mode == "canceled-cleanup-failure" {
+							client.closeErr = failure
+							close(entered)
+							<-release
+						}
+						return client, nil
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.instrument = func(*goredis.Client) error { return nil }
+				if err := p.ConfigureTracing(); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Sleep(recoveryInterval)
+				if calls != 2 || p.DefaultClient() != nil {
+					t.Fatal("transient attempt changed publication or retry timing")
+				}
+				if mode == "canceled-cleanup-failure" {
+					<-entered
+					ctx, cancel := context.WithCancel(t.Context())
+					cancel()
+					if err := p.Close(ctx); !errors.Is(err, context.Canceled) {
+						t.Fatalf("pending close=%v", err)
+					}
+					close(release)
+				} else if mode != "canceled" {
+					synctest.Sleep(recoveryInterval)
+				}
+				closeErr := p.Close(t.Context())
+				switch mode {
+				case "terminal":
+					if !errors.Is(closeErr, core.ErrComponentState) {
+						t.Fatalf("terminal cause=%v", closeErr)
+					}
+				case "canceled-cleanup-failure":
+					if !errors.Is(closeErr, failure) {
+						t.Fatalf("cleanup cause=%v", closeErr)
+					}
+				default:
+					if closeErr != nil {
+						t.Fatal(closeErr)
+					}
+				}
+				if mode == "canceled" || mode == "terminal" {
+					if err := client.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			instance.Sync()
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type logRecord struct {
+				Message string `json:"msg"`
+				Level   string `json:"level"`
+			}
+			var records []logRecord
+			for line := range strings.Lines(string(contents)) {
+				var record logRecord
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				records = append(records, record)
+			}
+			if len(records) != 2 || records[0].Level != "WARN" {
+				t.Fatalf("want startup warning and one outcome, got %s", contents)
+			}
+			wantLevel, wantMessage := "INFO", "redis recovery succeeded"
+			switch mode {
+			case "terminal":
+				wantLevel, wantMessage = "ERROR", "redis recovery stopped after terminal failure:"
+			case "canceled":
+				wantMessage = "redis recovery stopped: context canceled"
+			case "canceled-cleanup-failure":
+				wantLevel, wantMessage = "ERROR", "candidate cleanup failed"
+			}
+			if records[1].Level != wantLevel || !strings.Contains(records[1].Message, wantMessage) {
+				t.Fatalf("unexpected outcome: %s", contents)
+			}
+		})
 	}
 }

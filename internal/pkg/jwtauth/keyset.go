@@ -73,30 +73,13 @@ type KeySet struct {
 	ordered []VerificationKey
 }
 
-// NewKeySet 校验并构造密钥集。
-//
-// 校验项及其理由：
-//   - kid 格式：见 ValidateKID；
-//   - active 公私钥匹配：不匹配意味着签出的 token 谁也验不了，而这个错误
-//     只有在第一个真实请求上才会暴露；
-//   - kid 唯一：重复 kid 让"按 kid 精确选键"失去确定性——同一个 kid
-//     对应两把不同的公钥时，命中哪一把取决于遍历顺序；
-//   - previous 数量上限：见 maxPreviousKeys。
+// NewKeySet 校验签发私钥、公私钥配对及全部验签公钥。
 func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
-	var errs []error
-
-	if err := ValidateKID(active.KID); err != nil {
-		errs = append(errs, fmt.Errorf("active key: %w", err))
-	}
+	keys, keyErr := NewVerificationKeySet(VerificationKey{KID: active.KID, Public: active.Public}, previous)
+	errs := []error{keyErr}
 	if len(active.Private) != ed25519.PrivateKeySize {
 		errs = append(errs, errors.New("active key: private key is missing or has the wrong size"))
 	}
-	if len(active.Public) != ed25519.PublicKeySize {
-		errs = append(errs, errors.New("active key: public key is missing or has the wrong size"))
-	}
-
-	// 公私钥匹配必须实测，不能只看长度：长度对但不配对的一组密钥
-	// 会让签发成功、验签全败，而那在启动期完全看不出来。
 	if len(active.Private) == ed25519.PrivateKeySize && len(active.Public) == ed25519.PublicKeySize {
 		derived, ok := active.Private.Public().(ed25519.PublicKey)
 		if !ok || !derived.Equal(active.Public) {
@@ -104,6 +87,22 @@ func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
 				"active key: the configured public key does not match the private key; "+
 					"every token this process issues would fail verification"))
 		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	keys.active.Private = active.Private
+	return keys, nil
+}
+
+// NewVerificationKeySet 构造仅含公钥的验签密钥集，不能用于签发。
+func NewVerificationKeySet(active VerificationKey, previous []VerificationKey) (*KeySet, error) {
+	var errs []error
+	if err := ValidateKID(active.KID); err != nil {
+		errs = append(errs, fmt.Errorf("active key: %w", err))
+	}
+	if len(active.Public) != ed25519.PublicKeySize {
+		errs = append(errs, errors.New("active key: public key is missing or has the wrong size"))
 	}
 
 	if len(previous) > maxPreviousKeys {
@@ -144,7 +143,10 @@ func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
 	ordered = append(ordered, VerificationKey{KID: active.KID, Public: active.Public})
 	ordered = append(ordered, previous...)
 
-	return &KeySet{active: active, previous: previous, byKID: byKID, ordered: ordered}, nil
+	return &KeySet{
+		active:   SigningKey{KID: active.KID, Public: active.Public},
+		previous: previous, byKID: byKID, ordered: ordered,
+	}, nil
 }
 
 // ActiveKID 返回签发用的 kid。

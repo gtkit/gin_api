@@ -23,7 +23,7 @@ const (
 //
 // 全部在启动期完成：密钥配置错误的表现要么是"签出的令牌谁也验不了"，
 // 要么是"某类令牌被静默拒绝"，两者都只在真实流量上暴露。
-func validateJWTRotation(jwt JWTConfig, environment env.Env) error {
+func validateJWTRotation(jwt JWTConfig, mode AuthMode, environment env.Env) error {
 	var errs []error
 
 	// 废弃键 fail-fast，并给出迁移方向。
@@ -40,8 +40,8 @@ func validateJWTRotation(jwt JWTConfig, environment env.Env) error {
 	if strings.TrimSpace(jwt.Active.KID) == "" {
 		errs = append(errs, errors.New("jwt.active.kid is required"))
 	}
-	if strings.TrimSpace(jwt.Active.PrivateKeyPath) == "" {
-		errs = append(errs, errors.New("jwt.active.private_key_path is required"))
+	if mode == AuthModeLocal && strings.TrimSpace(jwt.Active.PrivateKeyPath) == "" {
+		errs = append(errs, errors.New("jwt.active.private_key_path is required for local authentication"))
 	}
 	if strings.TrimSpace(jwt.Active.PublicKeyPath) == "" {
 		errs = append(errs, errors.New("jwt.active.public_key_path is required"))

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +25,7 @@ const (
 // scriptRunner 是本包需要的 Redis 能力，便于测试替换。
 type scriptRunner interface {
 	ScriptLoad(ctx context.Context, script string) *redis.StringCmd
-	EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *redis.Cmd
+	Process(ctx context.Context, cmd redis.Cmder) error
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
@@ -177,12 +176,21 @@ func (b *RedisBackend) Health() *HealthState { return b.health }
 func (b *RedisBackend) check(
 	ctx context.Context, policy Policy, key string,
 ) (Decision, error) {
-	if !b.health.AllowRequest(ctx) {
-		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, nil
+	if err := ctx.Err(); err != nil {
+		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, err
+	}
+	attempt, allowed := b.health.beginAttempt(ctx)
+	if !allowed {
+		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		// 准入通知可能耗时；尚未执行的请求不形成依赖样本。
+		b.health.observeAttempt(attempt, context.Canceled)
+		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, err
 	}
 
 	decision, err := b.evaluate(ctx, policy, key)
-	b.health.Observe(err)
+	b.health.observeAttempt(attempt, err)
 	if err != nil {
 		return Decision{Outcome: OutcomeBackendUnavailable, Limit: policy.Burst}, err
 	}
@@ -209,7 +217,7 @@ func (b *RedisBackend) evaluate(
 		policy.MaxKeys,
 	}
 
-	raw, err := b.client.EvalSha(ctx, *b.sha.Load(), []string{key, registryKey}, args...).Result()
+	raw, err := b.eval(ctx, *b.sha.Load(), []string{key, registryKey}, args...)
 	if err != nil && isNoScript(err) {
 		// 主从切换或 SCRIPT FLUSH 之后脚本缓存会丢。**重载并重试一次**。
 		// 缺这一条，一次故障切换会让整片限流持续报错，而根因只是缓存没了。
@@ -220,13 +228,35 @@ func (b *RedisBackend) evaluate(
 		// 并发重载时多个 goroutine 会各自 Store 一次。这没有问题——
 		// 它们加载的是同一段脚本，因此得到的 sha 必然相同；重复存入等价。
 		b.sha.Store(&sha)
-		raw, err = b.client.EvalSha(ctx, sha, []string{key, registryKey}, args...).Result()
+		raw, err = b.eval(ctx, sha, []string{key, registryKey}, args...)
 	}
 	if err != nil {
 		return Decision{}, fmt.Errorf("evaluate rate limit script: %w", err)
 	}
 
 	return parseScriptResult(raw, policy)
+}
+
+// deductionCmd 禁止在执行结果不明时重放扣减；明确 NOSCRIPT 的重载由 evaluate 处理。
+type deductionCmd struct{ *redis.Cmd }
+
+func (*deductionCmd) NoRetry() bool { return true }
+
+func (b *RedisBackend) eval(ctx context.Context, sha string, keys []string, args ...any) (any, error) {
+	commandArgs := make([]any, 3+len(keys), 3+len(keys)+len(args))
+	commandArgs[0], commandArgs[1], commandArgs[2] = "evalsha", sha, len(keys)
+	for i, key := range keys {
+		commandArgs[3+i] = key
+	}
+	commandArgs = append(commandArgs, args...)
+	cmd := &deductionCmd{Cmd: redis.NewCmd(ctx, commandArgs...)}
+	if len(keys) > 0 {
+		cmd.SetFirstKeyPos(3)
+	}
+	if err := b.client.Process(ctx, cmd); err != nil {
+		return nil, err
+	}
+	return cmd.Result()
 }
 
 // isNoScript 识别脚本缓存缺失。
@@ -296,10 +326,7 @@ func toInt64(v any) (int64, error) {
 	}
 }
 
-// maxBucketTTL 是键存活时长的上限。
-//
-// 桶再大也不该让键活过一天：更长的 TTL 只是让一个早已无人访问的主体
-// 继续占内存，而它的配额早就补满了。
+// maxBucketTTL 限制桶与注册表的驻留时间；无法在此期限内补满的策略在注册时拒绝。
 const maxBucketTTL = 24 * time.Hour
 
 // registryKey 是策略的键基数注册表键。
@@ -316,32 +343,16 @@ func (b *RedisBackend) registryKey(policy Policy) string {
 // （构造重试、多后端实例），上限为 1 会让它们互相挤掉。
 const probeMaxKeys = 8
 
-// bucketTTL 返回键的存活时长：补满一桶所需时间 + 余量。
-//
-// **必须夹在上限内**。此前直接 `time.Duration(秒数) * time.Second` 会溢出：
-// 实测 Rate=0.000001、Burst=10000 通过了策略校验，却算出
-// -2346317h46m53s——负 TTL 传给 Redis 会让键立即过期或被拒绝，限流静默失效。
-//
-// 策略校验只查了 Lua 的精确整数范围，而这是**另一个**溢出边界
-// （time.Duration 是纳秒计的 int64）。两个边界必须各查各的。
+// bucketTTL 返回补满一桶所需时间加余量。合法 Redis 策略已在 Validate 中限制上界。
 func bucketTTL(policy Policy) time.Duration {
-	if policy.Rate <= 0 {
+	seconds, ok := policy.refillSeconds()
+	if !ok {
 		return ttlSlack
 	}
-
-	seconds := math.Ceil(float64(policy.Burst) / policy.Rate)
-	// 先在 float64 域比较再转换：转换后再比较就已经溢出了。
-	//
-	// **含余量之后再夹上限**，不能反过来：先夹再加余量会让结果比上限多出一个
-	// 余量（实测 Rate=1、Burst=86399 得到 24h0m59s，而声称的上限是 24h）。
-	// 一个自己就违反声称值的上限，无法作为容量估算的依据。
-	if seconds >= maxBucketTTL.Seconds() {
+	if seconds > int64((maxBucketTTL-ttlSlack)/time.Second) {
 		return maxBucketTTL
 	}
-	if ttl := time.Duration(seconds)*time.Second + ttlSlack; ttl < maxBucketTTL {
-		return ttl
-	}
-	return maxBucketTTL
+	return time.Duration(seconds)*time.Second + ttlSlack
 }
 
 // qualifiedKey 给键加上服务前缀。
@@ -389,6 +400,10 @@ func (b *FallbackBackend) Check(ctx context.Context, key string) (Decision, erro
 	decision, err := b.redis.check(ctx, b.policy, key)
 	if err == nil && decision.Outcome != OutcomeBackendUnavailable {
 		return decision, nil
+	}
+
+	if ctx.Err() != nil || isPureCancellation(err) {
+		return decision, err
 	}
 
 	b.warnOnce.Do(func() {

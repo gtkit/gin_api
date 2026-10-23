@@ -67,6 +67,7 @@ func buildRedisOptions(cfg config.RedisConfig) []redisx.Option {
 		redisx.WithAddr(cfg.Addr),
 		redisx.WithPassword(cfg.Password),
 		redisx.WithInitDBs(cfg.DBs...),
+		redisx.WithContextTimeoutEnabled(),
 	}
 
 	if cfg.PoolSize > 0 {

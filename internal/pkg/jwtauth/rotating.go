@@ -2,6 +2,7 @@ package jwtauth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -85,6 +86,9 @@ type Issuer struct {
 func NewIssuer(keys *KeySet, parser RotatingTokenParser, opts IssuerOptions) (*Issuer, error) {
 	if keys == nil {
 		return nil, errors.New("jwt issuer requires a key set")
+	}
+	if len(keys.SigningKey()) != ed25519.PrivateKeySize {
+		return nil, errors.New("jwt issuer requires a valid signing private key")
 	}
 	var errs []error
 	if opts.Issuer == "" {

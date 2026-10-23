@@ -139,7 +139,7 @@ func (c *Config) Validate() error {
 	if err := validateJWTConfig(c.JWT); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateJWTRotation(c.JWT, c.Env); err != nil {
+	if err := validateJWTRotation(c.JWT, c.Auth.Mode, c.Env); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateAuthJWTCompatibility(c.Auth, c.JWT); err != nil {

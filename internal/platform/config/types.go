@@ -263,7 +263,9 @@ type RateLimitConfig struct {
 // 装配层翻译成强类型并做全部校验。让配置结构直接复用强类型枚举会逼着
 // 使用者在 yaml 里写数字，而数字的含义只有读代码才知道。
 type RateLimitPolicyConfig struct {
-	ID          string  `mapstructure:"id"`
+	ID string `mapstructure:"id"`
+	// Rate 为每秒补充量，Burst 为突发容量；均必填且为正，无默认额度。
+	// Redis 策略按定点速率补满 Burst 并加 60s 余量，必须不超过 24h。
 	Rate        float64 `mapstructure:"rate"`
 	Burst       int     `mapstructure:"burst"`
 	Scope       string  `mapstructure:"scope"`
@@ -274,8 +276,9 @@ type RateLimitPolicyConfig struct {
 
 // JWTKeyConfig 是一把带 kid 的密钥。
 //
-// active 需要 Ed25519 PKCS#8 私钥（PRIVATE KEY，0600）与 PKIX 公钥（PUBLIC KEY）；
-// 路径必填，支持绝对路径或相对 APP_ROOT 的路径，不回落到默认密钥。
+// active 在 local 模式需要 Ed25519 PKCS#8 私钥（PRIVATE KEY，0600）与 PKIX 公钥（PUBLIC KEY）；
+// external 只需要公钥，私钥路径可留空且不会加载。必需路径不回落到默认密钥，
+// 支持绝对路径或相对 APP_ROOT 的路径。jwt generate/reencode 仍要求完整密钥对。
 // previous 只需要 PKIX 公钥（它们只用于验签，
 // 保留私钥意味着一把已经退役的密钥仍能签发新令牌——那正是轮换要终结的）。
 type JWTKeyConfig struct {
@@ -285,7 +288,7 @@ type JWTKeyConfig struct {
 }
 
 type JWTConfig struct {
-	// Active 是当前签发用的密钥。
+	// Active 是当前验签密钥；local 模式同时用于签发，external 仅加载公钥。
 	Active JWTKeyConfig `mapstructure:"active"`
 	// Previous 是仍接受验签的旧公钥，数量上限由 jwtauth 强制。
 	//

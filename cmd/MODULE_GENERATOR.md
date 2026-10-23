@@ -69,7 +69,7 @@ database/migrations/<version>_create_admins_table.sql
 ```go
 // scaffold:module-imports        // import 区：注入 app / http / runtime 三个包导入
 // scaffold:module-service-fields // services struct：注入 <name>Service *<name>app.Service 字段
-// scaffold:module-services       // buildServices：注入 svc.<name>Service = <name>runtime.NewService(inf.mysqlDB)
+// scaffold:module-services       // buildServicesWithBudget：注入 svc.<name>Service = <name>runtime.NewService(inf.mysqlDB)
 // scaffold:modules               // buildEngine 的 v1Modules：注入 <name>http.NewModule(svc.<name>Service)
 ```
 

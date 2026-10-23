@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"time"
 )
 
 // Scope 决定限流键里"主体"那一段取自哪里。
@@ -136,6 +137,7 @@ type Policy struct {
 	// ID 是稳定的低基数标识，进限流键与 metrics label。
 	ID string
 	// Rate 是每秒补充速率，必须 > 0。允许小数（如 0.5 = 每 2 秒 1 个）。
+	// Redis 策略按定点速率补满 Burst 的时间加 60s 必须不超过 24h。
 	Rate float64
 	// Burst 是桶容量，必须 > 0。
 	Burst int
@@ -197,6 +199,13 @@ func (p Policy) Validate() error {
 	}
 
 	errs = append(errs, p.validateFixedPointRange()...)
+	if p.Store == StoreRedis {
+		if seconds, ok := p.refillSeconds(); ok && seconds > int64((maxBucketTTL-ttlSlack)/time.Second) {
+			errs = append(errs, fmt.Errorf(
+				"rate limit policy %q refill time %ds plus %s slack exceeds maximum bucket TTL %s",
+				p.ID, seconds, ttlSlack, maxBucketTTL))
+		}
+	}
 
 	return errors.Join(errs...)
 }
@@ -206,27 +215,46 @@ func (p Policy) Validate() error {
 // 越界之后整数运算开始丢精度，而表现是限流**悄悄失准**——没有任何报错。
 // 因此必须在启动期拒绝，而不是等运行时算出一个错误的剩余配额。
 func (p Policy) validateFixedPointRange() []error {
-	if p.Rate <= 0 || p.Burst <= 0 {
+	if p.Rate <= 0 || math.IsNaN(p.Rate) || math.IsInf(p.Rate, 0) || p.Burst <= 0 {
 		return nil // 已由上面的规则报错，这里不再重复
 	}
 
 	var errs []error
 
-	ratePerSecond := int64(math.Round(p.Rate * microTokensPerToken))
+	ratePerSecond := math.Round(p.Rate * microTokensPerToken)
 	if ratePerSecond < 1 {
 		errs = append(errs, fmt.Errorf(
 			"rate limit policy %q rate %v is below the smallest representable rate (1 microtoken/s)",
 			p.ID, p.Rate))
 	}
+	if ratePerSecond > float64(maxExactInteger) {
+		errs = append(errs, fmt.Errorf(
+			"rate limit policy %q rate %v overflows the exact-integer range usable in the limiter script",
+			p.ID, p.Rate))
+	}
 
-	capacity := int64(p.Burst) * microTokensPerToken
-	if p.Burst > math.MaxInt64/microTokensPerToken || capacity > maxExactInteger {
+	if int64(p.Burst) > maxExactInteger/microTokensPerToken {
 		errs = append(errs, fmt.Errorf(
 			"rate limit policy %q burst %d overflows the exact-integer range usable in the limiter script",
 			p.ID, p.Burst))
 	}
 
 	return errs
+}
+
+// refillSeconds 按 Lua 实际使用的定点速率向上取整，转换前先确认数值范围。
+func (p Policy) refillSeconds() (int64, bool) {
+	rate := math.Round(p.Rate * microTokensPerToken)
+	if math.IsNaN(rate) || rate < 1 || rate > float64(maxExactInteger) ||
+		p.Burst <= 0 || int64(p.Burst) > maxExactInteger/microTokensPerToken {
+		return 0, false
+	}
+	capacity, perSecond := p.FixedPointBurst(), int64(rate)
+	seconds := capacity / perSecond
+	if capacity%perSecond != 0 {
+		seconds++
+	}
+	return seconds, true
 }
 
 // FixedPointRate 返回每秒补充的 microtokens（四舍五入）。

@@ -16,7 +16,7 @@ type rollbackStep struct {
 
 // rollbackStack 收集装配过程中产生的进程级副作用，失败时逆序回滚。
 //
-// buildServices 用独立栈登记模块资源，失败时 unwind，成功时交出清理函数。
+// buildServicesWithBudget 用独立栈登记模块资源，失败时 unwind，成功时交出清理函数。
 // 仅用于 bootstrap 内部的装配与资源释放。
 type rollbackStack struct {
 	steps []rollbackStep

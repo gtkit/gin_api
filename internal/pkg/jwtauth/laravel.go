@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -88,7 +87,7 @@ func NewLaravelVerifier(secret, algorithm, role string, leeway time.Duration) (*
 }
 
 // ParseToken 按钉死的 HMAC 算法验签并校验 exp/nbf，成功后把 tymon 载荷适配为 gojwt claims：
-// UserID 取自 sub（兼容 JSON 数字与字符串编码），Roles 合成为构造时注入的角色。
+// UserID 取自 sub（JSON 整数字面量或整数字符串），Roles 合成为构造时注入的角色。
 // 签名与 gojwt Tokener 的 ParseToken 对齐，便于与 Ed25519 主验证器组合。
 func (v *LaravelVerifier) ParseToken(
 	_ context.Context, tokenString string, opts ...jwtv5.ParserOption,
@@ -96,6 +95,7 @@ func (v *LaravelVerifier) ParseToken(
 	baseOpts := []jwtv5.ParserOption{
 		jwtv5.WithValidMethods([]string{v.method.Alg()}),
 		jwtv5.WithExpirationRequired(),
+		jwtv5.WithJSONNumber(),
 	}
 	// 与主验证器同源的时钟容忍：跨机器的合理时钟偏差不因验签路径不同而更严。
 	if v.leeway > 0 {
@@ -142,8 +142,8 @@ func (v *LaravelVerifier) adaptClaims(mapClaims jwtv5.MapClaims, userID int64) *
 }
 
 // laravelUserID 从 tymon 的 sub claim 提取用户主键。
-// tymon 依 PHP 侧序列化差异可能把 sub 编码为 JSON 数字或字符串，两种都接受；
-// 缺失、非整数、非正数一律报错，绝不放行 UserID==0 的 claims。
+// 接受 JSON 整数字面量及整数字符串，不接受小数或指数形式；
+// 缺失、溢出、非正数一律报错，绝不放行 UserID==0 的 claims。
 func laravelUserID(mapClaims jwtv5.MapClaims) (int64, error) {
 	raw, ok := mapClaims["sub"]
 	if !ok {
@@ -152,11 +152,6 @@ func laravelUserID(mapClaims jwtv5.MapClaims) (int64, error) {
 
 	var userID int64
 	switch sub := raw.(type) {
-	case float64:
-		if sub != math.Trunc(sub) {
-			return 0, fmt.Errorf("laravel token: sub %v is not an integer", sub)
-		}
-		userID = int64(sub)
 	case json.Number:
 		parsed, err := sub.Int64()
 		if err != nil {

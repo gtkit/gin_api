@@ -118,7 +118,7 @@ make project-init NAME=your_project
 
 ## JWT 密钥轮换操作手册
 
-母版的 JWT 由 `gojwt` 签发，使用**带 kid 的多密钥**体系。Ed25519 私钥采用 PKCS#8 PEM（`PRIVATE KEY`），公钥采用 PKIX PEM（`PUBLIC KEY`），支持 Go `crypto/x509` 与 OpenSSL。
+母版的 JWT 使用**带 kid 的多密钥**体系。local 模式由 `gojwt` 签发；external 模式只加载 active/previous 公钥验签，不提供签发器、不读取私钥。Ed25519 私钥采用 PKCS#8 PEM（`PRIVATE KEY`），公钥采用 PKIX PEM（`PUBLIC KEY`），支持 Go `crypto/x509` 与 OpenSSL。
 
 **生成一组新密钥**（kid 必须是新的——同 kid 会被无条件拒绝）：
 
@@ -126,7 +126,7 @@ make project-init NAME=your_project
 go run . jwt generate --kid k2026b --out-dir config/pem
 ```
 
-生成命令给私钥 0600、公钥 0644。`server` 在生产环境启动时会强制检查私钥权限，
+生成命令给私钥 0600、公钥 0644。local 模式的 `server` 在生产环境启动时会强制检查私钥权限，
 Unix 下还会检查 active/previous 公钥不可被 group/other 写入；无需先运行 doctor 才生效。
 dev/test 私钥权限分支较宽，doctor 的 Unix 检查仍严格。
 NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windows 的 doctor 只检查存在性/普通文件。
@@ -433,7 +433,9 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 
 **`external` —— 身份来自外部**
 
-不注册任何认证端点，本服务只验签与授权。接线点：
+不注册任何认证端点，本服务只验签与授权。默认 Ed25519 验签只要求 active/previous 公钥；
+`jwt.active.private_key_path` 可留空，即使填写也不会加载。`jwt generate` 和 `jwt reencode` 仍按各自原规则处理完整密钥对。
+接线点：
 
 1. `internal/pkg/jwtauth` 的 parser 换成你的 IdP 验签实现（或配置为接受其 JWKS）；
 2. `sharedauth.UserVerifier` 改为查询你的用户同步表；

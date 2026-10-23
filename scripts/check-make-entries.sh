@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Exercise Make entry wiring in an isolated fixture. Go/lint stubs record the
-# actual invoked commands; the cleaner itself runs with the real local Go tool.
+# actual invoked commands. The cleaner and tiny integration fixtures use the
+# real local Go tool; fixture tests run without vet, race or coverage checks.
 set -euo pipefail
 # The fixture owns its module and output paths. Parent command-line overrides
 # (notably external coverage output) must not redirect the fixture's cleaner.
-unset MAKEFLAGS MFLAGS MAKELEVEL MAKEOVERRIDES COVERAGE_PROFILE GO_TARGETS GO_BUILD_TAGS
+unset MAKEFLAGS MFLAGS MAKELEVEL MAKEOVERRIDES MAKEFILES GOFLAGS COVERAGE_PROFILE GO_TARGETS GO_BUILD_TAGS
 export GOWORK=off
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sandbox="$(mktemp -d "${TMPDIR:-/tmp}/gin-api-make-entries.XXXXXX")" || exit 1
@@ -27,10 +28,6 @@ fixture="$sandbox/work area"
 mkdir -p "$fixture/scripts" "$fixture/security" "$fixture/bin" "$fixture/.cache" "$sandbox/tools" "$sandbox/outside"
 cp "$ROOT/Makefile" "$fixture/Makefile"
 cp -R "$ROOT/make" "$fixture/make"
-for target in port kill-port; do
-  count="$(awk -v target="$target" '$0 ~ "^" target ":[[:space:]]*$" { n++ } END { print n+0 }' "$fixture/Makefile" "$fixture"/make/*.mk)"
-  [ "$count" = 1 ] || { echo "FAIL: $target has $count ordinary recipes" >&2; exit 1; }
-done
 cp "$ROOT/security/toolchain.mk" "$fixture/security/toolchain.mk"
 cp "$ROOT/scripts/clean.go" "$ROOT/scripts/check-tool-version.sh" "$fixture/scripts/"
 printf 'APP_NAME = fixture\nAPP_DISPLAY_NAME = Fixture\n' > "$fixture/project.mk"
@@ -49,7 +46,21 @@ if [ "${1:-}" = run ] && [ "${2:-}" = ./scripts/clean.go ]; then
 fi
 if [ "${1:-}" = test ] && [ "${INTEGRATION_WIRING_RUN:-0}" = 1 ]; then
   [ "${PLUGIN_INTEGRATION:-0}" = 1 ] || { echo 'missing plugin opt-in' >&2; exit 1; }
-  exec "$WIRING_GO" "$@"
+  # 上面的 GO 记录保留 Make 原始参数，用于验证生产目标的接线。
+  # 真正执行的只有本脚本生成的微型夹具；固定关闭 vet 并移除 race，
+  # 不因验证接线而顺带运行调用者尚未授权的检查。
+  shift
+  ordinary_args=(-vet=off)
+  for arg in "$@"; do
+    case "$arg" in
+      -race|-race=true|-race=false|-vet=off) ;;
+      -vet=*|-cover*) echo 'fixture refuses vet or coverage checks' >&2; exit 1 ;;
+      *) ordinary_args+=("$arg") ;;
+    esac
+  done
+  printf 'GO_EXEC test %s\n' "${ordinary_args[*]}" >> "$MAKE_WIRING_TRACE"
+  printf '[fixture execution] go test %s\n' "${ordinary_args[*]}"
+  exec "$WIRING_GO" test "${ordinary_args[@]}"
 fi
 STUB
 cat > "$sandbox/tools/golangci-lint" <<'STUB'
@@ -190,6 +201,72 @@ target_metadata() {
   make --no-print-directory -p -f Makefile -f "$sandbox/inspect.mk" __inspect BUILD_COMMIT=fixture BUILD_TIME=unknown "MAKECMDGOALS=$1" > "$sandbox/make.database"
   awk -v target="$2" '$0 ~ "^" target ":" { found=1; print; next } found && /^\t/ { print; next } found && /^$/ { exit }' "$sandbox/make.database"
 }
+
+# Make 允许同一目标多次声明依赖，因此不能按源码中的目标行计数。
+# 由 Make 自身解析 include、行尾注释和依赖合并，再检查实际配方及覆盖诊断。
+# 始终只执行无副作用的 __inspect，port/kill-port 和它们的依赖不会运行。
+# 返回 1 专指发现重复配方；解析错误、缺失配方或工具失败返回 2，防止反例
+# 因为无关失败也被判为通过。条件调用会关闭 set -e，关键步骤须显式检查。
+check_port_recipes() {
+  local rules="$1"
+  local database="$sandbox/port.database"
+  local diagnostics="$sandbox/port.diagnostics"
+  local warning_status=0
+  local target
+  if ! LC_ALL=C "$WIRING_MAKE" --no-print-directory -p -f Makefile -f "$sandbox/inspect.mk" -f "$rules" __inspect BUILD_COMMIT=fixture BUILD_TIME=unknown > "$database" 2> "$diagnostics"; then
+    cat "$diagnostics" >&2
+    return 2
+  fi
+  # GNU Make 旧版使用 commands，新版使用 recipe；引号形式也随版本不同。
+  grep -Eq "warning: (overriding|ignoring old) (commands|recipe) for target .(port|kill-port).$" "$diagnostics" || warning_status=$?
+  case "$warning_status" in
+    0) cat "$diagnostics" >&2; return 1 ;;
+    1) ;;
+    *) echo 'FAIL: could not inspect Make recipe diagnostics' >&2; return 2 ;;
+  esac
+  for target in port kill-port; do
+    if ! awk -v target="$target" '
+      $0 ~ "^" target ":" { found=1; next }
+      found && /^\t/ { recipe=1; exit }
+      found && /^$/ { exit }
+      END { exit !recipe }
+    ' "$database"; then
+      echo "FAIL: $target has no ordinary recipe" >&2
+      return 2
+    fi
+  done
+  return 0
+}
+
+port_rules="$sandbox/port-rules.mk"
+: > "$port_rules"
+check_port_recipes "$port_rules" || { echo 'FAIL: baseline port recipes' >&2; exit 1; }
+printf 'port: ## dependency-only comment\nkill-port: ## dependency-only comment\n' > "$port_rules"
+check_port_recipes "$port_rules" || { echo 'FAIL: commented target declarations' >&2; exit 1; }
+printf '.PHONY: __port_dependency\n__port_dependency:\n\t@:\nport kill-port: __port_dependency\n' > "$port_rules"
+check_port_recipes "$port_rules" || { echo 'FAIL: legal dependency merge' >&2; exit 1; }
+for target in port kill-port; do
+  for form in comment dependency; do
+    if [ "$form" = comment ]; then
+      printf '%s: ## duplicate recipe\n\t@:\n' "$target" > "$port_rules"
+    else
+      printf '.PHONY: __port_dependency\n__port_dependency:\n\t@:\n%s: __port_dependency\n\t@:\n' "$target" > "$port_rules"
+    fi
+    if check_port_recipes "$port_rules" > "$sandbox/port-check.log" 2>&1; then
+      echo "FAIL: accepted duplicate $target recipe with $form" >&2
+      exit 1
+    else
+      port_status=$?
+    fi
+    if [ "$port_status" -ne 1 ]; then
+      cat "$sandbox/port-check.log" >&2
+      echo "FAIL: $target/$form failed without detecting a duplicate recipe" >&2
+      exit 1
+    fi
+  done
+done
+echo 'OK: port recipes accept comments/dependency merges and reject four duplicate fixtures'
+
 target_metadata 'migrate-migration build dev' build > "$sandbox/build.target"
 grep -Fq '@:' "$sandbox/build.target"
 if grep -Fq 'go build' "$sandbox/build.target"; then echo 'FAIL: migration build placeholder lost' >&2; exit 1; fi
@@ -289,4 +366,9 @@ rm cmd/integration_test.go
 : > "$MAKE_WIRING_TRACE"
 INTEGRATION_WIRING_RUN=1 INTEGRATION_FORCE_FAILURE=1 make --no-print-directory test-integration BUILD_COMMIT=fixture BUILD_TIME=unknown
 if grep '^GO test.*-race.*\./cmd/' "$MAKE_WIRING_TRACE"; then echo 'FAIL: removed fixture still discovered' >&2; exit 1; fi
-echo 'OK: Make entry/clean boundaries; real cmd integration discovery and forced opt-in failure'
+grep -q '^GO_EXEC test -vet=off ' "$MAKE_WIRING_TRACE"
+if grep -Eq '^GO_EXEC .* (-race|-cover)' "$MAKE_WIRING_TRACE"; then
+  echo 'FAIL: ordinary fixture execution enabled race or coverage checks' >&2
+  exit 1
+fi
+echo 'OK: Make entry/clean boundaries; ordinary Go fixtures (vet off, no race/coverage), discovery and forced opt-in failure'
