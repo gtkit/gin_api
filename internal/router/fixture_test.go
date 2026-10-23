@@ -1,12 +1,13 @@
 package router
 
 import (
+	"testing"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/shared/env"
 	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel"
-	"testing"
 )
 
 func newRouterForTest(t *testing.T, environment env.Env, opt Options) (*gin.Engine, error) {

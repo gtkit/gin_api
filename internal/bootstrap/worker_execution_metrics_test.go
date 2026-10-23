@@ -44,7 +44,11 @@ func TestWorkerMetricsExcludeLongRunningLifetime(t *testing.T) {
 	for _, scope := range data.ScopeMetrics {
 		for _, metric := range scope.Metrics {
 			if metric.Name == "worker.executions" {
-				for _, point := range metric.Data.(metricdata.Sum[int64]).DataPoints {
+				counter, ok := metric.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("metric %q has unexpected type %T", metric.Name, metric.Data)
+				}
+				for _, point := range counter.DataPoints {
 					kind, _ := point.Attributes.Value("worker.kind")
 					counts[kind.AsString()] += point.Value
 				}
@@ -91,7 +95,11 @@ func TestWorkerManagerStartRecordsBothOneShotPaths(t *testing.T) {
 	for _, scope := range data.ScopeMetrics {
 		for _, metric := range scope.Metrics {
 			if metric.Name == "worker.executions" {
-				for _, point := range metric.Data.(metricdata.Sum[int64]).DataPoints {
+				counter, ok := metric.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("metric %q has unexpected type %T", metric.Name, metric.Data)
+				}
+				for _, point := range counter.DataPoints {
 					name, _ := point.Attributes.Value("worker.name")
 					counts[name.AsString()] += point.Value
 				}

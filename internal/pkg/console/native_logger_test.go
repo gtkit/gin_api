@@ -23,7 +23,9 @@ func newNativeTestLogger(t testing.TB, level string) (*logger.Logger, func() []m
 	instance, err := logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithOutJSON(true), logger.WithLevel(level), logger.WithReplaceGlobals(false))
 	os.Stdout = previousOutput
 	if err != nil {
-		_ = output.Close()
+		if closeErr := output.Close(); closeErr != nil {
+			t.Errorf("close log output: %v", closeErr)
+		}
 		t.Fatal(err)
 	}
 	previous := logger.Default()

@@ -3,7 +3,6 @@ package bootstrap
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"slices"
 	"strings"
@@ -159,14 +158,14 @@ func TestNotificationRuntimeRollsBackAndDrainsBeforeChannels(t *testing.T) {
 				f.base.components[2].init = func(context.Context) error { return cause }
 			}
 			if failure == "open with alert" {
-				f.base.components[2].init = func(context.Context) error { logger.HError(fmt.Sprintf("startup failure alert")); return cause }
+				f.base.components[2].init = func(context.Context) error { logger.HError("startup failure alert"); return cause }
 			}
 			r, err := NewRuntime(t.Context(), f.options)
 			if failure == "none" {
 				if err != nil {
 					t.Fatal(err)
 				}
-				logger.HError(fmt.Sprintf("shutdown alert"))
+				logger.HError("shutdown alert")
 				if err := r.Close(t.Context()); err != nil {
 					t.Fatal(err)
 				}
@@ -275,7 +274,7 @@ func TestNotificationLiveWorkerOnlyDrainsLogging(t *testing.T) {
 			t.Fatalf("stop worker=%v", err)
 		}
 		app := &App{runtime: r, workers: manager, shutdown: NewShutdownCoordinator()}
-		logger.HError(fmt.Sprintf("live worker exit alert"))
+		logger.HError("live worker exit alert")
 		if err := app.closeResources(t.Context()); !errors.Is(err, ErrWorkerNotExited) {
 			t.Fatalf("close resources=%v", err)
 		}

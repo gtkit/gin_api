@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"github.com/gtkit/logger/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +8,7 @@ import (
 
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel"
 
 	"gorm.io/gorm"

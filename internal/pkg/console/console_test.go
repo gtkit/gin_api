@@ -20,7 +20,6 @@ func TestConsoleFailureReachesExistingLogger(t *testing.T) {
 	if len(entries) != 1 || entries[0]["level"] != "ERROR" || entries[0]["error"] != cause.Error() {
 		t.Fatalf("console error missing: %v", entries)
 	}
-
 }
 
 // TestColoredOutputBytes 锁定三个打印函数的**逐字节**输出。

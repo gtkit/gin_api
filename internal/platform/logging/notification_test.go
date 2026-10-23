@@ -3,7 +3,6 @@ package logging
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +38,7 @@ func TestPureLoggingDoesNotConstructNotificationClients(t *testing.T) {
 	// composition must neither validate them nor create any outbound resources.
 	cfg := &config.Config{Log: config.LogConfig{ConsoleStdout: 1}, News: config.NewsConfig{Platform: "unknown"}, Email: config.EmailConfig{Host: "invalid"}, SMS: config.SMSConfig{Provider: "unknown"}}
 	p := mustOpen(t, Options{Config: cfg})
-	logger.HError(fmt.Sprintf("local alert"))
+	logger.HError("local alert")
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -62,12 +61,12 @@ func TestAlertQueueRemainsBoundedAt64(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	logger.HError(fmt.Sprintf("first"))
+	logger.HError("first")
 	<-entered
 	for range 64 {
-		logger.HError(fmt.Sprintf("queued"))
+		logger.HError("queued")
 	}
-	logger.HError(fmt.Sprintf("overflow"))
+	logger.HError("overflow")
 	if got := p.main.DroppedMessages(); got != 1 {
 		t.Fatalf("queue dropped=%d, want one after 64 pending", got)
 	}
@@ -180,7 +179,7 @@ func TestCleanupCancellationReachesRealQueuedSend(t *testing.T) {
 		notifier := mustOpenNotification(t, notification.Options{Config: configuration, Robot: channel})
 		p := mustOpen(t, Options{Config: configuration, Notification: notifier})
 
-		logger.HError(fmt.Sprintf("in flight"))
+		logger.HError("in flight")
 		<-entered
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -228,9 +227,9 @@ func TestResolvedSDKLateCallbacksCannotUseStoppedChannels(t *testing.T) {
 			return logger.New(append(opts, logger.WithMessager(delayed))...)
 		}})
 
-		logger.HError(fmt.Sprintf("first"))
+		logger.HError("first")
 		<-delayed.entered
-		logger.HError(fmt.Sprintf("queued"))
+		logger.HError("queued")
 		done := make(chan error, 1)
 		var group sync.WaitGroup
 		group.Go(func() { done <- p.Close(t.Context()) })

@@ -47,7 +47,11 @@ func TestQueueExecutionMetricsPreserveAttempts(t *testing.T) {
 		for _, metric := range scope.Metrics {
 			switch metric.Name {
 			case "worker.executions":
-				points := metric.Data.(metricdata.Sum[int64]).DataPoints
+				counter, ok := metric.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("metric %q has unexpected type %T", metric.Name, metric.Data)
+				}
+				points := counter.DataPoints
 				if len(points) != 1 || points[0].Attributes.Len() != 3 {
 					t.Fatal("task-specific labels leaked into metrics")
 				}
@@ -58,7 +62,11 @@ func TestQueueExecutionMetricsPreserveAttempts(t *testing.T) {
 				}
 				count = points[0].Value
 			case "worker.execution.duration":
-				for _, point := range metric.Data.(metricdata.Histogram[float64]).DataPoints {
+				histogram, ok := metric.Data.(metricdata.Histogram[float64])
+				if !ok {
+					t.Fatalf("metric %q has unexpected type %T", metric.Name, metric.Data)
+				}
+				for _, point := range histogram.DataPoints {
 					durationCount += point.Count
 				}
 			}
@@ -80,5 +88,6 @@ func TestQueueExecutionDoesNotRecoverPanic(t *testing.T) {
 			t.Errorf("panic changed: %v", got)
 		}
 	}()
-	_ = wrapped.ProcessTask(t.Context(), asynq.NewTask("task", nil))
+	err := wrapped.ProcessTask(t.Context(), asynq.NewTask("task", nil))
+	t.Errorf("ProcessTask returned instead of panicking: %v", err)
 }

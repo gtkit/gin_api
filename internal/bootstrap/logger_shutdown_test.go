@@ -51,8 +51,12 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 				defer close(requestDone)
 				response, requestErr := server.Client().Get(server.URL)
 				if requestErr == nil {
-					_, _ = io.Copy(io.Discard, response.Body)
-					_ = response.Body.Close()
+					if _, err := io.Copy(io.Discard, response.Body); err != nil {
+						t.Errorf("read response body: %v", err)
+					}
+					if err := response.Body.Close(); err != nil {
+						t.Errorf("close response body: %v", err)
+					}
 				}
 			}()
 			waitClosed(t, entered, "handler did not start")
@@ -108,7 +112,9 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				output.Write(contents)
+				if _, err := output.Write(contents); err != nil {
+					t.Fatal(err)
+				}
 			}
 			for _, message := range []string{"handler main after flush", "handler access after flush"} {
 				if !strings.Contains(output.String(), message) {

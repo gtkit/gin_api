@@ -2,7 +2,7 @@
 
 日期：2026-10-23（Asia/Taipei）  
 修订：第 2 版，替代上一版全部实施设计。  
-状态：**D1–D3 已确认，阶段 1–3 已实施并完成本次功能验收。lint、脚本 lint、vet、modern、全量 race、覆盖率等受控检查仍未授权。**
+状态：**D1–D3 与阶段 1–3 已完成；阶段 4 已执行。golangci-lint 已升级到 2.15.0，迁移引入的 25 项 lint 告警已修复。第 17 节 P1–P6 已完成：22 项对应修复和脚本分组入口经完整 make lint 验证，全仓及 5 组脚本均为 0 issues、exit 0；本轮仅补改一处 HTTP 测试的 context 来源及注释。独立 vet、modern、全量 race、覆盖率未执行，cmd 既有超时仍不处理。历史检查见第 15–16 节，本次结果见第 17.7 节。**
 
 ## 1. 需求来源与本次纠正
 
@@ -269,7 +269,7 @@ scripts/check-architecture.sh 中 application/dto/models 和外部 pkg 的禁止
 
 尤其不能把“删除门面后，手持原生实例在 Sync 后继续写也会被拒绝”写进验收；当前 SDK 没有该保证。对应旧测试需要明确区分用户批准退场的协议和继续必须满足的实际业务生命周期。
 
-编译、mock、文件测试不能证明真实通知送达、生产磁盘持久性或容量。本节为验收目标；本次真实执行结果见第 14 节，未授权检查与生产送达/容量仍未验证。
+编译、mock、文件测试不能证明真实通知送达、生产磁盘持久性或容量。本节为验收目标；功能验收见第 14 节，后续获准检查见第 15 节，生产送达/容量仍未验证。
 
 ## 9. 分阶段实施计划
 
@@ -289,10 +289,10 @@ scripts/check-architecture.sh 中 application/dto/models 和外部 pkg 的禁止
 | 2.5 局部验收 | 所有接线连通 | 只格式化本次 Go 文件，build 与相关普通测试 | 实际输出、测试名、最终差异 | 同问题 3 轮未解决/无关失败/范围扩大 | 已完成；实际证据见第 14 节，受控检查除外 |
 | 3.1 功能验收 | 阶段 2 完成且阶段 3 获准 | 真实 SDK 文件、HTTP、worker、通知和异常关闭验证；按已授权范围做定向 race | A1–A9 实际矩阵；D1–D3 批准记录单列 | 未证明的关键行为不能报兼容 | 已完成；实际证据见第 14 节，受控检查除外 |
 | 3.2 交付 | 3.1 有真实证据 | 按 backend-acceptance 核对影响范围，更新本文结果并回读 | 明确源码、功能、生产证据各自界限 | 未运行被写成通过 | 已完成；实际证据见第 14 节，受控检查除外 |
-| 4.1 受控检查 | 全部功能完成后，用户另行明确批准具体检查 | 只运行获准的 lint/脚本 lint/vet/modern/全量 race/覆盖率 | 工具版本、完整命令、exit 与原始输出 | 用户停止、工具阻断、无关失败；不绕过 | 未授权、未执行 |
-| 4.2 收尾 | 已有 4.1 实际结果 | 仅修本次问题并在原授权范围复验、记录 | 定向补丁及对应重跑结果 | 需要扩大范围则先说明 | 未授权、未执行 |
+| 4.1 受控检查 | 全部功能完成后，用户另行明确批准具体检查 | 只运行获准的 lint/脚本 lint/vet/modern/全量 race/覆盖率 | 工具版本、完整命令、exit 与原始输出 | 用户停止、工具阻断、无关失败；不绕过 | 已执行；首次结果见第 15 节，工具升级后 lint 与脚本检查见第 16 节；整体尚未全通过 |
+| 4.2 收尾 | 已有 4.1 实际结果 | 仅修本次问题并在原授权范围复验、记录 | 定向补丁及对应重跑结果 | 需要扩大范围则先说明 | 已修复迁移引入的 25 项测试告警并通过 8 包普通测试；22 项存量告警、脚本入口及 cmd 超时保持未处理 |
 
-本轮已明确授权按方案实施阶段 1–3，D1–D3 也已确认；阶段 4 须等全部功能完成后另行询问，不自动运行。
+阶段 1–3 与 D1–D3 按原授权完成；阶段 4 已在全部功能完成后取得用户独立授权，实际结果见第 15 节。
 
 ## 10. 验证方式（真实执行结果见第 14 节）
 
@@ -425,3 +425,339 @@ SDK 的关闭仍是合作式 I/O；迟到通知的渠道接纳保护已用真实
 - OpenSpec 严格验证返回 valid=true、0 issues；随后 `archive use-gtkit-logger-directly --skip-specs -y` 明确返回已归档。已回读归档产物与勾选状态；基线 specs 未改。
 - 对照实施前快照确认依赖和 logging/options.go 未变化；只移除本任务指定旧包，不覆盖其他任务已有源码/文档改动。新增测试仅捕获或驱动原生 SDK，不给生产调用增加代理。
 - 本方案的确认结果、实际阶段状态、失败及修复记录、命令结果与未验证项已回读；等待用户对阶段 4 的独立授权。
+
+## 15. 2026-10-23 阶段 4：获准检查与限定修复
+
+用户最新授权：
+
+> 可以，执行 lint、vet、modern、全量 race 和覆盖率检查，只修复本次日志迁移引入的问题，不要改无关代码。完成后把实际结果更新到方案里并汇报。
+
+第 14 节及其“未运行”状态是上一轮功能交付记录；首次检查结果单独记在本节，不覆盖历史结果。后续工具升级、lint 重跑及限定修复见第 16 节；本节的版本阻断为升级前历史状态。
+
+### 15.1 前置事实、执行顺序与边界
+
+- 当前 HEAD 为 `109ccd4`（日志迁移提交）；本轮开始时 `git status --porcelain=v1` 为空。原迁移前快照仍可用于逐文件归因。
+- 本机 `/usr/local/bin/go` 为 go1.27.3 darwin/amd64；PATH 中 golangci-lint 为 2.14.0，`security/toolchain.mk` 要求 2.15.0。先运行真实项目入口，保留版本阻断，不安装/替换工具、不绕过门禁。
+- 执行独立入口：`make lint`、`make vet`、`make check-modern`、`make check-coverage COVERAGE_PROFILE=/Users/xiaozhaofu/go/src/Project/gin_api/.cache/logger-unification-gates-20261023-4qkhl_ex/coverage.out`。
+- 所有入口加 `GOWORK=off GOTOOLCHAIN=local GOPROXY=off`；race/coverage 使用项目默认 `scaffold` 构建标签，`ALLOW_NO_LOOPBACK=0`。覆盖率入口本身执行全量 `go test -race -count=1 -timeout=5m -covermode=atomic`，无需重复跑同一全量 race。
+- 原始输出保存在 `.cache/logger-unification-gates-20261023-4qkhl_ex/`；不复用旧 profile，不把失败测试的部分 profile 当作完整覆盖率。
+- 每项前置条件是本节授权与实际工具入口已核对；检查命令/退出码/输出构成证据。无关代码问题只记录、不修复；缺工具或重复旧失败不改项目约束、不删除测试、不降阈值、不跳过用例伪造全绿。
+- 如发现本次日志迁移引入的问题，先在本节记录具体位置、归因和最小修复步骤，再改对应文件，重跑受影响模块及获准检查。检查三轮仍失败、无法明确归因或需扩大范围时停止对应修复。
+- 未运行 `make check` 的其他传感器/发布/容器/集成入口，未改配置、依赖、架构或其他任务代码，未提交或发布。本轮未修改源码。
+
+### 15.2 实际结果
+
+以下日志均位于第 15.1 节的证据目录；实际入口、环境变量和退出码另存 `results.json`。
+
+| 项目 | 本轮结果 | 证据 |
+|---|---|---|
+| lint | make exit 2；工具版本门禁阻断，实际 Go lint/脚本 errcheck 未开始 | lint.log |
+| vet | make exit 0；go vet -tags scaffold ./... 通过 | vet.log |
+| modern | make exit 0；go fix -diff -tags scaffold ./... 无改写输出 | modern.log |
+| 主工作区全量 race | make exit 2；cmd/TestServerUsesDefaultConfigurationLoader 在 5m0s 超时，cmd 包 307.251s；其余 48 个有测试包通过，输出未出现数据竞争告警 | race-coverage.log |
+| 主工作区覆盖率 | 全量测试失败，阈值比较未执行；coverage.out 仅为失败运行的部分数据，不作为通过证据 | race-coverage.log、coverage.out |
+| 同提交隔离环境全量 race | make exit 0；49 个有测试包通过，输出未出现数据竞争告警 | isolated-race-coverage.log |
+| 同提交隔离环境覆盖率 | 实际阈值检查通过：82.7% >= 72.5%，未修改原阈值 | isolated-race-coverage.log、isolated-coverage.out |
+
+失败归因与范围处理：
+
+- lint：项目要求 2.15.0，本机为 2.14.0，与旧 ERR-20261023-100 一致；`security/toolchain.mk` 相对迁移前提交 `4e93cfa` 无变化。本轮记录为 ERR-20261023-113，保持 open。未绕过版本校验，也未安装/替换工具。
+- 主工作区超时：与旧 ERR-20261023-091/101 一致。测试将 APP_ROOT 指向空临时目录，但配置查找会继续回落到源码目录内的未入库本地运行配置；堆栈显示测试进入 App.Run/awaitShutdown 等待关停。`cmd/runtime_assembly_test.go`、`internal/platform/config/load.go`、`internal/runtime/resource/path.go` 相对 `4e93cfa` 均无变化；干净同提交环境通过，进一步支持环境归因。本轮记录为 ERR-20261023-115，保持 open。
+- 已执行检查未发现需在本次授权范围内修复的日志迁移新增问题；不修改上述既有工具或配置问题。未把“无数据竞争告警”当作失败运行已通过，也不以隔离结果覆盖主工作区失败。
+
+### 15.3 同提交的隔离验证
+
+主工作区 full race/coverage 未被替换或提前终止，已等待其真实失败结果。基于旧配置回落问题，追加同一提交的干净本地工作树作环境对照：
+
+1. 实际执行 `git worktree add --detach /Users/xiaozhaofu/go/src/Project/gin_api/.cache/logger-unification-gates-20261023-4qkhl_ex/isolated 109ccd4`，exit 0；保留同一提交全部代码/测试，未复制主工作区未入库的运行配置。
+2. 在该目录执行 `GOWORK=off GOTOOLCHAIN=local GOPROXY=off ALLOW_NO_LOOPBACK=0 make check-coverage COVERAGE_PROFILE=/Users/xiaozhaofu/go/src/Project/gin_api/.cache/logger-unification-gates-20261023-4qkhl_ex/isolated-coverage.out`，exit 0；标签仍为 scaffold，覆盖范围仍为 ./...，含完整 race 与 72.5% 原覆盖率门槛。cmd 包 10.014s 通过，logging 包覆盖率 97.9%，项目总覆盖率 82.7%。
+3. 两边 HEAD 均为 `109ccd47432d9339beaad2e2e83ff9ecd23eeace`；两边 `*.go`、go.mod/go.sum 相对 HEAD 均无差异，隔离工作树 git status 为空。结果记录于 `source-comparison.json`。不删测试、不改配置、不修复与迁移无关的配置查找行为。
+4. 完成后执行 `git worktree remove /Users/xiaozhaofu/go/src/Project/gin_api/.cache/logger-unification-gates-20261023-4qkhl_ex/isolated`，exit 0；临时工作树已移除，日志、两个 profile 和结果记录保留在证据目录。未修改业务目录/模块层级、主工作区源码或 Git 历史。
+
+### 15.4 收尾与未解决项
+
+- 本轮仅更新此方案及项目错误记录，保存检查证据；未修改任何 Go 源码、测试、配置、依赖或其他任务文档。
+- vet/modern、同提交隔离环境的全量 race/覆盖率已有实际通过证据；lint 尚未运行到代码检查，主工作区全量测试仍失败，整体门禁不标为全通过。
+- 未解决项是本机 golangci-lint 2.14.0 与项目要求 2.15.0 不匹配，以及主工作区本地配置影响缺配置测试。未将本次检查授权扩大为安装工具或修复无关代码的授权。
+- 两项失败均已记录实际命令、输出和归因；本次没有源码修复补丁，因此没有修复后的额外重跑。后续若处理既有阻断，应另行明确对应范围。
+
+## 16. 2026-10-23 golangci-lint 2.15.0 升级与 lint 重跑
+
+用户后续授权：
+
+> 把 golangci-lint 升级到项目要求的 2.15.0，重跑 lint 并把实际结果更新到方案里；cmd 的既有超时暂时不处理，不要改无关代码。
+
+### 16.1 目标、事实与实施边界
+
+- 目标：将 PATH 当前使用的 `/Users/xiaozhaofu/go/bin/golangci-lint` 从 2.14.0 升至项目要求的 2.15.0，实际重跑 `make lint`，如实记录 Go lint 与脚本 errcheck 结果。
+- 已核对目标为普通可执行文件（非符号链接），旧程序报告 2.14.0、Go 1.27.2；本机 Go 为 1.27.3，GOOS/GOARCH 为 darwin/amd64。
+- 官方 [v2.15.0 Release](https://github.com/golangci/golangci-lint/releases/tag/v2.15.0) 已确认存在、非 draft/prerelease。系统 curl 通过 HTTPS 取得 release API：darwin-amd64 归档 SHA256 为 `767b899a28285e88ded2823d5dcc4bc5ef681173eb2d80f029a7b17ee4ece3b8`，官方 checksums 文件 SHA256 为 `364f56cb7ef4555e42bb1754b432b0f40bd914477d962c5888c8a8b5378ce8b6`。最终下载内容已按两份官方摘要校验。
+- Python urllib 首次查询因本机证书链校验失败，未下载/安装程序；系统 curl 保留 TLS 校验后查询成功。不关闭 TLS 校验，不修改系统证书或网络配置。
+- 变更获准的工具文件、本文及必要项目错误记录；发现迁移新增告警后，按第 16.4 节仅修复本次迁移的 15 个测试文件。原始证据与旧程序备份保存到 `.cache/logger-lint-upgrade-20261023/`。不修改项目依赖、工具版本要求、lint 规则、配置、目录架构或其他任务文件；不重跑 cmd 测试、独立 vet、modern、race、覆盖率或聚合门禁。
+- 兼容边界：保持原 PATH 安装位置和执行权限，只升级工具至已有固定版本，不改变应用运行接口、存储、业务行为。lint 若报告问题，先记录具体位置和归因；只处理已确认属于本次日志迁移的问题，无关问题仅报告。
+
+### 16.2 步骤、失败处理与回滚
+
+| 步骤 | 前置条件 | 具体操作 | 检查与可复核证据 | 停止/失败处理 | 状态 |
+|---|---|---|---|---|---|
+| 16.2.1 保存依据 | 授权、规则、原方案及官方版本已核对 | 回读本节；创建证据目录，备份旧程序并记录 SHA256、版本及工作区状态 | 原程序备份、版本输出、差异快照 | 无法备份则不替换 | 已完成；备份 SHA256 为 815ada10a5bc5ca1b40e84e7c33310148f633a4dd7473ecb787855ecd3de03ff |
+| 16.2.2 准备候选 | 旧程序可恢复 | 从官方 Release 下载固定版本归档与 checksums；同时验证 API digest 与 checksums；仅提取归档中的目标普通文件 | 下载命令退出码、SHA256、候选 `version` 输出 | 下载、校验、架构或启动失败则保持旧程序 | 已完成；16000778 字节完整归档双重摘要校验通过，候选 version exit 0 |
+| 16.2.3 安装 | 候选校验通过，准确报告 2.15.0 | 在原目录临时落盘后原子替换目标，保留原执行权限 | PATH 解析位置、安装后版本及项目 check-tool-version 退出码 | 安装后校验失败则从备份恢复旧程序；不伪造版本输出 | 已完成；实际 2.15.0、Go 1.27.0，版本门禁 exit 0，权限仍为 0755 |
+| 16.2.4 重跑 lint | 实际安装版本满足 2.15.0 | `GOWORK=off GOTOOLCHAIN=local GOPROXY=off make lint`，保留全部输出 | 命令退出码、Go lint/逐脚本 errcheck 实际结果 | 非零先归因，不改无关代码；不降规则或跳过文件 | 已执行；第一次 47 项、限定修复后 22 项，make 均 exit 2；脚本另行检查结果见 16.5 |
+| 16.2.5 记录 | 已取得实际结果 | 更新本节与阶段状态；仅在版本阻断确已消除时关闭本任务 ERR-20261023-113 | 回读方案、错误记录、最终工作区差异 | 未完成项不标为通过，ERR-20261023-115 保持未处理 | 已记录；113/116/117/122 已关闭，120/123 的存量阻断与 115 保持 open |
+
+安装准备过程保留真实失败：直连 Release 域名超时（两个请求均为 curl exit 28）；官方 API 单流归档在 60 秒后中断（963382/16000778 字节，exit 28）。下载未完成时曾错误地提前启动校验，校验 exit 1 拒绝不完整文件，该轮未生成候选或安装。错误与纠正记录为 ERR-20261023-116/117。
+
+根据已观测的约每秒 33 KB 速率估算，改用同一官方资产的分段传输：保存首 8000000 字节后停止本任务原续传进程（exit 143）；8000000–11999999 段在 3959850/4000000 字节处超时（exit 28），随后补齐最后 40150 字节（exit 0）；12000000–16000777 段 exit 0。已逐段核对 Content-Range 与长度，按顺序合成；完整归档匹配官方 release API SHA256 和 checksums。未切换第三方来源或关闭 TLS 校验，未执行不完整文件。
+
+已原子替换 `/Users/xiaozhaofu/go/bin/golangci-lint`，安装后 SHA256 为 `e04962742507a5f37a4002a7a8b2b549f6864f17807eb5d534d947f6311a051f`；实际输出 `golangci-lint has version 2.15.0 built with go1.27.0 from 25c5369a on 2026-10-16T11:03:09Z`。项目版本门禁 exit 0；`make lint` 的实际结果见 16.5。ERR-20261023-113/116/117 已按实际处置关闭，cmd 的 ERR-20261023-115 未处理。
+
+若候选或安装后验证失败，只回滚工具文件；lint 的真实源码告警不作为自动回退工具版本的理由。备份保留便于用户复核或恢复。
+
+### 16.3 第一次 lint 与归因
+
+`GOWORK=off GOTOOLCHAIN=local GOPROXY=off make lint` 已返回 exit 2，共 47 项：bodyclose 4、canonicalheader 5、contextcheck 1、errcheck 20、goimports 4、staticcheck 11、whitespace 2。Go lint 失败后 Makefile 尚未执行脚本 errcheck。原始输出为 `lint.log`，问题清单为 `lint-issues.json`。
+
+对照迁移前快照 `/var/folders/_w/xwv4k3t12vn9054592gsk5200000gn/T/gin-api-logger-direct-lqbc1ufo`：25 项由日志迁移引入；其余 22 项位于迁移前已存在的 `internal/pkg/httpclient/propagation_test.go`、`internal/bootstrap/worker_execution_metrics_test.go`、`internal/pkg/metrics/worker_execution_test.go`、`internal/pkg/tasks/execution_metrics_test.go`。快照的 `status-before.txt` 已列出这四个文件；propagation_test 的迁移差异仅为 logger import/ContextWithRequestID，所报问题行均已存在；bootstrap 指标测试与快照逐字相同。不按单次提交包含的全部文件推定归属。
+
+### 16.4 仅修复日志迁移引入的 25 项
+
+沿用第 15 节用户已明确的“只修复本次日志迁移引入的问题”授权；本次工具升级用于完成该受控检查，不扩展到四个存量问题文件或 cmd 超时。修复仅限已有测试，生产调用、SDK 使用方式、依赖、配置、接口、存储和目录架构不变。
+
+| 步骤 | 前置条件与具体范围 | 改动 | 检查、停止条件与交付物 | 状态 |
+|---|---|---|---|---|
+| 16.4.1 保存 | 已逐项对照 lint 输出、迁移前快照和最新源码 | 保存下述 15 个测试文件的修改前副本、四个存量文件的 SHA256 | 备份与文件清单可回读；不能确认归属则不修改 | 已完成，source-before-lint-fix/ 与 unrelated-source-hashes.json |
+| 16.4.2 错误检查（8 项） | `internal/bootstrap/logger_shutdown_test.go`；`internal/middleware/native_logger_test.go`；`internal/pkg/{console,httpcache,response}/native_logger_test.go`；`internal/platform/data/native_logger_test.go` | 给 io.Copy、Body.Close、Builder.Write 和初始化失败后的文件 Close 增加测试错误报告；保留原测试流程与资源关闭顺序 | 不忽略真实 I/O 错误；不修改 logger 调用或引入封装 | 已完成，对应告警全部消失 |
+| 16.4.3 冗余格式化（11 项） | `internal/bootstrap/alerting_test.go`、`internal/bootstrap/notification_test.go`、`internal/platform/logging/notification_test.go` | 仅把无参数 `fmt.Sprintf` 的固定字符串直接传给 logger.HError，移除已无用途的 fmt import | 保留消息原文和通知断言，保留真正需要格式化的调用 | 已完成，对应告警全部消失 |
+| 16.4.4 格式（6 项） | `internal/bootstrap/{assembly_contract,lifecycle_contract}_test.go`、`internal/router/{fixture,middleware_construction}_test.go`；`internal/pkg/console/console_test.go`、`internal/platform/logging/owner_test.go` | 归位迁移加入的 imports，删除迁移删除语句后遗留的两处空行，仅格式化这 15 个文件 | 不自动格式化或修改其他文件 | 已完成，gofmt exit 0，对应告警全部消失 |
+| 16.4.5 复验 | 上述局部补丁完成 | 重跑 make lint；运行上述 8 个受影响包普通测试（`-vet=off -tags scaffold -count=1 -timeout=3m`）；Go lint 若被存量告警阻断，另按 Makefile 对 scripts/*.go 逐个执行 `golangci-lint run --enable-only=errcheck`，保留 make 的失败结论 | 不跑 cmd、全量 race/覆盖率；存量告警只记录，不降低规则或跳过文件；同一修复三轮失败则停止 | 已执行，8 包普通测试通过；全仓 lint 与脚本入口仍因存量问题失败 |
+| 16.4.6 收尾 | 已有实际输出 | 更新最终结果与剩余告警，核对四个存量文件未变，回读方案 | 有剩余问题不得标为全仓 lint 通过；只关闭真实解决的错误 | 已完成，四个文件 SHA256 相同；未改任何生产 Go 文件或无关代码 |
+
+本次修复风险仅为测试内错误报告新增失败分支；已通过相关普通测试验证。若局部补丁导致不相关行为或无法确认结果，按逐文件备份回退本次补丁，不撤销旧迁移或其他任务改动。此节在源码修改前落盘并回读；实际补丁仅涉及 15 个测试文件，40 行新增、28 行删除。
+
+### 16.5 最终实际结果与证据
+
+cwd：`/Users/xiaozhaofu/go/src/Project/gin_api`；所有 Go/lint 检查均使用 `GOWORK=off GOTOOLCHAIN=local GOPROXY=off`。本轮未重新执行独立 vet、modern、race、覆盖率，也未运行 cmd 测试。
+
+| 执行 | 退出码与结果 | 证据（.cache/logger-lint-upgrade-20261023/） |
+|---|---|---|
+| 候选及安装后 `golangci-lint version`、项目 `check-tool-version.sh golangci-lint 2.15.0` | 均 exit 0，安装版本准确为 2.15.0 | integrity.json、install.json、version-candidate.txt |
+| 第一次 `make lint` | exit 2，47 项，版本门禁已通过 | lint.log |
+| 仅修复日志迁移新增问题后 `make lint` | exit 2，剩余 22 项：bodyclose 4、canonicalheader 5、contextcheck 1、errcheck 12；本次 25 项全部消失 | lint-after-fix.log、final-verification.json |
+| `go test -vet=off -tags scaffold -count=1 -timeout=3m ./internal/bootstrap ./internal/middleware ./internal/pkg/console ./internal/pkg/httpcache ./internal/pkg/response ./internal/platform/data ./internal/platform/logging ./internal/router` | exit 0，8 个包全部通过 | tests-after-fix.log |
+| 按 Makefile 同样的单文件参数逐个执行 `golangci-lint run --enable-only=errcheck scripts/<file>.go` | 前 3 个 exit 0；第 4 个 check-repository-context_test.go exit 1、4 处 typecheck 错误；其后 clean.go/security-eval.go 未运行 | script-errcheck.log、script-errcheck-results.json |
+| 最终范围核对 | 15 个变更 Go 文件均为本次测试；4 个存量告警文件 SHA256 未变；go.mod/go.sum、.golangci.yml、Makefile、相关脚本及 cmd 无差异 | final-verification.json、工作区 diff |
+
+脚本失败归因：现有入口逐个传入 `.go` 文件，`check-repository-context_test.go` 需要同目录 `check-repository-context.go:51` 的 `repositoryContextFindings`，单独加载时未定义。迁移前状态已列出这两个脚本，本轮未改脚本/入口或通过改参数制造全绿。记录为 ERR-20261023-123（open）。全仓剩余 22 项与限定修复记录为 ERR-20261023-120（open）；一次补丁上下文不匹配已纠正并关闭 ERR-20261023-122。
+
+本轮结果：工具版本升级成功，日志迁移新增告警已修复，相关普通测试通过；**全仓 lint 和脚本 lint 尚未通过**。cmd 既有超时明确暂不处理。旧工具备份保留在 `golangci-lint-2.14.0.backup`；未提交、推送或发布。所有实际状态与未执行项均按以上证据记录，未把第 15 节历史 race/覆盖率结果当作本次修复后的重新验证。
+
+## 17. 剩余 22 项告警与脚本 lint：已批准的修复方案
+
+### 17.1 本轮授权、依据与范围
+
+本节制定时的用户要求：
+
+> 把剩余 22 项存量告警和脚本 lint 失败的具体原因、涉及文件及建议修复方式列出来，更新到方案里给我确认，先别改代码，cmd 的既有超时仍不处理。
+
+本节最初仅制定方案：当时已读取第 16 节留存的真实 lint 输出、四个测试文件、相关生产契约、Makefile 与两个配套脚本，未修改代码或运行检查。用户随后批准 P1–P5，实施授权及实际结果见第 17.6 节；以下原因与建议保留为原方案依据，不能单凭方案视为 lint 已通过。
+
+下表及第 17.2–17.4 节的行号均为方案制定时的原行号；检查结果来自上一轮 `lint-after-fix.log` 与 `script-errcheck.log`，不是实施后重跑。当前锁定 Go 为 1.27.3，OpenTelemetry 为 1.47.0，golang.org/x/tools 为 0.52.0，golangci-lint 为 2.15.0；本次未升级或新增依赖。
+
+| 文件 | 现有告警数 | 建议修改范围 |
+|---|---:|---|
+| `internal/pkg/httpclient/propagation_test.go` | 11 | HTTP 替身响应与关闭、Header API 字面量、trace 提取的父 context、测试 fixture 解析错误 |
+| `internal/bootstrap/worker_execution_metrics_test.go` | 2 | 指标数据的受检类型断言 |
+| `internal/pkg/metrics/worker_execution_test.go` | 6 | 指标类型断言及预期 panic/Goexit 的返回值处理 |
+| `internal/pkg/tasks/execution_metrics_test.go` | 3 | 指标类型断言及预期 panic 的返回值处理 |
+| `Makefile` | 独立的脚本入口问题 | `tool` 目标中按独立脚本及其配套测试组合检查 |
+
+22 项均位于测试文件：bodyclose 4、canonicalheader 5、contextcheck 1、errcheck 12。其中 12 项 errcheck 是 **8 处未检查的类型断言、3 处预期异常控制流中被丢弃的 error、1 处 TraceState 解析 error**，不是 12 处生产调用错误。脚本的 4 条 typecheck 诊断另计，不包含在 22 项内。
+
+### 17.2 HTTP 请求传播测试：11 项
+
+文件：`internal/pkg/httpclient/propagation_test.go`。
+
+| ID | 行号 / 规则 | 具体原因 | 建议修复方式 |
+|---|---|---|---|
+| R01 | 69 / bodyclose | `RoundTrip` 的响应被 `_` 丢弃，分析器看不到 Body 关闭路径。该用例的替身实际返回 `(nil, cause)`，不是已证实发生了真实 Body 泄漏。 | 显式接收 response 与 err；若意外得到非 nil Body，先关闭并检查关闭错误，再断言 response 为 nil 且 `errors.Is(err, cause)`。保留原错误传播语义。 |
+| R02 | 92 / bodyclose | 成功路径丢弃响应；其替身在第 90 行返回 `(nil, nil)`，没有构造符合成功路径语义的 HTTP 响应。 | 替身返回 `StatusCode: http.StatusNoContent, Body: http.NoBody` 的非 nil 响应；调用方检查 err、response/Body，并显式关闭 Body、检查关闭错误。保留无关联 context 时调用方 header 不变的断言。 |
+| R03 | 116 / bodyclose | 与 R02 相同，第 114 行替身返回 `(nil, nil)`，调用方未处理响应 Body。 | 构造同样的最小合法响应并显式关闭；保留六个原始大小写键未变、输出只有三个关联键的断言。 |
+| R04 | 136 / bodyclose | 并发用例的第 130 行替身返回 `(nil, nil)`，32 次调用均丢弃响应。 | 每次返回最小合法响应，并在对应 goroutine 内检查、关闭 Body；错误用 `t.Errorf` 加 return 报告，不在该 goroutine 中调用 `t.Fatal`。保留 32 个 request ID 不串值及原请求未变的断言。 |
+| R05 | 46 / canonicalheader | `Header.Set("traceparent", ...)` 使用未规范化的 Header API 字面量。 | 改为 `"Traceparent"`；值 `old-trace` 不变。 |
+| R06 | 47 / canonicalheader | `Header.Set("tracestate", ...)` 使用未规范化的 Header API 字面量。 | 改为 `"Tracestate"`；值 `old=value` 不变。 |
+| R07 | 72 / canonicalheader | `Header.Get` 使用小写字面量；本行同时读取 traceparent、tracestate，lint 输出以本行第一处定位。 | 本行两处分别改为 `"Traceparent"`、`"Tracestate"`，保留原始 header 未被改写的断言。 |
+| R08 | 87 / canonicalheader | 对收到的 header 与原 header 调用 `Get("traceparent")`，同一行有两处。 | 两处均改为 `Get("Traceparent")`，保留两边值相等的比较。 |
+| R09 | 188 / canonicalheader | 真实 HTTP client 用例调用 `Get("traceparent")`。 | 改为 `Get("Traceparent")`，保留实际服务端收到关联 header 的断言。 |
+| R10 | 58 / contextcheck | 第 56 行用独立的 `t.Context()` 提取 header，再使用提取结果；检查器将其判为未继承当前请求 context 的来源。 | 从 `got.Context()` 派生提取用 context，但先用 `trace.ContextWithSpanContext(got.Context(), trace.SpanContext{})` 清空已有 span，再传给 `TraceContext.Extract`。保留请求 context 身份和取消传播断言，并增加缺失/非法 traceparent 时提取结果无效的断言。 |
+| R11 | 31 / errcheck | `correlationContext` 将 `trace.ParseTraceState("vendor=value")` 的 error 丢给 `_`。固定输入不等于可以绕过已启用的错误检查。 | 为这个私有测试 fixture 加 `testing.TB` 参数与 `t.Helper()`，显式检查解析错误；仅在测试主 goroutine 调用。更新本文件第 42、100、135、183 行四处使用，其中并发用例先在循环中构造 context，再交给 `wg.Go`，避免 fixture 内的 `t.Fatal` 在工作 goroutine 执行。 |
+
+必须保留的细节：
+
+- R05–R09 只规范化 Header.Set/Get 的参数。第 101–104 行直接构造 map 的 `x-request-id`、`traceparent`、`TRACESTATE` 是刻意覆盖重复大小写键的反例，不改成统一大小写。
+- R10 不能直接把第 56 行替换成 `Extract(got.Context(), ...)` 就结束。已读取的 OTel 1.47.0 源码表明：header 无效时 `Extract` 直接返回传入的父 context；而 `got.Context()` 已带期望的 span，这样可能在 header 根本没传播时仍通过测试。先清空 span 可保留取消与其他 context 值，同时使断言真正依赖 header。
+- R01 的 `(nil, cause)` 是有效错误用例，保留；R02–R04 才改为成功响应。只修测试替身与资源处理，不改 `propagationTransport.RoundTrip` 的生产行为。
+
+### 17.3 指标与异常控制流测试：11 项
+
+`.golangci.yml:84–90` 已启用 `check-type-assertions: true`、`check-blank: true`，所以 `value.(T)` 和 `_ = 返回error的方法()` 都会被 errcheck 报告。建议遵守现有规则，不关闭检查器或增加路径排除。
+
+| ID | 文件 / 行号 | 具体原因 | 建议修复方式 |
+|---|---|---|---|
+| R12 | `internal/bootstrap/worker_execution_metrics_test.go:47` | 直接断言 `metric.Data.(metricdata.Sum[int64])`，类型变化时 panic，未检查 ok。 | 先接收 Sum 与 ok；不匹配用 `t.Fatalf` 输出指标名与实际 `%T`，再遍历 DataPoints。 |
+| R13 | 同文件 :94 | 同 R12，第二个 worker 启动路径断言未检查。 | 同样显式检查类型；保留 required/optional 各一次、cleanup 各一次的断言。 |
+| R14 | `internal/pkg/metrics/worker_execution_test.go:35` | worker.executions 的 Sum 类型断言未检查。 | 先保留采集结果，再用 comma-ok 断言；失败明确报告类型，不跳过该指标。 |
+| R15 | 同文件 :36 | worker.execution.duration 的 Histogram 类型断言未检查。 | 显式检查 `metricdata.Histogram[float64]`；保留序列数量与 2 秒时长断言。 |
+| R16 | 同文件 :73 | 预期 callback panic 的路径仍写成 `_ = recorder.RunWorker(...)`。 | 显式接收并检查返回 error；保留 defer/recover 对原 panic 对象的比较。若调用意外正常返回，也判测试失败；不在生产 RunWorker 中吞掉 panic。 |
+| R17 | 同文件 :103 | 32 次并发执行后的 Sum 类型断言未检查。 | comma-ok 检查后继续验证 calls、DataPoints 长度和计数均为 32。 |
+| R18 | 同文件 :115 | 预期 `runtime.Goexit()` 终止 goroutine，却直接丢弃 RunWorker 的 error。 | 写出对意外返回 error 的检查；若调用正常返回 nil 也用 `t.Error` 判失败。保留 `defer close(done)`、等待 done 和后续指标断言，不使用会作用于错误 goroutine 的 `t.Fatal`。 |
+| R19 | 同文件 :121 | Goexit 后采集 Sum 的类型断言未检查。 | comma-ok 检查后取 DataPoints；保留一次记录及 `worker.outcome == "panic"` 的既有契约。 |
+| R20 | `internal/pkg/tasks/execution_metrics_test.go:50` | queue 执行计数的 Sum 类型断言未检查。 | 显式检查 Sum；保留单一序列、三个标签、consumer/failure 标签和两次尝试计数。 |
+| R21 | 同文件 :61 | queue 时长 Histogram 类型断言未检查。 | 显式检查 Histogram 再遍历；保留 durationCount == 2。 |
+| R22 | 同文件 :83 | 预期 handler panic，却直接丢弃 `wrapped.ProcessTask(...)` 的 error。 | 显式检查意外返回的 error，保留 recover 对原 panic 对象的比较；正常返回 nil 也必须失败。不修改 production middleware 的 panic 传播。 |
+
+这 8 处受检类型断言不建议抽成新的公共工具包；在各测试内就地写出类型和失败信息即可。不要用类型不符时 continue 或返回零值来消除告警，否则会削弱测试。panic/Goexit 路径的目标仍是原控制流，不把它们改成普通成功或 error 返回路径。
+
+### 17.4 脚本 lint 失败：一个入口原因，四条 typecheck 诊断
+
+实际来源是 `Makefile:124–126`：它对 `scripts/*.go` 的每个文件分别执行 `golangci-lint run --enable-only=errcheck "$source"`。
+
+| 位置 | 已确认原因 | 建议处理 |
+|---|---|---|
+| `scripts/check-repository-context_test.go:75、117、134、142` | 该测试文件四次引用 `repositoryContextFindings`；单独传入测试文件时，没有加载定义所在的配套源码。 | 与 `scripts/check-repository-context.go` 作为同一个编译单元交给 lint。保留现有测试与全部四处断言。 |
+| `scripts/check-repository-context.go:51` | 函数已经存在，不是缺少实现；该源码文件单独 lint 已通过。 | 不补一个同名假函数，不复制定义到测试，也不修改检查器算法。 |
+| 两个文件第 1 行 | 均带 `//go:build ignore`，普通 `./...` 检查不会自动覆盖这组独立脚本；当前入口用显式文件参数补充覆盖。 | 保留 ignore 标签及显式脚本检查，不通过删除 build tag 改变包布局。 |
+| `Makefile:124–126` | 通配符把配套 `_test.go` 当作独立程序检查。其余脚本也都为带 main 的独立程序，不能把整个 `scripts/*.go` 一次性交给 lint，否则会形成多个 main 的冲突。 | 按“非 `_test.go` 主文件 + 同名 `_test.go`（存在时）”分组；不同独立脚本继续分开运行，失败仍立即返回非零。对没有配套主文件的 `_test.go` 明确报错，不能静默漏检。 |
+
+建议 Makefile 检查分组如下；每个现有文件恰好覆盖一次：
+
+| 编译单元 | lint 参数中的文件 | 上轮实际状态 |
+|---|---|---|
+| 文档引用检查器 | `scripts/check-doc-refs.go` | 单文件通过 |
+| 包变量检查器 | `scripts/check-package-vars.go` | 单文件通过 |
+| repository context 检查器及测试 | `scripts/check-repository-context.go` + `scripts/check-repository-context_test.go` | 主文件单独通过；测试单独失败；组合尚未执行 |
+| 清理工具 | `scripts/clean.go` | 因前项失败，尚未执行 |
+| 安全评估工具 | `scripts/security-eval.go` | 因前项失败，尚未执行 |
+
+建议只修改 Makefile 的文件组合方式，不新增目录、公共封装、模块或依赖；也不预先修改后三个编译单元的源码。组合后的 lint 结果及最后两项结果目前未知，不能提前宣称全部通过。
+
+### 17.5 已批准实施顺序、风险、回滚与验收
+
+建议实施范围为上述 **4 个测试文件 + Makefile**。生产 HTTP/指标/队列实现、脚本检查器算法、go.mod/go.sum、.golangci.yml、目录结构和已有 15 个迁移修复文件均不在新增修改范围。原 request ID、header 不变性、32 路并发隔离、panic 身份、Goexit、指标标签和重试次数断言必须保留。
+
+| 阶段 | 前置条件 | 具体工作 | 预期证据 / 停止条件 | 当前状态 |
+|---|---|---|---|---|
+| P1 复核与快照 | 用户明确确认实施本节 | 重读本节、最新错误记录、源码和工作区差异；保存 5 个文件的当前副本 | 原件与差异可复核；文件/告警已变化时先核对，不覆盖其他任务 | 已完成；5 个目标文件快照、15 个既有 Go 改动 SHA256 已保存 |
+| P2 HTTP 测试 | P1 一致 | 按 R01–R11 修正 fixture、响应关闭、Header API、context 来源与解析错误 | 11 项逐项有对应补丁；不弱化大小写反例或 trace/header 断言 | 已完成；普通回归通过，P6 补正 context 静态来源后 lint 通过 |
+| P3 指标测试 | P1 一致 | 按 R12–R22 补受检类型断言与异常返回分支 | 11 项逐项有对应补丁；panic/Goexit/计数契约不变 | 已完成；三个相关包普通回归与 P6 lint 通过 |
+| P4 脚本入口 | 已核对现有 6 个脚本文件的归属 | 在 Makefile 按上表组成 5 个独立编译单元；检查孤立测试文件；保留失败传播 | 不漏掉测试、不合并多个 main；发现额外脚本或依赖变化则先补充明确分组 | 已完成；真实 make lint 的 5 组脚本全部通过 |
+| P5 功能回归 | 用户已授权实施及相关普通回归 | 运行四个受影响包的普通测试（`-vet=off`）；显式文件方式运行 repository context 检查器的配套测试 | 保留原业务断言；新增无效/missing traceparent 检查和意外正常返回失败路径有真实证据；任一失败先归因，不改无关逻辑 | 已完成；基线、修改后普通回归均 exit 0，7 个反证均得到预期失败，最终范围核对通过 |
+| P6 受控 lint 与记录 | P2–P5 功能完成，且用户另行明确授权 lint | 运行原 `make lint` 完整入口，记录全仓结果和 5 个脚本编译单元结果 | 22 项旧诊断消失、4 条脚本 typecheck 消失且 6 个文件均被覆盖，方可报告 lint 通过；若出现新告警先限定归因，不擅自扩大范围 | 已完成；首轮 exit 2、两条 contextcheck，经限定修复后 exit 0、六条 0 issues；见第 17.7 节 |
+
+主要风险及处理：R10 若保留父 context 中的期望 span 会造成假通过；R11 若在工作 goroutine 内调用 FailNow 会改变测试控制流；R16/R18/R22 若只检查 error 而接受正常返回，会失去对 panic/Goexit 的约束；脚本分组若只跳过 `_test.go` 会减少检查覆盖。按上文的具体处理与验收避免这些变化，不以禁用规则或忽略错误作为修复。
+
+若实施后需要回滚，只恢复 P1 保存的这 5 个文件的本次修改，不回滚已完成的日志迁移、2.15.0 工具升级或其他任务。发现当前原件与快照之外的并行修改时停止恢复并说明差异，禁止整仓 reset/clean。
+
+**上述范围已获批准，P6 已在功能完成后单独获准并执行。cmd 的既有超时不处理，其他受控检查仍未执行。**
+
+### 17.6 P1–P5 实施授权与执行记录（P6 结果见 17.7）
+
+用户已明确批准：
+
+> 可以，按第17节方案实施，修复剩余22项告警和脚本lint入口，只改这4个测试文件及Makefile，保留原有测试语义，cmd的既有超时不处理。完成后更新方案并汇报，lint等受控检查再单独问我。
+
+因此 P1–P5 已获准；P6 仍未获准，不运行实际 lint、脚本 lint、vet、modern、race、覆盖率或聚合入口。只允许改动以下代码文件，另更新本文与必要的项目错误记录，验证产物保存在忽略目录：
+
+- `internal/pkg/httpclient/propagation_test.go`
+- `internal/bootstrap/worker_execution_metrics_test.go`
+- `internal/pkg/metrics/worker_execution_test.go`
+- `internal/pkg/tasks/execution_metrics_test.go`
+- `Makefile`
+
+实施前读取的新 harness 会话契约要求原生请求状态。以运行端 `CODEX_THREAD_ID` 取得的真实会话 `01a166ec-68c6-7b50-add3-73ccf788d436` 调用 workflow.py status，实际 exit 1：`no request state for this session; submit the current user request first`；未伪造或导入状态。用户随后明确回复 **“允许仅本次跳过，按第 17 节继续”**，授权本次跳过会话工作流及 OpenSpec 门禁；该例外不扩展文件范围，也不授权任何受控检查。
+
+P1 已保存五个目标文件及既有改动的 SHA256；普通基线/回归使用本机 Go 1.27.3 darwin/amd64、`GOWORK=off GOTOOLCHAIN=local GOPROXY=off`，四个包测试带 `-vet=off -tags scaffold -count=1 -timeout=3m`，脚本配套测试使用显式两个文件并带 `-vet=off -count=1 -timeout=3m`。Makefile 仅核对实际源码与 dry-run 展开，不执行其中的 lint 命令；新入口真实检查留到 P6 获准后。
+
+五个目标文件的补丁已完成。HTTP 测试处理全部四处响应 Body、五处 Header API 诊断、继承请求 context 并清空 span，以及 fixture 的解析错误；保留原始大小写 map 反例，将并发 fixture 构造移到测试主 goroutine。指标测试的八处类型断言均检查 ok，三处预期 panic/Goexit 调用明确拒绝意外正常返回。Makefile 在 lint 主循环前拒绝孤立 `_test.go`，再按五组显式文件调用，保留原版本门禁、errcheck 和非零退出传播；未改脚本实现或生产日志调用。
+
+P5 的异常返回反证使用 Go 已有 `-overlay` 能力：只把上述测试文件的临时变体存入 `.cache/logger-remaining-lint-20261023/`，分别让预期 panic/Goexit 的回调返回 nil 或 error，以及取消提取前清空 span。七次对应单测全部 exit 1 且命中预期失败信息，这是反证成功，不是工作区测试失败。该反证未写生产文件或工作区测试文件，未执行任何受控检查。
+
+实际命令与结果（本轮执行，不沿用历史结果）：
+
+| 操作 | 实际结果 | 证据文件（相对 `.cache/logger-remaining-lint-20261023/`） |
+|---|---|---|
+| 保存原件与初始状态 | 五个目标副本、目标 SHA256、既有 15 个 Go 改动 SHA256 已保存 | `before/`、`manifest-before.json`、`status-before.txt` |
+| 四个包的修改前普通测试 | exit 0，四包通过 | `baseline-packages.log` |
+| repository context 配套测试基线 | exit 0 | `baseline-script.log` |
+| `gofmt -w` 四个目标测试文件 | exit 0；未格式化其他 Go 文件 | 最终 diff、`scope-verification.json` |
+| 四个包的修改后普通测试 | exit 0；httpclient 2.125s、bootstrap 7.587s、metrics 1.487s、tasks 2.546s | `tests-after-fix.log` |
+| repository context 配套测试回归 | exit 0，0.954s | `script-tests-after-fix.log` |
+| `make -n tool` | exit 0，只展开命令；实际 lint 未执行 | `make-tool-dry-run.log` |
+| 七个测试文件 overlay 反证 | 各 exit 1，均命中预期断言；反证驱动 exit 0 | `negative-case-manifest.json`、`negative-case-results.json`、各同名 `.log` |
+| 最终范围核对 | 五个目标发生预期变化；既有 15 个 Go 改动 SHA256 不变；四文件原测试函数名全部保留；Makefile 仅本轮脚本循环变化 | `scope-verification.json`、`makefile-this-task.diff` |
+
+普通测试完整命令，修改前后各执行一次：
+
+```sh
+GOWORK=off GOTOOLCHAIN=local GOPROXY=off go test -vet=off -tags scaffold -count=1 -timeout=3m ./internal/pkg/httpclient ./internal/bootstrap ./internal/pkg/metrics ./internal/pkg/tasks
+GOWORK=off GOTOOLCHAIN=local GOPROXY=off go test -vet=off -count=1 -timeout=3m scripts/check-repository-context.go scripts/check-repository-context_test.go
+```
+
+反证完整命令已逐项写入 `negative-case-results.json`；统一参数为 `go test -vet=off -tags scaffold -count=1 -timeout=30s -overlay <该例 overlay.json> -run <对应测试名> <对应包>`，同样设置上述三个环境变量。
+
+| 反证场景 | 必须观察到且实际出现的失败信息 |
+|---|---|
+| 不清空继承的 span | `missing traceparent inherited the original span` |
+| worker 预期 panic，回调返回 nil / error | `RunWorker returned instead of panicking: <nil>` / `original failure` |
+| worker 预期 Goexit，回调返回 nil / error | `RunWorker returned instead of exiting goroutine: <nil>` / `unexpected return` |
+| queue 预期 panic，回调返回 nil / error | `ProcessTask returned instead of panicking: <nil>` / `handler panic` |
+
+范围与未验证项：
+
+- `cmd`、`scripts`、go.mod/go.sum、`.golangci.yml` 无工作区 diff；生产代码未新增修改。原有 15 个日志迁移测试改动均保留。
+- Makefile 的既有 `port` / `kill-port` 重复目标在 dry-run 中产生覆盖警告，已与实施前副本比对，本轮未新增、未修改这部分内容。
+- 脚本六个文件已静态核对为五组且各覆盖一次；dry-run 和普通脚本测试不等于实际脚本 lint，孤立文件拒绝及非零退出传播本轮仅回读核对。
+- lint、脚本 lint、vet、modern、全量 race、覆盖率和聚合检查全部未执行；旧 22 项及脚本 typecheck 是否已消失仍待 P6。cmd 既有超时未重跑、未修复。
+- ERR-20261023-120 / 123 追加本轮实施结果，但因尚未执行 lint 保持 open；准备阶段的路径检索错误已记录并纠正（128 closed），原生会话状态缺失仅获一次例外（129 open），不声称工作流已修复。
+- 本轮 P1–P5 已完成；无提交、推送、安装、Docker 或发布操作。下一步单独请求 P6 的 `make lint`（含脚本 lint）授权。
+
+### 17.7 P6 lint 单独授权与执行记录
+
+用户在 P1–P5 完成后明确批准：
+
+> 可以，执行 make lint（包含脚本 lint），只修复本次改动引入的问题，不改无关代码，cmd 的既有超时仍不处理。完成后把实际结果更新到方案里并汇报，其他受控检查先不执行。
+
+本轮仅执行项目原有 `make lint`：保留锁定的 golangci-lint 2.15.0、现有配置和五组脚本参数，不运行独立 vet、modern、全量 race、覆盖率、`make check` 或其他聚合门禁。沿用同一第 17 节任务已取得的一次性工作流/OpenSpec 例外，不伪造原生状态或扩展授权。Makefile 分类拆分仅答复建议，本轮不实施目录、文件分拆或目标迁移。
+
+执行前已回读计划、错误记录和实际 Makefile，核对五个目标文件与 P5 交付 SHA256 一致，并保存当前源码/配置哈希。若发现本次补丁引入的新诊断，只在原四个测试文件及 Makefile 内处理；若属于存量、其他并行改动或需要扩大范围，则记录事实并停止对应修复。实际命令为 `GOWORK=off GOTOOLCHAIN=local GOPROXY=off make lint`，本轮共执行两次，均保留完整输出和退出码。
+
+P6 首次执行的实际结果：`make lint` exit 2，全仓部分仅剩 `internal/pkg/httpclient/propagation_test.go:63、75` 的两条 contextcheck，脚本循环尚未执行。其他原诊断未再出现，不将这次失败报告为 lint 通过。
+
+这两条来自本次 R10 补丁：实际二进制依赖的 contextcheck v1.1.6 会把捕获 `ctx` 的闭包按 EntryWithCtx 分析，此模式只追踪传入/捕获的 context，不继承 `got.Context()` 的静态来源；源码中的请求 context 身份断言不参与其静态分析。已读检查器 `checkIsCtx`、`checkIsEntry`、`collectCtxRef` 和 `checkFuncWithCtx` 确认该分支。先记录错误并落盘限定修复方案，再将清空 span 的来源改为闭包中已捕获的 `ctx`；原有 `got.Context() != ctx` 断言、清空 span、缺失/非法 header 反例和取消断言全部保留。两者通过身份断言保证是同一个 context；未增加包装、nolint 或配置豁免。随后完成 httpclient 包普通回归（`-vet=off`）、这一处的 trace 反证和第二次 `make lint`。
+
+本轮环境：本机 Go 1.27.3 darwin/amd64，golangci-lint 2.15.0（以 Go 1.27.0 构建）。完整证据目录：`.cache/logger-lint-p6-20261023-q9nc9trz/`。
+
+| 实际操作 | 退出码及结果 | 证据文件（相对上述目录） |
+|---|---|---|
+| 第一次 `GOWORK=off GOTOOLCHAIN=local GOPROXY=off make lint` | exit 2；仅两条 contextcheck；脚本未执行 | `make-lint.log`、`make-lint-result.json` |
+| `GOWORK=off GOTOOLCHAIN=local GOPROXY=off go test -vet=off -tags scaffold -count=1 -timeout=3m ./internal/pkg/httpclient` | exit 0，1.615s | `httpclient-after-context-fix.log` |
+| 用临时测试 overlay 去掉清空 span，再运行 `TestPropagationPreservesOriginalRequestAndContext` | 目标测试 exit 1，命中 `missing traceparent inherited the original span`；反证驱动 exit 0 | `trace-parent-fallback.log`、`trace-parent-fallback-result.json` |
+| 第二次相同 `make lint` | **exit 0；全仓和 5 组脚本合计六次 `0 issues.`** | `make-lint-after-fix.log`、`make-lint-after-fix-result.json` |
+| 444 个已跟踪源码/配置文件的 SHA256 对比 | 仅 `internal/pkg/httpclient/propagation_test.go` 改变；本轮 Makefile、其他 Go 文件、依赖、配置不变 | `hashes-before.json`、`final-verification.json`、`source-change.diff` |
+
+脚本覆盖按原入口的循环顺序、遇错退出行为、六条 `0 issues.` 及最终成功标记确认，不是另外换参数运行的结果：
+
+| 编译单元 | 本次实际 lint 结果 |
+|---|---|
+| 全仓 `./...`（保留配置中的 sonic/scaffold 标签） | 0 issues |
+| `scripts/check-doc-refs.go` | 0 issues |
+| `scripts/check-package-vars.go` | 0 issues |
+| `scripts/check-repository-context.go` + `scripts/check-repository-context_test.go` | 0 issues，原四条 typecheck 消失 |
+| `scripts/clean.go` | 0 issues |
+| `scripts/security-eval.go` | 0 issues |
+
+结论：22 项原诊断及此次补丁引入的两条 contextcheck 均已消失，脚本入口完整通过。关闭已验证的 ERR-20261023-120、123、131。lint 输出仍包含既有的无匹配排除规则提示，以及 Makefile 中 `port` / `kill-port` 重复目标警告；这些不是此次改动引入，未修改相关代码或配置。
+
+未执行独立 vet、modern、全量 race、覆盖率及其他聚合检查；`.golangci.yml` 内已有的 govet 分析器属于获准的 `make lint`，不能当作独立 `go vet` 已执行。cmd 仅随全仓 lint 做静态分析，既有超时测试未重跑、未修复。P1–P6 完成不代表项目全部质量门禁或生产验收通过。
+
+关于 Makefile 分类：当前 423 行已混合开发、构建、检查、迁移、发布与脚手架职责，建议后续按这些职责拆成少量 `.mk`，由根 Makefile 显式 `include`，保留公共变量和聚合入口、现有命令名与默认目标；现有 `project.mk` / `security/toolchain.mk` 继续沿用，复杂流程留在 `scripts/`。这只是本轮问题的建议，未建立拆分计划、未新增子文件、未移动目标或改变目录。

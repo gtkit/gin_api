@@ -6,7 +6,9 @@
 
 本次授权的两项修复已通过专项验收：标准文档补丁正常放行；采集器完整收到匹配回合的 `turn/completed`，原生回合 42.783 秒完成、采集器 exit 0。文档/guard 10 项、采集器 8 项定向测试均通过，6 条已信任 hook 定义共收到 10 次回调。方案先于代码保存并回读，见 `docs/harness-two-fixes-plan-2026-10-23.md`。
 
-此前信任登记只新增 6 个精确定义记录；本次修复没有再改用户配置、hook 定义或信任。未运行 lint、脚本 lint、vet、modern、全量 race、覆盖率、Go 构建/测试，也未修改 Go 业务代码、模板源、CI 或其他 change。范围快照另发现 40 个任务外文件变化，来源未确认，未修改或回滚；因此不宣称全工作区保持不变或阶段 1 全部跨端验收通过。
+第一阶段已在当前授权和已验证环境内完成收尾。此前发现的 40 个任务外文件变化，现已通过同基线哈希、真实写入记录和逐项差异核对，全部归因到用户授权的并行日志改造；没有未归因项，详见下方清单。原范围断言 exit 1 保留，不再把合法并行变化视为本次 harness 修复的阻断。
+
+此前信任登记只新增 6 个精确定义记录；两项修复没有再改用户配置、hook 定义或信任。本轮仅做来源核对与文档收尾，没有运行任何测试、构建或受控检查，没有修改 Go 代码、模板源、CI 或 OpenSpec 文件。PowerShell、Claude 真实客户端与当前桌面聊天 hook 的未验证边界保留，不宣称所有运行端均已通过。
 
 ## 第一阶段累计文件与实际行为
 
@@ -113,27 +115,91 @@ Codex 官方要求审阅并信任精确 hook 定义，新的或改变后的定�
 | `PYTHONDONTWRITEBYTECODE=1 python3 .cache/harness-runtime-phase1-4w0lbm8o/trust-acceptance/test_actual_runtime.py` | exit 0；8 项通过，0.013 秒 | `targeted-tests.json` |
 | `PYTHONDONTWRITEBYTECODE=1 python3 .cache/harness-runtime-phase1-4w0lbm8o/trust-acceptance/actual_runtime.py --evidence-dir .cache/harness-runtime-phase1-4w0lbm8o/trust-acceptance/repair-105-107/native-run` | exit 0；回合 42.783 秒，status=completed | `native-run/protocol.jsonl`、`native-run/runtime-summary.json` |
 | `PYTHONDONTWRITEBYTECODE=1 python3 .openspec-auto/tools/run_openspec.py validate repair-project-harness-runtime-wiring --type change --strict --json --no-interactive` | exit 0；valid=true，issues=[]；只证明 schema | `openspec-validate.json` |
-| 538 个任务外文件的范围比较 | 断言 exit 1；40 个文件变化，来源未确认；用户配置及 hook 定义摘要未变 | `protected-before.json`、`native-result.json`，ERR-20261023-109 |
+| 538 个任务外文件的范围比较 | 历史断言 exit 1；当时 40 个文件未归因，现已全部对应并行日志改造；用户配置及 hook 定义摘要未变 | `protected-before.json`、`native-result.json`，ERR-20261023-109 |
 
 原生会话 `01a16724-ce0f-7310-8b09-960f8b5883cd`、回合 `01a16724-ce8a-7552-b013-75646fe9bb14` 的匹配终结通知已落入完整协议日志。6 条 hook 定义共 10 次完成/拒绝回调：两条 SessionStart、UserPromptSubmit、三次调用分别触发的两条 PreToolUse，以及 Stop。固定 printf exit 0；canary 补丁成功且内容为 `HARNESS_RUNTIME_CANARY\n`；不可达危险分支负例仍被安全 hook 拒绝。实际事件没有范围外工具调用。只清理了内容核对过的 canary 和该回合新建的 request-scope，原有会话状态核对未变。
 
-105/107 按本轮专项证据处置；40 个任务外文件的变化仅报告，未读取业务内容进行诊断、修改或回滚。本次未重跑首轮完整测试；healthcheck 仅随 HookCommandTests 在隔离夹具中执行，未单独重跑本机项目接线检查。没有推进其他阶段或将原总体验收改为全部通过。
+105/107 已按前轮专项证据处置。前轮对 40 个任务外变化仅作报告；本轮按新授权补齐下面的逐项来源核对，未修改或回滚这些文件。前轮未重跑首轮完整测试，healthcheck 仅随 HookCommandTests 在隔离夹具中执行；本轮没有新增检查执行。
+
+## 40 个并行日志改造文件的逐项归因与第一阶段收尾
+
+用户提供并确认了[并行日志改造会话](thread://01a166ec-68c6-7b50-add3-73ccf788d436?hostId=local)。本轮实际读取该会话的实施回合 `01a16722-3602-74a2-8427-7110e8350dbb`：用户批准 D1–D3、要求直接使用 gtkit/logger，回合于 2026-10-23 13:00:57–13:12:29（UTC+8）执行，覆盖范围断言记录的 13:05:03。其他会话的命令只作为来源证据读取，没有在本会话重放。
+
+归因使用三个独立对应点：
+
+1. harness 原始 `protected-before.json`、日志任务 `manifest.json`、日志任务 `source/<路径>` 实际文件三者的完整 SHA-256，40/40 一致。证明两边从相同文件基线出发。
+2. 日志任务真实写入记录覆盖 40/40：B 的成功输出列出 36 个文件；其余 4 个由 P、D 的成功补丁/脚本覆盖。没有仅凭目录或文件名归因。
+3. 40/40 均列入日志任务的 `task-files.json.changed_from_snapshot`；本轮逐项读取备份与当前文件的文本差异，与下表日志迁移职责对应。这里只归因原 40 个文件，不接管日志任务其他文件、功能验收或受控检查。
+
+日志任务备份目录为 `/var/folders/_w/xwv4k3t12vn9054592gsk5200000gn/T/gin-api-logger-direct-lqbc1ufo/`，含 `manifest.json`、`source/`、`task-files.json`。表内哈希为已完成完整比较后的 SHA-256 前 12 位，便于人工核对；没有修改这两套原始证据。
+
+写入记录索引：
+
+- **B**：`exec-310f0db4-1ce1-47f8-9779-6ea49929919f`，exit 0；先写原生日志 owner，再批量迁移导入与调用，实际输出列出 36 条路径。
+- **P**：`exec-758a9a03-393c-4fa4-918a-1ba7cb792427`，fileChange completed；修改 Gin access 及 router 装配。
+- **D**：`exec-8bfe2330-ca69-495c-ba2e-4514c1169264`，exit 0；修改 access 字段和 GORM 原生日志调用。
+
+| 原 40 个文件 | 共同基线 SHA-256 前 12 位 | 写入记录 | 已读取差异对应的职责 |
+|---|---|---|---|
+| `cmd/signals.go` | `075f1fd18206` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/app.go` | `003aa4faf4a0` | B | 日志调用；HTTP 生产者与资源关闭协调 |
+| `internal/bootstrap/http.go` | `b21cc5068834` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/listener.go` | `a709f3163b0e` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/migrateruntime.go` | `f08e0692d63d` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/pprof.go` | `3030d786508c` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/processruntime.go` | `db9a989f13a2` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/providers.go` | `7a80275d7f28` | B | 日志调用；原生 access logger 装配 |
+| `internal/bootstrap/ratelimit.go` | `4bd4cccf9813` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/resources.go` | `fdb07c6e810e` | B | 原生 access logger 传递 |
+| `internal/bootstrap/runtime.go` | `6fa11e3d9f3c` | B | 日志调用；异常刷盘职责说明 |
+| `internal/bootstrap/singleton_worker.go` | `cc301b0d0304` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/worker_scheduler.go` | `2988e7a1a72a` | B | 原生日志调用及必要字段替换 |
+| `internal/bootstrap/workermanager.go` | `9002904264f3` | B | 日志调用；原生 HError 格式化 |
+| `internal/middleware/error.go` | `a9d60a3f04d9` | B | 原生日志调用与 zap 字段 |
+| `internal/middleware/logger.go` | `a89e351f269b` | P、D | GinLogger 接收原生 access 实例 |
+| `internal/middleware/ratelimit.go` | `c807e0ded4b3` | B | 原生日志调用及必要字段替换 |
+| `internal/middleware/recovery.go` | `19fa61dae55f` | B | 原生日志、zap 字段和堆栈 |
+| `internal/middleware/requestid.go` | `d18ff0038a98` | B | 原生日志和 request ID API |
+| `internal/middleware/routetimeout.go` | `bc55ca06ba4b` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/auditlog/auditlog.go` | `f80b7d76c65c` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/breaker/breaker.go` | `477be8e784f4` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/cache/cache.go` | `79c2498e4698` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/console/console.go` | `709cf3088942` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/httpcache/cache.go` | `da1da7049774` | B | 原生 cache logger 接入，移除转发适配 |
+| `internal/pkg/httpcache/envelope.go` | `e7a877c3683c` | B | 原生 request ID API |
+| `internal/pkg/news/delivery.go` | `e306eff41182` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/news/news.go` | `e0e10958fd3a` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/response/response.go` | `7cef4e28e00a` | B | 原生日志、zap 字段和 request ID API |
+| `internal/pkg/singleton/runner.go` | `d1c3059c972d` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/upload/uploader.go` | `75e61eb743ab` | B | 原生日志调用及必要字段替换 |
+| `internal/platform/data/init.go` | `d0176b022f35` | D | GORM 日志协议接入原生 logger |
+| `internal/platform/logging/owner.go` | `fe252fe2b336` | B | 原生实例初始化、访问及关停 |
+| `internal/platform/redis/owner.go` | `065d2120739f` | B | 原生日志调用及必要字段替换 |
+| `internal/platform/responsecache/owner.go` | `9912f82f05a7` | B | 原生日志调用及必要字段替换 |
+| `internal/router/health.go` | `8b0de3fd63da` | B | 原生日志调用及必要字段替换 |
+| `internal/router/init.go` | `717482e4f657` | P | Options 增加原生 access 实例 |
+| `internal/router/middleware.go` | `0a8167f51a7d` | P | access 实例校验与中间件注入 |
+| `internal/runtime/module/auth/adapters.go` | `c3086dcd15a1` | B | 原生日志调用及必要字段替换 |
+| `internal/pkg/httpclient/propagation.go` | `732103060154` | B | 原生 request ID API |
+
+**结论：40/40 为用户已授权的并行日志改造，没有未归因项。** 原范围断言的 exit 1 仍是真实历史结果；本轮撤销的是“这些变化来源未确认、阻碍 harness 收尾”的判断，不把“全工作区未变”改写成通过，也不把本次来源核对冒充日志功能测试。ERR-20261023-109 按这份证据关闭。
+
+第一阶段在当前授权范围内完成收尾：项目规则、reader、运行端接线、6 条 hook 信任/实际回调、两项续修均已有前轮证据；本轮补齐并行变化归因。PowerShell、Claude 真实客户端以及当前桌面聊天的 hook 回调仍按原边界标为未验证。阶段 2、3 不动。本轮只读取证据、更新验收报告/第一阶段计划状态和错误记录，不执行测试、构建、lint、脚本 lint、vet、modern、race、覆盖率，不改业务代码或 OpenSpec 文件、不执行归档。
 
 ## 本轮只报告的其他问题
 
 1. 当前全局 selected change 状态、基于文本的绕过/完成判断、skills 实际读取证明等仍属于后续阶段，不因本轮接线修复而自动具备强制保障。
 2. 模板源没有同步本轮项目定制；治理文件仍被本地 Git 排除。未改分发策略或 CI。
 3. 旧的 cmd 测试超时和 lint 2.14.0/项目要求 2.15.0 差异保留，证据来自前一任务，本轮没有重新运行或修复。
-4. 范围快照中的 40 个任务外文件变化来源未确认，详见本轮 `native-result.json`；不推定为本次修复造成，也不擅自回滚。ERR-20261023-109 保持 open。
 
 ## 回滚与范围保护
 
 `before/` 与 `manifest.json` 保存本轮原文件；`project-changes.diff` 与 `project-changes.json` 用于查看被 Git 排除的改动。恢复前先核对无后续改动，再只恢复 manifest 中本轮修改的原文件、删除本轮新文件。不要对仓库执行 reset/clean；错误记录保留并追加处置。
 
-此前信任登记仅对应 gin_api 的 6 条定义；本次两项修复仅使用既有信任。`/Users/xiaozhaofu/Ai/harness-engineering`、`/Users/xiaozhaofu/Ai/openspec-auto-bootstrap`、全局 skills 及用户配置未改。新增的两项修复备份位于 `repair-105-107/before/`、清单位于 `before-manifest.json`；恢复前须确认没有后续修改，只恢复本轮文件，不覆盖上述来源未确认的变化。
+此前信任登记仅对应 gin_api 的 6 条定义；两项修复仅使用既有信任。`/Users/xiaozhaofu/Ai/harness-engineering`、`/Users/xiaozhaofu/Ai/openspec-auto-bootstrap`、全局 skills 及用户配置未改。两项修复备份位于 `repair-105-107/before/`、清单位于 `before-manifest.json`；恢复前须确认没有后续修改，只恢复对应任务的文件，不覆盖已确认的并行日志改造。
 
-收尾 `git status` 另外显示新的 `docs/logger-unification-plan-2026-10-23.md`；它不在本轮最初清单中，也不是本轮创建，来源未确认，未读取或修改。
+前轮 `git status` 显示的新 `docs/logger-unification-plan-2026-10-23.md`，也已由日志会话的实际文档写入记录确认归属该并行任务；本轮没有修改它。
 
-合规核对：两项修复功能及原生重验通过，范围快照断言未通过，分别报告；无依赖安装、容器、生产操作或受控检查。验收采用 `backend-acceptance` 的证据边界，因只改开发工具，业务 API、数据库、事务与服务容量检查不适用。PowerShell、Claude 和当前桌面聊天回调仍未验证；不将本次专项通过扩大为所有运行端或全工作区的整体准入。
+合规核对：前轮两项功能及原生重验通过；本轮 40/40 来源核对完成，原范围断言失败保留为历史，已消除本阶段收尾的归因阻断。没有安装依赖、操作容器/生产、运行新检查或改动并行业务代码。沿用前轮 `backend-acceptance` 的证据边界，业务 API、数据库、事务与服务容量不是本轮验收内容；跨端未验证项保留。
 
 此前范围证据修正（历史）：备份创建于方案首次落盘之后，原始 691 项快照含当时方案。最终断言曾因该方案后续更新而失败；未改写原始快照，按 manifest 排除本任务文件后重新核对，当时 690 个任务外文件全部保持原值（ERR-20261023-106）。

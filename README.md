@@ -140,6 +140,20 @@ make module NAME=staff ARGS="--field nickname:string --field status:uint8 --acce
 
 模块生成器说明见 `cmd/MODULE_GENERATOR.md`。
 
+Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录> <目标>`。不指定目标时仍执行 `dev`。根 `Makefile` 通过固定顺序的 `include` 加载以下分类文件；各文件共享同一套变量和目标，不作为独立入口。
+
+| 文件 | 职责 |
+|------|------|
+| `Makefile` | 公共变量、默认与条件入口、`check` / `check-ci` 聚合目标、端口兼容规则 |
+| `make/build.mk` | 编译、镜像构建、受管产物清理 |
+| `make/dev.mk` | 开发依赖、应用 Compose 操作、钩子安装 |
+| `make/quality.mk` | lint、vet、modern、测试、覆盖率、架构及安全检查入口 |
+| `make/scaffold.mk` | 模块与项目生成、生成器验证、应用身份生成和检查 |
+| `make/migration.mk` | 迁移、环境与名称占位、迁移文件及数据库验证 |
+| `make/release.mk` | 发布门禁编排、tag 入口、发布接线验证 |
+
+现有命令、命令行及环境变量覆盖方式保持不变；公共变量和覆盖率门槛仍以根 `Makefile` 为准。子文件应随根文件一并保留，缺少任一必需文件时 Make 会报错。
+
 ## 质量门禁
 
 `make check` 依次执行：

@@ -93,7 +93,6 @@ func TestOwnerWritesStreamsFieldsAndAlerts(t *testing.T) {
 			t.Errorf("missing %q in %s", value, all)
 		}
 	}
-
 }
 
 type messages struct{ values []string }

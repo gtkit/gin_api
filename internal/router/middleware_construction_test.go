@@ -2,13 +2,13 @@ package router
 
 import (
 	"errors"
-	"github.com/gtkit/logger/v2"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel"
 )
 

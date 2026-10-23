@@ -32,8 +32,16 @@ func TestWorkerExecutionOutcomesAndDuration(t *testing.T) {
 			t.Parallel()
 			recorder, reader := newTestRecorder(t)
 			recorder.RecordWorkerExecution(t.Context(), WorkerQueue, "consumer", 2*time.Second, tc.err, tc.panicked)
-			counter := collect(t, reader, "worker.executions").Data.(metricdata.Sum[int64])
-			histogram := collect(t, reader, "worker.execution.duration").Data.(metricdata.Histogram[float64])
+			counterMetric := collect(t, reader, "worker.executions")
+			counter, ok := counterMetric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q has unexpected type %T", counterMetric.Name, counterMetric.Data)
+			}
+			histogramMetric := collect(t, reader, "worker.execution.duration")
+			histogram, ok := histogramMetric.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("metric %q has unexpected type %T", histogramMetric.Name, histogramMetric.Data)
+			}
 			if len(counter.DataPoints) != 1 || counter.DataPoints[0].Value != 1 || len(histogram.DataPoints) != 1 {
 				t.Fatal("expected one counter and histogram series")
 			}
@@ -70,10 +78,11 @@ func TestRunWorkerPreservesResultAndPanic(t *testing.T) {
 				t.Errorf("panic changed: %v", got)
 			}
 		}()
-		_ = recorder.RunWorker(t.Context(), WorkerOneShot, "startup", func(context.Context) error {
+		err := recorder.RunWorker(t.Context(), WorkerOneShot, "startup", func(context.Context) error {
 			calls++
 			panic(failure)
 		})
+		t.Errorf("RunWorker returned instead of panicking: %v", err)
 	}()
 	if calls != 2 || seriesCount(t, collect(t, reader, "worker.executions")) != 2 {
 		t.Fatal("execution count or outcomes lost")
@@ -100,7 +109,11 @@ func TestWorkerExecutionConcurrentCounts(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	counter := collect(t, reader, "worker.executions").Data.(metricdata.Sum[int64])
+	counterMetric := collect(t, reader, "worker.executions")
+	counter, ok := counterMetric.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("metric %q has unexpected type %T", counterMetric.Name, counterMetric.Data)
+	}
 	if calls.Load() != 32 || len(counter.DataPoints) != 1 || counter.DataPoints[0].Value != 32 {
 		t.Fatal("concurrent executions were lost or duplicated")
 	}
@@ -112,13 +125,19 @@ func TestRunWorkerGoexitRecordsAbnormalExit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = recorder.RunWorker(t.Context(), WorkerOneShot, "abnormal", func(context.Context) error {
+		err := recorder.RunWorker(t.Context(), WorkerOneShot, "abnormal", func(context.Context) error {
 			runtime.Goexit()
 			return nil
 		})
+		t.Errorf("RunWorker returned instead of exiting goroutine: %v", err)
 	}()
 	<-done
-	points := collect(t, reader, "worker.executions").Data.(metricdata.Sum[int64]).DataPoints
+	counterMetric := collect(t, reader, "worker.executions")
+	counter, ok := counterMetric.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("metric %q has unexpected type %T", counterMetric.Name, counterMetric.Data)
+	}
+	points := counter.DataPoints
 	if len(points) != 1 || points[0].Value != 1 {
 		t.Fatalf("abnormal exit was not recorded: %v", points)
 	}
