@@ -104,7 +104,7 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		Hasher:         newPasswordHasher(hasher, deps.Config.EffectiveBcryptConcurrency()),
 		AccessIssuer:   deps.Issuer,
 		RefreshStore:   refreshStore{store: refresh},
-		RevocationList: revocationList{list: revocation},
+		RevocationList: revocation,
 		Auditor:        authAuditor{},
 		Events:         eventRecorder{recorder: deps.Metrics},
 		AccessTTL:      deps.AccessTTL,

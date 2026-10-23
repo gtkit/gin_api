@@ -2,6 +2,11 @@ package news
 
 import "context"
 
+// ImageMessageSender is implemented directly by msgbot/feishu.App.
+type ImageMessageSender interface {
+	SendImageMessage(ctx context.Context, openID, path string) error
+}
+
 // MailMessage 是项目内的纯文本邮件契约，不包含供应商 SDK 类型。
 type MailMessage struct {
 	To      []string

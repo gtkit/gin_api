@@ -83,6 +83,9 @@ func (c *llmClient) Chat(ctx context.Context, call aiapp.ChatCall) (aiapp.Reply,
 	if err != nil {
 		return aiapp.Reply{}, translateError(err)
 	}
+	if len(resp.Content) > maxModelReplyBytes || len(resp.Reasoning) > maxModelReplyBytes-len(resp.Content) {
+		return aiapp.Reply{}, translateError(errResponseTooLarge)
+	}
 
 	return aiapp.Reply{
 		Content:      resp.Content,
@@ -135,6 +138,11 @@ func (c *llmClient) Stream(
 		}
 		if chunk == nil {
 			continue
+		}
+		remaining := maxModelReplyBytes - content.Len() - reasoning.Len()
+		if len(chunk.ReasoningDelta) > remaining || len(chunk.Delta) > remaining-len(chunk.ReasoningDelta) {
+			reply.Content, reply.Reasoning = content.String(), reasoning.String()
+			return reply, translateError(errResponseTooLarge)
 		}
 
 		// 模型名以响应侧回传的为准：请求留空时它才是真实取值。

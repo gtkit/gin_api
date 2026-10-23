@@ -8,21 +8,22 @@ import (
 	"testing"
 	"time"
 
-	newslib "github.com/gtkit/news"
+	"github.com/gtkit/msgbot/feishu"
 )
 
-type fakeAppNewser struct {
+type fakeImageSender struct {
 	sent []string
 }
 
-func (f *fakeAppNewser) Expired() int { return 0 }
-func (f *fakeAppNewser) SendImageMsg(_ context.Context, openID, filepath string) error {
+func (f *fakeImageSender) SendImageMessage(_ context.Context, openID, filepath string) error {
 	f.sent = append(f.sent, openID+":"+filepath)
 	return nil
 }
-func (f *fakeAppNewser) SendTextMsg(context.Context, string, string) error { return nil }
 
-var _ newslib.AppNewser = (*fakeAppNewser)(nil)
+var _ ImageMessageSender = (*fakeImageSender)(nil)
+
+// The real msgbot app must satisfy the consumer contract without an adapter.
+var _ ImageMessageSender = (*feishu.App)(nil)
 
 // newTestNotifier 直接构造一个 Notifier 实例。
 //
@@ -129,9 +130,9 @@ func TestNilNotifierIsSafeAndSilent(t *testing.T) {
 }
 
 func TestSendPicMsgSkipsBlankOpenIDs(t *testing.T) {
-	app := &fakeAppNewser{}
+	app := &fakeImageSender{}
 
-	if err := SendPicMsg(context.Background(), app, "u1, ,u2,,", "shot.png"); err != nil {
+	if err := SendPicMsg(t.Context(), app, "u1, ,u2,,", "shot.png"); err != nil {
 		t.Fatalf("SendPicMsg returned error: %v", err)
 	}
 

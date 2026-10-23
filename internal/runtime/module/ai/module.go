@@ -151,7 +151,8 @@ func buildClientWithFactory(cfg config.AIModuleConfig, create func() *http.Clien
 
 		client := create()
 		clients = append(clients, client)
-		base, err := newProvider(llm.ProviderName(name), pc.APIKey, baseURL, model, client)
+		base, err := newProvider(llm.ProviderName(name), pc.APIKey, baseURL, model,
+			&limitedHTTPClient{client: client, maxBytes: maxProviderResponseBytes})
 		if err != nil {
 			return nil, fmt.Errorf("ai: build provider %q: %w", name, err)
 		}
@@ -188,7 +189,7 @@ func buildClientWithFactory(cfg config.AIModuleConfig, create func() *http.Clien
 // switch 分支不能省，即便当前配置的都是 OpenAI 兼容平台：Claude 与 Gemini 走
 // **各自的原生协议**，用 OpenAI 兼容路径构造它们会得到一个能启动、能发请求、
 // 但每次都被对端拒绝的 provider——而错误信息指向的是"上游返回了 404"。
-func newProvider(name llm.ProviderName, apiKey, baseURL, model string, client *http.Client) (llm.Provider, error) {
+func newProvider(name llm.ProviderName, apiKey, baseURL, model string, client llm.HTTPDoer) (llm.Provider, error) {
 	switch name {
 	case llm.ProviderAnthropic:
 		return llm.NewAnthropicProvider(llm.NativeProviderConfig{
@@ -235,6 +236,9 @@ func harden(p llm.Provider, name string, cfg config.AIModuleConfig) (llm.Provide
 	retried, err := llm.TryWithRetry(p, llm.RetryOptions{
 		MaxAttempts: attempts,
 		Backoff:     llm.ExponentialBackoffWithJitter(200*time.Millisecond, 2*time.Second),
+		ShouldRetry: func(err error) bool {
+			return !errors.Is(err, errResponseTooLarge) && llm.IsRetryableError(err)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attach retry: %w", err)

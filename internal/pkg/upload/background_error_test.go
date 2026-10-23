@@ -9,7 +9,7 @@ import (
 
 	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	defaultlogging "github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gouploader"
 )
 
@@ -136,18 +136,15 @@ func readAllLogs(t *testing.T, dir string) string {
 	return sb.String()
 }
 
-type uploadLoggingConfiguration struct{ cfg *config.Config }
-
-func (c uploadLoggingConfiguration) Value() (*config.Config, error) { return c.cfg, nil }
 func initUploadTestLogging(t *testing.T, dir string) {
 	t.Helper()
-	logging := defaultlogging.New(defaultlogging.Options{Configuration: uploadLoggingConfiguration{&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "upload"), Level: "debug", FileStdout: 1}}}})
+	owner, err := defaultlogging.Open(t.Context(), defaultlogging.Options{Config: &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "upload"), Level: "debug", FileStdout: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		if err := logging.Stop(context.Background()); err != nil {
+		if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)
 		}
 	})
-	if err := logging.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
 }

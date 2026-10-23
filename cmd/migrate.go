@@ -35,7 +35,7 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 	// 最小装配：只要配置 + 日志 + 数据库。
 	// 此前走完整 NewRuntime，而 Redis 连不上会直接 panic——于是"Redis 挂了 ⇒ 数据库迁移也跑不了"，
 	// 两个无关依赖被绑死，而迁移恰恰是故障恢复时最需要能执行的操作。
-	rt, err := bootstrap.NewMigrationRuntime(ctx, bootstrap.MigrationOptions{RegisterPlugins: registerMigrationPlugins, Shutdown: shutdown})
+	rt, err := bootstrap.NewMigrationRuntime(ctx, bootstrap.MigrationOptions{Shutdown: shutdown})
 	if err != nil {
 		return nil, nil, err
 	}

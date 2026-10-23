@@ -1,12 +1,14 @@
 # 日志与插件热路径性能优化方案及实施记录
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 日期：2026-10-21。授权来源：用户要求在 `pluggable` 分支接续已批准的性能优化，完成优化、验收与记录；允许在本轮范围内落盘完整方案后直接实施。立项授权不含 commit、push、tag、发布、其他分支或 worktree；2026-10-22 的提交授权与复核见第8节。
 
 ## 1. 立项时事实与目标（最终结果见第7节）
 
 - 本轮实际核对：分支 `pluggable`，HEAD `4c8d7d7b582f847f579b86bef0896a1971ced29f`，开始时 tracked/untracked 工作区干净；忽略的旧工作文件不属于本轮，不覆盖它们。
 - Go `go1.27.3 darwin/amd64`；go.mod `go 1.27.0`，logger/v2 `v2.3.0`、zap `v1.28.0`、Gin `v1.12.0`、GORM `v1.31.2`。不改依赖。普通 workspace 使用本地 logger/v2 和 mailx；另用 `GOWORK=off` 验证锁定依赖。
-- 实读 `internal/plugin/builtin/logging/plugin.go`：每次 Log 持 gate Mutex 选择 target、增加 writes WaitGroup；CallerSkip 非 3 时在锁内派生 logger；过滤调用 Zap()，实际 SDK 实现会 WithOptions 克隆。SDK WithCallerSkip/SetLevel/Sync 在本地和锁定源码均需继续核对；当前已核对两份 methods 的相关入口存在且 Zap 克隆一致。
+- 实读 历史路径「internal/plugin/builtin/logging/plugin.go」（已迁移或移除）：每次 Log 持 gate Mutex 选择 target、增加 writes WaitGroup；CallerSkip 非 3 时在锁内派生 logger；过滤调用 Zap()，实际 SDK 实现会 WithOptions 克隆。SDK WithCallerSkip/SetLevel/Sync 在本地和锁定源码均需继续核对；当前已核对两份 methods 的相关入口存在且 Zap 克隆一致。
 - 实读门面、GORM、HTTP 中间件：门面只要求 Log；GORM 在 fc/callerSource/字段构建后才由后端过滤；HTTP 在脱敏、ClientIP、字段构建后过滤。Alert 经 HError，不能按普通 Error 过滤。
 - configuration 使用 RWMutex 发布一次 cfg/err；MySQL/Redis/cache 的读锁还包住可替换 SDK getter/方法，与 Close 的并发契约尚未全部确认。
 - 本轮基准、profile、正确性反证与最终门禁尚未执行。历史插件计划和归档保持原样。

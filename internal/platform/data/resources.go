@@ -11,7 +11,7 @@ import (
 )
 
 // DatabaseHandle is the narrow database capability consumed by Resources.
-// It deliberately has no Close method; the lifecycle plugin owns closure.
+// It deliberately has no Close method; the concrete owner controls closure.
 type DatabaseHandle interface {
 	DB() *gorm.DB
 	SQLDB() *sql.DB
@@ -19,29 +19,28 @@ type DatabaseHandle interface {
 }
 
 // RedisHandle is the narrow Redis capability consumed by Resources.
-// It deliberately has no Close method; the lifecycle plugin owns closure.
+// It deliberately has no Close method; the concrete owner controls closure.
 type RedisHandle interface {
 	GetClient(int) (*redis.Client, bool)
 	PoolStats() map[int]*redis.PoolStats
 	HealthCheck(context.Context) error
 }
 
-// Requirements 声明本次装配对**可选**资源的必需性。
-//
-// MySQL 不设开关：本脚手架的每条业务路径都落库，"MySQL 可选"没有对应的运行形态，
-// 给它一个开关只会让人误以为存在无库运行模式。
-//
-// Redis 的必需性由**已启用的能力集合**推导，而不是由一个独立的开关配置——
-// 独立开关必然与真实依赖漂移：有人打开了依赖 Redis 的能力却忘了把开关也打开，
-// 于是 Redis 挂掉时进程照常报告 ready，而那个能力已经不工作了。
-type Requirements struct {
-	// Redis 为 true 时，Redis 连接失败即启动失败；
-	// 为 false 时连接失败只让该能力进入永久降级，进程继续启动。
-	Redis bool
+// RedisClientProvider supplies borrowed clients without transferring closure.
+type RedisClientProvider interface {
+	Client(int) *redis.Client
+	DefaultClient() *redis.Client
+	Configured() bool
 }
 
-// Resources is a non-owning, immutable view over initialized plugin capabilities.
-// The registry owns resource lifetimes; closing this view never closes clients.
+// RedisProvider combines the client and observation capabilities used at startup.
+type RedisProvider interface {
+	RedisClientProvider
+	RedisHandle
+}
+
+// Resources is a borrowed, immutable view over initialized clients.
+// Runtime retains their owners; this view has no Close method.
 type Resources struct {
 	mysqlView       DatabaseHandle
 	redis           RedisHandle
@@ -49,11 +48,8 @@ type Resources struct {
 	redisState      *AvailabilityTracker
 }
 
-// ResourcesFromClients creates a non-owning view over plugin-managed clients.
-//
-// The view is used by existing bootstrap and repository assembly code so the
-// refactor does not widen business dependencies. MySQL and Redis remain owned
-// by their respective lifecycle plugins and are not closed by this value.
+// ResourcesFromClients borrows the initialized MySQL and Redis clients.
+// It owns availability tracking, but never closes the borrowed clients.
 func ResourcesFromClients(
 	mysql DatabaseHandle,
 	redis RedisHandle,
@@ -151,6 +147,3 @@ func (r *Resources) PingDB(ctx context.Context) error {
 	}
 	return r.mysqlView.PingContext(ctx)
 }
-
-// Close is retained for existing callers. Resource ownership stays in plugins.
-func (*Resources) Close() error { return nil }

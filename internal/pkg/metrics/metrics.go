@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -139,6 +140,14 @@ func New(meter metric.Meter) (*Recorder, error) {
 func (r *Recorder) RecordRequest(ctx context.Context, method, route string, status int, elapsed time.Duration) {
 	if r == nil {
 		return
+	}
+	// Methods are caller-controlled even on unmatched routes. Keep the label
+	// bounded using the HTTP semantic convention's known method set.
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch, "QUERY":
+	default:
+		method = "_OTHER"
 	}
 
 	attrs := metric.WithAttributes(

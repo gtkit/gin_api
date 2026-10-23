@@ -1,5 +1,7 @@
 # 通知通道可插拔方案与分阶段实施计划
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 编制日期：2026-10-22（Asia/Taipei）。文档版本：阶段 1–4 已完成本地实现验收；阶段 5 本地验证完成，受控门禁已单独获准，执行中。
 
 > 当前授权：用户已要求“把剩下所有的阶段都做完了，要保证代码能够安全高效稳定的运行在企业级线上”。阶段 1–2 的历史验收保留；本轮执行原编号阶段 3–5。
@@ -49,11 +51,11 @@
 
 | 已读取位置 | 当前事实 |
 |---|---|
-| `internal/core/plugin.go`、`internal/core/plugin_registry.go` | 现有生命周期为 Name / Init / Start / Stop；先全部 Init 再全部 Start；依赖拓扑排序、逆序清理、失败回滚、共享结果及取消等待已有实现；默认启动/回滚/停止总预算分别为 30 秒，启动单回调 context 预算为 10 秒；不能强制终止不合作回调 |
-| `cmd/plugins.go` | server 注册配置、日志、MySQL、Redis、缓存、中间件；migration 注册配置、日志、数据库；构造与 Register 不读配置、不做资源 I/O |
-| `internal/bootstrap/plugin_registration.go` | PluginSet 的六种基础能力及 DrainLogs 为必填；不适合为了通知能力再增加一个必填字段 |
-| `internal/plugin/builtin/logging/options.go` | mainOptions 内部调用 news.NewWithConfig；SDK Messager 与深度 64 的队列在日志构造时接入 |
-| `internal/plugin/builtin/logging/plugin.go` | main/access 共用日志 owner；关闭接纳、等待在途写入、释放门面绑定、Sync access/main；Drain 与 Stop 共用一次清理 |
+| 历史路径「internal/core/plugin.go」（已迁移或移除）、历史路径「internal/core/plugin_registry.go」（已迁移或移除） | 现有生命周期为 Name / Init / Start / Stop；先全部 Init 再全部 Start；依赖拓扑排序、逆序清理、失败回滚、共享结果及取消等待已有实现；默认启动/回滚/停止总预算分别为 30 秒，启动单回调 context 预算为 10 秒；不能强制终止不合作回调 |
+| 历史路径「cmd/plugins.go」（已迁移或移除） | server 注册配置、日志、MySQL、Redis、缓存、中间件；migration 注册配置、日志、数据库；构造与 Register 不读配置、不做资源 I/O |
+| 历史路径「internal/bootstrap/plugin_registration.go」（已迁移或移除） | PluginSet 的六种基础能力及 DrainLogs 为必填；不适合为了通知能力再增加一个必填字段 |
+| 历史路径「internal/plugin/builtin/logging/options.go」（已迁移或移除） | mainOptions 内部调用 news.NewWithConfig；SDK Messager 与深度 64 的队列在日志构造时接入 |
+| 历史路径「internal/plugin/builtin/logging/plugin.go」（已迁移或移除） | main/access 共用日志 owner；关闭接纳、等待在途写入、释放门面绑定、Sync access/main；Drain 与 Stop 共用一次清理 |
 | `internal/pkg/news/news.go` | 通知器内部创建邮件与短信客户端；按 webhook → mail → 逐个手机号 SMS 顺序同步扇出；每次外部发送独立 10 秒；失败仅记普通 Error |
 | `internal/pkg/mail/mail.go` | mailx 客户端封装；host 空返回 nil；host 非空时构造客户端，是否用于告警另外取决于 alert_to；现有封装未暴露 Close |
 | `internal/pkg/sms/sms.go` | smsx 阿里云封装；provider 空返回 nil，仅接 aliyun；接收逻辑模板名；现有封装未暴露 Close |
@@ -358,8 +360,8 @@ Start：同一拓扑顺序；全部 Init 成功后才进入全部 Start
 |---|---|---|
 | `internal/pkg/news/news.go` 及既有测试 | 改成依赖注入扇出、增加 context 核心入口、保留消息语义、移除旧隐式工厂入口 | 1–3 |
 | `internal/pkg/mail/mail.go`、`internal/pkg/sms/sms.go` 及既有测试 | 继续作为默认 SDK 封装；仅在确有必要时增加实例级工厂注入或完成类型翻译；不新增全局可变测试缝 | 2 |
-| `internal/plugin/builtin/logging/plugin.go`、`internal/plugin/builtin/logging/options.go` 及既有测试 | 接收通知能力、移除隐式构造、接入 BindDrain；保留 main/access、字段、调用位置、过滤与 owner 保护 | 3 |
-| `cmd/plugins.go` 及 plugins 相关既有测试 | 显式选择通道、声明依赖；server/migration 复用同一通知注册辅助函数 | 3 |
+| 历史路径「internal/plugin/builtin/logging/plugin.go」（已迁移或移除）、历史路径「internal/plugin/builtin/logging/options.go」（已迁移或移除） 及既有测试 | 接收通知能力、移除隐式构造、接入 BindDrain；保留 main/access、字段、调用位置、过滤与 owner 保护 | 3 |
+| 历史路径「cmd/plugins.go」（已迁移或移除） 及 plugins 相关既有测试 | 显式选择通道、声明依赖；server/migration 复用同一通知注册辅助函数 | 3 |
 | `internal/bootstrap/alerting_test.go`、plugin_registration/runtime/app 的相关既有测试 | 验证告警仍先于清理、存活 worker 只 Drain、换实现及错误聚合 | 3、5 |
 | `config/env.yml.example`、`config/README.md`、`internal/platform/config/types.go` 的相关注释 | 只同步本期行为和职责说明；值、字段和验证规则保持 | 4 |
 | `docs/observability.md`、`docs/architecture.md` | 在实现完成后描述已实现的注册/生命周期边界；不改业务分层规则 | 4 |
@@ -621,7 +623,7 @@ Makefile 的 check 已包含架构传感器、vet、lint、modern 和覆盖率�
 | 文件 | 实际内容与边界 |
 |---|---|
 | `internal/pkg/news/contracts.go` | 新增 MailMessage、三个 sender、AlertSink、AlertDrainBinder、NotificationSink；仅类型与契约注释，唯一直接 import 为 context |
-| `internal/plugin/notification.go` | 新增 `type NotificationSink = news.NotificationSink`，沿用 Logger 的装配别名方式 |
+| 历史路径「internal/plugin/notification.go」（已迁移或移除） | 新增 `type NotificationSink = news.NotificationSink`，沿用 Logger 的装配别名方式 |
 | 本文 | 更新授权、1.1–1.4 状态、已核实事实、命令与验收证据；保留阶段 0 历史 |
 | `openspec/changes/add-pluggable-notification-channels/` | 按仓库 openspec-auto 同步 .openspec.yaml、proposal/design/tasks 与 notification-channels、outbound-notification、plugin-lifecycle-registry 三份 delta；完整方案仅作为待实施规范，只有阶段 1 任务完成，未合并规范、未归档 |
 | `.harness/error-journal.md` | 仅新增并处置本阶段的 ERR-20261022-056（错误路径读取）和 ERR-20261022-059（lint 共享锁）；不处置其他任务条目 |
@@ -755,16 +757,16 @@ OPENSPEC_TELEMETRY=0 /Users/xiaozhaofu/.nvm/versions/node/v24.22.0/bin/node /Use
 
 | 步骤 | 文件及具体职责 | 验收与停止条件 |
 |---|---|---|
-| 2.1 | 新增 `internal/plugin/notification_channel.go`：供三个通道及通知组合复用的实例级资源状态，无注册器或后台工作循环；Init/Start/Stop、同锁接纳与归还、完成 channel 等待、自有清理函数、迟到工厂结果清理。新增 `builtin/robot/{plugin,sender}.go`、`internal/plugin/builtin/mail/plugin.go`、`internal/plugin/builtin/sms/plugin.go`：依赖 ConfigurationProvider，实例级 Opener 返回 sender 与可选 context 清理函数，默认适配现有 SDK；按已有配置门控。 | New 不读配置、不调工厂；同一实例只构造一次；失败/取消保留原错误及清理错误。Stop 超时但在途未退出时返回未排空错误，保留资源，不启动遗弃等待 goroutine。 |
+| 2.1 | 新增 历史路径「internal/plugin/notification_channel.go」（已迁移或移除）：供三个通道及通知组合复用的实例级资源状态，无注册器或后台工作循环；Init/Start/Stop、同锁接纳与归还、完成 channel 等待、自有清理函数、迟到工厂结果清理。新增 `builtin/robot/{plugin,sender}.go`、历史路径「internal/plugin/builtin/mail/plugin.go」（已迁移或移除）、历史路径「internal/plugin/builtin/sms/plugin.go」（已迁移或移除）：依赖 ConfigurationProvider，实例级 Opener 返回 sender 与可选 context 清理函数，默认适配现有 SDK；按已有配置门控。 | New 不读配置、不调工厂；同一实例只构造一次；失败/取消保留原错误及清理错误。Stop 超时但在途未退出时返回未排空错误，保留资源，不启动遗弃等待 goroutine。 |
 | 2.2 | 新增 `internal/pkg/news/delivery.go`：注入式 Options、发送结果分类、仅含通道/结果/耗时的诊断、边界 sender 验证与 context 扇出。修改 `news.go`：保留旧构造入口及图片辅助方法；Warn 委托同一 context 核心，复制目标、逐次复制参数，继续固定顺序和 10 秒单次预算。 | 旧有效输入字节/字段不变；默认 URL 空跳过；显式 URL 不影响邮件/SMS。逐 sender 隔离 panic/错误，诊断不拼接 SDK 原始错误或敏感负载。 |
-| 2.3 | `internal/plugin/notification.go` 增加三个借用 provider 契约。新增 `builtin/notification/{plugin,drain}.go`：Init 验证已启用配置对应 provider，构造唯一注入式 Notifier；只发布受生命周期保护的通知能力，BindDrain 只注册取消回调，release 幂等并等待自身回调。 | 生命周期不保存 Init context；组合不关闭借用 sender；Stop 先关闭接纳并取消在途。取消/解除/Stop 的屏障用例证明组件级行为，真实 SDK 日志 owner 接线不在本阶段。 |
+| 2.3 | 历史路径「internal/plugin/notification.go」（已迁移或移除） 增加三个借用 provider 契约。新增 `builtin/notification/{plugin,drain}.go`：Init 验证已启用配置对应 provider，构造唯一注入式 Notifier；只发布受生命周期保护的通知能力，BindDrain 只注册取消回调，release 幂等并等待自身回调。 | 生命周期不保存 Init context；组合不关闭借用 sender；Stop 先关闭接纳并取消在途。取消/解除/Stop 的屏障用例证明组件级行为，真实 SDK 日志 owner 接线不在本阶段。 |
 | 2.4 | 对上述文件新增同包或外部 `*_test.go`，包括注册器回滚三通道轨迹、工厂部分结果/typed nil/取消、发送/关闭竞争、未排空资源保留、独立超时、目标快照、诊断脱敏、drain 解除与迟到回调。 | 两环境相关普通测试与 build；逐项记录实际结果。未运行 race 不宣称已通过数据竞争检测；未接日志/两入口的 A09/A10/A15/A16/A17 总体场景仍待阶段 3/5。 |
 
 `NotificationChannel` 仅复用四个本期 owner 相同的接纳、在途、取消和一次清理协议，放在既有 plugin 包，不建立新层级、不修改 Core 或其他默认插件。新资源工厂清理预算沿用计划中的 30 秒回滚上限；正常 Stop 使用调用方真实 context。创建只保存选项，所有工厂仅由 Init 触发。
 
 任意用户实现可能通过接口返回 typed nil；单个 `news.ValidateSender` 仅在构造/发布边界用 reflect.ValueOf/Kind/IsNil 识别该情况，不反射调用、不遍历字段、不在发送热路径使用反射。具体 SDK 指针仍先直接判 nil。没有这一边界检查就无法在不调用任意实现方法的情况下拒绝 typed nil；不扩大成通用反射工具。
 
-仅在本次已批准的四个 builtin 包及现有 news/plugin 文件内增补实现和测试；`cmd/plugins.go`、logging、bootstrap、Core、mail/sms 原 SDK 封装、配置值及示例保持原样。OpenSpec 仅同步本 change 的阶段 2 授权/实施记录，保留阶段 3–5 未完成，不归档。
+仅在本次已批准的四个 builtin 包及现有 news/plugin 文件内增补实现和测试；历史路径「cmd/plugins.go」（已迁移或移除）、logging、bootstrap、Core、mail/sms 原 SDK 封装、配置值及示例保持原样。OpenSpec 仅同步本 change 的阶段 2 授权/实施记录，保留阶段 3–5 未完成，不归档。
 
 执行前状态（历史）：上述细节与范围已落盘并回读后实施；当时组件、测试和构建尚未完成。最终结果如下。
 

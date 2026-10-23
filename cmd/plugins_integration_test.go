@@ -26,10 +26,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/gtkit/gin-api/internal/bootstrap"
-	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
 	"github.com/gtkit/gin-api/internal/router"
 	"github.com/gtkit/gin-api/internal/shared/env"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -91,7 +89,7 @@ func TestIsolatedPluginRoot(t *testing.T) {
 
 // This opt-in suite performs only startup/session checks and isolated cache writes
 // on the existing local services. It never runs DDL, DML, FLUSH, or migrations.
-func TestPluginRegistryRealDependencies(t *testing.T) {
+func TestFixedRuntimeRealDependencies(t *testing.T) {
 	if os.Getenv("PLUGIN_INTEGRATION") != "1" {
 		if os.Getenv("REQUIRE_DB_INTEGRATION") == "1" {
 			t.Fatal("REQUIRE_DB_INTEGRATION=1 requires PLUGIN_INTEGRATION=1; refusing a silent skip")
@@ -131,7 +129,7 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 		installPluginConfiguration(t, broken)
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		if runtime, err := bootstrap.NewRuntime(ctx, bootstrap.Options{RegisterPlugins: registerServerPlugins}); runtime != nil || err == nil || !strings.Contains(err.Error(), `init plugin "mysql"`) {
+		if runtime, err := bootstrap.NewRuntime(ctx, bootstrap.Options{}); runtime != nil || err == nil || !strings.Contains(err.Error(), "mysql") {
 			t.Fatalf("expected MySQL handshake failure, got %v", err)
 		}
 	})
@@ -140,7 +138,7 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 	}
 	t.Run("migration minimal readonly", func(t *testing.T) {
 		installPluginConfiguration(t, base)
-		runtime, err := bootstrap.NewMigrationRuntime(t.Context(), bootstrap.MigrationOptions{RegisterPlugins: registerMigrationPlugins})
+		runtime, err := bootstrap.NewMigrationRuntime(t.Context(), bootstrap.MigrationOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -195,12 +193,12 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	} {
 		t.Setenv(key, value)
 	}
-	cfg, err := defaultconfig.Load()
+	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Preserve resolved local credentials in memory, then remove APP_ overrides so
-	// each subsequent registration really consumes its own complete temporary file.
+	// each subsequent runtime really consumes its own complete temporary file.
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(key, "APP_") {
@@ -360,13 +358,7 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 	cfg.Redis.Prefix = cfg.App.Name
 	cfg.Cache = config.CacheConfig{Enabled: true, Store: store, RedisDB: 0, TTL: 2 * time.Second, MaxBytes: 1 << 20, MaxBodyBytes: 4096}
 	installPluginConfiguration(t, cfg)
-	var selected bootstrap.PluginSet
-	register := func(r *core.PluginRegistry) (bootstrap.PluginSet, error) {
-		var err error
-		selected, err = registerServerPlugins(r)
-		return selected, err
-	}
-	runtime, err := bootstrap.NewRuntime(t.Context(), bootstrap.Options{RegisterPlugins: register})
+	runtime, err := bootstrap.NewRuntime(t.Context(), bootstrap.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,14 +367,17 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 			t.Error(err)
 		}
 	})
-	sqlDB := selected.Database.SQLDB()
-	redisClient := selected.Redis.DefaultClient()
-	if sqlDB == nil || redisClient == nil || !selected.Cache.Enabled() {
-		t.Fatalf("real capability states: SQL=%t Redis=%t cache=%t configuredCache=%t", sqlDB != nil, redisClient != nil, selected.Cache.Enabled(), runtime.Config().Cache.Enabled)
+	sqlDB, err := runtime.Resources().Mdb().DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisClient := runtime.Resources().Rdb(0)
+	if sqlDB == nil || redisClient == nil || !runtime.Cache().Enabled() {
+		t.Fatalf("real capability states: SQL=%t Redis=%t cache=%t configuredCache=%t", sqlDB != nil, redisClient != nil, runtime.Cache().Enabled(), runtime.Config().Cache.Enabled)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := selected.Database.PingContext(ctx); err != nil {
+	if err := runtime.Resources().PingDB(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := redisClient.Ping(ctx).Err(); err != nil {
@@ -393,8 +388,8 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 		t.Fatal(err)
 	}
 	var executions atomic.Int32
-	engine, err := router.New(env.Test, router.Options{Middleware: selected.Middleware, Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
-		v1.GET("/cache-probe", selected.Cache.Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
+	engine, err := router.New(env.Test, router.Options{AllowedOrigins: cfg.CORS.AllowedOrigins, LogRequestBody: cfg.Log.AccessRequestBody, LogResponseBody: cfg.Log.AccessResponseBody, MaxBodyBytes: cfg.App.MaxBodyBytes, Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
+		v1.GET("/cache-probe", runtime.Cache().Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +446,7 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 		t.Fatal("Redis client stayed open")
 	}
 	if sqlDB.Stats().OpenConnections != 0 || redisClient.PoolStats().TotalConns != 0 {
-		t.Fatal("owned connections remain after Stop")
+		t.Fatal("owned connections remain after Close")
 	}
 	t.Logf("%s: real HTTP cache hit, identity bypass, SQL/Redis pools closed", store)
 }

@@ -1,6 +1,8 @@
 package ai
 
 import (
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -30,7 +32,62 @@ const (
 	expectContinueTimeout = time.Second
 	maxIdleConns          = 32
 	maxIdleConnsPerHost   = 16
+
+	// Protocol framing needs more room than the retained model reply. Both are
+	// memory safety limits, independent of model token counts and time budgets.
+	maxProviderResponseBytes int64 = 64 << 20
+	maxModelReplyBytes             = 8 << 20
 )
+
+var errResponseTooLarge = errors.New("ai: provider response exceeds byte limit")
+
+// limitedHTTPClient bounds decoded HTTP bodies before an SDK can buffer an
+// unterminated SSE line, error payload or JSON value. The original client still
+// owns its connection pool and is closed by the module assembly.
+type limitedHTTPClient struct {
+	client   *http.Client
+	maxBytes int64
+}
+
+func (c *limitedHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	// #nosec G704 -- SDK 依据部署者配置的固定 BaseURL 构造请求；HTTP DTO 不接受目标 URL。
+	response, err := c.client.Do(req)
+	if err == nil && response.Body != nil {
+		response.Body = &limitedResponseBody{ReadCloser: response.Body, remaining: c.maxBytes}
+	}
+	return response, err
+}
+
+type limitedResponseBody struct {
+	io.ReadCloser
+	remaining int64
+	failure   error
+}
+
+func (b *limitedResponseBody) Read(p []byte) (int, error) {
+	if b.failure != nil {
+		return 0, b.failure
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining+1] // One extra byte distinguishes exact size from truncation.
+	}
+	n, err := b.ReadCloser.Read(p)
+	if int64(n) > b.remaining {
+		allowed := int(b.remaining)
+		b.remaining, b.failure = 0, errResponseTooLarge
+		// EOF is a normal ending; including it would let an SDK misclassify
+		// overflow as successful completion. Preserve other read failures.
+		if err != nil && err != io.EOF {
+			b.failure = errors.Join(b.failure, err)
+		}
+		return allowed, b.failure
+	}
+	b.remaining -= int64(n)
+	return n, err
+}
 
 // newHTTPClient 构造一家厂商专用的出站 HTTP 客户端。
 //
@@ -44,9 +101,8 @@ const (
 // 补偿：没有它们，一个建连就卡住的对端会把 goroutine 与连接一起无限期扣住，
 // 而 ctx 的 deadline 只在**流式**路径上足够长到无法及时兜住。
 //
-// **不复用 internal/pkg/httpclient**：那套 httpc.Client 给每个下游设总超时与
-// 响应体字节上限，两者对 SSE 长连接都是错的语义——响应体上限会把一个正常的
-// 长回复判成异常。名字相同、语义不同的复用比不复用更危险。
+// 不复用 internal/pkg/httpclient 的总超时与普通 JSON 限额。AI 在 SDK 读取
+// 之前单独限制协议字节，适配器另限制正文加推理的累计字节。
 //
 // 每家厂商一个 client：连接池按 host 隔离，一家厂商的慢响应不该占用另一家的
 // 连接配额；同一家的多次调用则复用同一个池。

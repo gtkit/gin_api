@@ -1,10 +1,12 @@
 # logging 包导入名修正
 
+> 历史记录：以下路径、命令和验收结果按当时版本保留，部分文件现已迁移或移除。当前基础组件采用显式 Open/Close 装配，见 [当前架构](architecture.md) 和 [简化方案](architecture-simplification-plan.md)。
+
 来源：用户指出 `plugin.go` 的 `sdk` 别名语义不明，并明确要求立即改正。目标是沿用第三方包原名 `logger`；项目日志门面仍为 `applog`。
 
 当前事实：`go list -f '{{.Name}}' github.com/gtkit/logger/v2` 实际输出 `logger`。本项目 Go 1.27.0、logger/v2 v2.3.0 不变；workspace 仍可能使用本机替换，需与 GOWORK=off 分别检查。
 
-范围仅为 `internal/plugin/builtin/logging/` 中五个文件：`plugin.go`、`options.go`、`plugin_test.go`、`hotpath_contract_test.go`、`benchmark_test.go`。删除 `sdk` 导入别名，将对应 `sdk.` 引用改为 `logger.`；hotpath 测试中同名局部变量分别改为 `instance`、`gormLogger`，避免遮蔽导入。保留函数名、实际类型、依赖、构造和关闭顺序、配置、日志及通知行为，不改目录或其他包，不进入通知阶段 2，不启动 OpenSpec。
+范围仅为 历史路径「internal/plugin/builtin/logging/」（已迁移或移除） 中五个文件：`plugin.go`、`options.go`、`plugin_test.go`、`hotpath_contract_test.go`、`benchmark_test.go`。删除 `sdk` 导入别名，将对应 `sdk.` 引用改为 `logger.`；hotpath 测试中同名局部变量分别改为 `instance`、`gormLogger`，避免遮蔽导入。保留函数名、实际类型、依赖、构造和关闭顺序、配置、日志及通知行为，不改目录或其他包，不进入通知阶段 2，不启动 OpenSpec。
 
 | 步骤 | 前置条件 | 具体动作与验收证据 | 停止条件 | 状态 |
 |---|---|---|---|---|

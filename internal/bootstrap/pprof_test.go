@@ -229,7 +229,10 @@ func TestPprofShutdownIsIdempotent(t *testing.T) {
 	second := make(chan error, 1)
 	go func() { second <- h.Shutdown(ctx) }()
 	select {
-	case <-second:
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("second Shutdown: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("second Shutdown blocked; it must not wait for a result that was already consumed")
 	}

@@ -21,11 +21,11 @@ import (
 	"github.com/gtkit/gin-api/internal/router"
 	"go.opentelemetry.io/otel"
 
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
-	"github.com/gtkit/gin-api/internal/plugin"
 	"github.com/gtkit/gin-api/internal/repository/useraccount"
 	"github.com/gtkit/gin-api/internal/repository/userrole"
 	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
@@ -48,7 +48,7 @@ type providerSet struct {
 	// outbound 是具名出站执行入口（客户端 + 熔断）；未声明 clients 时为空入口。
 	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关停时释放本地 store 的后台 goroutine。
-	cache plugin.ResponseCache
+	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧。必须在 metrics 之前装配。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端，供各模块注入。
@@ -70,8 +70,7 @@ type infra struct {
 	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
 	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
-	cache      plugin.ResponseCache
-	middleware plugin.MiddlewareBuilder
+	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
 	telemetry *telemetry.Provider
 	// tasksProducer 是异步任务入队端；未启用时 Enqueue 报 ErrDisabled。
@@ -233,17 +232,16 @@ func newProvidersWithBudget(
 		applog.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
-	// 3c. 响应缓存。Runtime 的 Cache 插件已按 Redis 可达性完成初始化；
+	// 3c. 响应缓存。Runtime 已按 Redis 可达性完成缓存初始化；
 	//     这里仅取得它的 typed view，默认关闭时仍产出透传中间件。
 	//     必须先于路由装配：模块在注册只读路由时就要挂上它。Redis 已配置
-	//     但启动期不可达时的禁用降级由插件完成，避免 providers 重复构造和关闭 Store。
-	cachePlugin := runtime.CachePlugin()
-	if cachePlugin == nil {
-		return nil, errors.New("response cache plugin is not initialized")
+	//     但启动期不可达时由 owner 禁用，避免 providers 重复构造和关闭 Store。
+	responseCache := runtime.Cache()
+	if responseCache == nil {
+		return nil, errors.New("response cache is not initialized")
 	}
-	responseCache := cachePlugin
 	inf.cache = responseCache
-	if cachePlugin.Enabled() {
+	if responseCache.Enabled() {
 		applog.Infof("GET response cache enabled (store=%s, ttl=%s); it only applies to routes that "+
 			"explicitly mount the middleware, and requests carrying identity always bypass it",
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
@@ -346,7 +344,6 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 		cfg:        cfg,
 		mysqlDB:    mysqlDB,
 		httpConfig: newHTTPConfig(cfg),
-		middleware: runtime.middleware,
 	}, nil
 }
 
@@ -544,9 +541,13 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
 
-	opt := router.Options{Middleware: inf.middleware,
-		TracingEnabled: cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
-		ServiceName:    cfg.App.Name,
+	opt := router.Options{
+		AllowedOrigins:  cfg.CORS.AllowedOrigins,
+		LogRequestBody:  cfg.Log.AccessRequestBody,
+		LogResponseBody: cfg.Log.AccessResponseBody,
+		MaxBodyBytes:    cfg.App.MaxBodyBytes,
+		TracingEnabled:  cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
+		ServiceName:     cfg.App.Name,
 		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,

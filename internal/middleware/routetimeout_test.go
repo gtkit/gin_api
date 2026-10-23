@@ -444,6 +444,11 @@ func TestTimeoutErrorClassification(t *testing.T) {
 		{name: "wrapped deadline", err: fmt.Errorf("q: %w", context.DeadlineExceeded), wantTimeout: true},
 		{name: "canceled", err: context.Canceled, wantGone: true},
 		{name: "wrapped canceled", err: fmt.Errorf("q: %w", context.Canceled), wantGone: true},
+		{name: "cancellation and deadline", err: errors.Join(context.Canceled, context.DeadlineExceeded), wantGone: true},
+		{name: "wrapped abort tree", err: fmt.Errorf("q: %w", errors.Join(context.DeadlineExceeded, context.Canceled)), wantGone: true},
+		{name: "cancellation and failure", err: errors.Join(context.Canceled, errors.New("database unavailable"))},
+		{name: "deadline and failure", err: errors.Join(context.DeadlineExceeded, errors.New("database unavailable"))},
+		{name: "abort tree and failure", err: errors.Join(context.Canceled, context.DeadlineExceeded, errors.New("database unavailable"))},
 		{name: "unrelated", err: errors.New("boom")},
 	}
 

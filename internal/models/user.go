@@ -3,7 +3,7 @@ package models
 import (
 	"time"
 
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 )
 
 // UserStatus 表示用户状态。

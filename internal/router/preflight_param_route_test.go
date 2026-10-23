@@ -14,7 +14,7 @@ func newParamRouteEngine(t *testing.T) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	engine, err := newRouterForTest("test", Options{
-		Middleware: testMiddlewareWithOrigins([]string{"https://example.com"}),
+		AllowedOrigins: []string{"https://example.com"},
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusOK) })
 			v1.PUT("/thing/:id", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -183,7 +183,7 @@ func TestPreflightDefersToRegisteredOptionsHandler(t *testing.T) {
 
 	var optionsHandlerRan bool
 	engine, err := newRouterForTest("test", Options{
-		Middleware: testMiddlewareWithOrigins([]string{"https://example.com"}),
+		AllowedOrigins: []string{"https://example.com"},
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing/:id", func(c *gin.Context) { c.Status(http.StatusOK) })
 			v1.OPTIONS("/thing/:id", func(c *gin.Context) {

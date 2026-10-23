@@ -408,7 +408,10 @@ func TestLeaseIsReleasedOnShutdown(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run 未在 ctx 取消后返回")
 	}

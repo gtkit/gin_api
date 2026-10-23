@@ -27,7 +27,7 @@ import (
 	"os"
 	"testing"
 
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	defaultconfig "github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/ormx"
 	"gorm.io/gorm"

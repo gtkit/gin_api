@@ -15,6 +15,7 @@
 
 # Go 源码
 !main.go
+!main_jsoniter.go
 !version.go
 !cmd
 !internal

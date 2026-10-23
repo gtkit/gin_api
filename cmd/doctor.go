@@ -7,9 +7,8 @@ import (
 	"net"
 	"time"
 
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
-	defaultmysql "github.com/gtkit/gin-api/internal/plugin/builtin/mysql"
-	defaultredis "github.com/gtkit/gin-api/internal/plugin/builtin/redis"
+	defaultmysql "github.com/gtkit/gin-api/internal/platform/mysql"
+	defaultredis "github.com/gtkit/gin-api/internal/platform/redis"
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
 	"github.com/gtkit/gin-api/internal/diagnostics"
@@ -18,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// configLoader 抽象配置加载动作，便于测试注入桩替换 defaultconfig.Load。
+// configLoader 抽象配置加载动作，便于测试注入桩替换 config.Load。
 type configLoader func() (*config.Config, error)
 
 // probeBuilder 构造 deep 检查所需的真实探测能力，并返回释放函数。
@@ -31,9 +30,9 @@ func init() {
 	RegisterRootCommand(newDoctorCmd)
 }
 
-// newDoctorCmd 构造 doctor 子命令，默认使用 defaultconfig.Load 与真实资源探测。
+// newDoctorCmd 构造 doctor 子命令，默认使用 config.Load 与真实资源探测。
 func newDoctorCmd(_ *rootOptions) *cobra.Command {
-	return newDoctorCmdWithDeps(defaultconfig.Load, buildRuntimeProbes)
+	return newDoctorCmdWithDeps(config.Load, buildRuntimeProbes)
 }
 
 // newDoctorCmdWithDeps 构造 doctor 子命令：不启动任何服务，只做部署前自检。
