@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -354,8 +355,14 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 			}
 			defer limiter.Close()
 
-			decision, err := limiter.Check(context.Background(), "k")
-			if err != nil && tt.mode != ratelimit.FailureOpen {
+			decision, err := limiter.Check(t.Context(), "k")
+			// 首次请求会探测缺失的客户端。fail_open 放行仍保留后端根因，
+			// 不能接受任意错误；local_fallback 成功使用本地桶时则返回 nil。
+			if tt.mode == ratelimit.FailureOpen {
+				if !errors.Is(err, errRedisUnavailable) {
+					t.Fatalf("first probe error = %v, want Redis unavailable", err)
+				}
+			} else if err != nil {
 				t.Fatalf("Check: %v", err)
 			}
 			if decision.Allowed() != tt.wantAllowed {
@@ -365,7 +372,7 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 			// 打穿 burst：只有真的在算限额的执行体才会开始拒绝。
 			var rejected bool
 			for range policy.Burst + 2 {
-				d, checkErr := limiter.Check(context.Background(), "k")
+				d, checkErr := limiter.Check(t.Context(), "k")
 				if checkErr != nil {
 					t.Fatalf("Check: %v", checkErr)
 				}
@@ -382,9 +389,18 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 
 func TestRedisCommandAdapterReportsMissingClient(t *testing.T) {
 	adapter := redisCommands{}
-	if adapter.ScriptLoad(t.Context(), "return 1").Err() == nil ||
-		adapter.EvalSha(t.Context(), "sha", []string{"key"}, "arg").Err() == nil ||
-		adapter.Del(t.Context(), "key").Err() == nil {
-		t.Fatal("missing client was reported as a successful command")
+	for _, command := range []struct {
+		name string
+		err  error
+	}{
+		{name: "ScriptLoad", err: adapter.ScriptLoad(t.Context(), "return 1").Err()},
+		{name: "EvalSha", err: adapter.EvalSha(t.Context(), "sha", []string{"key"}, "arg").Err()},
+		{name: "Del", err: adapter.Del(t.Context(), "key").Err()},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			if !errors.Is(command.err, errRedisUnavailable) {
+				t.Fatalf("error = %v, want Redis unavailable", command.err)
+			}
+		})
 	}
 }

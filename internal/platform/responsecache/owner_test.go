@@ -94,6 +94,74 @@ func TestRecoveredCacheSharesStoreAndRetainsEachRouteMiddleware(t *testing.T) {
 	}
 }
 
+// TestCacheReadPathsShareOwnerLock 区分功能正确与读路径确实不需要写锁。
+// 先固定持有一个读锁，再分别调用 Enabled 和已挂载路由：另一个读者可以
+// 完成，取写锁的旧实现则只能等测试释放锁。超时仅作为失败上界，不用于猜测
+// goroutine 是否已经运行；失败后也先释放锁并接回结果，避免遗留请求。
+func TestCacheReadPathsShareOwnerLock(t *testing.T) {
+	for _, state := range []string{"waiting", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			provider := new(lateRedis)
+			store := new(countedStore)
+			p := mustOpen(t, Options{
+				Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}},
+				Redis:  provider,
+				Factory: func(config.CacheConfig, *redis.Client, string) (Store, error) {
+					return store, nil
+				},
+			})
+			if state == "ready" {
+				client := redis.NewClient(&redis.Options{Addr: "unused"})
+				t.Cleanup(func() {
+					if err := client.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				provider.current.Store(client)
+			}
+			engine := gin.New()
+			engine.GET("/cache", p.Middleware(time.Second), func(c *gin.Context) {
+				c.Status(http.StatusNoContent)
+			})
+			request := func() bool {
+				recorder := httptest.NewRecorder()
+				engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/cache", nil))
+				return recorder.Code == http.StatusNoContent
+			}
+			if !request() {
+				t.Fatal("initial request failed")
+			}
+			for _, operation := range []struct {
+				name string
+				run  func() bool
+			}{
+				{name: "enabled", run: func() bool { return p.Enabled() == (state == "ready") }},
+				{name: "middleware", run: request},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					done := make(chan bool, 1)
+					p.mu.RLock()
+					go func() { done <- operation.run() }()
+					var passed, blocked bool
+					select {
+					case passed = <-done:
+					case <-time.After(time.Second):
+						blocked = true
+					}
+					p.mu.RUnlock()
+					if blocked {
+						<-done
+						t.Fatal("read path waited for the Owner write lock")
+					}
+					if !passed {
+						t.Fatal("read path changed the response or enabled state")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestLateFactoryFailureIsTerminalAndClosesPartialStore(t *testing.T) {
 	for _, mode := range []string{"error", "typed-nil", "panic"} {
 		t.Run(mode, func(t *testing.T) {

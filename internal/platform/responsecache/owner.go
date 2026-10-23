@@ -134,14 +134,12 @@ func closeStore(store Store) (err error) {
 	return store.Close()
 }
 
-// resolveStoreLocked serializes the single late construction with Close. No
-// handler is executed under this lock, and terminal failures are never retried.
-func (p *Owner) resolveStoreLocked() {
+// resolveStoreLocked 在写锁内把首次恢复构造与 Close 串行化。调用方已在锁外
+// 取得非 nil 的 Redis 客户端，但读取状态和取得写锁之间仍可能发生关闭，
+// 或由另一请求先完成构造，因此必须再次检查。失败保持终态，不重复构造；
+// 请求处理器始终在锁外执行。
+func (p *Owner) resolveStoreLocked(client *redis.Client) {
 	if p.closed || !p.waiting {
-		return
-	}
-	client := p.redis.Client(p.config.RedisDB)
-	if client == nil {
 		return
 	}
 	p.waiting = false
@@ -169,15 +167,32 @@ func (p *Owner) Close(ctx context.Context) error {
 	return p.closeErr
 }
 
+// Enabled 读取当前可用状态；只有等待恢复且已取得客户端时才进入写锁。
+// 稳定状态下在读锁内查询 Store，既允许并发读取，也保持与 Close 的互斥。
 func (p *Owner) Enabled() bool {
 	if p == nil {
 		return false
 	}
+	p.mu.RLock()
+	if p.closed || !p.waiting {
+		defer p.mu.RUnlock()
+		return !p.closed && p.store != nil && p.store.Enabled()
+	}
+	p.mu.RUnlock()
+
+	client := p.redis.Client(p.config.RedisDB)
+	if client == nil {
+		return false
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.resolveStoreLocked()
+	p.resolveStoreLocked(client)
 	return !p.closed && p.store != nil && p.store.Enabled()
 }
+
+// Middleware 为每个挂载点保留一次构造的处理器。读锁只用于获取一致状态，
+// 不覆盖实际请求处理；未恢复时继续透传，稳定运行时不再竞争 Owner 写锁。
+// 恢复构造和该挂载点的首次处理器构造仍受同一写锁保护。
 func (p *Owner) Middleware(ttl time.Duration) gin.HandlerFunc {
 	if p == nil {
 		return passthrough
@@ -185,9 +200,35 @@ func (p *Owner) Middleware(ttl time.Duration) gin.HandlerFunc {
 	var middleware gin.HandlerFunc
 	return func(c *gin.Context) {
 		handler := func() gin.HandlerFunc {
+			p.mu.RLock()
+			closed, waiting, hasStore := p.closed, p.waiting, p.store != nil
+			current := middleware
+			p.mu.RUnlock()
+			if closed {
+				return passthrough
+			}
+			if current != nil {
+				return current
+			}
+
+			var client *redis.Client
+			if !hasStore {
+				if !waiting {
+					return passthrough
+				}
+				client = p.redis.Client(p.config.RedisDB)
+				if client == nil {
+					return passthrough
+				}
+			}
+
+			// 不能持读锁升级写锁。这里重新确认关闭/构造状态，也保护
+			// 各请求共享的 middleware 闭包变量，避免首次请求重复创建。
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			p.resolveStoreLocked()
+			if client != nil {
+				p.resolveStoreLocked(client)
+			}
 			if p.closed || p.store == nil {
 				return passthrough
 			}

@@ -201,8 +201,8 @@ func TestReadyEndpointNilChecker(t *testing.T) {
 	}
 }
 
-// TestReadyEndpointReportsErrorDetail 钉住公开文案与内部原因的隔离。
-func TestReadyEndpointReportsErrorDetail(t *testing.T) {
+// TestReadyEndpointHidesErrorDetail 钉住公开文案与内部原因的隔离。
+func TestReadyEndpointHidesErrorDetail(t *testing.T) {
 	const depErr = "dial tcp 10.0.0.5:3306: connection refused"
 	engine := newTestEngine(t, &stubChecker{dbErr: errors.New(depErr)})
 

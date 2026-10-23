@@ -129,6 +129,11 @@ func buildLimiter(
 	return ratelimit.NewRedisLimiter(*redisBackend, policy)
 }
 
+// errRedisUnavailable 只表示本次命令没有取得可借用的 DB 0 客户端，
+// 不代表配置永久缺失；后续命令仍重新查询 Resources，以便接入恢复后的连接。
+// 三个命令共用该原因，使包装后的错误可以用 errors.Is 精确识别。
+var errRedisUnavailable = errors.New("redis is unavailable")
+
 // redisCommands borrows the current DB 0 client once per command. Recovery and
 // ownership stay with Resources; algorithm, keys and retry policy stay in ratelimit.
 type redisCommands struct{ resources *data.Resources }
@@ -138,7 +143,7 @@ func (r redisCommands) ScriptLoad(ctx context.Context, script string) *redis.Str
 		return client.ScriptLoad(ctx, script)
 	}
 	cmd := redis.NewStringCmd(ctx)
-	cmd.SetErr(errors.New("redis is unavailable"))
+	cmd.SetErr(errRedisUnavailable)
 	return cmd
 }
 
@@ -147,7 +152,7 @@ func (r redisCommands) EvalSha(ctx context.Context, sha string, keys []string, a
 		return client.EvalSha(ctx, sha, keys, args...)
 	}
 	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("redis is unavailable"))
+	cmd.SetErr(errRedisUnavailable)
 	return cmd
 }
 
@@ -156,7 +161,7 @@ func (r redisCommands) Del(ctx context.Context, keys ...string) *redis.IntCmd {
 		return client.Del(ctx, keys...)
 	}
 	cmd := redis.NewIntCmd(ctx)
-	cmd.SetErr(errors.New("redis is unavailable"))
+	cmd.SetErr(errRedisUnavailable)
 	return cmd
 }
 

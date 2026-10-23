@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -159,9 +160,13 @@ func TestOptionalRedisRecoveryReachesMountedCacheAndSharedLimiter(t *testing.T) 
 		if backend != shared {
 			t.Fatal("policies did not share a backend")
 		}
-		if decision, _ := openLimiter.Check(t.Context(), "open-key"); !decision.Allowed() || !decision.Degraded {
-			t.Fatal("fail_open did not degrade")
+		if decision, err := openLimiter.Check(t.Context(), "open-key"); !decision.Allowed() || !decision.Degraded || !errors.Is(err, errRedisUnavailable) {
+			t.Fatalf("fail_open initial decision=%+v err=%v, want allowed with Redis unavailable", decision, err)
 		}
+		// 冷却从首次失败探测开始；后面的 Owner 恢复、readiness 和 tracing
+		// 验证也会经过虚拟时间，因此最后等待截止点，不能再写死剩余 25 秒。
+		healthPolicy := ratelimit.DefaultHealthPolicy()
+		cooldownUntil := time.Now().Add(healthPolicy.Cooldown)
 		for i := range 3 {
 			decision, err := fallback.Check(t.Context(), "fallback-key")
 			if err != nil || !decision.Degraded || decision.Allowed() != (i < 2) {
@@ -175,8 +180,8 @@ func TestOptionalRedisRecoveryReachesMountedCacheAndSharedLimiter(t *testing.T) 
 			t.Fatal(err)
 		}
 		synctest.Wait()
-		time.Sleep(5 * time.Second)
-		synctest.Wait()
+		// 此处的 5 秒属于 Redis Owner 的独立重试周期，不是限流健康策略。
+		synctest.Sleep(5 * time.Second)
 		clientDB3, exists := client.GetClient(3)
 		if calls.Load() != 2 || !exists || resources.Rdb(3) != clientDB3 {
 			t.Fatal("owner recovery did not reach borrowed resources")
@@ -217,11 +222,23 @@ func TestOptionalRedisRecoveryReachesMountedCacheAndSharedLimiter(t *testing.T) 
 		if sets != 2 {
 			t.Fatalf("set spans=%d, want one per DB operation", sets)
 		}
-		time.Sleep(25 * time.Second)
-		if decision, err := openLimiter.Check(t.Context(), "open-key"); err != nil || !decision.Allowed() || decision.Degraded {
-			t.Fatalf("first recovered check=%+v err=%v", decision, err)
+		synctest.Sleep(time.Until(cooldownUntil))
+		// 共享后端按生产策略要求的连续成功次数恢复；交替使用两个策略，
+		// 并用独立 key 隔离探测成功与业务桶耗尽这两种不同的结果。
+		for attempt := range healthPolicy.SuccessThreshold {
+			if attempt > 0 {
+				synctest.Sleep(healthPolicy.ProbeInterval)
+			}
+			limiter := openLimiter
+			if attempt%2 != 0 {
+				limiter = fallback
+			}
+			decision, err := limiter.Check(t.Context(), fmt.Sprintf("recovered-probe-%d", attempt))
+			if err != nil || !decision.Allowed() || decision.Degraded {
+				t.Fatalf("recovery probe=%d decision=%+v err=%v", attempt, decision, err)
+			}
 		}
-		time.Sleep(5 * time.Second)
+		// 即使未来成功阈值降为一次，也仍单独验证 fallback 已回到 Redis。
 		if decision, err := fallback.Check(t.Context(), "fallback-key"); err != nil || !decision.Allowed() || decision.Degraded {
 			t.Fatalf("fallback did not return to Redis: %+v %v", decision, err)
 		}
