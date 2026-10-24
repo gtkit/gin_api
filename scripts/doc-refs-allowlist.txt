@@ -16,6 +16,14 @@
 pprof/01-pprof性能调优指南.md:pprof/profiles/        # pprof — 采集产物目录，运行时由 pprof/scripts/collect.sh 创建（该脚本第 35 行 OUT_DIR），并由 pprof/.gitignore 忽略，故不在仓库里
 pprof/03-go-tool-pprof命令详解.md:pprof/profiles/     # pprof — 同上，此处是与 go tool pprof 默认输出位置的对照说明
 CHANGELOG.md:cmd/MODULE_GENERATOR.md # scaffold maintainers — 历史变更记录引用的模块生成手册已于 2026-10-25 删除
+CHANGELOG.md:internal/pkg/tasks/scheduler.go # taskqueue maintainers — 历史依赖修复记录，队列实现已迁入 internal/taskqueue
 docs/review-remediation-plan-2026-10-23.md:cmd/MODULE_GENERATOR.md # scaffold maintainers — 保留历史审查记录，当时存在的模块生成手册已删除
 docs/review-remediation-plan-2026-10-23.md:internal/scaffold/module.go # scaffold maintainers — 保留历史审查记录，当时存在的模块生成器已删除
 docs/review-remediation-plan-2026-10-23.md:internal/scaffold/module_test.go # scaffold maintainers — 保留历史审查记录，当时存在的生成器测试已删除
+docs/review-remediation-plan-2026-10-23.md:internal/pkg/tasks/scheduler.go # taskqueue maintainers — 历史审查路径，实现已迁入 internal/taskqueue
+docs/review-remediation-plan-2026-10-23.md:internal/pkg/tasks/scheduler_test.go # taskqueue maintainers — 历史审查路径，测试已迁入 internal/taskqueue
+docs/review-remediation-plan-2026-10-23.md:internal/pkg/tasks/scheduler_shutdown_test.go # taskqueue maintainers — 历史审查路径，测试已迁入 internal/taskqueue
+docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler.go # taskqueue maintainers — 历史适配器已合并到注释接线模板
+docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
+docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_shutdown_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
+docs/review-remediation-plan-2026-10-23.md:internal/platform/config/tasks.go # taskqueue maintainers — 历史审查路径，配置已迁入 internal/taskqueue/config.go

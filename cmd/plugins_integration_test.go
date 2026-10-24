@@ -35,6 +35,9 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
+// TASKQUEUE: 启用可选队列并运行本集成测试时，取消下一行 import 声明和配置清空语句的注释。
+// import "github.com/gtkit/gin-api/internal/taskqueue"
+
 // Run by Make before any other integration package can connect.
 func TestPluginIntegrationPrerequisites(t *testing.T) {
 	if os.Getenv("PLUGIN_INTEGRATION") != "1" {
@@ -224,7 +227,7 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
 	cfg.RateLimit = config.RateLimitConfig{}
 	cfg.Outbound = config.OutboundConfig{}
-	cfg.Tasks = config.TasksConfig{}
+	// cfg.Tasks = taskqueue.Config{}
 	cfg.Telemetry = config.TelemetryConfig{}
 	cfg.Pprof = config.PprofConfig{}
 	cfg.News = config.NewsConfig{}

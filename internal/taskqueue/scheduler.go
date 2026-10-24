@@ -1,4 +1,4 @@
-package tasks
+package taskqueue
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
-	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
 // PeriodicTask 声明一条周期任务。TaskType 必须有对应的队列处理器。
@@ -40,7 +39,7 @@ func (t PeriodicTask) validate() error {
 // Scheduler 在当前进程内按 cron 投递任务。
 // Prepare 完成注册，Run 启动一次；管理器在 Run 退出后调用 Cleanup。
 type Scheduler struct {
-	cfg       config.TasksConfig
+	cfg       Config
 	client    redis.UniversalClient
 	name      string
 	entries   []PeriodicTask
@@ -65,7 +64,7 @@ var _ schedulerRunner = (*asynqx.Scheduler)(nil)
 // NewScheduler 在队列或调度器未启用、或没有周期任务时返回 nil。
 // 构造不连接 Redis；cron、payload 和投递选项在 Prepare 中校验。
 func NewScheduler(
-	cfg config.TasksConfig, client redis.UniversalClient, name string, entries ...PeriodicTask,
+	cfg Config, client redis.UniversalClient, name string, entries ...PeriodicTask,
 ) (*Scheduler, error) {
 	if !cfg.Enabled || !cfg.Scheduler.Enabled || len(entries) == 0 {
 		return nil, nil //nolint:nilnil // 未启用时返回 nil 调度器是正常路径。

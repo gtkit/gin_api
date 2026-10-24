@@ -484,13 +484,6 @@ func TestNegativeConfigValuesAreRejected(t *testing.T) {
 			},
 			wantErr: "not an absolute http(s) URL",
 		},
-		{
-			name: "tasks 负并发",
-			mutate: func(c *Config) {
-				c.Tasks = TasksConfig{Enabled: true, Concurrency: -1, RedisDB: 0}
-			},
-			wantErr: "negative concurrency",
-		},
 	}
 
 	for _, tt := range tests {

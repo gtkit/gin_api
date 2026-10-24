@@ -14,11 +14,13 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 )
+
+// TASKQUEUE: 启用可选队列时取消下一行 import 声明和 infra.tasksProducer 字段的注释。
+// import "github.com/gtkit/gin-api/internal/taskqueue"
 
 type providerSet struct {
 	cleanup    *providerCleanup
@@ -45,8 +47,8 @@ type infra struct {
 	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
 	telemetry *telemetry.Provider
-	// tasksProducer 是异步任务入队端；未启用时 Enqueue 报 ErrDisabled。
-	tasksProducer *tasks.Producer
+	// TASKQUEUE: 供业务 service 显式注入的入队端，启用时取消注释。
+	// tasksProducer *taskqueue.Producer
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -149,15 +151,11 @@ func newProvidersWithBudget(
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
 	}
 
-	// 3d. 异步任务入队端。必须先于 service：service 要注入它才能入队。
-	//     未启用时它是一个空壳，Enqueue 报 ErrDisabled 而不是静默丢弃——
-	//     "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
-	tasksProducer, err := tasks.NewProducer(inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB))
-	if err != nil {
-		return nil, fmt.Errorf("build task producer: %w", err)
-	}
-	inf.tasksProducer = tasksProducer
-	cleanup.push("task producer", cleanupExtensions, tasksProducer.Shutdown)
+	// TASKQUEUE: 启用时先恢复 taskqueue.go 的实现，再取消下面调用的注释。
+	// 必须位于 buildServices 之前，业务 service 才能通过 inf.tasksProducer 接收依赖。
+	// if err := buildTaskQueueProducer(&inf, cleanup); err != nil {
+	// 	return nil, err
+	// }
 
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)

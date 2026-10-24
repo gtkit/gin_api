@@ -1,4 +1,4 @@
-package tasks
+package taskqueue
 
 import (
 	"context"
@@ -9,11 +9,10 @@ import (
 	"github.com/gtkit/asynqx"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/testutil"
 )
 
-func schedulerConfig() config.TasksConfig {
+func schedulerConfig() Config {
 	cfg := enabledConfig()
 	cfg.Scheduler.Enabled = true
 	return cfg
@@ -71,7 +70,7 @@ func TestDisabledSchedulerBuildsNothing(t *testing.T) {
 	schedulerOff.Scheduler.Enabled = false
 	for _, tc := range []struct {
 		name    string
-		cfg     config.TasksConfig
+		cfg     Config
 		entries []PeriodicTask
 	}{
 		{"queue disabled", queueOff, []PeriodicTask{periodicTask()}},

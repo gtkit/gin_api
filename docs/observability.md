@@ -69,7 +69,7 @@ API 收到其他 kind 时统一归入 `other`。队列按 consumer 名聚合，�
 `runtime.Goexit` 这类异常退出；埋点不 recover，不改变既有 panic 处理流程。
 
 默认装配覆盖 OneShot 的 `Run`、
-`NewObservedConsumer` 创建的队列消费者每次处理尝试。队列重试会再次计数。
+启用可选 taskqueue 后，由 `NewObservedConsumer` 创建的队列消费者每次处理尝试。队列重试会再次计数。
 没有执行任务、Prepare/Cleanup 均不产生执行样本；
 LongRunning 的整个存活时间也不作为一次任务耗时。自定义循环内的工作需在实际处理边界
 调用 `Recorder.RunWorker`，或自行调用 `RecordWorkerExecution`。

@@ -98,8 +98,8 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 
 ## 执行指标
 
-默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；队列消费者通过
-`tasks.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
+默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；可选队列启用后，消费者通过
+`taskqueue.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
 
 实际任务每次结束记录 `worker.executions` 与 `worker.execution.duration`（秒），
 按装配期 worker 名、kind、有限 outcome 聚合。队列重试各计一次。
@@ -113,13 +113,14 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 `time.Ticker`，监听 `ctx.Done()` 并为每次执行设置超时。
 需要 cron 表达式并通过队列消费时，使用下面的周期任务调度器。
 
-### 周期任务调度器（`internal/pkg/tasks`）
+### 周期任务调度器（`internal/taskqueue`）
 
-默认关闭，配 `tasks.scheduler.enabled` 启用，同时启用 `tasks.enabled`。
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加声明：
+默认未接入主程序。先按 [启用说明](../internal/taskqueue/README.md) 恢复 TASKQUEUE 接线，
+再配置 `tasks.scheduler.enabled` 和 `tasks.enabled`。
+在 `internal/bootstrap/taskqueue.go` 的 `buildTaskQueueWorkers` 中向 `taskqueue.NewScheduler` 追加声明：
 
 ```go
-tasks.PeriodicTask{
+taskqueue.PeriodicTask{
     Spec:     "0 3 * * *",                // 每天 03:00
     TaskType: "cleanup:ai-conversations", // 必须有对应的已注册处理器
     Payload:  cleanupPayload{Scope: "expired"},
@@ -150,10 +151,11 @@ tasks.PeriodicTask{
 底层尚未退出时，`WorkerManager` 保持 worker 的未退出状态，
 `App` 不提前关闭它使用的扩展和共享 Redis。实例停止后，管理器完成清理。
 
-## 异步任务队列（`internal/pkg/tasks`）
+## 异步任务队列（`internal/taskqueue`）
 
-`asynqx` 的装配，**默认关闭**。队列是有状态的基础设施：一旦开始入队，任务就必须有人消费——
-预置打开只会在某个部署里留下一堆没人处理的积压。
+`asynqx` 的可选装配，**默认接线已注释**。启用和完整删除步骤见
+[taskqueue README](../internal/taskqueue/README.md)。仅修改 YAML 不会启用当前未接入的包；
+恢复接线后，队列仍由 `tasks.enabled` 控制。
 
 **一个开关管两端**：只开生产端会攒下没人处理的积压；只开消费端则是一个空转的 worker
 占着并发配额。
@@ -162,7 +164,7 @@ tasks.PeriodicTask{
 
 ```go
 if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil {
-    if errors.Is(err, tasks.ErrDisabled) {
+    if errors.Is(err, taskqueue.ErrDisabled) {
         // 队列未启用。这是一个错误而不是静默丢弃——
         // "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
     }
@@ -171,8 +173,8 @@ if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil
 
 ### 注册处理器
 
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中向 `tasks.NewObservedConsumer` 追加一个
-`tasks.Registrar`：
+在 `internal/bootstrap/taskqueue.go` 的 `buildTaskQueueWorkers` 中向 `taskqueue.NewObservedConsumer` 追加一个
+`taskqueue.Registrar`：
 
 ```go
 func(w *asynqx.Worker) error {

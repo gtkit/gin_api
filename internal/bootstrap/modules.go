@@ -17,7 +17,6 @@ import (
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
-	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/router"
 	"github.com/gtkit/gin-api/internal/runtime/module/account"
@@ -266,7 +265,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 
 // buildWorkers 组装进程级后台任务。
 //
-// 母版按配置与已登记的处理器/周期任务装配队列 worker；未启用或集合为空时不注册。
+// 可选队列的接线示例见 taskqueue.go 和 internal/taskqueue/README.md。
 // 其余后台任务在本函数中追加 Worker 构造；
 // 需要 application service 或装配期 ctx 时，在调用点把它们加进形参即可——
 // 调用点只有一处，签名跟着真实消费者走，不为尚不存在的 worker 预留。
@@ -288,29 +287,12 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	}()
 	var workers []Worker
 
-	// 队列消费者：未启用队列或未注册任何处理器时不注册。
-	//
-	// 处理器通过下方的 tasks.Registrar 参数追加。没有处理器就不注册
-	// 消费者——一个空转的 worker 只会让关停多等一轮、让监控里多一个永远
-	// 空闲的实例，而不会处理任何东西。
-	if consumer := newAsynqConsumerWorker(tasks.NewObservedConsumer(
-		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-consumer", inf.recorder,
-	)); consumer != nil {
-		workers = append(workers, consumer)
-	}
-
-	// 周期任务调度器：未启用队列/调度器、或未声明任何周期任务时不注册。
-	//
-	// 周期任务通过下方的 tasks.PeriodicTask 参数追加，在当前进程内调度。
-	scheduler, schedulerErr := tasks.NewScheduler(
-		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-scheduler",
-	)
-	if schedulerErr != nil {
-		return nil, fmt.Errorf("build task scheduler: %w", schedulerErr)
-	}
-	if worker := newAsynqSchedulerWorker(scheduler); worker != nil {
-		workers = append(workers, worker)
-	}
+	// TASKQUEUE: 启用时恢复 taskqueue.go 的实现，并取消下面接线的注释。
+	// queueWorkers, err := buildTaskQueueWorkers(inf)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// workers = append(workers, queueWorkers...)
 
 	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
 	if err != nil {

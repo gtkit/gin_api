@@ -6,6 +6,9 @@ import (
 	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
+// TASKQUEUE: 启用时取消下一行 import 声明及下面 Tasks 字段的注释，见 internal/taskqueue/README.md。
+// import "github.com/gtkit/gin-api/internal/taskqueue"
+
 // Config 是服务的强类型运行配置。
 type Config struct {
 	Env      env.Env        `mapstructure:"env"`
@@ -34,8 +37,8 @@ type Config struct {
 	Cache CacheConfig `mapstructure:"cache"`
 	// Telemetry 是 OpenTelemetry 导出配置。默认关闭，此时埋点仍在但走 no-op。
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
-	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。
-	Tasks TasksConfig `mapstructure:"tasks"`
+	// TASKQUEUE: 可选队列配置，启用时取消下一行注释。
+	// Tasks taskqueue.Config `mapstructure:"tasks"`
 }
 
 type AppConfig struct {

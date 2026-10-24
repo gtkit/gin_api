@@ -97,8 +97,8 @@
 领域事件用于解耦跨上下文通信。当前 `auth` 与 `ai` 双向零引用，
 模块间通信不经任何代码路径发生，事件机制没有消费者。
 
-真正出现跨模块通知需求时，异步承载已经就位：`internal/pkg/tasks/` 的
-asynq 队列，其 worker 契约与关停顺序见
+真正出现跨模块通知需求时，可启用 `internal/taskqueue/` 中预留的
+asynq 队列（接线默认注释，操作见目录 README），其 worker 契约与关停顺序见
 [workers-and-scheduling.md](../workers-and-scheduling.md)。
 届时的决策点是「同步端口注入还是异步事件」，属于另一次决策。
 

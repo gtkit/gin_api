@@ -1,4 +1,4 @@
-// Package tasks 装配异步任务队列（asynq）的生产端与消费端。
+// Package taskqueue 装配异步任务队列（asynq）的生产端与消费端。
 //
 // 队列是有状态的基础设施：一旦开始入队，任务就必须有人消费。因此本包默认
 // 关闭，且两端**同一个开关**——只开生产端会攒下没人处理的积压，只开消费端
@@ -8,7 +8,7 @@
 // 后接入进程的 worker 管理器。因此它自动获得既有保证——关停排序（消费者在
 // HTTP 之后 drain）、Prepare 失败即启动失败、未预期退出必须被上报——
 // 而不是再造一套生命周期。本包因此不依赖装配层。
-package tasks
+package taskqueue
 
 import (
 	"context"
@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/asynqx"
 	"github.com/redis/go-redis/v9"
@@ -42,7 +41,7 @@ var ErrDisabled = errors.New("tasks: queue is disabled")
 //
 // client 提供 Redis 连接。复用进程已有的客户端而不是让 asynq 自己建一套：
 // 两套连接池对同一个 Redis，池上限与监控口径都会分叉。
-func NewProducer(cfg config.TasksConfig, client redis.UniversalClient) (*Producer, error) {
+func NewProducer(cfg Config, client redis.UniversalClient) (*Producer, error) {
 	if !cfg.Enabled {
 		return &Producer{}, nil
 	}
@@ -113,7 +112,7 @@ type Registrar func(worker *asynqx.Worker) error
 // worker 管理器——那套契约已经处理了关停排序、启动失败上报，以及"长期任务
 // 未预期退出必须被上报"。
 type Consumer struct {
-	cfg      config.TasksConfig
+	cfg      Config
 	client   redis.UniversalClient
 	name     string
 	handlers []Registrar
@@ -128,7 +127,7 @@ type Consumer struct {
 // handlers 为空时返回 nil：没有处理器的消费者是一个空转的 worker，
 // 注册它只会让关停多等一轮、让监控里多一个永远空闲的实例。
 func NewConsumer(
-	cfg config.TasksConfig, client redis.UniversalClient, name string, handlers ...Registrar,
+	cfg Config, client redis.UniversalClient, name string, handlers ...Registrar,
 ) *Consumer {
 	return NewObservedConsumer(cfg, client, name, nil, handlers...)
 }
@@ -136,7 +135,7 @@ func NewConsumer(
 // NewObservedConsumer records each processing attempt under the configured
 // consumer name. Task IDs, payloads and arbitrary task types are not labels.
 func NewObservedConsumer(
-	cfg config.TasksConfig, client redis.UniversalClient, name string, recorder *metrics.Recorder, handlers ...Registrar,
+	cfg Config, client redis.UniversalClient, name string, recorder *metrics.Recorder, handlers ...Registrar,
 ) *Consumer {
 	if !cfg.Enabled || len(handlers) == 0 {
 		return nil

@@ -160,9 +160,10 @@ func (c *Config) Validate() error {
 	if err := validateTelemetryConfig(c.Telemetry); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateTasksConfig(c.Tasks, c.Redis); err != nil {
-		errs = append(errs, err)
-	}
+	// TASKQUEUE: 恢复 Tasks 字段后，取消下面配置校验的注释。
+	// if err := c.Tasks.Validate(c.Redis.Addr, c.Redis.DBs); err != nil {
+	// 	errs = append(errs, err)
+	// }
 	if err := validateNewsConfig(c.News); err != nil {
 		errs = append(errs, err)
 	}
@@ -378,7 +379,7 @@ const fixedRedisDB = 0
 // 降级、本地认证的刷新令牌与撤销记录无处存放、日志声称 "redis is configured
 // but unreachable"，而 Redis 完全健康。运维会去查一个没有问题的 Redis。
 //
-// cache.redis_db 与 tasks.redis_db 早有同款校验，理由与此完全一致。
+// cache.redis_db 有同款校验，理由与此完全一致。
 //
 // 聚合成一条错误而不是逐项报：各项说的是同一件事，逐项会让运维看到几行
 // 几乎相同的消息。
@@ -453,9 +454,10 @@ func validateRedisCapabilities(c Config) error {
 	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis {
 		consumers = append(consumers, "redis response cache")
 	}
-	if c.Tasks.Enabled {
-		consumers = append(consumers, "task queue")
-	}
+	// TASKQUEUE: 启用后取消注释，使队列必须配置 Redis 地址。
+	// if c.Tasks.Enabled {
+	// 	consumers = append(consumers, "task queue")
+	// }
 	if len(consumers) == 0 {
 		return nil
 	}

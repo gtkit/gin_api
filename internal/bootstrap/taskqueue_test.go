@@ -1,5 +1,8 @@
 package bootstrap
 
+// TASKQUEUE: 可选接线的回归测试。启用 taskqueue.go 和配置接线后，
+// 删除下面包围测试代码的 /* 和 */，执行本包测试。
+/*
 import (
 	"context"
 	"errors"
@@ -11,11 +14,48 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alicebob/miniredis/v2/server"
-	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/taskqueue"
 	"github.com/gtkit/gin-api/internal/testutil"
 	"github.com/redis/go-redis/v9"
 )
+
+// TestSchedulerWorkerIsAProducer 钉住调度器的关停分类。
+//
+// 分类决定关停顺序，而顺序是实质的：调度器是任务生产者，必须**最先**停。
+// 若它被当成 consumer，关停时它会在 HTTP 之后才停——那段时间里它仍在投递，
+// 而消费者正在 drain，新投递的任务这一轮没人处理。
+//
+// Lifecycle 同样是声明而非推断：调度器的 Run 持续调度，在 ctx 取消之前返回
+// （包括返回 nil）意味着所有周期任务都停了，而进程看起来完全正常——
+// 声明为 LongRunning 才能让管理器把那种退出上报为异常。
+func TestSchedulerWorkerIsAProducer(t *testing.T) {
+	t.Parallel()
+
+	w := &asynqSchedulerWorker{}
+
+	if got := w.Kind(); got != KindProducer {
+		t.Fatalf("Kind() = %v, want KindProducer（生产者必须最先停）", got)
+	}
+	if got := w.Lifecycle(); got != LifecycleLongRunning {
+		t.Fatalf("Lifecycle() = %v, want LifecycleLongRunning", got)
+	}
+	if w.Required() {
+		t.Fatal("Required() = true：调度器不可用不应让整个实例被摘流，周期任务本就允许迟到")
+	}
+}
+
+// TestNilSchedulerIsNotRegistered 钉住"未启用时不注册 worker"。
+//
+// 构造函数在未启用时返回 nil 调度器，adapter 必须据此返回 nil——
+// 否则 worker 集合里会多出一个包着 nil 的 worker，它会在 Prepare 时 panic。
+func TestNilSchedulerIsNotRegistered(t *testing.T) {
+	t.Parallel()
+
+	if w := newAsynqSchedulerWorker(nil); w != nil {
+		t.Fatal("nil 调度器竟被包装成了 worker")
+	}
+}
 
 func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 	testutil.RequireLoopback(t)
@@ -47,10 +87,10 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 		}
 		return false
 	})
-	scheduler, err := tasks.NewScheduler(config.TasksConfig{
+	scheduler, err := taskqueue.NewScheduler(taskqueue.Config{
 		Enabled: true, ShutdownTimeout: 20 * time.Millisecond,
-		Scheduler: config.SchedulerConfig{Enabled: true},
-	}, client, "blocked-scheduler", tasks.PeriodicTask{Spec: "@every 1s", TaskType: "test:drain"})
+		Scheduler: taskqueue.SchedulerConfig{Enabled: true},
+	}, client, "blocked-scheduler", taskqueue.PeriodicTask{Spec: "@every 1s", TaskType: "test:drain"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,3 +163,54 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 		t.Fatalf("late cleanup counts: resources=%d extensions=%d", resourceCloses.Load(), extensionCloses.Load())
 	}
 }
+
+// TestRedisRequiredForTaskQueue 钉住任务队列对 Redis 必需性的贡献。
+//
+// 漏掉这一行的后果不是"Redis 挂了任务不跑"，而是**进程起不来且错误指错方向**：
+// 推导为 optional → Redis 已配置但启动期不可达时 res.redis 保持 nil →
+// Rdb() 返回 nil → taskqueue.NewProducer 报 "producer requires a redis client"
+// → 启动失败。运维看到的那句话读起来像配置缺失，而真实原因（Redis 不可达）
+// 不出现在错误里任何位置。
+//
+// 这条判据同时覆盖调度器：它向 Redis 队列投递，且以 tasks.enabled 为前提。
+func TestRedisRequiredForTaskQueue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{
+			name: "队列启用即 required",
+			cfg:  &config.Config{Tasks: taskqueue.Config{Enabled: true}},
+			want: true,
+		},
+		{
+			name: "队列启用且开了调度器仍为 required",
+			cfg: &config.Config{Tasks: taskqueue.Config{
+				Enabled:   true,
+				Scheduler: taskqueue.SchedulerConfig{Enabled: true},
+			}},
+			want: true,
+		},
+		{
+			// 反向锚：缺了它，一个无条件返回 true 的实现也能让上面两条通过，
+			// 而那会让不用队列的部署因为一个用不到的依赖而起不来。
+			name: "队列关闭不抬高必需性",
+			cfg:  &config.Config{Tasks: taskqueue.Config{Enabled: false}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RedisRequired(tt.cfg); got != tt.want {
+				t.Fatalf("redisRequired = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+*/

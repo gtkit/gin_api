@@ -1,4 +1,4 @@
-package config
+package taskqueue
 
 import (
 	"errors"
@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// TasksConfig 是异步任务队列（asynq）的进程级配置。
+// Config 是异步任务队列（asynq）的进程级配置。
 //
 // 默认关闭。队列是有状态的基础设施：一旦开始入队，任务就必须有人消费——
 // 母版替使用者打开它，只会在某个部署里留下一堆没人处理的积压。
-type TasksConfig struct {
+type Config struct {
 	// Enabled 是总开关。关闭时既不建 producer 也不注册 consumer worker。
 	Enabled bool `mapstructure:"enabled"`
 	// Concurrency 是单副本的并发处理数。
@@ -56,7 +56,7 @@ const (
 const maxTasksShutdownTimeout = 5 * time.Minute
 
 // EffectiveConcurrency 返回生效的并发数。
-func (c TasksConfig) EffectiveConcurrency() int {
+func (c Config) EffectiveConcurrency() int {
 	if c.Concurrency > 0 {
 		return c.Concurrency
 	}
@@ -64,7 +64,7 @@ func (c TasksConfig) EffectiveConcurrency() int {
 }
 
 // EffectiveTaskTimeout 返回生效的单任务超时。
-func (c TasksConfig) EffectiveTaskTimeout() time.Duration {
+func (c Config) EffectiveTaskTimeout() time.Duration {
 	if c.TaskTimeout > 0 {
 		return c.TaskTimeout
 	}
@@ -72,7 +72,7 @@ func (c TasksConfig) EffectiveTaskTimeout() time.Duration {
 }
 
 // EffectiveShutdownTimeout 返回生效的关停预算。
-func (c TasksConfig) EffectiveShutdownTimeout() time.Duration {
+func (c Config) EffectiveShutdownTimeout() time.Duration {
 	if c.ShutdownTimeout > 0 {
 		return c.ShutdownTimeout
 	}
@@ -80,45 +80,45 @@ func (c TasksConfig) EffectiveShutdownTimeout() time.Duration {
 }
 
 // EffectiveQueues 返回生效的队列权重表。
-func (c TasksConfig) EffectiveQueues() map[string]int {
+func (c Config) EffectiveQueues() map[string]int {
 	if len(c.Queues) > 0 {
 		return c.Queues
 	}
 	return map[string]int{"default": 1}
 }
 
-// validateTasksConfig 校验任务队列配置。
-func validateTasksConfig(cfg TasksConfig, redis RedisConfig) error {
-	if !cfg.Enabled {
+// Validate 校验任务队列配置及它依赖的 Redis 地址、库号。
+func (c Config) Validate(redisAddr string, redisDBs []int) error {
+	if !c.Enabled {
 		return nil
 	}
 
 	var errs []error
 
 	// 队列必须有 Redis：没有它，入队会在运行期持续失败，而进程看起来正常。
-	if strings.TrimSpace(redis.Addr) == "" {
+	if strings.TrimSpace(redisAddr) == "" {
 		errs = append(errs, errors.New(
 			"tasks are enabled but redis.addr is empty: the queue has no backing store"))
 	}
 	// redis_db 必须真的在 redis.dbs 里：不校验的话资源层取不到该库的客户端，
 	// 装配拿到 nil 后按"redis 未配置"处理——表现为"配了队列却说没有 redis"，
 	// 而配置文件看起来完全正常。
-	if cfg.RedisDB < 0 {
-		errs = append(errs, fmt.Errorf("tasks.redis_db %d must not be negative", cfg.RedisDB))
-	} else if !slices.Contains(redis.DBs, cfg.RedisDB) {
+	if c.RedisDB < 0 {
+		errs = append(errs, fmt.Errorf("tasks.redis_db %d must not be negative", c.RedisDB))
+	} else if !slices.Contains(redisDBs, c.RedisDB) {
 		errs = append(errs, fmt.Errorf(
 			"tasks.redis_db %d is not listed in redis.dbs %v: the resource layer only opens the "+
 				"declared databases, so the queue would get no client at all",
-			cfg.RedisDB, redis.DBs))
+			c.RedisDB, redisDBs))
 	}
 	// 负值一律拒绝，不静默回退：回退让"配了一个非法值"与"没配"变成同一种
 	// 结果，而使用者以为自己配的那个值正在生效。
-	if cfg.Concurrency < 0 || cfg.TaskTimeout < 0 || cfg.ShutdownTimeout < 0 {
+	if c.Concurrency < 0 || c.TaskTimeout < 0 || c.ShutdownTimeout < 0 {
 		errs = append(errs, errors.New(
 			"tasks: negative concurrency / task_timeout / shutdown_timeout are not allowed "+
 				"(they silently fall back to defaults, so the configured value never takes effect)"))
 	}
-	for name, weight := range cfg.Queues {
+	for name, weight := range c.Queues {
 		if strings.TrimSpace(name) == "" {
 			errs = append(errs, errors.New("tasks.queues: queue name must not be empty"))
 			continue
@@ -131,9 +131,9 @@ func validateTasksConfig(cfg TasksConfig, redis RedisConfig) error {
 					"and never processes them", name, weight))
 		}
 	}
-	if cfg.EffectiveShutdownTimeout() > maxTasksShutdownTimeout {
+	if c.EffectiveShutdownTimeout() > maxTasksShutdownTimeout {
 		errs = append(errs, fmt.Errorf(
-			"tasks.shutdown_timeout %s exceeds the %s cap", cfg.EffectiveShutdownTimeout(), maxTasksShutdownTimeout))
+			"tasks.shutdown_timeout %s exceeds the %s cap", c.EffectiveShutdownTimeout(), maxTasksShutdownTimeout))
 	}
 
 	return errors.Join(errs...)

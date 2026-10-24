@@ -293,7 +293,7 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
-| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者接线与 `modules.go` 的消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。 |
+| 异步队列与调度：`asynqx` | `internal/taskqueue/` | 默认未接入主程序；目录外接线均为 TASKQUEUE 注释。启用或删除按 [taskqueue 说明](internal/taskqueue/README.md) 操作。普通主程序构建不编译它，`go build ./...` 仍会编译该可选包。 |
 | HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
 | 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
 
@@ -509,9 +509,10 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 ### 后台定时任务
 
-周期任务在当前进程内调度，通过队列交给已注册的处理器执行。
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中追加
-`tasks.PeriodicTask`，配置 `tasks.enabled` 和 `tasks.scheduler.enabled`。
+可选队列保存在 `internal/taskqueue/`，默认接线和配置段均已注释。
+先按 [启用说明](internal/taskqueue/README.md) 恢复接线，再在
+`internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`，
+配置 `tasks.enabled` 和 `tasks.scheduler.enabled`。
 固定间隔的本地工作可直接使用监听取消的 `time.Ticker` 循环。
 注册方式及关停行为见 [后台任务与调度](docs/workers-and-scheduling.md)。
 
@@ -567,8 +568,8 @@ telemetry:
 | 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
-| 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
-| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加 `tasks.PeriodicTask` 声明，在当前进程内调度。触发时刻、任务类型和投递选项写在代码里；队列处理器按业务要求保证幂等。详见 `docs/workers-and-scheduling.md` |
+| 任务队列（`internal/taskqueue`，asynq） | 默认接线已注释，先按目录 README 启用。配置 `tasks.enabled`、队列权重与 `tasks.redis_db`；库号必须出现在 `redis.dbs` 中。通过 bootstrap 适配器接入既有启停顺序。 |
+| 周期任务调度（`internal/taskqueue`，cron） | 启用接线后设置 `tasks.scheduler.enabled`，在 `internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`。调度限于当前进程，队列处理器仍需业务幂等。 |
 
 ### 告警扇出的对外副作用
 

@@ -21,7 +21,6 @@ func TestOptionalRedisConfiguration(t *testing.T) {
 			c.RateLimit.Policies = []RateLimitPolicyConfig{{ID: "redis", Store: "redis", Scope: "ip", FailureMode: "fail_open", Rate: 1, Burst: 1}}
 		}, true},
 		{"redis response cache", func(c *Config) { c.Cache = CacheConfig{Enabled: true, Store: CacheStoreRedis} }, true},
-		{"queue", func(c *Config) { c.Tasks.Enabled = true }, true},
 		{"memory cache", func(c *Config) { c.Cache = CacheConfig{Enabled: true, Store: CacheStoreMemory, MaxBytes: 1 << 20} }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -30,7 +29,6 @@ func TestOptionalRedisConfiguration(t *testing.T) {
 			cfg.Redis = RedisConfig{}
 			cfg.RateLimit.Policies = nil
 			cfg.RateLimit.KeyHMACSecret = strings.Repeat("x", 32)
-			cfg.Tasks.Enabled = false
 			cfg.Cache.Enabled = false
 			tc.mutate(cfg)
 			err := cfg.Validate()

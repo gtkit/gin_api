@@ -1,4 +1,4 @@
-package tasks
+package taskqueue
 
 import (
 	"context"
@@ -6,13 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/platform/config"
-
 	"github.com/gtkit/asynqx"
 )
 
-func enabledConfig() config.TasksConfig {
-	return config.TasksConfig{Enabled: true, Concurrency: 2}
+func enabledConfig() Config {
+	return Config{Enabled: true, Concurrency: 2}
 }
 
 // TestDisabledProducerRefusesInsteadOfDropping 钉住关闭态不静默丢弃。
@@ -22,7 +20,7 @@ func enabledConfig() config.TasksConfig {
 func TestDisabledProducerRefusesInsteadOfDropping(t *testing.T) {
 	t.Parallel()
 
-	producer, err := NewProducer(config.TasksConfig{Enabled: false}, nil)
+	producer, err := NewProducer(Config{Enabled: false}, nil)
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
@@ -79,10 +77,10 @@ func TestConsumerNotRegisteredWhenPointless(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		cfg      config.TasksConfig
+		cfg      Config
 		handlers []Registrar
 	}{
-		{name: "队列未启用", cfg: config.TasksConfig{Enabled: false}, handlers: []Registrar{noop}},
+		{name: "队列未启用", cfg: Config{Enabled: false}, handlers: []Registrar{noop}},
 		{name: "没有处理器", cfg: enabledConfig(), handlers: nil},
 	}
 

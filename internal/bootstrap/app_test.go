@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -176,7 +177,11 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	for _, step := range app.cleanup.steps {
 		names = append(names, step.name)
 	}
-	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients", "task producer"}
+	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients"}
+	// 队列接线可按 README 手动恢复；无论哪种状态，都检查完整清理清单。
+	if _, wired := reflect.TypeFor[config.Config]().FieldByName("Tasks"); wired {
+		want = append(want, "task producer")
+	}
 	if !slices.Equal(names, want) {
 		t.Fatalf("registered provider resources = %v, want %v", names, want)
 	}
