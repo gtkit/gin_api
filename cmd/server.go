@@ -96,10 +96,6 @@ func printBanner(w io.Writer) error {
 	return err
 }
 
-func init() {
-	RegisterRootCommand(newServerCmd)
-}
-
 // newServerCmd 构造 server 子命令——CLI 的主用途：启动 HTTP 服务与后台 worker。
 // 执行流程：先检查启动banner写出 → bootstrap.NewApp组装配置/DB/Redis/路由/worker →
 // app.Run 阻塞运行直到进程退出。任一步失败经 commandError 附前缀返回。

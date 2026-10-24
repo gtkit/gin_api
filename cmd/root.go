@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// rootOptions 承载在所有命令间共享的根级选项，作为各子命令工厂的入参统一透传。
+// rootOptions 承载在所有命令间共享的根级选项，传给各子命令构造函数。
 type rootOptions struct {
 	// signals 是进程唯一的信号监督者；为 nil 表示未安装（测试直接构造命令树）。
 	signals *signalSupervisor
@@ -44,8 +44,8 @@ func ExecuteWithBuildInfo(info BuildInfo) error {
 	return newRootCmd(sup, info).ExecuteContext(sup.ctx)
 }
 
-// NewRootCmd 构造 root cobra 命令，并把所有经 RegisterRootCommand 注册的子命令
-// （server / migrate / jwt / project / doctor 等）挂载上去。
+// NewRootCmd 构造 root cobra 命令，显式挂载服务、迁移、密钥和诊断命令。
+// 项目初始化命令由 scaffold 构建标签控制。
 // SilenceUsage/SilenceErrors 关闭 cobra 默认的用法与错误输出，错误统一交给调用方处理。
 func NewRootCmd(signals *signalSupervisor) *cobra.Command {
 	return newRootCmd(signals, BuildInfo{})
@@ -68,7 +68,14 @@ func newRootCmd(signals *signalSupervisor, info BuildInfo) *cobra.Command {
 		Version:       fmt.Sprintf("%s commit=%s build_time=%s", info.Version, info.Commit, info.BuildTime),
 	}
 
-	rootCmd.AddCommand(buildRootCommands(opts)...)
+	rootCmd.AddCommand(
+		newServerCmd(opts),
+		newMigrateCmd(opts),
+		newMakeCmd(opts),
+		newJWTCmd(opts),
+		newDoctorCmd(opts),
+	)
+	addProjectCommand(rootCmd)
 
 	return rootCmd
 }

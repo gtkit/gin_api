@@ -22,6 +22,7 @@ func TestNewRootCmdRegistersExpectedCommands(t *testing.T) {
 		"server":  true,
 		"jwt":     true,
 		"migrate": true,
+		"make":    true,
 		"doctor":  true,
 	}
 

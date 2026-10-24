@@ -13,19 +13,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() {
-	RegisterRootCommand(newProjectCmd)
-}
-
-// newProjectCmd 构造 project 命令组：脚手架母版专用的项目级工具集合。
-// 自身不做事，仅挂载子命令（当前为 init）。
-func newProjectCmd(_ *rootOptions) *cobra.Command {
+// addProjectCommand 为开发期构建挂载项目初始化命令。
+func addProjectCommand(root *cobra.Command) {
 	cmd := &cobra.Command{
 		Use:   "project",
 		Short: "Scaffold-mother project tooling",
 	}
 	cmd.AddCommand(newProjectInitCmd())
-	return cmd
+	root.AddCommand(cmd)
 }
 
 // newProjectInitCmd 构造 project init 子命令：把由脚手架母版（经 gonew 复制）实例化出的

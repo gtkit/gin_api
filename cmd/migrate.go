@@ -13,11 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() {
-	// 注册根命令
-	RegisterRootCommands(newMigrateCmd, newMakeCmd)
-}
-
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
 //
 // ctx 由调用方（cobra 命令）传入而不是用背景上下文：中断信号因此能覆盖数据库
