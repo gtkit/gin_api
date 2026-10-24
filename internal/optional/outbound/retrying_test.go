@@ -1,4 +1,4 @@
-package httpclient
+package outbound
 
 import (
 	"context"

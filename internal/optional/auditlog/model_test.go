@@ -1,4 +1,4 @@
-package models
+package auditlog
 
 import (
 	"os"
@@ -14,7 +14,7 @@ import (
 
 func TestOperationAuditSchemaMatchesMigration(t *testing.T) {
 	t.Parallel()
-	s, err := schema.Parse(&OperationAudit{}, &sync.Map{}, schema.NamingStrategy{})
+	s, err := schema.Parse(&Record{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +34,8 @@ func TestOperationAuditSchemaMatchesMigration(t *testing.T) {
 		t.Errorf("audit status SQL type=%s, want int", got)
 	}
 	for _, path := range []string{
-		filepath.Join("..", "..", "database", "migrations", "20260819000001_create_operation_audit_logs_table.sql"),
-		filepath.Join("..", "..", "database", "ddl", "create_operation_audit_logs_table.sql"),
+		filepath.Join("migrations", "20260819000001_create_operation_audit_logs_table.sql"),
+		filepath.Join("ddl", "create_operation_audit_logs_table.sql"),
 	} {
 		data, err := os.ReadFile(path)
 		if err != nil {

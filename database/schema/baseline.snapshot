@@ -1,6 +1,5 @@
 TABLE|ai_conversations|InnoDB|utf8mb4_unicode_ci
 TABLE|ai_messages|InnoDB|utf8mb4_unicode_ci
-TABLE|operation_audit_logs|InnoDB|utf8mb4_unicode_ci
 TABLE|user_roles|InnoDB|utf8mb4_unicode_ci
 TABLE|users|InnoDB|utf8mb4_unicode_ci
 COLUMN|ai_conversations|1|id|bigint|NO|<null>|auto_increment|-
@@ -30,15 +29,6 @@ COLUMN|ai_messages|12|finish_reason|varchar(32)|NO|||utf8mb4_unicode_ci
 COLUMN|ai_messages|13|created_at|datetime|YES|<null>||-
 COLUMN|ai_messages|14|updated_at|datetime|YES|<null>||-
 COLUMN|ai_messages|15|deleted_at|datetime|YES|<null>||-
-COLUMN|operation_audit_logs|1|id|bigint|NO|<null>|auto_increment|-
-COLUMN|operation_audit_logs|2|occurred_at|datetime|NO|<null>||-
-COLUMN|operation_audit_logs|3|method|varchar(10)|NO|<null>||utf8mb4_unicode_ci
-COLUMN|operation_audit_logs|4|route|varchar(255)|NO|<null>||utf8mb4_unicode_ci
-COLUMN|operation_audit_logs|5|status|int|NO|<null>||-
-COLUMN|operation_audit_logs|6|latency_ms|bigint|NO|<null>||-
-COLUMN|operation_audit_logs|7|user_id|bigint|NO|<null>||-
-COLUMN|operation_audit_logs|8|request_id|varchar(64)|NO|<null>||utf8mb4_unicode_ci
-COLUMN|operation_audit_logs|9|client_ip|varchar(64)|NO|<null>||utf8mb4_unicode_ci
 COLUMN|user_roles|1|id|bigint|NO|<null>|auto_increment|-
 COLUMN|user_roles|2|user_id|bigint|NO|<null>||-
 COLUMN|user_roles|3|role|varchar(64)|NO|<null>||utf8mb4_unicode_ci
@@ -71,10 +61,6 @@ INDEX|ai_messages|idx_ai_messages_deleted_at|1|deleted_at|1|-
 INDEX|ai_messages|idx_ai_messages_updated_at|1|updated_at|1|-
 INDEX|ai_messages|idx_ai_messages_user|1|user_id|1|-
 INDEX|ai_messages|PRIMARY|1|id|0|-
-INDEX|operation_audit_logs|idx_operation_audit_logs_occurred_at|1|occurred_at|1|-
-INDEX|operation_audit_logs|idx_operation_audit_logs_user_occurred|1|user_id|1|-
-INDEX|operation_audit_logs|idx_operation_audit_logs_user_occurred|2|occurred_at|1|-
-INDEX|operation_audit_logs|PRIMARY|1|id|0|-
 INDEX|user_roles|idx_user_roles_role|1|role|1|-
 INDEX|user_roles|PRIMARY|1|id|0|-
 INDEX|user_roles|uk_user_roles_user_role|1|user_id|0|-

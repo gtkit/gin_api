@@ -1,4 +1,4 @@
-package httpclient
+package outbound
 
 import (
 	"context"
@@ -8,8 +8,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/pkg/breaker"
-	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/optional/outbound/breaker"
 	"github.com/gtkit/gin-api/internal/testutil"
 	"github.com/gtkit/httpc"
 )
@@ -28,7 +27,7 @@ func TestClientResponseDecodeErrorsDoNotTripBreaker(t *testing.T) {
 					}
 				}))
 				t.Cleanup(server.Close)
-				d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 2})
+				d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 2})
 				for range 3 {
 					var decodeErr error
 					attempt := func(ctx context.Context, client *httpc.Client) (int, error) {
@@ -63,7 +62,7 @@ func TestClientResponseDecodeErrorsDoNotTripBreaker(t *testing.T) {
 
 func TestClientResponseDoesNotResetPreviousBreakerFailure(t *testing.T) {
 	t.Parallel()
-	d := newTestDownstreams(t, "http://unused.example.test", config.OutboundBreakerConfig{ConsecutiveFailures: 2})
+	d := newTestDownstreams(t, "http://unused.example.test", BreakerConfig{ConsecutiveFailures: 2})
 	serverFailure := func(context.Context, *httpc.Client) (int, error) { return http.StatusServiceUnavailable, nil }
 	if _, err := d.Do(t.Context(), "orders", serverFailure); !errors.Is(err, ErrDownstreamServerError) {
 		t.Fatal(err)

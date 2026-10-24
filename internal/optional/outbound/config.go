@@ -1,4 +1,4 @@
-package config
+package outbound
 
 import (
 	"errors"
@@ -8,25 +8,25 @@ import (
 	"time"
 )
 
-// OutboundConfig 是出站 HTTP 客户端的进程级配置。
+// Config 是出站 HTTP 客户端的进程级配置。
 //
 // Clients 为空即不启用（不构造任何客户端）。母版默认不预设任何下游——
 // 下游集合是每个项目自己的事实，预置一个假的只会被照抄。
-type OutboundConfig struct {
+type Config struct {
 	// Defaults 是各客户端未显式设置时继承的默认值。
-	Defaults OutboundClientConfig `mapstructure:"defaults"`
+	Defaults ClientConfig `mapstructure:"defaults"`
 	// Clients 按名字声明下游。名字即故障域，与熔断器的下游名一一对应。
-	Clients map[string]OutboundClientConfig `mapstructure:"clients"`
+	Clients map[string]ClientConfig `mapstructure:"clients"`
 	// Breaker 是全部下游共用的熔断阈值；实例按下游名各自独立。
 	//
 	// 阈值共用而实例独立：一个下游的故障只熔断它自己，而"多少次连续失败
 	// 算故障"是进程级的运维口径，按下游拆散只会让每个新下游多一组
 	// 没人知道该填什么的配置项。零值字段取熔断包的保守默认。
-	Breaker OutboundBreakerConfig `mapstructure:"breaker"`
+	Breaker BreakerConfig `mapstructure:"breaker"`
 }
 
-// OutboundBreakerConfig 是出站熔断的阈值（outbound-http-resilience spec）。
-type OutboundBreakerConfig struct {
+// BreakerConfig 是出站熔断的阈值（outbound-http-resilience spec）。
+type BreakerConfig struct {
 	// ConsecutiveFailures 连续失败达到该值即熔断；0 取默认（5）。
 	ConsecutiveFailures int `mapstructure:"consecutive_failures"`
 	// OpenTimeout 是熔断后到半开探测的等待；0 取默认（60s）。
@@ -35,10 +35,10 @@ type OutboundBreakerConfig struct {
 	HalfOpenMaxRequests int `mapstructure:"half_open_max_requests"`
 }
 
-// OutboundClientConfig 是单个出站客户端的参数。
+// ClientConfig 是单个出站客户端的参数。
 //
 // 零值字段继承 Defaults；Defaults 自身的零值由 outboundDefault* 兜底。
-type OutboundClientConfig struct {
+type ClientConfig struct {
 	// BaseURL 是该下游的基地址，相对路径基于它解析。
 	BaseURL string `mapstructure:"base_url"`
 	// Timeout 是**单次请求的总超时**（含连接、写、读、重定向）。
@@ -82,7 +82,7 @@ const maxBreakerOpenTimeout = 10 * time.Minute
 // 补齐在读取端做而不是在解码后就地改写：就地改写会让"配置文件里写了什么"
 // 与"实际生效什么"在同一个结构体上分不开，排查时无从判断某个值是人写的
 // 还是被补上的。
-func (c OutboundClientConfig) Resolved(defaults OutboundClientConfig) OutboundClientConfig {
+func (c ClientConfig) Resolved(defaults ClientConfig) ClientConfig {
 	resolved := c
 	if resolved.BaseURL == "" {
 		resolved.BaseURL = defaults.BaseURL
@@ -124,12 +124,12 @@ func firstPositiveInt(values ...int) int {
 	return 0
 }
 
-// validateOutboundConfig 校验出站客户端配置。
+// Validate 校验出站客户端配置。
 //
 // 未声明任何客户端时只校验熔断阈值（写错的阈值即使暂时不生效也该被拦下，
 // 否则它会在第一个下游接入时才爆）；客户端配置本身不校验：母版默认不启用
 // 出站能力。
-func validateOutboundConfig(cfg OutboundConfig) error {
+func (cfg Config) Validate() error {
 	var errs []error
 
 	if cfg.Defaults.Timeout < 0 || cfg.Defaults.MaxResponseBytes < 0 ||

@@ -1,14 +1,16 @@
 # 出站调用
 
-覆盖出站 HTTP 客户端（`internal/pkg/httpclient`）、熔断（`internal/pkg/breaker`）及两者的组合。
+覆盖出站 HTTP 客户端（`internal/optional/outbound`）、熔断（`internal/optional/outbound/breaker`）及两者的组合。
 
 **架构传感器禁止使用 `http.DefaultClient` / `http.Get` / `http.Post` / `http.Head`**：
 它们用的是同一个进程级 client，`Timeout` 为 0（没有任何超时），Transport 全局共享
 （一个依赖的连接池耗尽会波及所有其他依赖），且无处设置单依赖的超时或连接池。
 
-## 默认入口：`httpclient.Downstreams`
+默认主程序未接入本模块。先按 [启用说明](../internal/optional/outbound/README.md) 恢复 OUTBOUND 接线和配置，再使用下列 API。
 
-`gtkit/httpc` 的具名客户端 + 按同一批下游名登记的熔断实例，装配期由 bootstrap 构造并注入。
+## 启用后的入口：`outbound.Downstreams`
+
+`gtkit/httpc` 的具名客户端 + 按同一批下游名登记的熔断实例，启用后在装配期由 bootstrap 构造并注入。
 组合关系一次定死：**熔断在外、重试在内、重试复用同一个客户端**——调用点不再自己拼装三件事。
 
 ```yaml
@@ -37,7 +39,7 @@ status, err := downstreams.Do(ctx, "billing",
 
 // 幂等只读调用：DoIdempotent（熔断在外，有界退避重试在内）
 status, err := downstreams.DoIdempotent(ctx, "catalog",
-    httpclient.RetryPolicy{Attempts: 2, WaitTime: 50 * time.Millisecond, MaxWaitTime: time.Second},
+    outbound.RetryPolicy{Attempts: 2, WaitTime: 50 * time.Millisecond, MaxWaitTime: time.Second},
     func(ctx context.Context, client *httpc.Client) (int, error) {
         return client.GetJSON(ctx, "/items/"+id, nil, &out)
     })
@@ -45,9 +47,9 @@ status, err := downstreams.DoIdempotent(ctx, "catalog",
 switch {
 case breaker.IsOpen(err):
     // 下游已被熔断：直接降级，连重试都不该发生
-case errors.Is(err, httpclient.ErrUnknownClient):
+case errors.Is(err, outbound.ErrUnknownClient):
     // 名字没在配置里登记 —— 编码或配置错误
-case errors.Is(err, httpclient.ErrDownstreamServerError):
+case errors.Is(err, outbound.ErrDownstreamServerError):
     // 下游以 5xx 回答：入口把它归一化成错误，让状态码进入熔断统计
 }
 ```
@@ -61,7 +63,7 @@ case errors.Is(err, httpclient.ErrDownstreamServerError):
   写调用走 `Do`，重放由业务的幂等键处理。
 - **重试执行体拿到的就是同一个客户端**：连接池、总超时、响应体上限全部随之生效，
   不存在「重试路径用了另一个没有防护的客户端」。
-- 重试判据是 `httpclient.RetryableFailure(status, err)`：传输层错误、429、5xx 重试；
+- 重试判据是 `outbound.RetryableFailure(status, err)`：传输层错误、429、5xx 重试；
   4xx 与 501 不重试；调用方取消/超时不重试（没人在等它的结果了）。
 - 普通 4xx（429 除外）从熔断统计中排除，即使响应解码失败也不累计或清零已有的
   连续失败。解码错误仍原样交给调用方；5xx、传输错误和 429 的既有分类保持不变。
@@ -85,7 +87,7 @@ case errors.Is(err, httpclient.ErrDownstreamServerError):
 - 入站仍生成本服务的内部 Request ID，不采信来路的 `X-Request-ID`；因此本服务的出站日志
   可用同一 ID 关联，但接收方若也重新生成 ID，需要结合 trace ID 串联整条链路。
 
-## 熔断（`internal/pkg/breaker`）
+## 熔断（`internal/optional/outbound/breaker`）
 
 `sony/gobreaker/v2` 的薄适配：具名实例、配置阈值、状态变更进日志。不自研状态机。
 

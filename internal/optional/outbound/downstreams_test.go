@@ -1,4 +1,4 @@
-package httpclient
+package outbound
 
 import (
 	"context"
@@ -9,18 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/pkg/breaker"
-	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/optional/outbound/breaker"
 	"github.com/gtkit/gin-api/internal/testutil"
 
 	"github.com/gtkit/httpc"
 )
 
 // newTestDownstreams 构造指向 server 的单下游执行入口。
-func newTestDownstreams(t *testing.T, baseURL string, breakerCfg config.OutboundBreakerConfig) *Downstreams {
+func newTestDownstreams(t *testing.T, baseURL string, breakerCfg BreakerConfig) *Downstreams {
 	t.Helper()
-	d, err := NewDownstreams(config.OutboundConfig{
-		Clients: map[string]config.OutboundClientConfig{
+	d, err := NewDownstreams(Config{
+		Clients: map[string]ClientConfig{
 			"orders": {BaseURL: baseURL, Timeout: 2 * time.Second},
 		},
 		Breaker: breakerCfg,
@@ -48,7 +47,7 @@ func getStatus(path string) Attempt {
 func TestDoRejectsUnknownDownstream(t *testing.T) {
 	t.Parallel()
 
-	d := newTestDownstreams(t, "http://unused.example.test", config.OutboundBreakerConfig{})
+	d := newTestDownstreams(t, "http://unused.example.test", BreakerConfig{})
 	_, err := d.Do(context.Background(), "typo", func(context.Context, *httpc.Client) (int, error) {
 		t.Fatal("未登记的下游执行了调用")
 		return 0, nil
@@ -76,7 +75,7 @@ func TestDoNormalizesServerErrorsIntoTheBreaker(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 2})
+	d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 2})
 
 	for range 2 {
 		status, err := d.Do(context.Background(), "orders", getStatus("/"))
@@ -131,7 +130,7 @@ func TestDoIdempotentRetriesWithTheSameProtectedClient(t *testing.T) {
 			t.Cleanup(server.Close)
 
 			// 熔断阈值放高：本用例只看重试，不让熔断先跳。
-			d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 100})
+			d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 100})
 
 			factoryClient, err := d.Client("orders")
 			if err != nil {
@@ -163,7 +162,7 @@ func TestDoIdempotentRetriesWithTheSameProtectedClient(t *testing.T) {
 func TestDoIdempotentRejectsUnsafePolicies(t *testing.T) {
 	t.Parallel()
 
-	d := newTestDownstreams(t, "http://unused.example.test", config.OutboundBreakerConfig{})
+	d := newTestDownstreams(t, "http://unused.example.test", BreakerConfig{})
 	_, err := d.DoIdempotent(context.Background(), "orders", RetryPolicy{Attempts: 99},
 		func(context.Context, *httpc.Client) (int, error) {
 			t.Fatal("非法策略仍执行了调用")
@@ -190,7 +189,7 @@ func TestRetryBackoffIsCancelable(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 100})
+	d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 100})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -232,7 +231,7 @@ func TestZeroBackoffStillChecksCancellation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	d := newTestDownstreams(t, server.URL, config.OutboundBreakerConfig{ConsecutiveFailures: 100})
+	d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 100})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

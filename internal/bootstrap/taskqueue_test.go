@@ -15,7 +15,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alicebob/miniredis/v2/server"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/taskqueue"
+	"github.com/gtkit/gin-api/internal/optional/taskqueue"
 	"github.com/gtkit/gin-api/internal/testutil"
 	"github.com/redis/go-redis/v9"
 )

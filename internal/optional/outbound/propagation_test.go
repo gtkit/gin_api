@@ -1,4 +1,4 @@
-package httpclient
+package outbound
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -208,7 +207,7 @@ func TestFactoryPropagatesCorrelationToHTTPServer(t *testing.T) {
 		seen <- r.Header.Clone()
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	factory, err := New(config.OutboundConfig{Clients: map[string]config.OutboundClientConfig{
+	factory, err := New(Config{Clients: map[string]ClientConfig{
 		"test": {BaseURL: "http://downstream.example.com"},
 	}})
 	if err != nil {

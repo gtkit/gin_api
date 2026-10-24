@@ -6,8 +6,11 @@ import (
 	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
-// TASKQUEUE: 启用时取消下一行 import 声明及下面 Tasks 字段的注释，见 internal/taskqueue/README.md。
-// import "github.com/gtkit/gin-api/internal/taskqueue"
+// TASKQUEUE: 启用时取消下一行 import 声明及下面 Tasks 字段的注释，见 internal/optional/taskqueue/README.md。
+// import "github.com/gtkit/gin-api/internal/optional/taskqueue"
+
+// OUTBOUND: 启用时取消下一行 import 和 Outbound 字段的注释，见 internal/optional/outbound/README.md。
+// import "github.com/gtkit/gin-api/internal/optional/outbound"
 
 // Config 是服务的强类型运行配置。
 type Config struct {
@@ -30,8 +33,8 @@ type Config struct {
 	Proxy ProxyConfig `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
-	// Outbound 是出站 HTTP 客户端的具名声明。clients 为空即不启用。
-	Outbound OutboundConfig `mapstructure:"outbound"`
+	// OUTBOUND: 按需启用的具名出站 HTTP 客户端配置。
+	// Outbound outbound.Config `mapstructure:"outbound"`
 	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
 	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
 	Cache CacheConfig `mapstructure:"cache"`

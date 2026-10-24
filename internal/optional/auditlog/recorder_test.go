@@ -7,18 +7,16 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gtkit/gin-api/internal/models"
 )
 
 type fakeSink struct {
 	mu      sync.Mutex
 	err     error
-	batches [][]models.OperationAudit
+	batches [][]Record
 	written chan int // 每写出一批发一次批大小，供测试同步（不靠 sleep 猜时序）
 }
 
-func (f *fakeSink) WriteBatch(_ context.Context, records []models.OperationAudit) error {
+func (f *fakeSink) WriteBatch(_ context.Context, records []Record) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -50,8 +48,8 @@ func (f *fakeSink) totalRecords() int {
 	return total
 }
 
-func record(i int) models.OperationAudit {
-	return models.OperationAudit{Method: "POST", Route: "/x", Status: 200, UserID: int64(i)}
+func record(i int) Record {
+	return Record{Method: "POST", Route: "/x", Status: 200, UserID: int64(i)}
 }
 
 // startRecorder 启动 Run 循环并返回停止函数（取消 + 等退出）。

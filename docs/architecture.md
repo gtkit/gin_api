@@ -180,15 +180,16 @@ TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；�
 ```
 resolveInfra（基础设施与派生 HTTP 配置）
   → 遥测导出 → 数据层追踪埋点 → 指标仪表          （telemetry.New / InstrumentTracing / metrics.New）
-  → 限流注册表 → 出站客户端 → 响应缓存 → 任务入队端   （buildRateLimits / httpclient / httpcache / tasks）
+  → 限流注册表 → 响应缓存                         （buildRateLimits / httpcache）
+  → [可选：出站客户端、任务入队端、上传、审计]       （默认注释，按模块 README 启用）
   → buildServices（各模块 application service）
   → buildMiddlewares（认证与授权中间件）
   → buildWorkers（后台任务 + WorkerManager）
   → buildEngine（路由引擎，含限流引用的 fail-closed 判定）
 ```
 
-顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、出站、缓存、
-任务入队必须先于 service（service 在构造时按名字取用它们，名字未登记属装配错误）；
+顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、缓存及已启用的
+可选能力必须先于 service（service 构造时接收需要的依赖）；
 worker 必须先于路由（readiness 要读 worker 状态）。
 
 阶段间用三个聚合 struct 传递状态：`infra`（基础设施与派生配置）、`services`（各模块 application

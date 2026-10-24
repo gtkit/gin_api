@@ -4,7 +4,7 @@
 // 响应体上限）、熔断（按下游名登记）、幂等重试（有界退避）。收敛的意义在于
 // 组合关系一次定死——熔断在外、重试在内、重试复用同一个客户端——而不是
 // 让每个调用点自己拼装三件事，拼错任何一处都没有编译期迹象。
-package httpclient
+package outbound
 
 import (
 	"context"
@@ -12,8 +12,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/gtkit/gin-api/internal/pkg/breaker"
-	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/optional/outbound/breaker"
 
 	"github.com/gtkit/httpc"
 )
@@ -49,7 +48,7 @@ type Downstreams struct {
 // 客户端与熔断实例用**同一批下游名**：两者名字不一致时，"这个下游的连接池"
 // 与"这个下游的熔断器"会各指一处，而那正是分开装配时最容易犯的错。
 // Clients 为空时返回空入口：任何按名取用都会得到 ErrUnknownClient。
-func NewDownstreams(cfg config.OutboundConfig) (*Downstreams, error) {
+func NewDownstreams(cfg Config) (*Downstreams, error) {
 	factory, err := New(cfg)
 	if err != nil {
 		return nil, err

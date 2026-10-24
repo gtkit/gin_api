@@ -1,15 +1,15 @@
-package middleware
+package auditlog
 
 import (
 	"time"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/gtkit/gin-api/internal/models"
+	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 )
 
-// OperationAudit 在请求完成后投递一条写操作审计记录。
+// Middleware 在请求完成后投递一条写操作审计记录。
 //
 // 挂在需要审计的路由组上（通常是写操作组，认证之后——身份要从
 // 已认证上下文取）。enqueue 为 nil 时返回直接放行的中间件，
@@ -23,7 +23,7 @@ import (
 // 访问日志已按各自受控策略覆盖）。字符串字段按列宽在此截断：
 // 严格 sql_mode 下 varchar 溢出是整批写入失败，一条超长记录
 // 会拖死同批的全部记录。
-func OperationAudit(enqueue func(models.OperationAudit) bool) gin.HandlerFunc {
+func Middleware(enqueue func(Record) bool) gin.HandlerFunc {
 	if enqueue == nil {
 		return func(c *gin.Context) { c.Next() }
 	}
@@ -37,15 +37,15 @@ func OperationAudit(enqueue func(models.OperationAudit) bool) gin.HandlerFunc {
 			route = c.Request.URL.Path
 		}
 		// 丢弃与否由记录器计数并节流告警，这里不重复处理。
-		_ = enqueue(models.OperationAudit{
+		_ = enqueue(Record{
 			OccurredAt: start,
-			Method:     truncateRunes(c.Request.Method, models.OperationAuditMethodLen),
-			Route:      truncateRunes(route, models.OperationAuditRouteLen),
+			Method:     truncateRunes(c.Request.Method, methodLen),
+			Route:      truncateRunes(route, routeLen),
 			Status:     c.Writer.Status(),
 			LatencyMs:  time.Since(start).Milliseconds(),
 			UserID:     ginc.UserIDFromContext(c),
-			RequestID:  truncateRunes(RequestIDFromContext(c), models.OperationAuditRequestIDLen),
-			ClientIP:   truncateRunes(ginc.ClientIP(c), models.OperationAuditClientIPLen),
+			RequestID:  truncateRunes(middleware.RequestIDFromContext(c), requestIDLen),
+			ClientIP:   truncateRunes(ginc.ClientIP(c), clientIPLen),
 		})
 	}
 }

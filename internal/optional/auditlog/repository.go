@@ -1,4 +1,3 @@
-// Package auditlog 是写操作审计记录的数据访问层。
 package auditlog
 
 import (
@@ -8,7 +7,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 )
 
@@ -24,8 +22,8 @@ type Repository struct {
 	db *gorm.DB
 }
 
-// New 创建审计仓储。
-func New(db *gorm.DB) *Repository {
+// NewRepository 创建审计仓储。
+func NewRepository(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
@@ -34,9 +32,9 @@ func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
 	return dbtx.DB(ctx, r.db)
 }
 
-// WriteBatch 批量写入审计记录，实现 internal/pkg/auditlog 的 Sink。
+// WriteBatch 批量写入审计记录，实现 Sink。
 // 调用方（记录器）已在构造点截断字符串字段，本方法不再逐条检查。
-func (r *Repository) WriteBatch(ctx context.Context, records []models.OperationAudit) error {
+func (r *Repository) WriteBatch(ctx context.Context, records []Record) error {
 	if len(records) == 0 {
 		return nil
 	}
@@ -58,7 +56,7 @@ func (r *Repository) DeleteOlderThan(ctx context.Context, cutoff time.Time, batc
 		res := r.mdbCtx(ctx).
 			Where("occurred_at < ?", cutoff).
 			Limit(batchLimit).
-			Delete(&models.OperationAudit{})
+			Delete(&Record{})
 		if res.Error != nil {
 			return total, fmt.Errorf("delete expired operation audits: %w", res.Error)
 		}

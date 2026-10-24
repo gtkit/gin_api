@@ -51,7 +51,7 @@ err := producer.Enqueue(ctx, "email:send", payload,
 go list -deps .
 ```
 
-输出不应包含 `internal/taskqueue`、`github.com/gtkit/asynqx` 或 `github.com/hibiken/asynq`。
+输出不应包含 `internal/optional/taskqueue`、`github.com/gtkit/asynqx` 或 `github.com/hibiken/asynq`。
 
 ## 启用步骤
 
@@ -88,10 +88,10 @@ rg -n TASKQUEUE internal/bootstrap internal/platform/config config/env.yml.examp
    - 若运行 Linux integration 用例，恢复 `cmd/plugins_integration_test.go` 中标注 TASKQUEUE 的 import 和配置清空语句，避免测试读取的业务配置意外启用队列。
 
 ```powershell
-gofmt -w internal/bootstrap internal/platform/config internal/taskqueue
+gofmt -w internal/bootstrap internal/platform/config internal/optional/taskqueue
 go build ./...
 go vet ./...
-go test -race ./internal/taskqueue ./internal/bootstrap
+go test -race ./internal/optional/taskqueue ./internal/bootstrap
 go test -race ./internal/platform/config -run 'Test(TaskQueue|ShippedExample|ExampleCoversConfigStruct|OptionalRedisConfiguration)'
 ```
 

@@ -113,9 +113,9 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 `time.Ticker`，监听 `ctx.Done()` 并为每次执行设置超时。
 需要 cron 表达式并通过队列消费时，使用下面的周期任务调度器。
 
-### 周期任务调度器（`internal/taskqueue`）
+### 周期任务调度器（`internal/optional/taskqueue`）
 
-默认未接入主程序。先按 [启用说明](../internal/taskqueue/README.md) 恢复 TASKQUEUE 接线，
+默认未接入主程序。先按 [启用说明](../internal/optional/taskqueue/README.md) 恢复 TASKQUEUE 接线，
 再配置 `tasks.scheduler.enabled` 和 `tasks.enabled`。
 在 `internal/bootstrap/taskqueue.go` 的 `buildTaskQueueWorkers` 中向 `taskqueue.NewScheduler` 追加声明：
 
@@ -151,10 +151,10 @@ taskqueue.PeriodicTask{
 底层尚未退出时，`WorkerManager` 保持 worker 的未退出状态，
 `App` 不提前关闭它使用的扩展和共享 Redis。实例停止后，管理器完成清理。
 
-## 异步任务队列（`internal/taskqueue`）
+## 异步任务队列（`internal/optional/taskqueue`）
 
 `asynqx` 的可选装配，**默认接线已注释**。启用和完整删除步骤见
-[taskqueue README](../internal/taskqueue/README.md)。仅修改 YAML 不会启用当前未接入的包；
+[taskqueue README](../internal/optional/taskqueue/README.md)。仅修改 YAML 不会启用当前未接入的包；
 恢复接线后，队列仍由 `tasks.enabled` 控制。
 
 **一个开关管两端**：只开生产端会攒下没人处理的积压；只开消费端则是一个空转的 worker

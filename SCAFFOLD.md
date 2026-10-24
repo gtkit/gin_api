@@ -287,13 +287,19 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 
 ### 可按业务需求评估的能力
 
+`taskqueue`、`upload`、`outbound`、`auditlog` 统一放在 `internal/optional/`，默认未接线。
+每个目录自带启用和删除说明；设计约定见 [可选扩展目录](internal/optional/README.md)。
+`internal` 限制跨项目导入，`optional` 区分可裁剪能力；包名仍直接使用功能名。
+
 | 能力与 gtkit 模块 | 当前源码入口 | 保留条件与移除关联 |
 |---|---|---|
-| 上传：`gouploader` | `internal/upload/` | 默认未接入；构造、关闭和路由接线均为 UPLOAD 注释。启用或删除按 [上传模块说明](internal/upload/README.md) 操作，目录、限制与存储策略由业务显式提供。 |
+| 上传：`gouploader` | `internal/optional/upload/` | 默认未接入；构造、关闭和路由接线均为 UPLOAD 注释。启用或删除按 [上传模块说明](internal/optional/upload/README.md) 操作，目录、限制与存储策略由业务显式提供。 |
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
-| 异步队列与调度：`asynqx` | `internal/taskqueue/` | 默认未接入主程序；目录外接线均为 TASKQUEUE 注释。启用或删除按 [taskqueue 说明](internal/taskqueue/README.md) 操作。普通主程序构建不编译它，`go build ./...` 仍会编译该可选包。 |
+| 异步队列与调度：`asynqx` | `internal/optional/taskqueue/` | 默认未接入主程序；目录外接线均为 TASKQUEUE 注释。启用或删除按 [taskqueue 说明](internal/optional/taskqueue/README.md) 操作。普通主程序构建不编译它，`go build ./...` 仍会编译该可选包。 |
+| 出站 HTTP、重试与熔断：`httpc`、`gobreaker` | `internal/optional/outbound/` | 默认未接入，配置和初始化均为 OUTBOUND 注释，见 [启用说明](internal/optional/outbound/README.md)。 |
+| 写操作审计 | `internal/optional/auditlog/` | 记录器、仓储、模型、中间件及 SQL 都在目录内；默认不注册审计表，见 [启用说明](internal/optional/auditlog/README.md)。 |
 | HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
 | 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
 
@@ -312,7 +318,6 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | `ormx` | `internal/platform/mysql/open.go` 的 MySQL 装配及仓储分页 |
 | `redisx` | `internal/platform/redis/open.go` 的 Redis 装配；Redis 是否必需由已启用能力决定 |
 | `golimit/v2` | `pkg/ratelimit/local.go` 的本地限流；选择 Redis 存储不表示本地能力可以直接删除 |
-| `httpc` | `internal/pkg/httpclient/` 的出站调用、重试与下游客户端装配 |
 | `ginx` | auth HTTP handler 的绑定/响应辅助 |
 | `goerr` | 中间件、响应、事务及缓存的错误处理 |
 | `verify` | `internal/bootstrap/validation.go` 的校验注册与中文消息，以及响应校验 |
@@ -509,8 +514,8 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 ### 后台定时任务
 
-可选队列保存在 `internal/taskqueue/`，默认接线和配置段均已注释。
-先按 [启用说明](internal/taskqueue/README.md) 恢复接线，再在
+可选队列保存在 `internal/optional/taskqueue/`，默认接线和配置段均已注释。
+先按 [启用说明](internal/optional/taskqueue/README.md) 恢复接线，再在
 `internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`，
 配置 `tasks.enabled` 和 `tasks.scheduler.enabled`。
 固定间隔的本地工作可直接使用监听取消的 `time.Ticker` 循环。
@@ -560,16 +565,16 @@ telemetry:
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
-| 写操作审计（`internal/pkg/auditlog` + `internal/middleware/audit.go` + `internal/repository/auditlog` + `operation_audit_logs` 表） | 母版不接线。装配四步：① `auditlog.New(repo, Options{})` 构造记录器；② 把 `recorder.Run` 注册为 consumer worker（HTTP 停止后 drain 存量）；③ 在需要审计的路由组（认证之后）挂 `middleware.OperationAudit(recorder.Enqueue)`；④ 保留期清理接普通定时任务调 `repo.DeleteOlderThan`（保留期是合规决定，母版不定值）。**语义是尽力而为**：队列满载与落库故障丢弃并计数告警，不阻塞业务；不记请求体/响应体/query。不用时删除：包目录 ×3 + 中间件文件 + `internal/models/operation_audit.go` + 对应迁移 |
-| 文件上传（`internal/upload` + `gtkit/gouploader`，版本由母版钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，母版纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
-| 上传文件回源安全（`internal/upload` + `internal/upload/headers.go`） | 在上传文件的静态服务/下载路由组上挂 `upload.FileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
+| 写操作审计（`internal/optional/auditlog`） | 默认未接入；按 [审计模块说明](internal/optional/auditlog/README.md) 恢复 AUDITLOG 注释接线、选择业务写路由并接入审计表迁移。记录器按 consumer 顺序排空，队列满载或写入失败时丢弃并告警，不记录请求体、响应体或 query。不需要时可直接删除目录。 |
+| 文件上传（`internal/optional/upload` + `gtkit/gouploader`，版本由母版钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，母版纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
+| 上传文件回源安全（`internal/optional/upload` + `internal/optional/upload/headers.go`） | 在上传文件的静态服务/下载路由组上挂 `upload.FileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
 | 验证码（`internal/pkg/verifycode`） | 母版不构造实例。装配处 `verifycode.New(ctx, redis客户端, sender, Options{})` 按渠道各建一个实例（短信/邮件用不同 `KeyPrefix`），sender 用闭包适配 `internal/pkg/sms`/`mail`。包内兑现：Lua 原子签发与重置计数、原子校验（命中即毁、尝试超限销毁）、SetNX 发送节流、Redis 键经 SHA-256 不落明文手机号/邮箱。状态变更脚本禁止不确定结果的自动重试，仅在 NOSCRIPT 时重载；超时后由调用方处理未知结果，不自动重发验证码。**⚠ `Options.Debug` 是显式后门（固定码 + 只存不发），仅限本地/自动化测试装配，生产环境不得注入**——包内不做环境判断，责任在装配处 |
 | 图形验证码（`internal/pkg/captcha`） | 母版不构造实例。装配处 `captcha.New(redis客户端, Options{})`，`Generate` 返回 ID + base64 图片（答案只落 Redis），`Verify` 一次性消费：无论对错同一 ID 只有一次校验机会，猜错必须换新图 |
-| 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
-| 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
+| 出站 HTTP 客户端（`internal/optional/outbound`） | 默认未接入；按 [出站模块说明](internal/optional/outbound/README.md) 恢复 OUTBOUND 接线，再配置具名下游。超时、响应体上限、连接池与重试均由同一共享入口控制。 |
+| 熔断（`internal/optional/outbound/breaker`） | 属于可选出站模块，随其启用。按下游名隔离故障，阈值配 `outbound.breaker`；业务调用和失败分类见 [出站调用](docs/outbound.md)。 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
-| 任务队列（`internal/taskqueue`，asynq） | 默认接线已注释，先按目录 README 启用。配置 `tasks.enabled`、队列权重与 `tasks.redis_db`；库号必须出现在 `redis.dbs` 中。通过 bootstrap 适配器接入既有启停顺序。 |
-| 周期任务调度（`internal/taskqueue`，cron） | 启用接线后设置 `tasks.scheduler.enabled`，在 `internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`。调度限于当前进程，队列处理器仍需业务幂等。 |
+| 任务队列（`internal/optional/taskqueue`，asynq） | 默认接线已注释，先按目录 README 启用。配置 `tasks.enabled`、队列权重与 `tasks.redis_db`；库号必须出现在 `redis.dbs` 中。通过 bootstrap 适配器接入既有启停顺序。 |
+| 周期任务调度（`internal/optional/taskqueue`，cron） | 启用接线后设置 `tasks.scheduler.enabled`，在 `internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`。调度限于当前进程，队列处理器仍需业务幂等。 |
 
 ### 告警扇出的对外副作用
 
@@ -616,7 +621,7 @@ telemetry:
 
 ### 接入文件上传 / 对象存储
 
-上传能力集中在 `internal/upload/`，使用 go.mod 锁定的 `github.com/gtkit/gouploader`。
+上传能力集中在 `internal/optional/upload/`，使用 go.mod 锁定的 `github.com/gtkit/gouploader`。
 默认不注册上传或下载路由，目录外的构造、关闭和路由接线均以 UPLOAD 注释保留。
 普通主程序和 `make build` 不引入上传包及 SDK；`go build ./...` 仍会编译该可选包。
 
@@ -627,7 +632,7 @@ telemetry:
 上传路由复用 `middleware.MultipartBody`；上传文件的下载或回源路由使用
 `upload.FileHeaders`。鉴权、文件归属检查及文件记录由业务模块负责。
 
-初始化位置、启用步骤和删除方法见 [上传模块说明](internal/upload/README.md)。
+初始化位置、启用步骤和删除方法见 [上传模块说明](internal/optional/upload/README.md)。
 
 ### 本地开发依赖（可选）
 

@@ -1,24 +1,24 @@
-package models
+package auditlog
 
 import "time"
 
-// OperationAudit 列宽常量。构造点按它们截断字符串字段：
+// Record 列宽常量。构造点按它们截断字符串字段：
 // 严格 sql_mode 下 varchar 溢出是整批写入失败，而审计走批量写，
 // 一条超长记录会拖死同批的全部记录。
 const (
-	OperationAuditMethodLen    = 10
-	OperationAuditRouteLen     = 255
-	OperationAuditRequestIDLen = 64
-	OperationAuditClientIPLen  = 64
+	methodLen    = 10
+	routeLen     = 255
+	requestIDLen = 64
+	clientIPLen  = 64
 )
 
-// OperationAudit 是一条写操作审计记录：谁、何时、对哪条路由、结果如何。
+// Record 是一条写操作审计记录：谁、何时、对哪条路由、结果如何。
 //
 // 刻意不含请求体、响应体与 query string——它们是脱敏事故的既往来源，
 // 访问日志已按各自受控策略覆盖。记录不可变，无软删除；
-// 保留期清理见 internal/repository/auditlog 的 DeleteOlderThan。
-type OperationAudit struct {
-	BaseID
+// 保留期清理见 Repository.DeleteOlderThan。
+type Record struct {
+	ID int64 `gorm:"column:id;primaryKey;autoIncrement;comment:主键编码" json:"id"`
 
 	OccurredAt time.Time `gorm:"column:occurred_at;type:datetime;not null;index:idx_operation_audit_logs_occurred_at;index:idx_operation_audit_logs_user_occurred,priority:2;comment:发生时间"`
 	Method     string    `gorm:"column:method;size:10;not null;comment:HTTP方法"`
@@ -33,6 +33,6 @@ type OperationAudit struct {
 }
 
 // TableName 指定表名。
-func (a *OperationAudit) TableName() string {
+func (a *Record) TableName() string {
 	return "operation_audit_logs"
 }

@@ -36,7 +36,10 @@ import (
 )
 
 // TASKQUEUE: 启用可选队列并运行本集成测试时，取消下一行 import 声明和配置清空语句的注释。
-// import "github.com/gtkit/gin-api/internal/taskqueue"
+// import "github.com/gtkit/gin-api/internal/optional/taskqueue"
+
+// OUTBOUND: 启用出站 HTTP 接线时恢复此 import 和 cfg.Outbound 清空语句。
+// import "github.com/gtkit/gin-api/internal/optional/outbound"
 
 // Run by Make before any other integration package can connect.
 func TestPluginIntegrationPrerequisites(t *testing.T) {
@@ -226,7 +229,8 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Redis.DialTimeoutMS, cfg.Redis.ReadTimeoutMS, cfg.Redis.WriteTimeoutMS = 500, 500, 500
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
 	cfg.RateLimit = config.RateLimitConfig{}
-	cfg.Outbound = config.OutboundConfig{}
+	// OUTBOUND: 启用出站 HTTP 接线时取消注释，避免集成测试继承业务下游配置。
+	// cfg.Outbound = outbound.Config{}
 	// cfg.Tasks = taskqueue.Config{}
 	cfg.Telemetry = config.TelemetryConfig{}
 	cfg.Pprof = config.PprofConfig{}

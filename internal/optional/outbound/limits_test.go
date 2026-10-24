@@ -1,4 +1,4 @@
-package httpclient
+package outbound
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/testutil"
 
 	"github.com/gtkit/httpc"
@@ -35,8 +34,8 @@ func TestTimeoutIsEnforced(t *testing.T) {
 		server.Close()
 	})
 
-	factory, err := New(config.OutboundConfig{
-		Clients: map[string]config.OutboundClientConfig{
+	factory, err := New(Config{
+		Clients: map[string]ClientConfig{
 			"slow": {BaseURL: server.URL, Timeout: 150 * time.Millisecond},
 		},
 	})
@@ -91,8 +90,8 @@ func TestMaxResponseBytesIsEnforced(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	factory, err := New(config.OutboundConfig{
-		Clients: map[string]config.OutboundClientConfig{
+	factory, err := New(Config{
+		Clients: map[string]ClientConfig{
 			"chatty": {BaseURL: server.URL, Timeout: 5 * time.Second, MaxResponseBytes: limit},
 		},
 	})

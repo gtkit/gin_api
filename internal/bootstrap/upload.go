@@ -1,13 +1,13 @@
 package bootstrap
 
 // UPLOAD: 可选上传器的构造与关闭接线。
-// 启用前按 internal/upload/README.md 设置存储目录和文件策略，再取消下面注释。
+// 启用前按 internal/optional/upload/README.md 设置存储目录和文件策略，再取消下面注释。
 /*
 import (
 	"context"
 	"fmt"
 
-	"github.com/gtkit/gin-api/internal/upload"
+	"github.com/gtkit/gin-api/internal/optional/upload"
 	"github.com/gtkit/gouploader"
 )
 

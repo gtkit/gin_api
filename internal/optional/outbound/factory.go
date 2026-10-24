@@ -1,14 +1,14 @@
-// Package httpclient 按名字提供出站 HTTP 客户端。
+// Package outbound 按名字提供出站 HTTP 客户端。
 //
 // 它解决的是同一类反复出现的出站缺陷：调用点各自 new 一个客户端。那样每次
 // 调用都新建一套连接池，连接无法复用，高频调用下本地端口会被 TIME_WAIT 占满；
 // 而且超时与响应体上限散落在每个调用点，漏掉一处就是一个能把进程拖垮的洞。
 //
-// 契约与 internal/pkg/breaker 对称：**下游集合是启动期事实**。工厂在构造时
+// 契约与 internal/optional/outbound/breaker 对称：**下游集合是启动期事实**。工厂在构造时
 // 按配置把全部客户端建好，运行期只能按名字取；取不到就是编码错误，而不是
 // 悄悄再建一个。名字即故障域，与熔断器的下游名一一对应——两者用同一个名字，
 // "这个下游的连接池"与"这个下游的熔断器"才指的是同一件事。
-package httpclient
+package outbound
 
 import (
 	"errors"
@@ -16,8 +16,6 @@ import (
 	"maps"
 	"slices"
 	"sync"
-
-	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/httpc"
 )
@@ -42,7 +40,7 @@ type Factory struct {
 //
 // clients 为空时返回一个空工厂而不是 nil：调用方可以无条件注入它，
 // 取用未登记的名字会得到 ErrUnknownClient——那正是此时该有的答案。
-func New(cfg config.OutboundConfig) (*Factory, error) {
+func New(cfg Config) (*Factory, error) {
 	factory := &Factory{clients: make(map[string]*httpc.Client, len(cfg.Clients))}
 
 	// 按名字排序构造：出错时的报错顺序与配置无关，可复现。

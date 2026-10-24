@@ -177,7 +177,10 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	for _, step := range app.cleanup.steps {
 		names = append(names, step.name)
 	}
-	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients"}
+	want := []string{"telemetry", "db pool metrics", "rate limits"}
+	if _, wired := reflect.TypeFor[infra]().FieldByName("outbound"); wired {
+		want = append(want, "outbound http clients")
+	}
 	// 队列接线可按 README 手动恢复；无论哪种状态，都检查完整清理清单。
 	if _, wired := reflect.TypeFor[config.Config]().FieldByName("Tasks"); wired {
 		want = append(want, "task producer")

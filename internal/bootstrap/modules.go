@@ -25,7 +25,10 @@ import (
 )
 
 // UPLOAD: 启用上传/下载路由示例时取消下一行 import 声明的注释。
-// import "github.com/gtkit/gin-api/internal/upload"
+// import "github.com/gtkit/gin-api/internal/optional/upload"
+
+// AUDITLOG: 恢复审计路由示例时取消下一行 import 的注释。
+// import "github.com/gtkit/gin-api/internal/optional/auditlog"
 
 // services 保存启动时装配好的业务模块产物，供中间件、路由和 worker 装配阶段复用。
 // 每个字段代表需要在这些阶段之间传递的服务或共享能力，不是模块目录的登记清单。
@@ -245,6 +248,9 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
+		// AUDITLOG: 在 audited 上注册需要审计的业务写路由；此处不自动审计全部接口。
+		// audited := v1.Group("", mw.auth, auditlog.Middleware(inf.auditRecorder.Enqueue))
+		// _ = audited // 用实际业务路由注册替换这一行。
 		// UPLOAD: 恢复 services 字段和 import 后，按业务路由约定取消下面注释。
 		// 处理器负责文件记录、权限与响应；未提供处理器时不注册路由。
 		// if svc.uploadFile != nil {
@@ -280,7 +286,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 
 // buildWorkers 组装进程级后台任务。
 //
-// 可选队列的接线示例见 taskqueue.go 和 internal/taskqueue/README.md。
+// 可选队列的接线示例见 taskqueue.go 和 internal/optional/taskqueue/README.md。
 // 其余后台任务在本函数中追加 Worker 构造；
 // 需要 application service 或装配期 ctx 时，在调用点把它们加进形参即可——
 // 调用点只有一处，签名跟着真实消费者走，不为尚不存在的 worker 预留。
@@ -308,6 +314,11 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	// 	return nil, err
 	// }
 	// workers = append(workers, queueWorkers...)
+
+	// AUDITLOG: 恢复 auditlog.go 后取消注释；HTTP 停止后再排空审计记录。
+	// if inf.auditRecorder != nil {
+	// 	workers = append(workers, &auditLogWorker{recorder: inf.auditRecorder})
+	// }
 
 	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
 	if err != nil {

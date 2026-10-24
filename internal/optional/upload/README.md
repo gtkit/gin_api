@@ -49,10 +49,10 @@ rg -n UPLOAD internal/bootstrap
 3. **验证。**
 
 ```powershell
-gofmt -w internal/upload internal/bootstrap
+gofmt -w internal/optional/upload internal/bootstrap
 go build ./...
 go vet ./...
-go test -race ./internal/upload
+go test -race ./internal/optional/upload
 ```
 
 若派生项目已修改 go.mod 的 module 名，恢复注释时将示例 import 中的

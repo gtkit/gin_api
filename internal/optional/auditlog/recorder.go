@@ -5,7 +5,7 @@
 // 或 WAL，代价是把数据库可用性并进每个写请求的关键路径，那是另一种产品。
 //
 // 母版不构造实例：派生项目在装配处构造 Recorder、把 Run 注册为
-// consumer worker、在写操作路由组挂 middleware.OperationAudit，
+// consumer worker、在写操作路由组挂 auditlog.Middleware，
 // 见 SCAFFOLD.md「注册位」。
 package auditlog
 
@@ -17,14 +17,12 @@ import (
 	"time"
 
 	"github.com/gtkit/logger/v2"
-
-	"github.com/gtkit/gin-api/internal/models"
 )
 
-// Sink 承接批量落库，由 internal/repository/auditlog 实现、装配处连线。
+// Sink 承接批量落库，由本包 Repository 实现、装配处连线。
 // 实现不得在返回后保留切片（记录器会复用/释放它）。
 type Sink interface {
-	WriteBatch(ctx context.Context, records []models.OperationAudit) error
+	WriteBatch(ctx context.Context, records []Record) error
 }
 
 // Options 是构造参数。零值字段取默认值；越界值构造报错而不是静默修正。
@@ -50,7 +48,7 @@ const (
 type Recorder struct {
 	sink Sink
 	opts Options
-	ch   chan models.OperationAudit
+	ch   chan Record
 	// dropped 是累计丢弃数（队列满载 + 落库失败批），reported 是已告警过的水位。
 	dropped  atomic.Int64
 	reported atomic.Int64
@@ -83,13 +81,13 @@ func New(sink Sink, opts Options) (*Recorder, error) {
 	return &Recorder{
 		sink: sink,
 		opts: opts,
-		ch:   make(chan models.OperationAudit, opts.QueueSize),
+		ch:   make(chan Record, opts.QueueSize),
 	}, nil
 }
 
 // Enqueue 非阻塞投递一条记录；队列满载返回 false 并计数（由 Run 节流告警）。
 // 绝不阻塞调用方——这是审计不放大业务故障的第一道保证。
-func (r *Recorder) Enqueue(record models.OperationAudit) bool {
+func (r *Recorder) Enqueue(record Record) bool {
 	select {
 	case r.ch <- record:
 		return true
@@ -112,7 +110,7 @@ func (r *Recorder) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.opts.FlushInterval)
 	defer ticker.Stop()
 
-	batch := make([]models.OperationAudit, 0, r.opts.BatchSize)
+	batch := make([]Record, 0, r.opts.BatchSize)
 	for {
 		select {
 		case <-ctx.Done():
@@ -122,12 +120,12 @@ func (r *Recorder) Run(ctx context.Context) error {
 			batch = append(batch, record)
 			if len(batch) >= r.opts.BatchSize {
 				r.flush(ctx, batch)
-				batch = make([]models.OperationAudit, 0, r.opts.BatchSize)
+				batch = make([]Record, 0, r.opts.BatchSize)
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
 				r.flush(ctx, batch)
-				batch = make([]models.OperationAudit, 0, r.opts.BatchSize)
+				batch = make([]Record, 0, r.opts.BatchSize)
 			}
 			r.reportDrops()
 		}
@@ -136,7 +134,7 @@ func (r *Recorder) Run(ctx context.Context) error {
 
 // drain 在独立预算内排空队列与未写出的批。预算 ctx 剥离运行 ctx 的取消
 // （运行 ctx 已经取消了），只保留其 value 链。
-func (r *Recorder) drain(ctx context.Context, batch []models.OperationAudit) {
+func (r *Recorder) drain(ctx context.Context, batch []Record) {
 	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.opts.DrainBudget)
 	defer cancel()
 
@@ -146,7 +144,7 @@ func (r *Recorder) drain(ctx context.Context, batch []models.OperationAudit) {
 			batch = append(batch, record)
 			if len(batch) >= r.opts.BatchSize {
 				r.flush(drainCtx, batch)
-				batch = make([]models.OperationAudit, 0, r.opts.BatchSize)
+				batch = make([]Record, 0, r.opts.BatchSize)
 			}
 		default:
 			if len(batch) > 0 {
@@ -166,7 +164,7 @@ func (r *Recorder) drain(ctx context.Context, batch []models.OperationAudit) {
 
 // flush 写出一批。失败整批丢弃并计数——审计写库故障时无界重试
 // 会把内存队列变成不设限的堆积面；数据库恢复后新记录照常落库。
-func (r *Recorder) flush(ctx context.Context, batch []models.OperationAudit) {
+func (r *Recorder) flush(ctx context.Context, batch []Record) {
 	if err := r.sink.WriteBatch(ctx, batch); err != nil {
 		r.dropped.Add(int64(len(batch)))
 		logger.Warnf("auditlog: drop batch of %d records on sink failure: %v", len(batch), err)

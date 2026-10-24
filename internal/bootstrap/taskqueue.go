@@ -1,15 +1,15 @@
 package bootstrap
 
 // TASKQUEUE: 可选任务队列的全部适配与装配代码。
-// 默认保留为注释，主程序不会导入 internal/taskqueue。
-// 启用时删除下面包围代码的 /* 和 */，并完成 internal/taskqueue/README.md 的接线清单。
+// 默认保留为注释，主程序不会导入 internal/optional/taskqueue。
+// 启用时删除下面包围代码的 /* 和 */，并完成 internal/optional/taskqueue/README.md 的接线清单。
 
 /*
 import (
 	"context"
 	"fmt"
 
-	"github.com/gtkit/gin-api/internal/taskqueue"
+	"github.com/gtkit/gin-api/internal/optional/taskqueue"
 )
 
 // asynqConsumerWorker 把队列消费端接进进程的 worker 管理器。

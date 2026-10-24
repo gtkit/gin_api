@@ -1,18 +1,16 @@
-package httpclient
+package outbound
 
 import (
 	"errors"
 	"slices"
 	"testing"
 	"time"
-
-	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
-func testConfig() config.OutboundConfig {
-	return config.OutboundConfig{
-		Defaults: config.OutboundClientConfig{Timeout: 3 * time.Second},
-		Clients: map[string]config.OutboundClientConfig{
+func testConfig() Config {
+	return Config{
+		Defaults: ClientConfig{Timeout: 3 * time.Second},
+		Clients: map[string]ClientConfig{
 			"billing":   {BaseURL: "https://billing.example.test"},
 			"inventory": {BaseURL: "https://inventory.example.test", Timeout: 8 * time.Second},
 		},
@@ -91,12 +89,12 @@ func TestUnknownNameIsAnError(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     config.OutboundConfig
+		cfg     Config
 		lookup  string
 		wantErr error
 	}{
 		{name: "拼错的名字", cfg: testConfig(), lookup: "biling", wantErr: ErrUnknownClient},
-		{name: "空配置", cfg: config.OutboundConfig{}, lookup: "billing", wantErr: ErrUnknownClient},
+		{name: "空配置", cfg: Config{}, lookup: "billing", wantErr: ErrUnknownClient},
 		{name: "空名字", cfg: testConfig(), lookup: "", wantErr: ErrUnknownClient},
 	}
 
@@ -151,8 +149,8 @@ func TestNamesAreSortedAndComplete(t *testing.T) {
 func TestMissingBaseURLIsRejected(t *testing.T) {
 	t.Parallel()
 
-	_, err := New(config.OutboundConfig{
-		Clients: map[string]config.OutboundClientConfig{"billing": {Timeout: time.Second}},
+	_, err := New(Config{
+		Clients: map[string]ClientConfig{"billing": {Timeout: time.Second}},
 	})
 	if err == nil {
 		t.Fatal("缺少 base_url 时构造仍然成功了")

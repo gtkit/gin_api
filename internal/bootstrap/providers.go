@@ -12,7 +12,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
-	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
@@ -20,11 +19,17 @@ import (
 )
 
 // TASKQUEUE: 启用可选队列时取消下一行 import 声明和 infra.tasksProducer 字段的注释。
-// import "github.com/gtkit/gin-api/internal/taskqueue"
+// import "github.com/gtkit/gin-api/internal/optional/taskqueue"
 
 // UPLOAD: 启用本地上传时取消下面两个 import 声明及 infra.uploader 字段的注释。
-// import "github.com/gtkit/gin-api/internal/upload"
+// import "github.com/gtkit/gin-api/internal/optional/upload"
 // import "github.com/gtkit/gouploader"
+
+// OUTBOUND: 恢复出站 HTTP 接线时取消此 import 与 infra.outbound 字段的注释。
+// import "github.com/gtkit/gin-api/internal/optional/outbound"
+
+// AUDITLOG: 恢复审计接线时取消此 import 与 infra.auditRecorder 字段的注释。
+// import "github.com/gtkit/gin-api/internal/optional/auditlog"
 
 type providerSet struct {
 	cleanup    *providerCleanup
@@ -45,8 +50,10 @@ type infra struct {
 	httpConfig   HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
-	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
-	outbound *httpclient.Downstreams
+	// OUTBOUND: 具名出站客户端、重试与熔断，供业务服务显式注入。
+	// outbound *outbound.Downstreams
+	// AUDITLOG: 审计记录器，Run 由 consumer worker 管理。
+	// auditRecorder *auditlog.Recorder
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
@@ -133,16 +140,10 @@ func newProvidersWithBudget(
 	inf.rateLimits = rateLimits
 	cleanup.push("rate limits", cleanupExtensions, func(context.Context) error { return closeRateLimits(rateLimits) })
 
-	// 3b. 先构造具名出站客户端与熔断实例，供 service 按名取用；此处不做 I/O。
-	outbound, err := httpclient.NewDownstreams(inf.cfg.Outbound)
-	if err != nil {
-		return nil, fmt.Errorf("build outbound downstreams: %w", err)
-	}
-	inf.outbound = outbound
-	cleanup.push("outbound http clients", cleanupExtensions, func(context.Context) error { return outbound.Close() })
-	if names := outbound.Names(); len(names) > 0 {
-		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
-	}
+	// OUTBOUND: 先恢复 outbound.go 及配置接线，再取消下面调用的注释。
+	// if err := buildOutbound(&inf, cleanup); err != nil {
+	// 	return nil, err
+	// }
 
 	// 3c. 借用 Runtime 所有的响应缓存视图，不重复创建或关闭 Store。
 	//     Redis 恢复后既有中间件延迟接入 Store，Enabled 仅用于报告当前状态。
@@ -173,6 +174,11 @@ func newProvidersWithBudget(
 	// if err := buildLocalUploader(&inf, cleanup, uploadOptions,
 	// 	gouploader.WithChunkTempDir("./storage/upload-chunks"),
 	// ); err != nil {
+	// 	return nil, err
+	// }
+
+	// AUDITLOG: 恢复 auditlog.go 后取消注释；记录器不在此启动 goroutine。
+	// if err := buildAuditLog(&inf); err != nil {
 	// 	return nil, err
 	// }
 

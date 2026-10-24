@@ -44,8 +44,9 @@ config/
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
 - `auth`：本地认证或外部身份模式。
 - `email`、`sms`、`news`：通知渠道与告警配置。
-- `ratelimit`、`cache`、`outbound`：限流、响应缓存和出站请求。
-- `telemetry`、`tasks`：可观测性导出与异步任务，默认关闭。
+- `ratelimit`、`cache`：限流和响应缓存。
+- `telemetry`：可观测性导出，默认关闭。
+- `outbound`、`tasks`：可选出站 HTTP 和任务队列，默认未接线；恢复配置字段及装配后才能使用，见 [可选扩展](../internal/optional/README.md)。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 

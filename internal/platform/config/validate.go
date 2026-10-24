@@ -151,9 +151,10 @@ func (c *Config) Validate() error {
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateOutboundConfig(c.Outbound); err != nil {
-		errs = append(errs, err)
-	}
+	// OUTBOUND: 恢复 Outbound 字段后，取消下面配置校验的注释。
+	// if err := c.Outbound.Validate(); err != nil {
+	// 	errs = append(errs, err)
+	// }
 	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
 		errs = append(errs, err)
 	}

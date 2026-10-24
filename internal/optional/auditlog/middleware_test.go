@@ -1,4 +1,4 @@
-package middleware
+package auditlog
 
 import (
 	"net/http"
@@ -8,17 +8,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 )
 
 // auditEngine 组一个带路由的引擎：FullPath 只有真实路由匹配才有值，
 // CreateTestContext 不走路由树，测不了模板回退。
-func auditEngine(capture *[]models.OperationAudit, accept bool) *gin.Engine {
+func auditEngine(capture *[]Record, accept bool) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) { ginc.SetUserID(c, 42) })
-	engine.Use(OperationAudit(func(rec models.OperationAudit) bool {
+	engine.Use(Middleware(func(rec Record) bool {
 		*capture = append(*capture, rec)
 		return accept
 	}))
@@ -26,8 +25,8 @@ func auditEngine(capture *[]models.OperationAudit, accept bool) *gin.Engine {
 	return engine
 }
 
-func TestOperationAuditRecordsCompletedRequest(t *testing.T) {
-	var records []models.OperationAudit
+func TestMiddlewareRecordsCompletedRequest(t *testing.T) {
+	var records []Record
 	engine := auditEngine(&records, true)
 
 	rec := httptest.NewRecorder()
@@ -55,9 +54,9 @@ func TestOperationAuditRecordsCompletedRequest(t *testing.T) {
 	}
 }
 
-// TestOperationAuditFallsBackToRawPath 钉住未匹配路由的回退：404 也要留下审计线索。
-func TestOperationAuditFallsBackToRawPath(t *testing.T) {
-	var records []models.OperationAudit
+// TestMiddlewareFallsBackToRawPath 钉住未匹配路由的回退：404 也要留下审计线索。
+func TestMiddlewareFallsBackToRawPath(t *testing.T) {
+	var records []Record
 	engine := auditEngine(&records, true)
 
 	rec := httptest.NewRecorder()
@@ -76,28 +75,28 @@ func TestOperationAuditFallsBackToRawPath(t *testing.T) {
 	}
 }
 
-// TestOperationAuditTruncatesOversizedPath 钉住构造点截断：超长路径不毒化批次。
-func TestOperationAuditTruncatesOversizedPath(t *testing.T) {
-	var records []models.OperationAudit
+// TestMiddlewareTruncatesOversizedPath 钉住构造点截断：超长路径不毒化批次。
+func TestMiddlewareTruncatesOversizedPath(t *testing.T) {
+	var records []Record
 	engine := auditEngine(&records, true)
 
-	long := "/" + strings.Repeat("a", 2*models.OperationAuditRouteLen)
+	long := "/" + strings.Repeat("a", 2*routeLen)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, long, nil))
 
 	if len(records) != 1 {
 		t.Fatalf("captured %d records, want 1", len(records))
 	}
-	if got := len([]rune(records[0].Route)); got != models.OperationAuditRouteLen {
-		t.Fatalf("route length = %d runes, want truncated to %d", got, models.OperationAuditRouteLen)
+	if got := len([]rune(records[0].Route)); got != routeLen {
+		t.Fatalf("route length = %d runes, want truncated to %d", got, routeLen)
 	}
 }
 
-// TestOperationAuditNilEnqueuePassesThrough 钉住 nil 契约：没接审计是正常路径。
-func TestOperationAuditNilEnqueuePassesThrough(t *testing.T) {
+// TestMiddlewareNilEnqueuePassesThrough 钉住 nil 契约：没接审计是正常路径。
+func TestMiddlewareNilEnqueuePassesThrough(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(OperationAudit(nil))
+	engine.Use(Middleware(nil))
 	engine.GET("/ok", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	rec := httptest.NewRecorder()
@@ -107,10 +106,10 @@ func TestOperationAuditNilEnqueuePassesThrough(t *testing.T) {
 	}
 }
 
-// TestOperationAuditDropDoesNotAffectResponse 钉住「审计故障不放大」：
+// TestMiddlewareDropDoesNotAffectResponse 钉住「审计故障不放大」：
 // enqueue 返回 false（队列满载）时响应不受影响。
-func TestOperationAuditDropDoesNotAffectResponse(t *testing.T) {
-	var records []models.OperationAudit
+func TestMiddlewareDropDoesNotAffectResponse(t *testing.T) {
+	var records []Record
 	engine := auditEngine(&records, false)
 
 	rec := httptest.NewRecorder()
