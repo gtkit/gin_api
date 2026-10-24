@@ -119,6 +119,7 @@ func jwtTestConfig(t *testing.T) *config.Config {
 	}
 
 	return &config.Config{
+		Auth: config.AuthConfig{Mode: config.AuthModeExternal},
 		JWT: config.JWTConfig{
 			Active: config.JWTKeyConfig{
 				KID: "test-kid", PrivateKeyPath: priPath, PublicKeyPath: pubPath,

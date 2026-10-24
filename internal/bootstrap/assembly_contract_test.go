@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,14 +19,8 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 )
-
-func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, error) {
-	budget := &rollbackBudget{}
-	defer budget.Close()
-	return buildServicesWithBudget(ctx, inf, runtime, budget)
-}
 
 func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	cfg := jwtTestConfig(t)
@@ -59,15 +52,13 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	inf := infra{cfg: cfg, resources: resources, mysqlDB: &gorm.DB{}, rateLimits: limits, cache: cache}
 	installMetricsFixture(t, &inf)
 	runtime := &Runtime{config: cfg, resources: resources, jwt: jwt}
+	if runtime.TokenIssuer() != nil {
+		t.Fatal("external mode exposed a signing interface or a typed-nil issuer")
+	}
 	svc, err := buildServices(t.Context(), inf, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := svc.cleanup(); err != nil {
-			t.Error(err)
-		}
-	})
 	if svc.auth.Service != nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil || RedisRequired(cfg) {
 		t.Fatalf("unexpected assembly: auth=%v accounts=%v", svc.auth.Service, svc.accounts)
 	}
@@ -163,11 +154,6 @@ func TestLocalIdentityAssemblyRetainsAllAccountPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := svc.cleanup(); err != nil {
-			t.Error(err)
-		}
-	})
 	if svc.auth.Service == nil || svc.auth.Revocation == nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil {
 		t.Fatalf("incomplete local identity assembly: %+v", svc)
 	}

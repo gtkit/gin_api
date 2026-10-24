@@ -21,10 +21,9 @@ func (alwaysNoScript) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd
 	return cmd
 }
 
-func (f alwaysNoScript) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
-	cmd := redis.NewCmd(ctx)
+func (f alwaysNoScript) Process(_ context.Context, cmd redis.Cmder) error {
 	cmd.SetErr(f.cause)
-	return cmd
+	return f.cause
 }
 
 func (alwaysNoScript) Del(ctx context.Context, _ ...string) *redis.IntCmd {

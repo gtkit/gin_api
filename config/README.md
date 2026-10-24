@@ -136,26 +136,30 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 显式 `--out-dir <dir> --kid <kid>` 优先，使用 kid.private.pem/kid.public.pem 且无需 env；相对显式目录基于当前工作目录。
 命令拒绝覆盖已有文件；完整命令见 [cmd/README.md](../cmd/README.md#jwt)。
 
-`jwt.active.kid` 和两条密钥路径必填，路径可为绝对路径或相对 `APP_ROOT` 的路径；
-无隐式默认密钥。现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
+`jwt.active.kid` 与公钥路径在两种认证模式下均必填；`auth.mode=local` 还要求私钥路径。
+`external` 只加载公钥验签，不构造签发器，也不解析或读取 active 私钥路径，路径可留空。
+路径可为绝对路径或相对 `APP_ROOT` 的路径，无隐式默认密钥。
+现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
 `jwt.previous` 仅配置仍需验签的旧公钥（最多 8 个）；`issuer` 与 `audiences` 必填。
 
 ### JWT 文件权限与启动校验
 
 `server` 在 `bootstrap.NewApp → newRuntime → jwtauth.Assemble` 中读取密钥，
 进入 `App.Run` 提供服务之前就会校验；不依赖操作者先执行 `doctor`。
-`internal/pkg/jwtauth/assemble.go` 按有效配置的 `env` 决定私钥是否严格检查，
-实际文件检查位于 `internal/pkg/jwtauth/keyset.go`。
+`internal/pkg/jwtauth/assemble.go` 按认证模式选择签发或仅验签能力；local 模式再按
+有效配置的 `env` 决定私钥是否严格检查。实际文件检查位于 `internal/pkg/jwtauth/keyset.go`。
 
 | 文件/环境 | server 的现有规则 | 部署建议 |
 |---|---|---|
-| active 私钥，`env: prod` | `mode & 0077` 必须为 0，即 group/other 无任何权限；失败阻断启动 | 使用 0600，或服务进程可读的 0400；不要求权限值恰好等于 0600 |
-| active 私钥，`env: dev/test` | 不强制上述权限位条件；仍校验文件存在、可读、普通文件及密钥格式 | 同样建议收紧到 0600，不把开发放宽当成生产规则 |
+| active 私钥，local 且 `env: prod` | `mode & 0077` 必须为 0，即 group/other 无任何权限；失败阻断启动 | 使用 0600，或服务进程可读的 0400；不要求权限值恰好等于 0600 |
+| active 私钥，local 且 `env: dev/test` | 不强制上述权限位条件；仍校验文件存在、可读、普通文件及密钥格式 | 同样建议收紧到 0600，不把开发放宽当成生产规则 |
+| active 私钥，external 各环境 | 不读取，也不要求文件存在 | 验签服务只挂载公钥 |
 | active 与 previous 公钥，Unix 各环境 | `mode & 0022` 必须为 0，禁止 group/other 写入；允许他人只读 | 使用 0644 或可读的 0444，防止验签公钥被其他账户改写 |
 
 符号链接会先解析到实际目标，再检查目标文件类型、权限与内容。目录、设备等非普通文件会被拒绝；
-私钥须为 Ed25519 PKCS#8 PEM，公钥须为 Ed25519 PKIX PEM，active 密钥还必须配对。
-这些校验在 dev/test 下也保留。
+读取的私钥须为 Ed25519 PKCS#8 PEM，公钥须为 Ed25519 PKIX PEM；local 的 active 密钥还必须配对。
+这些格式与配对校验在 dev/test 下也保留。`jwt generate` 和 `jwt reencode` 仍按各自规则
+要求并处理完整密钥对，server 的 external 模式不改变两条命令的语义。
 
 `doctor` 的 `jwt_keys` 只看元数据：Unix 下不分环境，私钥都要求 group/other 无权限，
 公钥都禁止 group/other 写入。因此 dev/test 的宽权限私钥可能通过 server 的权限分支，

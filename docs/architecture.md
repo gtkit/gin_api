@@ -164,19 +164,19 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
-模块自建的客户端由模块 `Assembly.Close` 交出清理入口。模块构造失败时先自行释放
-已建立部分；`buildServicesWithBudget` 与 `newProvidersWithBudget` 在后续失败时逆序回滚。装配成功后，
-清理责任移交 `App`，在 HTTP 与 worker 收尾之后、关闭共享基础设施之前执行。
-仍有未退出 worker 时跳过模块清理并返回错误，避免关闭它正在使用的客户端。
+当前模块仅借用 Runtime 的基础设施，`buildServices` 不创建或拥有独立客户端，
+不维护空的模块清理栈。真正创建资源的 provider 在构造成功处登记到 `providerCleanup`：
+失败时逆序回滚，成功时把清理责任交给 `App`，在 HTTP 与 worker 收尾后、关闭共享基础设施前执行。
+仍有未退出 worker 时跳过扩展与共享资源清理并返回错误，避免关闭它正在使用的客户端。
 
 `internal/bootstrap/providers.go` 的 `newProvidersWithBudget` 按七个阶段顺序编排，本函数只做顺序拼接、
-错误透传与失败回滚（`rollbackStack` 逆序撤销已产生的进程级副作用），不内联任何单个模块的装配细节：
+错误透传与失败回滚（`providerCleanup` 逆序撤销已登记的真实副作用），不内联任何单个模块的装配细节：
 
 ```
 resolveInfra（基础设施与派生 HTTP 配置）
   → 遥测导出 → 数据层追踪埋点 → 指标仪表          （telemetry.New / InstrumentTracing / metrics.New）
   → 限流注册表 → 出站客户端 → 响应缓存 → 任务入队端   （buildRateLimits / httpclient / httpcache / tasks）
-  → buildServicesWithBudget（各模块 application service）
+  → buildServices（各模块 application service）
   → buildMiddlewares（认证与授权中间件）
   → buildWorkers（后台任务 + WorkerManager）
   → buildEngine（路由引擎，含限流引用的 fail-closed 判定）
@@ -198,7 +198,7 @@ service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增
 |---|---|---|
 | `scaffold:module-imports` | import 区 | 注入 |
 | `scaffold:module-service-fields` | `services` struct 字段 | 注入 |
-| `scaffold:module-services` | `buildServicesWithBudget` 构造 | 注入 |
+| `scaffold:module-services` | `buildServices` 构造 | 注入 |
 | `scaffold:modules` | `buildEngine` 的 `RegisterModules` 闭包 | 注入 |
 | `scaffold:module-authorizers` | `buildAuthorizers` 具名授权注册 | 校验 |
 | `scaffold:task-handlers` | `buildWorkers` 的队列消费者处理器参数表 | 校验 |

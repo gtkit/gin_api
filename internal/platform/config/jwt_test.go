@@ -24,6 +24,21 @@ func rotationConfig(mutate func(*JWTConfig)) JWTConfig {
 	return c
 }
 
+func TestJWTRotationPrivateKeyRequirementFollowsAuthMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []AuthMode{AuthModeLocal, AuthModeExternal} {
+		cfg := rotationConfig(func(c *JWTConfig) { c.Active.PrivateKeyPath = "" })
+		err := validateJWTRotation(cfg, mode, env.Test)
+		if (err != nil) != (mode == AuthModeLocal) {
+			t.Fatalf("mode=%s missing private key error=%v", mode, err)
+		}
+		cfg.Active.PublicKeyPath = ""
+		if err := validateJWTRotation(cfg, mode, env.Test); err == nil {
+			t.Fatalf("mode=%s accepted missing verification key", mode)
+		}
+	}
+}
+
 // TestValidateJWTRotation 覆盖轮换配置的全部约束。
 func TestValidateJWTRotation(t *testing.T) {
 	t.Parallel()
@@ -115,7 +130,7 @@ func TestValidateJWTRotation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), AuthModeLocal, env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)
@@ -184,7 +199,7 @@ func TestValidateJWTCutoffs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), AuthModeLocal, env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)

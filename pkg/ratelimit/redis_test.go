@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -44,17 +45,22 @@ func (f *fakeRedis) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd {
 	return cmd
 }
 
-func (f *fakeRedis) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
+func (f *fakeRedis) Process(_ context.Context, command redis.Cmder) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	cmd := redis.NewCmd(ctx)
+	cmd, ok := command.(interface{ SetVal(any) })
+	if !ok {
+		err := fmt.Errorf("unexpected Redis command %T", command)
+		command.SetErr(err)
+		return err
+	}
 	idx := f.evalCalls
 	f.evalCalls++
 
 	if idx < len(f.evalErrs) && f.evalErrs[idx] != nil {
-		cmd.SetErr(f.evalErrs[idx])
-		return cmd
+		command.SetErr(f.evalErrs[idx])
+		return f.evalErrs[idx]
 	}
 	switch {
 	case len(f.evalResults) == 0:
@@ -64,7 +70,7 @@ func (f *fakeRedis) EvalSha(ctx context.Context, _ string, _ []string, _ ...any)
 	default:
 		cmd.SetVal(f.evalResults[len(f.evalResults)-1])
 	}
-	return cmd
+	return nil
 }
 
 func (f *fakeRedis) Del(ctx context.Context, _ ...string) *redis.IntCmd {

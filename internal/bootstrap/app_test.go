@@ -176,7 +176,7 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	for _, step := range app.cleanup.steps {
 		names = append(names, step.name)
 	}
-	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients", "task producer", "modules"}
+	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients", "task producer"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("registered provider resources = %v, want %v", names, want)
 	}
@@ -187,7 +187,7 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	type key struct{}
 	closeCtx := context.WithValue(t.Context(), key{}, "shutdown")
 	probeCalls := 0
-	app.cleanup.push("context probe", cleanupModules, func(ctx context.Context) error {
+	app.cleanup.push("context probe", cleanupExtensions, func(ctx context.Context) error {
 		probeCalls++
 		if ctx != closeCtx || ctx.Err() != nil || ctx.Value(key{}) != "shutdown" {
 			t.Error("cleanup captured the canceled startup context")
@@ -613,7 +613,7 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 				t.Fatal("Run did not return")
 			}
 
-			want := []string{"modules", "rate limits", "outbound http clients", "task producer", "telemetry", "db pool metrics", "worker metrics"}
+			want := []string{"rate limits", "outbound http clients", "task producer", "telemetry", "db pool metrics", "worker metrics"}
 			if !slices.Equal(calls, want) {
 				t.Fatalf("extension cleanup order = %v, want %v", calls, want)
 			}

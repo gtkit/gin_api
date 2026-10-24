@@ -32,6 +32,7 @@ func testJWTConfig(t *testing.T) *config.Config {
 	}
 
 	return &config.Config{
+		Auth: config.AuthConfig{Mode: config.AuthModeLocal},
 		JWT: config.JWTConfig{
 			Active: config.JWTKeyConfig{
 				KID:            "test-kid",

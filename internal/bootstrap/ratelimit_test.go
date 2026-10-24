@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -389,12 +390,17 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 
 func TestRedisCommandAdapterReportsMissingClient(t *testing.T) {
 	adapter := redisCommands{}
+	cmd := redis.NewCmd(t.Context(), "evalsha", "sha", 1, "key", "arg")
+	processErr := adapter.Process(t.Context(), cmd)
+	if !errors.Is(cmd.Err(), errRedisUnavailable) {
+		t.Fatalf("command error = %v, want Redis unavailable", cmd.Err())
+	}
 	for _, command := range []struct {
 		name string
 		err  error
 	}{
 		{name: "ScriptLoad", err: adapter.ScriptLoad(t.Context(), "return 1").Err()},
-		{name: "EvalSha", err: adapter.EvalSha(t.Context(), "sha", []string{"key"}, "arg").Err()},
+		{name: "Process", err: processErr},
 		{name: "Del", err: adapter.Del(t.Context(), "key").Err()},
 	} {
 		t.Run(command.name, func(t *testing.T) {
@@ -402,5 +408,16 @@ func TestRedisCommandAdapterReportsMissingClient(t *testing.T) {
 				t.Fatalf("error = %v, want Redis unavailable", command.err)
 			}
 		})
+	}
+}
+
+func TestConfiguredRedisPolicyRejectsRefillBeyondResidenceCap(t *testing.T) {
+	raw := policyConfig(func(p *config.RateLimitPolicyConfig) { p.Store = "redis"; p.Rate = 1; p.Burst = 86341 })
+	if _, err := toRateLimitPolicy(raw); err == nil {
+		t.Fatal("configured slow Redis policy bypassed assembly validation")
+	}
+	raw.Store = "local"
+	if _, err := toRateLimitPolicy(raw); err != nil {
+		t.Fatalf("Redis residence cap incorrectly applied to local policy: %v", err)
 	}
 }

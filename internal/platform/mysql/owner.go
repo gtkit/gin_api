@@ -11,7 +11,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )

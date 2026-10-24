@@ -13,7 +13,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/testutil"
+	"github.com/redis/go-redis/v9"
 )
+
+// redisView is only used by the real Redis integration contract below.
+type redisView struct {
+	client     *redis.Client
+	configured bool
+	wantDB     int
+	t          *testing.T
+}
+
+func (p redisView) Client(db int) *redis.Client {
+	if db != p.wantDB {
+		p.t.Fatalf("Redis DB=%d want=%d", db, p.wantDB)
+	}
+	return p.client
+}
+
+func (p redisView) DefaultClient() *redis.Client { return p.client }
+func (p redisView) Configured() bool             { return p.configured }
 
 func TestIntegrationExplicitPrefixesIsolateResponseCaches(t *testing.T) {
 	client := testutil.RealRedisOrSkip(t)

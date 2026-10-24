@@ -14,7 +14,7 @@ import (
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/logger/v2"
 	"github.com/redis/go-redis/v9"
 )

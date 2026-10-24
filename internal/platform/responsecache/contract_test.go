@@ -130,22 +130,6 @@ func TestConfigurationFailuresAndCancellation(t *testing.T) {
 	}
 }
 
-type redisView struct {
-	client     *redis.Client
-	configured bool
-	wantDB     int
-	t          *testing.T
-}
-
-func (p redisView) Client(db int) *redis.Client {
-	if db != p.wantDB {
-		p.t.Fatalf("Redis DB=%d want=%d", db, p.wantDB)
-	}
-	return p.client
-}
-func (p redisView) DefaultClient() *redis.Client { return p.client }
-func (p redisView) Configured() bool             { return p.configured }
-
 type forbiddenRedis struct{ t *testing.T }
 
 func (p forbiddenRedis) Client(int) *redis.Client {

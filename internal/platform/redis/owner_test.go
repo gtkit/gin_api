@@ -199,7 +199,7 @@ func TestRecoveryContractFailuresStopRetrying(t *testing.T) {
 				if calls.Load() != 2 || p.DefaultClient() != nil {
 					t.Fatal("terminal candidate retried or published")
 				}
-				want := error(core.ErrComponentState)
+				want := core.ErrComponentState
 				if mode == "tracing-error" || mode == "partial-close-error" {
 					want = failure
 				}
@@ -259,7 +259,7 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 			t.Cleanup(func() { logger.SetDefault(previous); instance.Sync() })
 
 			synctest.Test(t, func(t *testing.T) {
-				calls := 0
+				var calls atomic.Int32
 				client := &ownedRedis{clients: make(map[int]*goredis.Client)}
 				for _, db := range []int{0, 3} {
 					client.clients[db] = goredis.NewClient(&goredis.Options{
@@ -274,8 +274,7 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 				p, err := Open(t.Context(), Options{
 					Config: &config.Config{Redis: config.RedisConfig{Addr: "unused"}},
 					Open: func(context.Context, config.RedisConfig) (Client, error) {
-						calls++
-						if calls <= 2 {
+						if calls.Add(1) <= 2 {
 							return nil, errors.New("temporarily offline")
 						}
 						if mode == "terminal" {
@@ -297,7 +296,7 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 					t.Fatal(err)
 				}
 				synctest.Sleep(recoveryInterval)
-				if calls != 2 || p.DefaultClient() != nil {
+				if calls.Load() != 2 || p.DefaultClient() != nil {
 					t.Fatal("transient attempt changed publication or retry timing")
 				}
 				if mode == "canceled-cleanup-failure" {

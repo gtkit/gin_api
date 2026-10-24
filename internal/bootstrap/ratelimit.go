@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gtkit/logger/v2"

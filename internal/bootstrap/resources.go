@@ -10,7 +10,7 @@ import (
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gin-api/internal/platform/mysql"
 	"github.com/gtkit/gin-api/internal/platform/notification/dispatch"

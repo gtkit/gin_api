@@ -137,8 +137,8 @@ func TestHTTPProducersKeepNativeLogsUntilHandlersReturn(t *testing.T) {
 			if err := app.closeExtensions(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			if cleanupCalls != 7 {
-				t.Fatalf("late extension cleanup calls=%d, want 7", cleanupCalls)
+			if cleanupCalls != 6 {
+				t.Fatalf("late extension cleanup calls=%d, want 6", cleanupCalls)
 			}
 			if err := app.closeResources(t.Context()); err != nil {
 				t.Fatal(err)

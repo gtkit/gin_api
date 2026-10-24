@@ -15,7 +15,7 @@ import (
 	authhttp "github.com/gtkit/gin-api/internal/module/auth/transport/http"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/router"
 	"go.opentelemetry.io/otel"
 
@@ -74,7 +74,6 @@ type infra struct {
 // services 聚合各模块的 application service，供中间件、路由、worker 三个阶段引用。
 // 新增模块时在此追加一个具名字段（scaffold 生成器经 module-service-fields 标记注入）。
 type services struct {
-	cleanup func() error
 	// auth 是本地认证模块的装配产物；auth.mode 为 external 时是零值。
 	//
 	// 零值可用是有意的：外部身份模式下这些端点不存在，而"不存在"应当表达为
@@ -99,10 +98,7 @@ type middlewares struct {
 func newProvidersWithBudget(
 	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator, budget *rollbackBudget,
 ) (_ *providerSet, err error) {
-	// 失败回滚：装配已产生的进程级副作用（指标回调、限流注册表）逆序撤销。
-	// 只关 Runtime 是不够的——指标回调挂在进程级 MeterProvider 上持有已关闭
-	// 连接池的引用，限流执行体的后台 goroutine 仍在运行。
-	// 成功时把同一份登记交给 App，不再维护第二份关闭清单。
+	// 失败时逆序撤销已登记的副作用；成功时把同一份清理所有权交给 App。
 	cleanup := &providerCleanup{}
 	defer func() {
 		if err != nil {
@@ -110,9 +106,7 @@ func newProvidersWithBudget(
 		}
 	}()
 
-	// 0. 校验翻译器。必须先于任何可能发生请求绑定的时点：validator 在首次
-	//    校验某类型时缓存字段名元数据，晚初始化会让已缓存类型永远输出
-	//    Go 字段名。它不依赖任何资源、无副作用可回滚，失败即启动失败。
+	// 0. 首次绑定前初始化翻译器，避免 validator 缓存未经翻译的字段元数据。
 	if err := initValidation(); err != nil {
 		return nil, err
 	}
@@ -125,10 +119,7 @@ func newProvidersWithBudget(
 		return nil, err
 	}
 
-	// 2a. 遥测导出侧。**必须先于指标仪表**：Recorder 在构造时就从全局
-	//     MeterProvider 取 Meter，之后再换 provider，那些仪表仍挂在旧的上——
-	//     表现为"接了 OTLP 但一条指标也没出去"，而且没有任何报错。
-	//     关闭时它不改动任何全局 provider，进程与没有这一步完全等价。
+	// 2a. 遥测先于指标仪表：Recorder 在构造时绑定全局 MeterProvider。
 	telemetryProvider, err := telemetry.New(
 		ctx, inf.cfg.Telemetry, inf.cfg.App.Name)
 	if err != nil {
@@ -141,14 +132,8 @@ func newProvidersWithBudget(
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
 	}
 
-	// 2a'. 数据层追踪埋点（GORM + 全部已初始化 Redis DB）。必须在 telemetry.New
-	//      之后：otelgorm 在构造期就从全局 TracerProvider 取 tracer，先挂后设
-	//      provider 会让已有埋点继续使用旧 provider。埋点无条件挂载、不设开关，
-	//      未接导出时走全局 no-op tracer（见 docs/observability.md）。
-	//      初始埋点安装失败即装配失败，避免带着静默的观测盲区继续启动。
-	//      可选 Redis 首次不可达时，这一步还会通知 Owner tracing 已就绪，
-	//      由 Owner 启动唯一的受管恢复任务；后续候选完成各实际 DB 的埋点后
-	//      才能发布，不能把尚未埋点的客户端交给缓存或限流使用。
+	// 2a'. telemetry.New 之后安装数据层追踪，失败即终止装配。
+	//      可恢复 Redis Owner 也在此获知 tracing 就绪；恢复候选须先完成埋点再发布。
 	if err := inf.resources.InstrumentTracing(inf.cfg.Database.Name); err != nil {
 		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
 	}
@@ -178,10 +163,7 @@ func newProvidersWithBudget(
 	inf.rateLimits = rateLimits
 	cleanup.push("rate limits", cleanupExtensions, func(context.Context) error { return closeRateLimits(rateLimits) })
 
-	// 3b. 出站执行入口：具名客户端 + 按同一批下游名登记的熔断实例
-	//     （outbound-http-resilience spec）。必须先于 service 装配：下游集合
-	//     是启动期事实，service 在构造时就按名字取用，名字没登记属装配错误。
-	//     不做 I/O（只建连接池），因此不需要启动 ctx。
+	// 3b. 先构造具名出站客户端与熔断实例，供 service 按名取用；此处不做 I/O。
 	outbound, err := httpclient.NewDownstreams(inf.cfg.Outbound)
 	if err != nil {
 		return nil, fmt.Errorf("build outbound downstreams: %w", err)
@@ -192,13 +174,8 @@ func newProvidersWithBudget(
 		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
 	}
 
-	// 3c. 响应缓存。Runtime 持有缓存 Owner，这里只取得可借用的 typed view，
-	//     不重复创建或关闭 Store。必须先于路由装配取得视图：模块注册只读路由
-	//     时就会挂上对应中间件，后续不会因为 Redis 恢复而重新注册路由。
-	//     默认关闭时中间件直接透传；Redis 已配置但首次不可达时，Owner 保留
-	//     配置和 provider，暂时透传并等待恢复。客户端恢复后，已有中间件包装
-	//     延迟接入同一个 Store，再使用原有的身份绕过、键、TTL 和响应准入规则。
-	//     因此此处的 Enabled 只用于报告当前状态，不能据此永久移除路由包装。
+	// 3c. 借用 Runtime 所有的响应缓存视图，不重复创建或关闭 Store。
+	//     Redis 恢复后既有中间件延迟接入 Store，Enabled 仅用于报告当前状态。
 	responseCache := runtime.Cache()
 	if responseCache == nil {
 		return nil, errors.New("response cache is not initialized")
@@ -221,12 +198,9 @@ func newProvidersWithBudget(
 	cleanup.push("task producer", cleanupExtensions, tasksProducer.Shutdown)
 
 	// 4. Service：各模块的业务逻辑。
-	svc, err := buildServicesWithBudget(ctx, inf, runtime, budget)
+	svc, err := buildServices(ctx, inf, runtime)
 	if err != nil {
 		return nil, err
-	}
-	if svc.cleanup != nil {
-		cleanup.push("modules", cleanupModules, func(context.Context) error { return svc.cleanup() })
 	}
 
 	// 5. 中间件：鉴权、日志、限流、缓存等。
@@ -314,17 +288,9 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	}, nil
 }
 
-// buildServicesWithBudget 装配模块，按 module-services 标记接入生成代码。
-func buildServicesWithBudget(ctx context.Context, inf infra, runtime *Runtime, budget *rollbackBudget) (_ services, err error) {
+// buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。
+func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, error) {
 	var svc services
-	modules := &rollbackStack{}
-	defer func() {
-		if err != nil {
-			budget.Context(ctx)
-			err = errors.Join(err, modules.unwind())
-		}
-	}()
-	svc.cleanup = modules.unwind
 
 	// 本地认证按模式条件装配。
 	//
@@ -616,9 +582,7 @@ func rollbackWorkerMetricCleanups(inf *infra, cleanupsBefore int) error {
 	return errors.Join(errs...)
 }
 
-// newTokenParser 按配置装配注入 Auth 中间件的 token parser：
-// jwt.laravel 关闭时保持裸 Ed25519 issuer（与现状一致）；
-// 开启时包一层 Laravel 存量 token 回退验证（只验不签，过渡期兼容）。
+// newTokenParser 为 Ed25519 parser 按需附加有截止时间的 Laravel 回退验签。
 func newTokenParser(cfg *config.Config, issuer jwtauth.TokenParser) (middleware.TokenParser, error) {
 	laravelCfg := cfg.JWT.Laravel
 	if !laravelCfg.Enabled {
@@ -631,11 +595,7 @@ func newTokenParser(cfg *config.Config, issuer jwtauth.TokenParser) (middleware.
 		return nil, fmt.Errorf("init laravel verifier: %w", err)
 	}
 
-	// 截止时刻必须真正注入运行期。
-	//
-	// 此前它只在配置层被校验格式，从未被读取——于是只要 enabled 不关，
-	// Laravel 令牌永久有效，而配置里那个日期给了运维一个虚假的下线承诺。
-	// 格式已由 config.Validate 保证，这里再解析一次是为了把它变成 time.Time。
+	// 配置层已校验格式，这里把截止时间交给运行期 parser 执行兼容窗口约束。
 	acceptUntil, err := time.Parse(time.RFC3339, strings.TrimSpace(cfg.JWT.LaravelAcceptUntil))
 	if err != nil {
 		return nil, fmt.Errorf(

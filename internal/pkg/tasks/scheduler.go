@@ -29,12 +29,10 @@ type SchedulerObserver struct {
 	// LeaseSkipped 在租约被别的实例持有时调用。**这是正常情况**，
 	// 多副本部署下每一轮只有一个实例不会命中它。
 	LeaseSkipped func(scheduler string)
-	// LeaseLost 在续租失败、调度被中止时调用。这是需要关注的事件。
+	// LeaseLost 在续租失败、发出停止请求时调用，不表示底层已经退出。
 	LeaseLost func(scheduler string, err error)
-	// RoundFailed 在一轮选主因错误结束时调用。
-	//
-	// 一轮失败不终止 worker：调度器非 required，Redis 抖动应当重试而不是拖垮进程。
-	// 但它必须被观察到——只重试不上报，一个持续失败的调度器看起来和正常的一样。
+	// RoundFailed 报告轮次故障，包括尚在等待真实退出的关闭超时。
+	// 此时不能假定该轮已结束或下一轮已开始。
 	RoundFailed func(scheduler string, err error)
 }
 
@@ -74,14 +72,8 @@ type PeriodicTask struct {
 	TaskType string
 	// Payload 随任务投递，会被序列化为 JSON。
 	Payload any
-	// Guarantee 声明重复投递时靠什么保证正确。零值在注册期被拒绝。
-	//
-	// **租约不是正确性保证。** 租约过期而旧 leader 尚未察觉的窗口内，
-	// 两个实例会同时认为自己是 leader 并各自投递。网络分区、进程长时间暂停
-	// （GC、宿主机挂起）都会拉长这个窗口。
-	//
-	// 这个声明强迫作者在注册时就回答"重复投递会怎样"，
-	// 而不是把问题留到事故现场。
+	// Guarantee 只接受 GuaranteeIdempotent：处理器必须能安全处理重复投递。
+	// 租约不能消除易主窗口内的重复；当前消息链路不传递或校验 fence。
 	Guarantee singleton.Guarantee
 	// Options 是附加的投递选项（队列、重试次数、超时等）。
 	Options []asynqx.TaskOption
@@ -96,11 +88,16 @@ func (t PeriodicTask) validate() error {
 	if strings.TrimSpace(t.TaskType) == "" {
 		errs = append(errs, errors.New("task type must not be empty"))
 	}
-	if t.Guarantee == singleton.GuaranteeUnspecified {
+	switch t.Guarantee {
+	case singleton.GuaranteeIdempotent:
+	case singleton.GuaranteeUnspecified:
 		errs = append(errs, errors.New(
-			"guarantee must be declared: a lease is not a correctness guarantee, "+
-				"so every periodic task must state what makes a duplicate delivery safe "+
-				"(GuaranteeIdempotent or GuaranteeFenced)"))
+			"guarantee must be declared as GuaranteeIdempotent: a lease does not make duplicate delivery safe"))
+	case singleton.GuaranteeFenced:
+		errs = append(errs, errors.New(
+			"GuaranteeFenced is not supported for periodic tasks: the message and consumer do not carry or enforce a fence"))
+	default:
+		errs = append(errs, fmt.Errorf("unknown guarantee %d: periodic tasks require GuaranteeIdempotent", t.Guarantee))
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("tasks: periodic task %q: %w", t.TaskType, errors.Join(errs...))
@@ -108,15 +105,8 @@ func (t PeriodicTask) validate() error {
 	return nil
 }
 
-// Scheduler 按 cron 触发周期任务，并经 Redis 租约保证多副本下只有一个实例调度。
-//
-// 为什么必须选主：底层调度器**没有任何跨实例协调**——每个实例的触发点到了
-// 就各自投递一次，N 个副本就是每次触发投递 N 次。这不是能靠"只在一个实例上
-// 启用"约束的事：那需要部署侧记住并正确执行，而它出错时没有任何症状，
-// 只表现为下游被执行了 N 次。
-//
-// 它实现装配层 worker 管理器的三段生命周期，因此自动获得关停排序
-// （生产者最先停）、Prepare 失败即启动失败、未预期退出必须被上报。
+// Scheduler 按 cron 投递任务，使用 Redis 租约减少多副本重复调度。
+// 租约自然过期或进程暂停时仍可能重叠，正确性依赖处理器的业务幂等。
 type Scheduler struct {
 	cfg     config.TasksConfig
 	client  redis.UniversalClient
@@ -126,8 +116,25 @@ type Scheduler struct {
 	lease    *singleton.Lease
 	observer SchedulerObserver
 
-	// released 保证 Cleanup 幂等。
-	released sync.Once
+	newRunner func() (schedulerRunner, error)
+	// 实例与代次只在短临界区内读写，Start/Shutdown 和观察器始终在锁外执行。
+	mu         sync.Mutex
+	generation uint64
+	current    *schedulerInstance
+}
+
+// schedulerRunner 的 Shutdown 可重复等待同一停止过程；错误表示等待被 ctx 中止。
+type schedulerRunner interface {
+	Register(context.Context, string, string, any, ...asynqx.TaskOption) (string, error)
+	Start(context.Context) error
+	Shutdown(context.Context) error
+}
+
+var _ schedulerRunner = (*asynqx.Scheduler)(nil)
+
+type schedulerInstance struct {
+	runner     schedulerRunner
+	generation uint64
 }
 
 // NewScheduler 构造调度器。
@@ -164,14 +171,16 @@ func NewScheduler(
 		return nil, fmt.Errorf("tasks: scheduler lease: %w", err)
 	}
 
-	return &Scheduler{
+	s := &Scheduler{
 		cfg:      cfg,
 		client:   client,
 		name:     name,
 		entries:  entries,
 		lease:    lease,
 		observer: observer,
-	}, nil
+	}
+	s.newRunner = s.build
+	return s, nil
 }
 
 // schedulerLeasePrefix 是租约键前缀。
@@ -180,14 +189,8 @@ const schedulerLeasePrefix = "tasks"
 // Name 返回低基数标识。
 func (s *Scheduler) Name() string { return s.name }
 
-// Prepare 校验配置并实测租约能力，注册期的失败在这里全部暴露。
-//
-// 刻意**不**在这里构造并持有调度器实例：底层调度器停止后进入终态、无法重启，
-// 而本实现在每次失去租约后都要停掉它——预先构造的那个实例在第一次易主后就废了。
-//
-// spec 的合法性用一个临时实例验证后立即关闭。spec 写错（"0 3 * * *" 少写一段）
-// 如果留到运行期才发现，表现是这个任务**永远不触发**，
-// 而没有任何人在等一个不存在的信号。
+// Prepare 实测租约能力，并用临时实例验证任务注册与 cron 表达式。
+// 临时实例退出后才返回；底层停止后无法重启，Run 每轮另建实例。
 func (s *Scheduler) Prepare(ctx context.Context) (err error) {
 	// 只 PING 不能证明当前 ACL 能执行脚本，也不能证明锁键与 fence 键
 	// 在同一个集群 slot。用随机探测键真跑一遍抢锁/续租/释放。
@@ -195,18 +198,14 @@ func (s *Scheduler) Prepare(ctx context.Context) (err error) {
 		return fmt.Errorf("tasks: scheduler lease probe: %w", err)
 	}
 
-	probe, err := s.build()
+	probe, err := s.newRunner()
 	if err != nil {
 		return err
 	}
-	// 无论注册成功与否都要关掉这个临时实例，否则它持有的连接与 goroutine 会泄漏。
+	instance := s.hold(probe)
+	// Prepare 失败也必须等本实例退出，不能把仍持有共享客户端的探针留给启动回滚。
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), s.cfg.EffectiveShutdownTimeout())
-		defer cancel()
-		if shutdownErr := probe.Shutdown(shutdownCtx); shutdownErr != nil {
-			err = errors.Join(err, fmt.Errorf("tasks: close scheduler probe: %w", shutdownErr))
-		}
+		err = errors.Join(err, s.shutdownInstance(ctx, instance))
 	}()
 
 	if err := s.register(ctx, probe); err != nil {
@@ -218,7 +217,7 @@ func (s *Scheduler) Prepare(ctx context.Context) (err error) {
 // build 构造一个新的底层调度器实例。
 //
 // 每次成为 leader 都要新建：底层实例停止后进入终态，再次启动返回"已停止"错误。
-func (s *Scheduler) build() (*asynqx.Scheduler, error) {
+func (s *Scheduler) build() (schedulerRunner, error) {
 	inner, err := asynqx.NewScheduler(
 		asynqx.WithRedisInstance(s.client),
 		asynqx.WithDefaultTaskTimeout(s.cfg.EffectiveTaskTimeout()),
@@ -231,18 +230,11 @@ func (s *Scheduler) build() (*asynqx.Scheduler, error) {
 }
 
 // register 把全部条目登记进给定实例。Register 只登记不投递，无副作用。
-func (s *Scheduler) register(ctx context.Context, inner *asynqx.Scheduler) error {
+func (s *Scheduler) register(ctx context.Context, inner schedulerRunner) error {
 	for _, entry := range s.entries {
-		opts := entry.Options
-		// 幂等任务附加去重窗口作为**第二道防线**。
-		//
-		// 它挡不住所有重复：底层的唯一性锁在任务成功完成时就释放，
-		// 不是维持整个 TTL。一个很快跑完的任务配合实例间时钟偏移仍可能被投递两次。
-		// 因此它不替代 Guarantee 声明——有了它就放松声明要求，
-		// 正好是把"看起来能工作"当成"正确"。
-		if entry.Guarantee == singleton.GuaranteeIdempotent {
-			opts = append(opts, asynqx.WithTaskUnique(s.cfg.Scheduler.EffectiveUniqueTTL()))
-		}
+		// 唯一性锁在任务成功后即可释放，只是附加去重，不替代业务幂等。
+		opts := append([]asynqx.TaskOption(nil), entry.Options...)
+		opts = append(opts, asynqx.WithTaskUnique(s.cfg.Scheduler.EffectiveUniqueTTL()))
 		if _, err := inner.Register(ctx, entry.Spec, entry.TaskType, entry.Payload, opts...); err != nil {
 			return fmt.Errorf("tasks: register periodic task %q (spec %q): %w",
 				entry.TaskType, entry.Spec, err)
@@ -258,9 +250,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	retry := s.cfg.Scheduler.EffectiveRetryInterval()
 	timer := time.NewTimer(retry)
 	defer timer.Stop()
-	if !timer.Stop() {
-		<-timer.C
-	}
+	timer.Stop()
 
 	for {
 		if ctx.Err() != nil {
@@ -268,22 +258,20 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		}
 
 		acquired, err := s.leadOnce(ctx)
-		switch {
-		case err != nil && !errx.IsPureAbort(err):
-			// 一轮失败不终止 worker：调度器非 required，Redis 抖动应当重试而不是
-			// 拖垮进程。真正的终止条件只有 ctx 取消。
-			s.observer.roundFailed(s.name, err)
-		case acquired:
-			// 刚失去租约（或正在关停）：立即重试一次，让接管尽快发生。
+		if ctx.Err() != nil {
+			// 完整关闭才是正常结束；本轮排空超时或释放失败不得被父取消吞掉。
+			if errx.IsPureCancellation(err) {
+				return nil
+			}
+			return err
+		}
+		if err == nil && acquired {
 			continue
 		}
 
 		timer.Reset(retry)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
 			return nil
 		case <-timer.C:
 		}
@@ -301,7 +289,9 @@ func (s *Scheduler) leadOnce(ctx context.Context) (acquired bool, err error) {
 		s.observer.leaseSkipped(s.name)
 		return false, nil
 	case err != nil:
-		return false, fmt.Errorf("acquire lease: %w", err)
+		err = fmt.Errorf("acquire lease: %w", err)
+		s.observeRoundFailure(ctx, err)
+		return false, err
 	}
 
 	s.observer.leaseAcquired(s.name, held.Fence)
@@ -314,7 +304,9 @@ func (s *Scheduler) leadOnce(ctx context.Context) (acquired bool, err error) {
 			context.WithoutCancel(ctx), s.cfg.Scheduler.EffectiveLeaseTTL())
 		defer cancel()
 		if releaseErr := s.lease.Release(releaseCtx, held); releaseErr != nil {
-			err = errors.Join(err, fmt.Errorf("release lease: %w", releaseErr))
+			releaseErr = fmt.Errorf("release lease: %w", releaseErr)
+			s.observeRoundFailure(ctx, releaseErr)
+			err = errors.Join(err, releaseErr)
 		}
 	}()
 
@@ -326,33 +318,81 @@ func (s *Scheduler) leadOnce(ctx context.Context) (acquired bool, err error) {
 		defer close(renewDone)
 		s.keepAlive(leadCtx, cancel, held)
 	}()
-	// keepAlive 必须在返回前退出：它持有 cancel 并会调用它，
-	// 让它活过本轮意味着下一轮的 ctx 可能被上一轮的续租失败取消。
-	defer func() {
+	stopRenewal := func() {
 		cancel()
 		<-renewDone
-	}()
+	}
+	defer stopRenewal()
 
-	inner, buildErr := s.build()
+	inner, buildErr := s.newRunner()
 	if buildErr != nil {
+		s.observeRoundFailure(ctx, buildErr)
 		return true, buildErr
 	}
-	if regErr := s.register(leadCtx, inner); regErr != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(
-			context.WithoutCancel(ctx), s.cfg.EffectiveShutdownTimeout())
-		defer shutdownCancel()
-		shutdownErr := inner.Shutdown(shutdownCtx)
-		if shutdownErr != nil {
-			shutdownErr = fmt.Errorf("close unregistered scheduler: %w", shutdownErr)
-		}
-		return true, errors.Join(regErr, shutdownErr)
+	instance := s.hold(inner)
+	// 先结束续租，再排空底层实例；退出确认前保留本轮归属和原 token 的释放责任。
+	defer func() {
+		stopRenewal()
+		err = errors.Join(err, s.shutdownInstance(ctx, instance))
+	}()
+	if err := s.register(leadCtx, inner); err != nil {
+		s.observeRoundFailure(ctx, err)
+		return true, err
+	}
+	if err := inner.Start(leadCtx); err != nil {
+		err = fmt.Errorf("tasks: start scheduler: %w", err)
+		s.observeRoundFailure(ctx, err)
+		return true, err
 	}
 
-	// Run 在 leadCtx 取消后触发关闭并返回。取消来自两处：进程关停，或续租失败。
-	if runErr := inner.Run(leadCtx); runErr != nil && !errx.IsPureAbort(runErr) {
-		return true, fmt.Errorf("scheduler run: %w", runErr)
-	}
+	<-leadCtx.Done()
 	return true, nil
+}
+
+func (s *Scheduler) observeRoundFailure(ctx context.Context, err error) {
+	if err != nil && (ctx.Err() == nil || !errx.IsPureCancellation(err)) {
+		s.observer.roundFailed(s.name, err)
+	}
+}
+
+func (s *Scheduler) hold(inner schedulerRunner) *schedulerInstance {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+	instance := &schedulerInstance{runner: inner, generation: s.generation}
+	s.current = instance
+	return instance
+}
+
+func (s *Scheduler) forget(instance *schedulerInstance) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == instance && s.generation == instance.generation {
+		s.current = nil
+	}
+}
+
+// shutdownInstance 的首次预算只限制等待，超时后仍由当前 goroutine 跟踪真实停止。
+func (s *Scheduler) shutdownInstance(ctx context.Context, instance *schedulerInstance) error {
+	waitCtx := context.WithoutCancel(ctx)
+	shutdownCtx, cancel := context.WithTimeout(waitCtx, s.cfg.EffectiveShutdownTimeout())
+	shutdownErr := instance.runner.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr == nil {
+		s.forget(instance)
+		return nil
+	}
+
+	shutdownErr = fmt.Errorf("tasks: scheduler shutdown incomplete: %w", shutdownErr)
+	s.observer.roundFailed(s.name, shutdownErr)
+	// asynqx 的 Shutdown 仅因等待 ctx 结束返回错误；无取消的再次等待要到真实退出。
+	if waitErr := instance.runner.Shutdown(waitCtx); waitErr != nil {
+		waitErr = fmt.Errorf("tasks: wait for scheduler shutdown: %w", waitErr)
+		s.observer.roundFailed(s.name, waitErr)
+		return errors.Join(shutdownErr, waitErr)
+	}
+	s.forget(instance)
+	return shutdownErr
 }
 
 // keepAlive 周期续租，续租失败即取消 leadCtx，从而停止调度器。
@@ -382,19 +422,24 @@ func (s *Scheduler) keepAlive(ctx context.Context, cancel context.CancelFunc, he
 			continue
 		}
 
-		// 失去租约（或无法确认仍持有）必须立刻停止调度：继续调度意味着
-		// 与新 leader 同时投递，而那正是选主要消除的情况。
-		s.observer.leaseLost(s.name, err)
 		cancel()
+		s.observer.leaseLost(s.name, err)
 		return
 	}
 }
 
-// Cleanup 释放调度器持有的资源。幂等。
-//
-// 租约的释放发生在 leadOnce 的 defer 里——那里才知道本轮持有的是哪个 token，
-// 而用别的 token 释放会删掉新 leader 的锁。这里只做幂等收尾。
-func (s *Scheduler) Cleanup(_ context.Context) error {
-	s.released.Do(func() {})
+// Cleanup 按调用方预算等待当前实例的同一停止过程；超时保留归属。
+// 租约仍由 leadOnce 在真实退出并结束续租后，使用原 token 释放。
+func (s *Scheduler) Cleanup(ctx context.Context) error {
+	s.mu.Lock()
+	instance := s.current
+	s.mu.Unlock()
+	if instance == nil {
+		return nil
+	}
+	if err := instance.runner.Shutdown(ctx); err != nil {
+		return fmt.Errorf("tasks: cleanup scheduler: %w", err)
+	}
+	s.forget(instance)
 	return nil
 }

@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	redisowner "github.com/gtkit/gin-api/internal/platform/redis"
 	"github.com/gtkit/gin-api/internal/platform/responsecache"
 	"github.com/gtkit/gin-api/internal/testutil"

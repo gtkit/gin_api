@@ -1,15 +1,4 @@
-// Package cache 提供带 singleflight、TTL 抖动与容量上限的进程内缓存。
-//
-// 它解决的是三个各自独立、但总是一起出现的问题：
-//
-//	击穿——热点键过期的瞬间，所有并发请求同时回源，把一次缓存 miss 放大成
-//	      N 次数据库查询。singleflight 让同一个键在同一时刻只有一次加载。
-//	雪崩——一批同时写入的键会在同一瞬间集体过期，回源尖峰周期性重演。
-//	      TTL 抖动把它们的到期时刻打散。
-//	无界——键空间随请求变化时，缓存会一直涨。那不是命中率问题，是一次
-//	      必然发生的 OOM。容量上限 + LRU 淘汰是能安全上线的前提。
-//
-// 三者缺一都会在生产上被发现，而且都是在流量最高的时候。
+// Package cache 提供带加载合并、TTL 抖动与 LRU 容量上限的进程内缓存。
 package cache
 
 import (
@@ -25,7 +14,6 @@ import (
 	"github.com/gtkit/goerr"
 	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
-	"golang.org/x/sync/singleflight"
 )
 
 // defaultJitterRatio 是 TTL 抖动的默认幅度（±10%）。
@@ -37,10 +25,8 @@ const defaultJitterRatio = 0.1
 
 // defaultLoadTimeout 是单次回源的默认执行超时。
 //
-// 回源必须有独立超时：load 拿到的 ctx 剥离了调用方的取消（见 GetOrLoad），
-// 没有这层超时，一个永久阻塞的 loader 会让 goroutine 与 singleflight 条目
-// 随键空间无界积累——maxItems 管的是已完成的条目，管不到未完成的加载。
-// 30s 比任何合理的进程内回源都长；需要更长的调用方显式配置 WithLoadTimeout。
+// load 的 ctx 剥离调用方取消后仍需独立预算；无视 ctx 的 loader 由
+// maxInflight 限制数量，不能在超时后提前释放它的名额。
 const defaultLoadTimeout = 30 * time.Second
 
 // defaultMaxInflight 是同时在途回源数的默认上限。
@@ -67,16 +53,9 @@ type Cache[T any] struct {
 	loadTimeout time.Duration
 	maxInflight int
 
-	// loadMu 保护 loading，并让"准入登记"与 DoChan 成为一个原子步骤。
-	//
-	// 二者必须原子：分开做的话，登记已被摘除而 singleflight 尚未清理该键的
-	// 那个瞬间，新调用方会登记一个自己永远不会执行的加载——登记项就此泄漏，
-	// 上限最终把所有键都挡在门外。
+	// loadMu 保护准入、失效屏障与加载结果提交。嵌套加锁顺序固定为 loadMu → mu。
 	loadMu  sync.Mutex
-	loading map[string]*loadEntry
-
-	// group 合并同一个键的并发加载。
-	group singleflight.Group
+	loading map[string]*loadEntry[T]
 
 	// now 与 jitter 为纯函数注入，让过期与抖动可被确定性地测试。
 	now    func() time.Time
@@ -89,13 +68,12 @@ type entry[T any] struct {
 	expiresAt time.Time
 }
 
-// loadEntry 是一次在途回源的登记项。
-type loadEntry struct {
-	// fenced 记录这次加载期间该键是否被 Invalidate 过。
-	//
-	// 失效屏障（cache-preset spec）：数据源更新后调用方会 Invalidate，
-	// 而此前发起的那次查询可能**晚于**更新才返回——无条件回填等于把刚被
-	// 作废的旧值又按完整 TTL 写了回去，且没有任何一处会提示这件事。
+// loadEntry 为一个在途键保留一份结果和完成通知，不保存等待者列表。
+type loadEntry[T any] struct {
+	done  chan struct{}
+	value T
+	err   error
+	// fenced 由 loadMu 保护；value/err 在关闭 done 前发布，之后不再修改。
 	fenced bool
 }
 
@@ -181,7 +159,7 @@ func New[T any](maxItems int, ttl time.Duration, opts ...Option[T]) (*Cache[T], 
 		opt(c)
 	}
 	// 登记表在选项定型后创建：容量即上限。
-	c.loading = make(map[string]*loadEntry, c.maxInflight)
+	c.loading = make(map[string]*loadEntry[T], c.maxInflight)
 	return c, nil
 }
 
@@ -194,8 +172,8 @@ func New[T any](maxItems int, ttl time.Duration, opts ...Option[T]) (*Cache[T], 
 // 而它们各自的 ctx 明明还有预算。
 //
 // load 的执行有两道独立上界：单次执行受 WithLoadTimeout 约束（load 必须
-// 监听传入的 ctx），同时在途的加载数受 WithMaxInflight 约束——排队等不到
-// 名额同样以超时失败。两道都是"阻塞的 loader 不无界积累"的保证。
+// 监听传入的 ctx），同时在途的不同键受 WithMaxInflight 约束，名额满时立即
+// 返回 ErrLoadsSaturated。同键等待者共享一个完成通知，各自响应自己的取消。
 //
 // load 返回错误时不缓存：把失败缓存下来，一次瞬时故障会被固定住整个 TTL。
 func (c *Cache[T]) GetOrLoad(
@@ -210,84 +188,75 @@ func (c *Cache[T]) GetOrLoad(
 		return zero, err
 	}
 
-	// 准入登记必须在 DoChan **之前**：DoChan 对每个新键都会立刻起一个
-	// goroutine，把上限判定放进闭包里，高基数 miss 仍能在判定生效之前
-	// 堆起任意多个 goroutine 与 singleflight 条目——上限是假的。
-	//
-	// 登记与 DoChan 在同一把锁内完成：见 loadMu 的说明。
+	// 等锁期间前一次加载可能已经提交；二次读取与新登记共享同步边界。
+	// 注入的时钟在锁外调用，避免回调重入。
+	now := c.now()
 	c.loadMu.Lock()
+	if value, ok := c.getAt(key, now); ok {
+		c.loadMu.Unlock()
+		return value, nil
+	}
 	state, joining := c.loading[key]
 	if !joining {
 		if len(c.loading) >= c.maxInflight {
 			c.loadMu.Unlock()
 			return zero, fmt.Errorf("%w (limit %d, key %q)", ErrLoadsSaturated, c.maxInflight, key)
 		}
-		state = &loadEntry{}
+		state = &loadEntry[T]{done: make(chan struct{})}
 		c.loading[key] = state
 	}
-
-	// DoChan 而不是 Do：Do 会把调用方阻塞到 load 返回，没有办法响应
-	// 自己的 ctx 取消——一个 30s 的慢查询会把所有等待者一起扣住。
-	//
-	// 传给 load 的 ctx 剥离调用方的取消（WithoutCancel）：这次加载可能在为
-	// 其他调用方服务，不能因为**发起者**放弃就中断；值（trace、租户标识）
-	// 保留。剥离取消不等于不设限——回源有自己的执行超时。
-	//
-	// joining 为真时本闭包不会被执行（singleflight 已有该键的在途调用），
-	// 因此摘除登记的责任只属于登记者，不会重复也不会遗漏。
-	ch := c.group.DoChan(key, func() (result any, loadErr error) {
-		if !joining {
-			defer c.finishLoad(key)
-		}
-
-		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
-		defer cancel()
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				failure := &loaderPanicError{}
-				if cause, ok := recovered.(error); ok {
-					failure.cause = cause
-				}
-				result = zero
-				loadErr = goerr.New(failure, goerr.StatusInternalServer())
-				logger.ErrorCtx(loadCtx, "cache loader panic recovered",
-					zap.String("stack", string(debug.Stack())))
-			}
-		}()
-
-		value, err := load(loadCtx)
-		if err != nil {
-			return zero, err
-		}
-		// 失效屏障：加载期间被 Invalidate 过就不回填——那次更新之后，
-		// 这个值已经是过期数据，写回去等于把它按完整 TTL 复活。
-		c.loadMu.Lock()
-		fenced := state.fenced
-		c.loadMu.Unlock()
-		if !fenced {
-			c.set(key, value)
-		}
-		return value, nil
-	})
 	c.loadMu.Unlock()
+	if !joining {
+		go c.runLoad(ctx, key, state, load)
+	}
 
 	select {
 	case <-ctx.Done():
 		return zero, ctx.Err()
-	case result := <-ch:
-		if result.Err != nil {
-			return zero, result.Err
+	case <-state.done:
+		if state.err != nil {
+			return zero, state.err
 		}
-		value, ok := result.Val.(T)
-		if !ok {
-			return zero, errors.New("cache: loaded value has an unexpected type")
-		}
-		return value, nil
+		return state.value, nil
 	}
 }
 
-// Get 返回未过期的缓存值。
+// runLoad 只由登记者启动；名额一直保留到 loader 真实返回或 panic 恢复。
+func (c *Cache[T]) runLoad(ctx context.Context, key string, state *loadEntry[T], load func(context.Context) (T, error)) {
+	loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
+	defer cancel()
+
+	var value T
+	var loadErr error
+	var expiresAt time.Time
+	defer func() { c.finishLoad(key, state, value, loadErr, expiresAt) }()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			failure := &loaderPanicError{}
+			if cause, ok := recovered.(error); ok {
+				failure.cause = cause
+			}
+			var zero T
+			value = zero
+			loadErr = goerr.New(failure, goerr.StatusInternalServer())
+			logger.ErrorCtx(loadCtx, "cache loader panic recovered",
+				zap.String("stack", string(debug.Stack())))
+		}
+	}()
+
+	value, loadErr = load(loadCtx)
+	if loadErr == nil {
+		// 时钟与抖动函数可能被注入，必须在提交锁外执行。
+		expiresAt = c.now().Add(c.jitter(c.ttl, c.jitterRatio))
+	}
+}
+
+// get 返回未过期的缓存值。
 func (c *Cache[T]) get(key string) (T, bool) {
+	return c.getAt(key, c.now())
+}
+
+func (c *Cache[T]) getAt(key string, now time.Time) (T, bool) {
 	var zero T
 
 	c.mu.Lock()
@@ -301,7 +270,7 @@ func (c *Cache[T]) get(key string) (T, bool) {
 	if !ok {
 		return zero, false
 	}
-	if !c.now().Before(item.expiresAt) {
+	if !now.Before(item.expiresAt) {
 		// 过期即就地删除：留着它只会白占容量，把还有效的条目挤出去。
 		c.removeElementLocked(element)
 		return zero, false
@@ -311,13 +280,8 @@ func (c *Cache[T]) get(key string) (T, bool) {
 	return item.value, true
 }
 
-// set 写入并在超出容量时淘汰最久未使用的条目。
-func (c *Cache[T]) set(key string, value T) {
-	expiresAt := c.now().Add(c.jitter(c.ttl, c.jitterRatio))
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// setLocked 写入并淘汰超出容量的最旧条目；调用方持有 mu。
+func (c *Cache[T]) setLocked(key string, value T, expiresAt time.Time) {
 	if element, ok := c.entries[key]; ok {
 		if item, typeOK := element.Value.(*entry[T]); typeOK {
 			item.value = value
@@ -352,16 +316,14 @@ func (c *Cache[T]) Len() int {
 
 // Invalidate 删除一个键。数据源变更后调用它，比等 TTL 到期快得多。
 //
-// 同时对该键**在途的加载**竖起屏障：那次查询可能早于本次更新发出、晚于它
-// 返回，无条件回填会把刚作废的旧值按完整 TTL 写回去。屏障只影响已在途的
-// 加载，之后新发起的加载照常回填。
+// 在同一临界区阻止旧加载回填并删除缓存。已经参与旧加载的等待者仍可能拿到
+// 该次结果；等它结束后新发起的加载可正常回填。
 func (c *Cache[T]) Invalidate(key string) {
 	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
 	if state, loading := c.loading[key]; loading {
 		state.fenced = true
 	}
-	c.loadMu.Unlock()
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if element, ok := c.entries[key]; ok {
@@ -369,16 +331,20 @@ func (c *Cache[T]) Invalidate(key string) {
 	}
 }
 
-// finishLoad 摘除登记并让 singleflight 立刻忘掉该键。
-//
-// Forget 是必需的：本函数在闭包的 defer 里执行，早于 singleflight 自己删除
-// 该键。不 Forget 的话，"登记已摘除、singleflight 仍持有"的瞬间会让下一个
-// 调用方登记一个自己永远不会执行的加载，登记项就此泄漏。
-func (c *Cache[T]) finishLoad(key string) {
+// finishLoad 把归属核对、屏障检查、缓存提交及登记移除放在同一同步边界内。
+func (c *Cache[T]) finishLoad(key string, state *loadEntry[T], value T, loadErr error, expiresAt time.Time) {
 	c.loadMu.Lock()
-	defer c.loadMu.Unlock()
-	delete(c.loading, key)
-	c.group.Forget(key)
+	if c.loading[key] == state {
+		if loadErr == nil && !state.fenced {
+			c.mu.Lock()
+			c.setLocked(key, value, expiresAt)
+			c.mu.Unlock()
+		}
+		delete(c.loading, key)
+	}
+	state.value, state.err = value, loadErr
+	c.loadMu.Unlock()
+	close(state.done)
 }
 
 // randomJitter 在 [ttl*(1-ratio), ttl*(1+ratio)] 内取值。

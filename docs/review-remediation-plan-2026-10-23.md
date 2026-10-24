@@ -1,8 +1,8 @@
 # 全项目审查修复方案与分阶段实施计划
 
-日期：2026-10-23。适用项目：`/Users/xiaozhaofu/go/src/Project/gin_api`。
+计划日期：2026-10-23；续作日期：2026-10-24。当前项目：`D:\go\gin_api`（沿用现有目录和架构）。
 
-**当前状态：用户已批准全部代码实施阶段；实施准备中。测试用例编写、测试执行及其他检查本轮全部延期。** 依据最新指令：“批准方案，实施所有阶段，沿用现有目录和架构，暂不写测试用例及运行测试或其他检查，完成后汇报。”原验收标准保留为后续目标，不作为本轮已执行结果。
+**当前状态：阶段 1—6 的修复、测试适配及本次相关验收已完成。** R01—R06 已包含在最后提交 `29a58cd`，本次续作补齐 R07—R10、S01—S03 及遗漏说明。用户随后明确授权“测试文件也可以一起写了，进行该有的测试”，替代先前测试延期边界；第 9.1—9.2 节保留实施历史，最终结果与验证范围见第 9.3 节。修改保留在当前工作区，未提交或部署。
 
 ## 1. 需求来源、范围与授权
 
@@ -10,7 +10,7 @@
 
 初次计划轮仅新增本文；当前实施轮按最新授权修改第 5 节生产文件及其对应说明，不修改依赖、安全 hook 或用户配置。不接手其他会话的 change，不把此前只读审查的门禁例外扩展到本轮实施。本文使用 R01—R10、S01—S03 固定对应上次报告的顺序，后续不得重排编号或替换问题。
 
-后续每阶段必须先核对用户最新授权、本文、全局规则、项目规则及错误记录。阶段批准只覆盖该阶段；测试和检查按实际获准范围执行。lint、脚本 lint、vet、modern、race、覆盖率及聚合门禁须在全部功能完成后另行取得明确授权。本轮不询问检查授权，也不执行上述操作。
+每阶段必须核对用户最新授权、本文、全局规则、项目规则及可用错误记录。最初的测试和检查延期要求已由追加测试指令替代，本次执行相关功能测试、构建、vet、lint 和 race；未执行项及环境边界见第 9.3 节。
 
 ### 1.1 目标
 
@@ -33,7 +33,7 @@
 
 ### 2.1 证据口径
 
-本会话审查与本轮准备均以源码、已锁定依赖源码、规则和既有记录为依据。没有运行本轮测试、基准、race、构建、lint、vet、modern 或架构脚本。以下“问题”是当前源码支持的结论；以下“验收”是未来目标，不能写成已复现或已通过。
+最初审查和计划以源码、已锁定依赖源码、规则和既有记录为依据，当时没有运行检查。以下设计保留问题基线和验收标准；2026-10-24 的实际运行证据统一记录在第 9.3 节，不能将历史记录或源码回读替代本次验证。
 
 缓存与周期调度器目前属于扩展能力：审查未发现该通用缓存接入生产业务，也未发现当前注册周期任务。仍修复其契约，但不将风险表述为已经发生的线上事故。
 
@@ -54,6 +54,8 @@
 ### 2.3 保护现有工作区
 
 准备阶段 `git status --short` 显示以下七个文件已有修改：`cmd/MODULE_GENERATOR.md`、`docs/architecture.md`、`internal/bootstrap/rollback.go`、`internal/platform/redis/owner.go`、`internal/platform/redis/owner_test.go`、`internal/scaffold/module.go`、`scripts/check-make-entries.sh`。
+
+以上是 2026-10-23 的历史工作区。2026-10-24 续作基线为 `29a58cd`，开始时工作区干净；这些历史修改已在提交内，本次不回退或重做。
 
 计划轮未触碰这些修改。当前实施前已读取并保留上述七文件差异作为比较依据；只追加获准的局部差异。不得用 `git restore`、整文件覆盖或重置分支回滚这些文件。若内容已变化，重新定位同一修复点；无法区分修改归属时停止该步骤。
 
@@ -212,11 +214,11 @@ Cleanup 改为读取当前持有实例并按传入 ctx 等待同一幂等 Shutdo
 
 ## 5. 文件范围
 
-以下生产与文档范围已获本轮实施授权；测试列保留为后续验收范围，本轮不新增、修改或删除测试文件。新增文件均明确标“新增”；超出修复目标的修改仍需单独授权。两个说明落点补充如下：JWT/限流结构体实际定义在 `internal/platform/config/types.go`，因此在该文件同步 R05/R06 字段注释；S01 改名和删除空栈后同步 `docs/architecture.md` 对应装配段落及标记表，不移动目录、不改变架构、不改其他段落。
+以下为原定生产、文档及测试影响面。追加授权后已同步测试；新增用例的实际落点见第 9.3 节，未列出的旧测试保持原契约回归。JWT/限流结构体实际定义在 `internal/platform/config/types.go`；S01 改名和删除空栈后同步 `docs/architecture.md` 对应装配段落及标记表，不移动目录或改变架构。
 
 | 阶段 | 生产与文档文件 | 测试文件与只读影响面 |
 |---|---|---|
-| 1 / R01 | `internal/pkg/jwtauth/laravel.go` | 修改 `internal/pkg/jwtauth/laravel_test.go`；新增 `internal/middleware/laravel_identity_precision_test.go` |
+| 1 / R01 | `internal/pkg/jwtauth/laravel.go` | 新增 `internal/pkg/jwtauth/laravel_precision_test.go`；扩展 `internal/middleware/auth_laravel_test.go` |
 | 2 / R02—R05 | `pkg/ratelimit/health.go`、`redis.go`、`policy.go`；`internal/platform/redis/open.go`；`internal/platform/config/ratelimit.go`；`internal/bootstrap/ratelimit.go`；`pkg/ratelimit/README.md`；`config/env.yml.example` | `pkg/ratelimit/redis_test.go`、`ratelimit_test.go`、`concurrency_test.go`、`health_notify_test.go`、`probe_cleanup_test.go`、`loopback_test.go`、`keyprefix_test.go`、`integration_test.go`、`script_lua_test.go`；新增 `pkg/ratelimit/cancellation_test.go`、`retry_contract_test.go`；`internal/platform/redis/contract_test.go`、`probe_test.go`；新增 `internal/platform/redis/deadline_test.go`；`internal/router/health_test.go`、`readiness_test.go`；`internal/platform/config/validation_test.go`；`internal/bootstrap/ratelimit_test.go` |
 | 3 / R06 | `internal/pkg/jwtauth/assemble.go`、`keyset.go`、`rotating.go`；`internal/platform/config/jwt.go`、`validate.go`；`internal/bootstrap/runtime.go`；`config/env.yml.example`、`SCAFFOLD.md` | `internal/pkg/jwtauth/keyset_test.go`、`rotating_test.go`、`reencode_assembly_test.go`；新增 `internal/pkg/jwtauth/assemble_external_test.go`；`internal/platform/config/jwt_test.go`；`internal/bootstrap/assembly_contract_test.go`、`providers_token_test.go`；只读回归 cmd/jwt*、middleware、runtime/module/account、runtime/module/auth |
 | 4 / R07—R08 | `internal/pkg/cache/cache.go`；`docs/cache.md` | `internal/pkg/cache/cache_test.go`、`panic_test.go`；新增 `internal/pkg/cache/load_contract_test.go` |
@@ -233,44 +235,44 @@ S02 精确范围：
 - data 测试文件：`internal/platform/data/{native_logger,resources,redis_configured,init,gorm_logger_benchmark,gorm_logger_contract,availability,tracing}_test.go`。
 - 导入文件：`internal/bootstrap/{resources_test,lifecycle_contract_test,ratelimit,runtime,providers,ratelimit_test,assembly_contract_test,health,resources}.go`；`internal/platform/redis/owner.go`；`internal/platform/mysql/owner.go`；`internal/platform/responsecache/owner.go`；`internal/platform/logging/hotpath_contract_test.go`。花括号仅为清单缩写，不是 shell 执行命令。
 
-配置说明同步：R05、R06、R09 会修改现有 example/结构体说明。`config/env/env.yml` 是已确认存在的本机实际配置，本轮未读取其内容；实施时只在获准且可避免回显凭据的条件下同步对应注释，保留所有实际值，不自动重写或删私钥路径。若不能安全核对，则明确记录“实际配置说明未同步”，不得宣布该配置项交付完成。
+配置说明同步：R05、R06、R09 已同步 example/结构体说明。`config/env/env.yml` 属于历史环境的实际配置路径，当前项目目录没有该文件；本轮未创建配置或修改实际值。实际部署配置的兼容性核对仍由部署环境负责。
 
 ## 6. 分阶段实施步骤
 
 所有阶段共用以下门槛：①当前阶段得到明确授权；②重新读取本文及最新规则/错误记录；③核对基线和文件归属；④预期文件范围与用户要求一致。任何一项未满足，停在只读/计划范围。每个步骤完成后记录真实文件差异、验证方法、命令/退出码/证据路径；未运行填“未执行”，不能勾选通过。
 
-表中“验收”只规定未来方法。普通功能测试/编译也须在本轮“不运行检查”的限制被后续明确解除后才能运行。若只获准写代码，则交付代码状态和未验证清单，停止在阶段出口，不假报验收完成。
+表中保留原实施顺序与验收方法；“当前状态”已按追加测试授权后的最终结果更新。具体命令、失败处理和验证限制见第 9.3 节。
 
 | 阶段/步骤 | 前置条件 | 具体动作 | 验收方法与证据 | 停止条件/交付物 | 当前状态 |
 |---|---|---|---|---|---|
 | 0.1 | 仅文档授权 | 复核 13 项及实现边界，读取规则、错误记录与必要源码 | 逐项映射到第 3—5 节 | 缺关键事实时标明，不猜实现 | 已完成 |
 | 0.2 | 0.1 完成 | 保存本文，逐段回读并纠正文档内冲突 | 完整文件读取记录，13 项对应表 | 交付本文；不进入阶段 1 | 已保存并完整回读 |
-| 1.1 | 阶段 1 授权；接受 R01 整数表示边界 | 增加签名 token 与中间件 ID 传递用例 | A01；保留旧实现的真实结果 | 不同意表示范围收窄则修订方案，不改解析 | 待授权 |
-| 1.2 | 1.1 用例就绪 | 修改 Laravel 数字解析与身份分支 | F01；逐个核对身份/时间/角色结果 | 任一合法整数映射改变则停止；交付 R01 差异和证据 | 待授权 |
-| 2.1 | 阶段 2 授权；最小 runner 兼容范围确认 | 给扣减命令加 NoRetry，适配仓库内限流 runner 及动态借用客户端的装配适配器 | A04、F02、F09；对端执行次数、恢复后客户端借用及 NoRetry 属性 | 不得退回全局禁重试作为临时补丁 | 待授权 |
-| 2.2 | 2.1 接口确定 | 增加取消分类、准入凭证及同代探测完成逻辑 | A02；状态序列与调用次数 | 取消能恢复健康/释放他人探测时停止 | 待授权 |
-| 2.3 | 2.1—2.2 明确 | 统一 Redis context timeout，回审其他消费者 | A03、F03；实际 socket 等待结果 | 仅 mock 成功不能验收；缺真实条件标未验证 | 待授权 |
-| 2.4 | 接受 R05 启动校验收窄 | 校验有效补满时间；统一 TTL 计算；同步说明 | A05、F02、F04；边界表及配置错误 | 不改实际策略数值规避失败；交付 R02—R05 整阶段差异 | 待授权 |
-| 3.1 | 阶段 3 授权；阶段 1 完成 | 增加验签构造，保持签发构造严格 | A06 密钥集及 Issuer 错误用例 | 不得放宽 local 私钥/匹配校验 | 待授权 |
-| 3.2 | 3.1 完成 | 按认证模式装配；修正 typed-nil；同步配置说明 | F05、F06；模式/路由/CLI 矩阵 | external 意外拥有 Issuer 或 local 接口退化则停止；交付 R06 | 待授权 |
-| 4.1 | 阶段 4 授权；复核历史 ERR-143 与当前源码差异 | 写失效提交交错、取消等待、panic/nil、名额用例 | A07/A08；确定性调度证据 | 不凭历史“已通过”跳过当前基线 | 待授权 |
-| 4.2 | 4.1 就绪 | 单登记项替换 DoChan；统一锁顺序与结果发布 | F07；同键一次加载、64/65 边界、无等待者列表 | 失效后旧值回填、死锁或名额提前释放则停止；R07/R08 一起交付 | 待授权 |
-| 5.1 | 阶段 5 授权；阶段 2 完成 | 收紧周期任务保证，并同步文档与错误文本 | A10、F08；声明枚举矩阵 | 不把 Fenced 自动替换成 Idempotent | 待授权 |
-| 5.2 | 5.1 完成 | 跟踪真实退出、关闭超时观察、Cleanup 同实例等待 | A09、F08；两代实例数量、租约释放顺序 | 未退出即返回/重建/关共享资源则停止 | 待授权 |
-| 5.3 | 5.2 完成 | 复核 WorkerManager 与装配层资源安全门 | F09；超时期间资源保持、晚退出后的清理 | 安全门不满足则停止并修订范围，不自行重写 WorkerManager；交付 R09/R10 | 待授权 |
-| 6.1 | 阶段 6 授权；前五阶段完成；仍无模块登记项 | 删除空栈/空清理，移除同名测试包装，同步生成器描述 | AS01、F09、F10；真实清理顺序 | 一旦发现真实拥有资源的模块则停止此简化 | 待授权 |
-| 6.2 | 6.1 完成；确认已有修改归属 | 改 data 包声明与列明的消费者导入 | AS02、F11、F12；导出契约与差异回读 | 目录/import 路径/导出接口变化则停止；交付 S02 | 待授权 |
-| 6.3 | 6.2 完成 | 仅按 S03 修订过时注释 | AS03；逐块文字差异 | 不为注释清理改变运行逻辑；交付 S01—S03 | 待授权 |
-| 7.1 | 实现全部完成；普通验收获准 | 汇总 A01—A10、AS01—AS03；运行未完成的相关普通功能验收 | 第 7 节清单；已验证且代码未变的不重复跑 | 关键项缺证据时只能报“实现完成，验收未完成” | 待授权 |
-| 7.2 | 7.1 完成；另行取得具体受控检查授权 | 仅运行明确获准的 lint/vet/modern/race/覆盖率/架构门禁 | 每项命令、版本、退出码、日志、未执行项 | 版本不符/既有失败分别记录；不升级工具、不降低门槛、不绕过 | 待授权 |
+| 1.1 | 阶段 1 授权；接受 R01 整数表示边界 | 增加签名 token 与中间件 ID 传递用例 | A01；保留旧实现的真实结果 | 不同意表示范围收窄则修订方案，不改解析 | A01 用例已补齐；反证与 race 通过 |
+| 1.2 | 1.1 用例就绪 | 修改 Laravel 数字解析与身份分支 | F01；逐个核对身份/时间/角色结果 | 任一合法整数映射改变则停止；交付 R01 差异和证据 | 29a58cd 实现已验收；A01/F01 通过 |
+| 2.1 | 阶段 2 授权；最小 runner 兼容范围确认 | 给扣减命令加 NoRetry，适配仓库内限流 runner 及动态借用客户端的装配适配器 | A04、F02、F09；对端执行次数、恢复后客户端借用及 NoRetry 属性 | 不得退回全局禁重试作为临时补丁 | 测试桩已同步；丢回复/NOSCRIPT/真实 Redis 通过 |
+| 2.2 | 2.1 接口确定 | 增加取消分类、准入凭证及同代探测完成逻辑 | A02；状态序列与调用次数 | 取消能恢复健康/释放他人探测时停止 | A02 状态、取消及代次回归通过 |
+| 2.3 | 2.1—2.2 明确 | 统一 Redis context timeout，回审其他消费者 | A03、F03；实际 socket 等待结果 | 仅 mock 成功不能验收；缺真实条件标未验证 | A03 真实 socket/ready 及消费者回归通过 |
+| 2.4 | 接受 R05 启动校验收窄 | 校验有效补满时间；统一 TTL 计算；同步说明 | A05、F02、F04；边界表及配置错误 | 不改实际策略数值规避失败；交付 R02—R05 整阶段差异 | A05 边界及启动拒绝通过；实际配置缺失 |
+| 3.1 | 阶段 3 授权；阶段 1 完成 | 增加验签构造，保持签发构造严格 | A06 密钥集及 Issuer 错误用例 | 不得放宽 local 私钥/匹配校验 | A06 验签/签发模式及严格私钥回归通过 |
+| 3.2 | 3.1 完成 | 按认证模式装配；修正 typed-nil；同步配置说明 | F05、F06；模式/路由/CLI 矩阵 | external 意外拥有 Issuer 或 local 接口退化则停止；交付 R06 | 装配、路由及 JWT CLI 通过；README 已同步 |
+| 4.1 | 阶段 4 授权；复核历史 ERR-143 与当前源码差异 | 写失效提交交错、取消等待、panic/nil、名额用例 | A07/A08；确定性调度证据 | 不凭历史“已通过”跳过当前基线 | 交错、堆驻留、64 名额及广播用例已补齐 |
+| 4.2 | 4.1 就绪 | 单登记项替换 DoChan；统一锁顺序与结果发布 | F07；同键一次加载、64/65 边界、无等待者列表 | 失效后旧值回填、死锁或名额提前释放则停止；R07/R08 一起交付 | A07/A08/F07 及反证、race 通过 |
+| 5.1 | 阶段 5 授权；阶段 2 完成 | 收紧周期任务保证，并同步文档与错误文本 | A10、F08；声明枚举矩阵 | 不把 Fenced 自动替换成 Idempotent | A10 保证枚举及真实 UniqueTTL 通过 |
+| 5.2 | 5.1 完成 | 跟踪真实退出、关闭超时观察、Cleanup 同实例等待 | A09、F08；两代实例数量、租约释放顺序 | 未退出即返回/重建/关共享资源则停止 | A09 两代、关闭超时、租约及 Cleanup 通过 |
+| 5.3 | 5.2 完成 | 复核 WorkerManager 与装配层资源安全门 | F09；超时期间资源保持、晚退出后的清理 | 安全门不满足则停止并修订范围，不自行重写 WorkerManager；交付 R09/R10 | F09 阻塞关停和 App 资源安全门通过 |
+| 6.1 | 阶段 6 授权；前五阶段完成；仍无模块登记项 | 删除空栈/空清理，移除同名测试包装，同步生成器描述 | AS01、F09、F10；真实清理顺序 | 一旦发现真实拥有资源的模块则停止此简化 | 旧测试已迁移；真实清理/生成器回归通过 |
+| 6.2 | 6.1 完成；确认已有修改归属 | 改 data 包声明与列明的消费者导入 | AS02、F11、F12；导出契约与差异回读 | 目录/import 路径/导出接口变化则停止；交付 S02 | 测试包/消费者已同步；F11/F12 通过 |
+| 6.3 | 6.2 完成 | 仅按 S03 修订过时注释 | AS03；逐块文字差异 | 不为注释清理改变运行逻辑；交付 S01—S03 | 限定注释已修订并回读 |
+| 7.1 | 实现全部完成；普通验收获准 | 汇总 A01—A10、AS01—AS03；运行未完成的相关普通功能验收 | 第 7 节清单；已验证且代码未变的不重复跑 | 关键项缺证据时只能报“实现完成，验收未完成” | 相关 A/AS/F 验收完成；证据及范围见 9.3 |
+| 7.2 | 7.1 完成；另行取得具体受控检查授权 | 仅运行明确获准的 lint/vet/modern/race/覆盖率/架构门禁 | 每项命令、版本、退出码、日志、未执行项 | 版本不符/既有失败分别记录；不升级工具、不降低门槛、不绕过 | 相关 build/vet/lint/race 通过；未运行项见 9.3 |
 
 阶段 1、2、3、4、5、6 均可独立回滚；R02—R05 同阶段确认后再进入依赖其行为的阶段 5。R07 与 R08 共用状态结构，按一个回滚单元处理。阶段 7 不引入新的修复范围。
 
-## 7. 后续验收清单与运行边界
+## 7. 验收入口与运行边界
 
-### 7.1 普通功能验收入口（全部未执行）
+### 7.1 普通功能验收入口
 
-普通测试使用 `-vet=off`，避免隐式运行未授权 vet。下列命令只是计划；实际执行还需检查测试是否需要已有本机依赖，禁止隐式拉镜像、创建容器或连接生产。不能以跳过的集成测试证明真实链路通过。
+下表保留 F01—F12 的目的和入口。本次将相关包合并为 Linux `-race -tags=scaffold` 验证，vet 单独执行；JWT CLI 仍限于指定测试前缀。真实 Redis 验证使用本任务专用实例，结果见第 9.3 节；未连接现有业务服务，也未以跳过用例证明真实链路通过。
 
 | ID | 计划命令 | 主要目的 |
 |---|---|---|
@@ -291,9 +293,9 @@ F06 不运行 cmd 全包，以避免重新触发已记录的 `TestServerUsesDefa
 
 ### 7.2 并发、内存与性能证据
 
-- 需单独获准后，针对 ratelimit/cache/tasks/bootstrap 执行 race，覆盖本计划明确的交错；全量 race/coverage 另列结果。普通测试成功不证明没有 data race。
+- 本次已针对包括 ratelimit/cache/tasks/bootstrap 在内的 18 个受影响包执行 race，覆盖本计划明确的交错；未声称全仓 race 或覆盖率结果。普通测试成功不证明没有 data race。
 - R08 的机制目标：缓存条目数 ≤ maxItems；在途 loader 数 ≤ maxInflight（默认 64）；同键完成通知与结果存储为 1 份，不随历史已取消等待者总数增长。活跃调用者自己的 goroutine/栈不计作可消除的缓存内部常数内存。
-- 可在后续明确获准性能测量后，对同键阻塞 loader、分批 1,000 个取消等待者采集多批驻留/分配证据；比较时固定 Go、依赖、输入和采样方式，区分累计分配与存活内存。没有这些数据不报告内存降低比例。
+- 已对同键阻塞 loader、三批各 10,000 个取消等待者采集 GC 后 HeapAlloc/HeapObjects，另记累计 TotalAlloc；并以临时保留逐等待者 channel 的实现反证。结果仅支持该受控场景的驻留契约，不推导生产 RSS 或内存降低比例。
 - 复用 ERR-090 的教训：基准输出、解析警告、有效样本数都须核对；退出码 0 不自动使统计有效。本计划不新增无需求依据的全链路压测任务。
 
 ### 7.3 失败处理
@@ -339,7 +341,7 @@ F06 不运行 cmd 全包，以避免重新触发已记录的 `TestServerUsesDefa
 - harness 提示项目模板 `09972a20a8ef` 落后于模板仓库 `db2e0cdfa25b`。已提醒可用 `go-harness update` 或 `go-harness --force`；本轮不执行更新。ERR-148 记载过更新冲突，后续不能据提醒自动覆盖本地规则。
 - 完整回读状态：已完成；已核对 10 个问题、3 个简化项、阶段依赖、文件范围、兼容变化、回滚及验收一一对应。阶段 1—7：均未授权、未开始；所有 A/AS/F 验收项：未执行。读取成功仅证明文档已核对，不证明代码修复或运行期安全。
 
-### 9.1 本轮实施授权（优先于上述计划轮历史记录）
+### 9.1 生产实施授权历史（后续测试授权见 9.3）
 
 配置说明补充落点：`config/README.md` 的 JWT 启动校验段仍声明两种模式都需要私钥。本轮随 R06 同步该段与权限表的适用模式，保留 doctor/CLI 原行为说明；属于已批准的配置说明同步，不扩展运行代码范围。
 
@@ -348,13 +350,95 @@ F06 不运行 cmd 全包，以避免重新触发已记录的 `TestServerUsesDefa
 - 不新增、修改或删除 `_test.go`。S01 的旧测试包装、S02 的测试包声明，以及依赖旧 runner/私有签名的测试适配也延期；不得为旧测试保留无用生产封装。由此存在测试源码尚未同步的已知限制，本轮不能声称可编译或测试通过。
 - 所有 A/AS/F 验收项仍未执行；本轮仅可报告代码已写入并回读，不报告性能提升、并发安全证明或发布准入。
 - 已通过本会话的 OpenSpec 包装入口读取列表（exit 0），并创建独立变更 `repair-audit-safety-and-simplification`（exit 0），未使用任何历史 change。
-- 阶段 1—6 的生产步骤当前状态：已授权、尚未开始。阶段 7 及所有测试编写：按用户指令延期。
+- 上述授权记录写入时，阶段 1—6 的生产步骤为“已授权、尚未开始”；2026-10-24 的实际进度见第 9.2 节。阶段 7 及所有测试编写继续按用户指令延期。
 
-后续严格按本轮边界实施；不将工作流激活或实施授权解释为检查授权。
+本节记录当时边界；后续追加指令已授权测试编写及必要验证，最终范围以第 9.3 节为准。
+
+### 9.2 2026-10-24 生产续作历史（追加测试前）
+
+用户指令：“根据最后一次提交信息和文档 docs/review-remediation-plan-2026-10-23.md，继续做未完成的修复”。沿用第 9.1 节生产实现授权及测试/检查延期边界，不创建 worktree、不提交或推送、不部署。最后提交为 `29a58cdea62cdbad4a03696edf15f052c4703c9a`；提交说明与实际源码共同作为续作基线，不仅凭提交标题判断完成项。
+
+| 范围 | 本次核对或写入结果 | 验收状态 |
+|---|---|---|
+| R01 | `29a58cd` 已启用 JSON Number，数字 sub 通过 Int64 精确解析，移除 float64 身份分支 | A01/F01 未执行 |
+| R02—R05 | `29a58cd` 已有取消分类、健康代次凭证、NoRetry 扣减命令、动态 Process 转发、context timeout 与慢桶 TTL 校验；本次回读相关生产路径 | A02—A05/F02—F04 未执行 |
+| R06 | `29a58cd` 已有仅验签 KeySet、按模式加载及 nil Issuer；本次补齐 `config/README.md` 的模式、权限及 CLI 边界说明 | A06/F05/F06 未执行 |
+| R07/R08 | `cache.go` 改用泛型 loadEntry，每键一份结果和完成通知；取消等待不登记额外 channel。加载准入二次核对缓存；失效、归属校验及提交遵循 loadMu → mu，时钟与 jitter 在锁外执行；错误/panic 不缓存，名额留到 loader 真实退出；同步 `docs/cache.md` | 生产实现已写入；A07/A08/F07 及驻留证据未执行 |
+| R09 | 显式 Start/Shutdown；首次超时立即观察并保留错误，再由同一 Run goroutine 等待同一实例。实例/代次由锁保护，Cleanup 超时不清除归属，原 token 在真实退出及续租结束后释放；补齐观察日志、配置及生命周期说明 | 生产实现已写入；A09/F08/F09 未执行 |
+| R10 | 周期任务只接受 GuaranteeIdempotent，明确拒绝零值、Fenced 与未知枚举；一般 singleton 的 Held.Fence 能力保留，UniqueTTL 仍只作附加去重 | 生产实现已写入；A10/F08 未执行 |
+| S01 | 已确认没有生产模块 push，删除 rollbackStep/rollbackStack、services.cleanup 和空 modules 清理相位；生产入口改为 buildServices。真实 providerCleanup、回滚预算、逆序回滚与正常关闭阶段保留；同步生成器及架构说明 | 生产实现已写入；旧测试删除/迁移与 F09/F10 延期 |
+| S02 | data 目录五个生产文件改为 package data，八个生产消费者去掉冗余显式导入别名；不移动目录，不改导入路径或导出 API | 生产实现已写入；八个测试包声明及五个测试导入的同步延期；F11/F12 未执行 |
+| S03 | 限定文件删除 RouteTimeout/TimeoutPolicy/StreamKeepAlive/routespec 残留说明，压缩 router/providers/cache/scheduler 的历史叙述，保留取消、socket deadline、锁顺序、所有权和兼容窗口说明 | 文字已写入；仅源码回读，未执行检查 |
+
+源码调用方回读：`GetOrLoad/Invalidate` 未改公开签名；现有仓库未发现通用 cache 的生产业务接入。Scheduler 经 `asynqSchedulerWorker` 转发生命周期，装配入口和 PeriodicTask 载荷不变。`WorkerManager.StopKind` 超时后保留 stuck 条目，`cleanupPrepared` 跳过未退出任务，supervise 在 Run 返回后执行 Cleanup；`App.closeExtensions/closeResources` 对仍存活 worker 保留扩展和共享资源。本次未重写这些安全门，运行期结论仍需 A09/F09 验证。`buildServices` 的生产调用点和生成器说明已改名，测试包装按授权延期。
+
+独立只读复审已结束，未发现本轮范围内新的高置信度可操作缺陷。复审覆盖缓存锁顺序与发布、实际 asynqx v1.6.0 停止契约、排空超时错误保留、同代清理和真实 provider 所有权。复审未修改文件，也未运行测试、构建或其他检查；此结果不能替代上述验收项。
+
+本机范围差异：当前目录不存在仓库 `AGENTS.md`、`.harness/` 或 `openspec/`，故使用用户本轮提供的目录规则及现有 `docs/architecture.md`，没有创建或激活替代流程。历史错误日志在本机不可读，不将历史通过结果作为证据。`config/env/env.yml` 也不存在，本机实际配置说明未同步；仅更新 example 与结构体注释，不创建配置文件、不读取或回显凭据、不改变任何实际值。
+
+已知未闭环项：本轮没有新增、修改或删除任何 `_test.go`。旧 scriptRunner 测试桩仍需适配 Process，旧 JWT 私有签名/配置断言仍需适配；`assembly_contract_test.go` 中同名 buildServices 包装及 svc.cleanup 调用、rollback/module_cleanup 测试中的已删除类型/相位仍需迁移，data 测试仍为 package dao。这些是尚未同步的源码限制，不能把当前状态宣称为可构建、测试通过或发布就绪。
+
+本轮只运行读取、检索与差异回读命令并写入以上生产/说明文件；没有运行测试、构建、lint、vet、modern、race、coverage、架构或其他门禁。A01—A10、AS01/AS02 的运行验收、F01—F12、并发/内存证据均未执行，AS03 仅完成文字回读。不提供性能或并发安全证明。所有修改保留在当前项目工作区，后续先按已批准清单完成测试源码适配，再在获准范围内执行阶段 7。
+
+### 9.3 追加测试授权与最终执行记录
+
+用户最新指令：“测试文件也可以一起写了，进行该有的测试”。现同步延期测试，并执行本次修复所需的定向功能、构建和并发 race 等验证。既有目录、依赖和无提交/推送/部署约束不变，不连接现有业务数据库或 Redis；测试所需受控回环服务由各用例自行启动和清理。
+
+初次 `go test -vet=off -count=1 -timeout=240s ./internal/bootstrap ./internal/pkg/tasks`：exit 1。tasks 原有测试通过；bootstrap 编译失败于旧 cleanupModules/rollbackStack 和 redisCommands.EvalSha 引用，属于此前明确延期的适配。本轮同步这些测试，不为旧测试恢复已删除生产封装。
+
+**最终结果：本次相关功能与并发验收通过。** R01—R06 的已有实现已补回归；R07—R10、S01—S03 的实现和测试已同步。数据测试包声明改为 `data`，bootstrap 的旧空模块回滚用例改为真实 provider 清理断言，限流测试桩改用 Process，签发测试显式使用 local 模式。保留真实资源清理顺序、失败继续清理及重复关闭断言。
+
+实际新增测试落点与覆盖：
+
+| 验收项 | 测试落点及关键断言 |
+|---|---|
+| A01 | `internal/pkg/jwtauth/laravel_precision_test.go`、`internal/middleware/auth_laravel_test.go`：原始 JSON 实签，正 int64/2^53 边界、非法表示及签名、parser 选项覆盖，精确 ID 到达用户校验器和 handler |
+| A02 | `pkg/ratelimit/health_cancellation_test.go`：纯取消与混合错误树、连续失败阈值、探测间隔、旧代次结果、请求预取消及本地影子额度 |
+| A03 | `internal/platform/redis/deadline_test.go`、`internal/router/redis_deadline_test.go`：真实 TCP 握手后阻塞业务回复，DB0/DB3 的 100ms deadline 在 500ms 内返回，readiness 的 2s 预算在 2.5s 内返回；无 deadline 时仍受 socket timeout 约束 |
+| A04/A05 | `pkg/ratelimit/retry_contract_test.go`：服务端执行后丢回复只扣一次、同客户端普通 GET 仍重试、明确 NOSCRIPT 仅加载后再执行、24h/60s 余量与定点舍入边界；bootstrap/config 断言非法 Redis 策略启动失败而 local 策略可用 |
+| A06 | `internal/pkg/jwtauth/assemble_external_test.go`、既有 config/bootstrap/middleware/模块用例：external 忽略空/缺失/非法私钥路径、active/previous 验签、Issuer 真 nil、local 私钥缺失/错配/权限仍失败、错误 previous/重复 kid 仍失败 |
+| A07/A08 | `internal/pkg/cache/load_contract_test.go`：loader 返回至提交之间失效、同键 100 等待者共享成功/错误/panic/typed nil、三批各 10,000 次取消的堆驻留、64 个真实 loader 占满默认名额且忽略取消期间不提前释放 |
+| A09/A10 | `internal/pkg/tasks/scheduler_shutdown_test.go`、`internal/bootstrap/worker_scheduler_shutdown_test.go`：首轮超时只观察一次且继续跟踪、失租后旧代退出才启新代、同代 Cleanup/晚清理、原租约释放、App 延后关闭扩展/Redis；保证枚举白名单、真实队列入队及 UniqueTTL=7s |
+| AS01—AS03 | bootstrap/data/资源消费者/scaffold 的既有测试回归、包/导入同步、生成器契约及限定注释回读；真实 provider 清理路径保留 |
+
+最终命令和证据（相对路径均位于当前项目）：
+
+| 环境/命令 | 结果 | 证据 |
+|---|---|---|
+| Windows `go build ./...` | exit 0 | `.cache/review-remediation-2026-10-24/windows-build-final.{log,exit}` |
+| Windows `go vet -p=4 -tags=scaffold ./...` | exit 0 | 同目录 `vet-final.{log,exit}` |
+| Windows golangci-lint v2.15.0 `run --concurrency=4 --timeout=10m ./...` | exit 0，0 issues；未修改 lint 配置或排除规则 | 同目录 `lint-final.{log,exit}` |
+| Linux Go1.27.3 `go build -p=4 -tags=sonic ./...` | exit 0 | 同目录 `linux-build-final.{log,exit}` |
+| Linux `go test -p=4 -race -vet=off -tags=scaffold -count=1 -timeout=240s -json` 加下述 18 包 | exit 0；18 包、784 个顶层测试、1948 个含子用例；0 失败/跳过/race 警告 | 同目录 `linux-race-final.{jsonl,exit}` |
+| Linux `go test -p=4 -race -vet=off -tags=integration -count=1 -timeout=180s -run '^TestIntegration' -json ./pkg/ratelimit ./internal/pkg/tokenstore ./internal/platform/responsecache` | 3 包 8 项通过，0 失败/跳过/race 警告；连接本任务专用真实 Redis DB15 | 同目录 `redis-consumers-final.jsonl` |
+| Linux `go test -p=4 -vet=off -tags=scaffold -count=1 -timeout=180s -run '^Test(Bare)?JWT' -json ./cmd` | 12 个顶层测试、27 个含子用例通过，0 失败/跳过 | 同目录 `jwt-cli.jsonl` |
+| Linux `go test -race -vet=off -count=10 -run '^TestRecoveryOutcomeLogs$' ./internal/platform/redis` | exit 0；测试计数器修正后连续 10 次通过 | 同目录 `redis-recovery-race-green.log` |
+
+18 包为 `internal/pkg/{jwtauth,tokenstore,cache,tasks,singleton}`、`internal/middleware`、`pkg/ratelimit`、`internal/platform/{config,redis,data,mysql,responsecache,logging}`、`internal/router`、`internal/bootstrap`、`internal/runtime/module/{auth,account}` 和 `internal/scaffold`。这组 race 覆盖 F01—F05、F07—F11 的包范围；F06 单独执行，F12 为最终普通构建。
+
+驻留证据：Linux race 最后一轮的三批取消完成并 GC 后，新增存活 HeapAlloc 分别为 305336/306336/306320 字节，HeapObjects 为 1135/1142/1143；累计 TotalAlloc 为 3147680/5870136/8592904 字节。分配累计增长符合调用发生，存活量未随累计取消次数持续增长。该测试不使用 RSS 证明无泄漏，也不据此宣称生产内存改善比例。
+
+最小反证均在当前源码上临时修改目标点、运行定向测试，并在 finally 中恢复原始文件字节；没有保留反证实现或复制项目：
+
+- 去掉 fenced 提交保护，交错测试捕获旧值回填（`cache-fence-red.log`）。
+- 人工保留逐等待者 channel，堆驻留测试捕获三批存活量持续增长（`cache-waiters-red.log`）。
+- 首次 Shutdown 超时即返回，装配测试捕获 StopKind 过早确认退出（`scheduler-drain-red.log`）。
+- 取消扣减 NoRetry，TCP 对端记录 4 次执行，断言要求 1 次（`no-retry-red.log`）。
+- 去掉 JSON Number，2^53+1 的两种 parser 选项路径失败（`laravel-number-red.log`）。
+
+失败处理与复审：第一次 Linux race 在既有 `TestRecoveryOutcomeLogs/recovered` 发现测试计数器 `calls` 的并发读写；已仅将该计数器改为 atomic.Int32，保留原断言，定向 10 次与最终 18 包 race 均通过。lint 首次运行有超时和局部问题；修正等价表达式、错误检查和测试辅助类型归属后重跑为 0 issues。`redisView` 的使用者是 integration 文件，因此将其移入该标签文件，原断言和真实 Redis 回归保留。独立只读复审指出的 64 名额实际计数、失租后第二代和 UniqueTTL 三处覆盖缺口均已补齐，未留下已知未处理发现。
+
+环境和范围限制：
+
+- Windows 普通 JWT/config 测试分别遇到既有符号链接权限和绝对路径断言限制；没有添加兼容补丁或跳过用例，Linux 同包完整测试已通过。
+- Linux 使用本机缓存镜像、同版 Go1.27.3 工具链和 gcc，当前项目只读挂载到 `/workspace`，缓存单独可写；仅解压工具链，没有源码副本或替代工作树。最初共享目录工具链构建过慢而终止（143），未记为通过。
+- 真实 Redis 仅使用本次专用容器和网络，未暴露宿主端口，DB15 无业务数据；两只测试容器、所属匿名卷和专用网络已清理（`docker-cleanup.{log,exit}`，exit 0），未连接或停止既有 devilbox 服务。
+- 未运行全仓 cmd/server 测试、真实 MySQL 集成、覆盖率、全链路压测、modern/架构聚合脚本或安全扫描；本次没有依赖、数据库结构或消息协议变更，不将相关包测试结果扩展成全仓、生产容量或发布准入结论。
+- 实际 `config/env/env.yml` 缺失，未创建或改变配置；仅同步 example、结构体及 README。`go.mod`/`go.sum` 无差异，源码、测试和文档都保留在 `D:\go\gin_api` 工作区，未执行提交、推送、合并、打标签或部署。
 
 ## 10. 本轮全部生产阶段的读取契约
 
-以下契约覆盖用户已批准的全部生产阶段，不包含测试文件。checks 仅为工作流格式要求而声明后续入口，本轮禁止运行。变更已创建，激活结果另行按真实执行记录。
+以下保留 2026-10-23 的生产读取契约，不代表本机已执行该工作流。它没有纳入后续测试授权，不能覆盖第 9.3 节的最新范围；本机缺少其 required_context 及 OpenSpec 状态的事实见第 9.2 节，不据此重建或激活历史流程。
 
 <!-- harness-contract:v1 -->
 ```json

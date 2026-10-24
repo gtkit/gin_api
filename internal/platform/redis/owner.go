@@ -13,7 +13,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/logger/v2"
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -127,7 +127,6 @@ func openCandidate(ctx context.Context, open Opener, cfg config.RedisConfig) (cl
 		switch value.Kind() {
 		case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Chan, reflect.Func, reflect.Slice:
 			if value.IsNil() {
-				client = nil
 				return nil, errors.Join(err, fmt.Errorf("open redis: %w: typed-nil client", core.ErrComponentState)), true
 			}
 		}

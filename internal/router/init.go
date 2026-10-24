@@ -103,17 +103,7 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 
 // ginModeFromEnv 把运行环境映射到 gin 运行模式。
 //
-// 只处理生产环境是不够的：dev/test 会落在 gin 默认的 DebugMode，
-// 而 DebugMode 下 gin 自己往 stderr 打路由表与警告，绕过项目的结构化日志。
-//
-// **入参是类型化的环境值，且这里不做任何归一化**。配置层已经写死「只接受精确值
-// dev|test|prod，不归一化、不降级」，理由是未知值静默当作非生产会绕过 pprof 绑定
-// 限制、生产日志路径校验与 ReleaseMode 等全部生产保护。此前这里收 string 并做一次
-// ToLower+TrimSpace，等于把配置层拒绝的形态在装配层重新放行——那条路径没有任何判据
-// 守护，配置校验一旦放宽就会生效。
-//
-// default 保留回落 DebugMode：Env 底层仍是 string，零值与日后新增的常量都会落到这里，
-// 回落到限制更多的 DebugMode 是安全方向（ReleaseMode 会关掉框架自身的调试保护）。
+// 环境值由配置层严格校验，此处不再归一化；未知值保留 Gin 的 DebugMode。
 func ginModeFromEnv(environment env.Env) string {
 	switch environment {
 	case env.Prod:
@@ -127,57 +117,16 @@ func ginModeFromEnv(environment env.Env) string {
 	}
 }
 
-// configureEngine 是 engine 可配置面的**唯一**决策点。
-//
-// 这里逐项列出 gin.Engine 的全部可配置字段——包括决定"保持 gin 默认"的那些。
-// 清单本身就是防遗漏机制：此前只有可信代理与运行模式被想到并写下，其余十余项
-// 从未被提及，于是"漏了哪一项"无法通过阅读这段代码发现，而实际漏掉的四项
-// （405 不可能产生、404 脱离统一信封、隐式尾斜杠重定向、*gin.Context 丢 deadline）
-// 全都有真实后果。新增字段时在此追加一行定性，不要散落到别处。
-//
-// 各项定性（gin v1.12.0，默认值取自 gin.New()）：
-//
-//	RedirectTrailingSlash   true  → false：API 不做隐式重定向。非 GET 方法走 307，
-//	                        客户端会带原请求体重发，一次写操作可能落到并非作者
-//	                        本意的路径上；隐式纠正也让"路径不存在"不再确定。
-//	RedirectFixedPath       false 保持：大小写不敏感的路径修正会与网关/WAF 的
-//	                        路径规则分叉（网关按 /Admin 放行、应用按 /admin 匹配）。
-//	HandleMethodNotAllowed  false → true：否则 405 永不产生，方法不匹配伪装成 404，
-//	                        且与 CORS 预检回 405+Allow 的结论自相矛盾。
-//	ForwardedByClientIP     true  保持：与 SetTrustedProxies 配对生效。
-//	AppEngine               —     不触碰：已废弃字段。
-//	UseRawPath              false 保持：用已解码的 URL.Path 匹配，与既有路由声明一致。
-//	UseEscapedPath          false 保持：同上。
-//	UnescapePathValues      true  保持：路径参数解码后交给 handler，是既有行为。
-//	RemoveExtraSlash        false 保持：同 RedirectFixedPath，归一化会与上游规则分叉。
-//	RemoteIPHeaders         配置驱动，**无条件赋值**：留空即不采信任何转发头。
-//	                        不保留 gin 默认（X-Forwarded-For / X-Real-IP）——那会让
-//	                        "留空 = 不取 header" 这条随仓文档承诺不成立。
-//	TrustedPlatform         ""    保持：设置它等于无条件信任某云厂商的 IP 头，
-//	                        本仓走显式可信代理列表。
-//	MaxMultipartMemory      32MB  保持：仓库无 multipart 路由，全局 body 上限已封顶
-//	                        该场景；为尚不存在的上传路由预设一个值没有依据。接入
-//	                        上传时按该路由的实际上限单独定值。
-//	UseH2C                  false 保持：h2c 是明文 HTTP/2，本仓服务 TLS 或置于反代之后。
-//	ContextWithFallback     false → true：*gin.Context 自身满足 context.Context，
-//	                        下游写 service.Do(c, …) 能通过编译，但默认实现会让
-//	                        Deadline/Done/Err/Value 返回零值——路由级超时对这种
-//	                        写法完全失效，且无任何编译期或运行期信号。
+// configureEngine 集中配置可信代理、转发头、路由匹配与 context 传播。
+// 禁用尾斜杠隐式重定向，启用 405，并让 *gin.Context 转发请求的取消与 deadline；
+// 其余字段沿用 Gin 默认值，不做额外路径归一化。
 func configureEngine(engine *gin.Engine, opt Options) error {
 	// 可信代理必须显式设置。Gin 不设置时的默认是**信任所有代理**，
 	// 那会让任何客户端都能用转发头伪造自己的 IP，而限流与审计都按 IP 走。
 	if err := engine.SetTrustedProxies(opt.TrustedProxies); err != nil {
 		return err
 	}
-	// **无条件赋值**：留空即"不采信任何转发头"。
-	//
-	// 加 len > 0 判断的后果是留空时 gin 的默认值继续生效——默认是
-	// ["X-Forwarded-For", "X-Real-IP"]，而随仓配置样例把空值注释为
-	// "不配置=不从任何 header 取 IP"。客户端 IP 是审计事实与限流主体的来源，
-	// 运维据注释以为它只来自 TCP 对端，实际却来自请求头。
-	//
-	// gin 的判据是 RemoteIPHeaders != nil 且遍历该切片，因此 nil 与空切片
-	// 都会落到连接对端，不需要额外的哨兵值。
+	// 无条件赋值：nil 和空切片都表示只取连接对端，不能保留默认转发头。
 	engine.RemoteIPHeaders = opt.RemoteIPHeaders
 
 	engine.RedirectTrailingSlash = false

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +16,42 @@ import (
 
 // 32 字节：满足 hs256 的密钥下限。
 const laravelTestSecret = "laravel-test-secret-0123456789ab"
+
+type exactLaravelUser struct{ seen []int64 }
+
+func (v *exactLaravelUser) ValidateUser(_ context.Context, id int64) (bool, error) {
+	v.seen = append(v.seen, id)
+	return true, nil
+}
+
+func TestLaravelLargeIntegerReachesUserVerifierExactly(t *testing.T) {
+	verifier, err := jwtauth.NewLaravelVerifier(laravelTestSecret, "hs256", "user", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser, err := jwtauth.NewFallbackParser(newTestParser(t), verifier, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := &exactLaravelUser{}
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(mustAuthenticate(t, users, parser, false))
+	const want = int64(9007199254740993)
+	engine.GET("/protected", func(c *gin.Context) {
+		if got := ginc.UserIDFromContext(c); got != want {
+			t.Errorf("request identity=%d want=%d", got, want)
+		}
+		c.Status(http.StatusNoContent)
+	})
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil)
+	req.Header.Set("App-Token", signLaravelTestToken(t, want))
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, req)
+	if response.Code != http.StatusNoContent || len(users.seen) != 1 || users.seen[0] != want {
+		t.Fatalf("status=%d verifier IDs=%v", response.Code, users.seen)
+	}
+}
 
 func signLaravelTestToken(t *testing.T, userID int64) string {
 	t.Helper()

@@ -23,7 +23,6 @@ func TestStandardPEMAssemblyAndGoJWTInterop(t *testing.T) {
 		ttl        time.Duration
 	}{
 		{"local default", "local", 0, time.Hour},
-		{"external default", "external", 0, 30 * 24 * time.Hour},
 		{"explicit lifetime", "local", 12, 12 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,6 +38,9 @@ func TestStandardPEMAssemblyAndGoJWTInterop(t *testing.T) {
 			assembly, err := Assemble(cfg)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if assembly.Issuer == nil {
+				t.Fatal("local assembly returned no issuer")
 			}
 			token, err := assembly.Issuer.Issue(t.Context(), 42, "user")
 			if err != nil {

@@ -682,7 +682,7 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 // providersMarkers 返回 updateProviders 使用的「注入型」稳定标记——生成器在每个
 // 标记前插入新模块的接线行。标记归脚手架所有，不依赖任何业务模块长期存在。
 // 对应 providers.go 的分阶段结构：import 区、services struct 字段、
-// buildServicesWithBudget 构造、buildEngine 模块切片四处注入点。
+// buildServices 构造、buildEngine 路由注册四处注入点。
 //
 // 另有「校验型」标记见 providersValidateOnlyMarkers——两类标记处理方式不同，
 // 不要把校验型标记接进本函数或 ensureLineBefore 的插入逻辑。
