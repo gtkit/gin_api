@@ -61,7 +61,7 @@ brew install graphviz
 | 项 | 值 / 位置 | 说明 |
 | --- | --- | --- |
 | 启动入口 | `main.go` → `cmd.Execute()` → `server` 子命令 | cobra 多命令 |
-| 服务装配 | `internal/bootstrap/`（`app.go` / `providers.go` / `http.go`） | HTTP server 在此构建 |
+| 服务装配 | `internal/bootstrap/`（`app.go` / `providers.go` / `modules.go` / `http.go`） | HTTP server 在此构建 |
 | Gin engine 创建 | `internal/router/init.go` 的 `New(envName, opt)` | 返回 `*gin.Engine` |
 | 健康探针路由 | `internal/router/init.go:349` 注册 `GET /health`，处理逻辑在 `internal/router/health.go` | 附加路由的写法可参照它 |
 | 全局中间件栈 | `internal/router/init.go:218` 起 | `GinRecovery`→`RequestID`→〔otelgin〕→`GinLogger`→`Metrics`→`SecurityHeaders`→`ErrorHandler`→〔`Cors`〕→`MaxBytesLimit`（**无全局超时、无全局鉴权**——两者都按路由组挂） |

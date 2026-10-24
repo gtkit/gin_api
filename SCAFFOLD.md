@@ -67,7 +67,7 @@ make project-init NAME=your_project
 ```
 
 `project init` 与 `module` 是**开发期工具**，由 `scaffold` 构建约束门控——它们不在服务二进制里
-（`module` 会重写 `providers.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃 git 历史，
+（`module` 会重写 `modules.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃 git 历史，
 两者对已经跑起来的派生项目都不存在正确用法）。上面的 make 目标已把 tag 封装好；
 裸命令形式是 `go run -tags scaffold . project init --name your_project`。
 
@@ -112,9 +112,9 @@ make project-init NAME=your_project
 
 ## 之后
 
-- 用生成器加业务模块：`make module NAME=<name> ARGS="--field title:string ... --access authenticated"`（自动接线进分阶段 `providers.go`，见 `cmd/MODULE_GENERATOR.md`）。
+- 用生成器加业务模块：`make module NAME=<name> ARGS="--field title:string ... --access authenticated"`（自动接线进分阶段 `modules.go`，见 `cmd/MODULE_GENERATOR.md`）。
 - `user` 模块保留作为认证/参考起点（它是 `sharedauth.UserVerifier` 提供者），按新项目需要改造或替换。
-- 提交前跑 `make check`；改动触及生成器/模板/`providers.go` 时再跑 `make check-ci`（额外含脚手架防腐冒烟 `check-generator`）。质量门禁全部在本地执行——部署脚本与 CI 配置是外部冻结方案，其中不含质量 job。
+- 提交前跑 `make check`；改动触及生成器/模板/`modules.go` 时再跑 `make check-ci`（额外含脚手架防腐冒烟 `check-generator`）。质量门禁全部在本地执行——部署脚本与 CI 配置是外部冻结方案，其中不含质量 job。
 
 ## JWT 密钥轮换操作手册
 
@@ -232,7 +232,7 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
    - `internal/pkg/jwtauth/laravel.go`
    - `internal/pkg/jwtauth/laravel_test.go`
    - `internal/middleware/auth_laravel_test.go`
-2. 简化 `internal/bootstrap/providers.go` 的 `newTokenParser`：去掉 Laravel 回退分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
+2. 简化 `internal/bootstrap/modules.go` 的 `newTokenParser`：去掉 Laravel 回退分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
 3. 删除 `internal/platform/config/types.go` 中的 `LaravelJWTConfig` 类型、`JWT.Laravel` 字段及其校验分支。
 4. 清理相关测试用例：`internal/bootstrap/providers_token_test.go`、`internal/bootstrap/providers_phases_test.go` 中的 Laravel 回退开启态用例，`internal/platform/config/validation_test.go` 的 `TestValidateLaravelJWTConfig`。
 5. 跑 `make check` 确认全绿。
@@ -254,7 +254,8 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
    `validateTelemetryConfig` 的调用行。
 3. `internal/bootstrap/providers.go`：删 2a 步（`telemetry.New` 装配块，含 `rb.push` 与
    启用日志）和 2a' 步（`InstrumentTracing` 调用）；删 `providerSet` 与 `infra` 两个
-   结构体的 `telemetry` 字段及构造处的赋值；删 `buildEngine` 里 `TracingEnabled` /
+   结构体的 `telemetry` 字段及构造处的赋值；在 `internal/bootstrap/modules.go`
+   删 `buildEngine` 里 `TracingEnabled` /
    `ServiceName` 两行接线。2b 步 `metrics.New(otel.GetMeterProvider().Meter(metricsScope))`
    保留原样——`otel` 的 API import 随之保留。
 4. `internal/bootstrap/app.go`：删 `App` 的 `telemetry` 字段、构造处赋值与关停序列里的
@@ -293,7 +294,7 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
-| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者/消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。`internal/pkg/singleton` 直接使用 Redis，不随 asynqx 自动移除。 |
+| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者接线与 `modules.go` 的消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。`internal/pkg/singleton` 直接使用 Redis，不随 asynqx 自动移除。 |
 | HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
 | 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
 
@@ -485,7 +486,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 写在 `g` 上就是所有已认证用户都能删——而编译、`go vet` 与全部测试都不会有任何异常。
 母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
-然后在 `internal/bootstrap/providers.go` 的 `opt.RegisterModules` 里加一行
+然后在 `internal/bootstrap/modules.go` 的 `opt.RegisterModules` 里加一行
 `xxxhttp.Register(v1, ...)`。`make module` 生成的模板已经是这个形状。
 
 **新增路由时必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
@@ -594,7 +595,7 @@ telemetry:
 
 | 能力 | 如何启用 |
 |------|---------|
-| 后台任务 | 在 `providers.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
+| 后台任务 | 在 `modules.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
 | 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
 | 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
@@ -614,7 +615,7 @@ telemetry:
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
 | 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
-| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `providers.go` 的 `scaffold:periodic-tasks` 标记处追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
+| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `scaffold:periodic-tasks` 标记处追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
 
 ### 告警扇出的对外副作用
 
@@ -633,9 +634,9 @@ telemetry:
 | 内容 | 说明 |
 |------|------|
 | `auth` 模块 | 本地认证（注册/登录/刷新/登出）。`auth.mode: external` 使用外部身份来源；JWT 验签与账号状态校验独立保留 |
-| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `internal/bootstrap/providers.go` 的 `entitlement.vip` 注册、`internal/bootstrap/authorizers.go` 的会员授权实现、`internal/shared/auth` 的 `VIPVerifier` 及 `internal/runtime/module/account/module.go` 的 `Assembly.VIP` 接线；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
+| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `internal/bootstrap/modules.go` 的 `entitlement.vip` 注册、`internal/bootstrap/authorizers.go` 的会员授权实现、`internal/shared/auth` 的 `VIPVerifier` 及 `internal/runtime/module/account/module.go` 的 `Assembly.VIP` 接线；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
-| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `internal/runtime/module/account/module.go` 里的 `Assembly.Roles` 字段及角色源构造，并在 `internal/bootstrap/providers.go` 把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
+| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `internal/runtime/module/account/module.go` 里的 `Assembly.Roles` 字段及角色源构造，并在 `internal/bootstrap/modules.go` 把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
 | `users` 表的基线迁移 | 与 `auth` 模块配套；替换身份模型时一并重做 |
 
 ### 【内部支撑包 — 不构成能力，无需接线】

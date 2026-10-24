@@ -32,7 +32,7 @@ LINT_TARGETS ?= ./...
 #
 # `scaffold` 门控着模块生成器（internal/scaffold）与项目实例化器
 # （internal/projectinit）——它们是开发期工具，不进服务二进制：`module` 会重写
-# internal/bootstrap/providers.go，`project init` 带 --force-reinit-git 且会永久
+# internal/bootstrap/modules.go，`project init` 带 --force-reinit-git 且会永久
 # 丢弃 git 历史，两者对派生项目都不存在正确用法。
 #
 # 但**验证口径必须包含它们**：这些包的测试锁定着 module-scaffold-wiring 与

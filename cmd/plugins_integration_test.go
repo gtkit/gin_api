@@ -30,6 +30,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/router"
 	"github.com/gtkit/gin-api/internal/shared/env"
+	"github.com/gtkit/logger/v2"
 	"github.com/knadh/koanf/parsers/yaml"
 	"go.opentelemetry.io/otel"
 )
@@ -387,10 +388,23 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 	if err != nil {
 		t.Fatal(err)
 	}
+	accessLogger, err := logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(accessLogger.Sync)
 	var executions atomic.Int32
-	engine, err := router.New(env.Test, router.Options{AllowedOrigins: cfg.CORS.AllowedOrigins, LogRequestBody: cfg.Log.AccessRequestBody, LogResponseBody: cfg.Log.AccessResponseBody, MaxBodyBytes: cfg.App.MaxBodyBytes, Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
-		v1.GET("/cache-probe", runtime.Cache().Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
-	}})
+	engine, err := router.New(env.Test, router.Options{
+		AccessLogger:    accessLogger,
+		AllowedOrigins:  cfg.CORS.AllowedOrigins,
+		LogRequestBody:  cfg.Log.AccessRequestBody,
+		LogResponseBody: cfg.Log.AccessResponseBody,
+		MaxBodyBytes:    cfg.App.MaxBodyBytes,
+		Metrics:         recorder,
+		RegisterModules: func(v1 *gin.RouterGroup) {
+			v1.GET("/cache-probe", runtime.Cache().Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,7 @@
 # 脚手架防腐冒烟：把「发布候选工作树」导出到临时目录，用模块生成器造一个临时模块，
 # 验证产物能编译、过架构传感器、且 goimports 干净。用后即弃，不触碰当前工作区。
 #
-# 目的：堵死「providers.go 结构变了、生成器 marker/模板没跟上」这类脱节
+# 目的：堵死「modules.go 结构变了、生成器 marker/模板没跟上」这类脱节
 # （姊妹项目曾因此让自动接线静默失效）。
 #
 # 为什么必须验工作树而不是 HEAD：旧实现用 `git archive HEAD`，只验证已提交内容。
@@ -83,7 +83,7 @@ run_gate() {
   echo "[check-generator] 架构传感器"
   bash scripts/check-architecture.sh
 
-  echo "[check-generator] goimports / lint（生成代码 + 被注入的 providers.go）"
+  echo "[check-generator] goimports / lint（生成代码 + 被注入的 modules.go）"
   golangci-lint run \
     ./internal/bootstrap/... \
     "./internal/module/${probe}/..." \
@@ -107,7 +107,7 @@ run_self_test() {
   echo "[self-test] 导出发布候选工作树到临时副本 $tmp"
   export_worktree "$tmp"
 
-  local target="$tmp/internal/bootstrap/providers.go"
+  local target="$tmp/internal/bootstrap/modules.go"
   if ! grep -qF "$service_anchor" "$target"; then
     echo "[self-test] FAIL: 副本中未找到锚点 $service_anchor（锚点被重命名？请同步更新本脚本）"
     exit 1

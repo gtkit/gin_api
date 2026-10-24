@@ -119,7 +119,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 			Note: fmt.Sprintf(
 				"模块要求自定义授权 %s。该标识**尚未注册**，装配层会兜底为恒拒绝并打一条"+
 					"错误日志：可编译、可启动，所有请求都被拒绝，不留 TODO、不默许放行。"+
-					"接入真实实现的方式是在 providers.go 的 scaffold:module-authorizers 标记处"+
+					"接入真实实现的方式是在 modules.go 的 scaffold:module-authorizers 标记处"+
 					"注册它，路由代码无需改动。", id),
 		}, nil
 	}

@@ -99,7 +99,7 @@ HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留
 
 `internal/scaffold`、`internal/projectinit` 与它们的 `cmd` 入口（`cmd/module.go`、
 `cmd/project.go`）由 `//go:build scaffold` 门控，**不进服务二进制**：`module` 会重写
-`internal/bootstrap/providers.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃
+`internal/bootstrap/modules.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃
 git 历史——两者对派生项目都不存在正确用法。
 
 口径分工是硬约束，两边都不能省：
@@ -164,6 +164,10 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
+`internal/bootstrap/providers.go` 只负责基础设施视图与进程级装配顺序；
+`internal/bootstrap/modules.go` 集中维护模块服务、认证授权、HTTP 路由及后台任务的接线，
+并持有全部模块装配标记。两者同属 `bootstrap` 包，不增加运行时注册层或修改模块内路由职责。
+
 Runtime 先读取配置并校验本地 JWT 密钥、TLS 证书，再创建日志、数据库、Redis 和缓存。
 TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；预绑定仍重新检查当前有效期，
 并在日志已就绪后报告临期告警。端口预绑定仍先于 worker 启动。
@@ -194,7 +198,7 @@ worker 必须先于路由（readiness 要读 worker 状态）。
 service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增基础设施时才往 `infra` 加字段，
 不提前占坑。
 
-模块生成器经 `providers.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
+模块生成器经 `modules.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
 不重构阶段函数。前四个是**注入型**（生成器在标记前插入接线行），后四个是**校验型**
 （生成器只断言标记存在；这些位置的内容是业务判断，由使用者手写）：
 

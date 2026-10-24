@@ -19,7 +19,7 @@ func init() {
 
 // newModuleCmd 构造 module 子命令：按分层约定一次性生成业务模块脚手架
 // （module 的 application/dto/transport/http + repository + model + 迁移草稿），
-// 并默认把新模块注册进 internal/bootstrap/providers.go。
+// 并默认把新模块注册进 internal/bootstrap/modules.go。
 //
 // 参数与 flag：
 //   - <name>          必填，模块名（ExactArgs(1)）。
@@ -27,7 +27,7 @@ func init() {
 //     int 系/uint 系/float/time.Time 等类型。
 //   - --force         覆盖已存在的生成文件。
 //   - --dry-run       只预览将创建/更新的文件，不落盘。
-//   - --no-bootstrap  跳过改写 providers.go 的自动注册（生成后需手动接线，见输出提示）。
+//   - --no-bootstrap  跳过改写 modules.go 的自动注册（生成后需手动接线，见输出提示）。
 func newModuleCmd(_ *rootOptions) *cobra.Command {
 	var force bool
 	var dryRun bool
@@ -92,7 +92,7 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing generated files")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview scaffold changes without writing files")
-	cmd.Flags().BoolVar(&noBootstrap, "no-bootstrap", false, "skip updating internal/bootstrap/providers.go to register the generated module")
+	cmd.Flags().BoolVar(&noBootstrap, "no-bootstrap", false, "skip updating internal/bootstrap/modules.go to register the generated module")
 	cmd.Flags().StringSliceVar(&fields, "field", nil, "repeatable field definition in name:type format, e.g. --field nickname:string")
 	cmd.Flags().StringVar(&access, "access", "",
 		"access policy for the generated routes: authenticated|optional|admin|custom (mutually exclusive with --public)")

@@ -5,7 +5,7 @@
 ## 使用方式
 
 生成器由 `scaffold` 构建约束门控（它不属于服务二进制——它会重写
-`internal/bootstrap/providers.go`）。`make module` 已把 tag 封装好：
+`internal/bootstrap/modules.go`）。`make module` 已把 tag 封装好：
 
 ```bash
 make module NAME=admin ARGS="--access authenticated"
@@ -29,7 +29,7 @@ go run -tags scaffold . module article_tag --field title:string --field enabled:
 - `--field name:type`：可重复指定字段。
 - `--force`：覆盖允许更新的生成文件；model 不会被覆盖。
 - `--dry-run`：只输出计划，不写文件。
-- `--no-bootstrap`：不修改 `internal/bootstrap/providers.go`（默认会自动接线）。
+- `--no-bootstrap`：不修改 `internal/bootstrap/modules.go`（默认会自动接线）。
 
 支持字段类型：
 
@@ -64,7 +64,7 @@ internal/models/admin.go
 database/migrations/<version>_create_admins_table.sql
 ```
 
-默认还会通过以下稳定标记更新 `internal/bootstrap/providers.go`（分阶段装配结构，四个注入点）：
+默认还会通过以下稳定标记更新 `internal/bootstrap/modules.go`（分阶段装配结构，四个注入点）：
 
 ```go
 // scaffold:module-imports        // import 区：注入 app / http / runtime 三个包导入

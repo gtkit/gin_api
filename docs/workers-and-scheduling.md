@@ -60,7 +60,7 @@ OneShot 完成后。
 
 ### 注册
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:module-workers` 标记前追加构造，
+在 `internal/bootstrap/modules.go` 的 `scaffold:module-workers` 标记前追加构造，
 `buildWorkers` 的签名不需要改动。`WorkerManager` 的构造需要一个预算：
 
 ```go
@@ -162,7 +162,7 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 默认关闭，配 `tasks.scheduler.enabled` 启用（要求 `tasks.enabled` 也开着——
 调度器投递的任务需要有人消费）。
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:periodic-tasks` 标记处追加声明：
+在 `internal/bootstrap/modules.go` 的 `scaffold:periodic-tasks` 标记处追加声明：
 
 ```go
 tasks.PeriodicTask{
@@ -243,7 +243,7 @@ if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil
 
 ### 注册处理器
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:task-handlers` 标记处追加一个
+在 `internal/bootstrap/modules.go` 的 `scaffold:task-handlers` 标记处追加一个
 `tasks.Registrar`：
 
 ```go

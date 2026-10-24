@@ -203,7 +203,7 @@ func TestGeneratedWiringFillsEveryAccessDependency(t *testing.T) {
 				t.Fatalf("GenerateWithOptions: %v", err)
 			}
 
-			providers := root + "/internal/bootstrap/providers.go"
+			providers := root + "/internal/bootstrap/modules.go"
 			// 模板 Deps 声明的每个依赖都必须被填上，与所选策略无关：
 			// 留空能编译，却在启动或首个请求上以空值调用崩溃。
 			for _, field := range []string{
@@ -265,7 +265,7 @@ func TestAccessChoiceRateLimitScopeMatchesIdentity(t *testing.T) {
 // （access-policy-enforcement spec 的「生成器提示与真实机制一致」）。
 //
 // 这条判据是补的，因为分叉真的发生过：提示长期写着「当前没有权威角色源，
-// role.admin 是恒拒绝的占位实现，所有请求都会 403」，而 providers.go 早已把
+// role.admin 是恒拒绝的占位实现，所有请求都会 403」，而 modules.go 早已把
 // role.admin 注册成查 user_roles 表的真实判定（见 CHANGELOG 与 SCAFFOLD.md）。
 //
 // 方向危险才是重点：使用者被告知"这条路由现在全 403、上线前必须自己替换

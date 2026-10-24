@@ -43,7 +43,7 @@ func TestPrintGenerationSummaryDryRun(t *testing.T) {
 	if err := printGenerationSummary(rootCmd, &scaffold.GenerateResult{
 		DryRun:  true,
 		Created: []string{"internal/module/demo/application/service.go"},
-		Updated: []string{"internal/bootstrap/providers.go"},
+		Updated: []string{"internal/bootstrap/modules.go"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestPrintGenerationSummaryDryRun(t *testing.T) {
 	if !bytes.Contains([]byte(got), []byte("would create internal/module/demo/application/service.go")) {
 		t.Fatalf("summary missing dry-run create line: %s", got)
 	}
-	if !bytes.Contains([]byte(got), []byte("would update internal/bootstrap/providers.go")) {
+	if !bytes.Contains([]byte(got), []byte("would update internal/bootstrap/modules.go")) {
 		t.Fatalf("summary missing dry-run update line: %s", got)
 	}
 	if !bytes.Contains([]byte(got), []byte("dry-run mode: no files were written")) {

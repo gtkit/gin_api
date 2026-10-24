@@ -76,7 +76,7 @@ cmd
 ```
 
 - `cmd/`：Cobra 命令入口，只负责参数解析和启动。
-- `internal/bootstrap/`：进程级资源、HTTP Server、路由和 worker 生命周期编排。
+- `internal/bootstrap/`：`providers.go` 负责进程级资源与启动阶段编排，`modules.go` 集中装配模块服务、鉴权、路由和后台任务。
 - `internal/runtime/module/`：模块装配，将 DB、配置和外部客户端转换成 application port 实现。
 - `internal/module/`：业务模块，按 `application`、`dto`、`transport/http`、可选 `worker` 组织。
 - `internal/repository/`：GORM/Redis 数据访问实现。
