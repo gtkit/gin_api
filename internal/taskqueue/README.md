@@ -3,6 +3,39 @@
 这里集中保存 asynqx 的生产者、消费者、周期调度、配置校验、执行指标和包内测试。
 当前没有业务任务，目录外的接线默认全部注释；仅设置环境变量不能启用。
 
+| 文件 | 职责 |
+|---|---|
+| `producer.go` | 普通业务入队：`NewProducer`、`Producer.Enqueue`、`Shutdown` |
+| `consumer.go` | 注册处理器并消费任务 |
+| `scheduler.go` | 按 cron 定时投递任务 |
+| `config.go` | 配置、默认值与校验 |
+
+## 普通业务入队
+
+完成下面的启用步骤后，将装配好的 `inf.tasksProducer` 注入业务服务并复用，
+在 HTTP 请求或业务方法中调用 `Enqueue`：
+
+```go
+if err := producer.Enqueue(ctx, "email:send", map[string]any{
+    "user_id": 123,
+}); err != nil {
+    return err
+}
+```
+
+这会把任务立即放入队列，随后由注册了 `email:send` 的消费者处理。
+`Enqueue` 返回 nil 表示入队成功，任务的业务处理结果由消费者负责。
+普通入队不需要启用 scheduler，也不需要声明 `PeriodicTask`。
+不要在每次请求中重新构造 Producer；队列关闭时，`Enqueue` 返回 `ErrDisabled`。
+
+默认进入 `default` 队列；需要指定队列时，传入投递选项，并让消费者配置包含该队列：
+
+```go
+err := producer.Enqueue(ctx, "email:send", payload,
+    asynqx.WithTaskQueue("emails"),
+)
+```
+
 ## 默认构建范围
 
 - 主程序没有导入本包。构建主程序时，本包及 asynqx/asynq 不在依赖图中。
