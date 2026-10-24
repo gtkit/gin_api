@@ -222,7 +222,6 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Redis.PoolSize, cfg.Redis.MinIdleConns = 2, 1
 	cfg.Redis.DialTimeoutMS, cfg.Redis.ReadTimeoutMS, cfg.Redis.WriteTimeoutMS = 500, 500, 500
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
-	cfg.Modules = config.ModuleConfigs{}
 	cfg.RateLimit = config.RateLimitConfig{}
 	cfg.Outbound = config.OutboundConfig{}
 	cfg.Tasks = config.TasksConfig{}

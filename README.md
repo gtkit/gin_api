@@ -84,7 +84,6 @@ cmd
 - `internal/platform/`：配置与基础设施连接管理。
 - `internal/pkg/`：仅供当前项目复用的基础能力。
 - `internal/shared/`：跨模块共享的轻量业务语义。
-- `internal/scaffold/`：开发期模块生成器。
 
 应用层不得依赖 Gin、GORM 或具体 repository。跨 repository 事务通过 application 定义的 `TxManager` port 编排，repository 统一经 `mdbCtx(ctx)` 获取事务句柄。
 
@@ -135,15 +134,13 @@ cmd
 go run . server
 go run . doctor
 go run . jwt
-make module NAME=admin ARGS="--access authenticated"
-make module NAME=staff ARGS="--field nickname:string --field status:uint8 --access admin"
+make project-init NAME=my_service ARGS="--dry-run"
 ```
 
-`module` 与 `project init` 是**开发期工具**，由 `scaffold` 构建约束门控，不在服务二进制里——
-`make module` / `make project-init` 已把 tag 封装好。裸命令形式是
-`go run -tags scaffold . module <name>`。
-
-模块生成器说明见 `cmd/MODULE_GENERATOR.md`。
+`project init` 是开发期工具，由 `scaffold` 构建约束门控，不在服务二进制里。
+`make project-init` 已封装该标签，裸命令形式为
+`go run -tags scaffold . project init --name <name>`。
+业务模块按 [架构约束](docs/architecture.md) 实现，并在 `internal/bootstrap/modules.go` 显式接线。
 
 Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录> <目标>`。不指定目标时仍执行 `dev`。根 `Makefile` 通过固定顺序的 `include` 加载以下分类文件；各文件共享同一套变量和目标，不作为独立入口。
 
@@ -153,7 +150,7 @@ Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录>
 | `make/build.mk` | 编译、镜像构建、受管产物清理 |
 | `make/dev.mk` | 开发依赖、应用 Compose 操作、钩子安装 |
 | `make/quality.mk` | lint、vet、modern、测试、覆盖率、架构及安全检查入口 |
-| `make/scaffold.mk` | 模块与项目生成、生成器验证、应用身份生成和检查 |
+| `make/scaffold.mk` | 项目初始化、应用身份生成和检查 |
 | `make/migration.mk` | 迁移、环境与名称占位、迁移文件及数据库验证 |
 | `make/release.mk` | 发布门禁编排、tag 入口、发布接线验证 |
 
@@ -172,10 +169,7 @@ Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录>
 
 各步骤的**权威清单是 `Makefile` 的 `check` 目标**：本文只做导读，改动门禁时以 Makefile 为准。
 
-`make check-ci` 在 `make check` 基础上额外执行脚手架防腐冒烟 `check-generator`：把发布候选工作树
-（已跟踪文件 + 新增未跟踪且非 ignored 文件，排除 ignored）导出到临时目录跑生成器，验证产物编译 /
-过传感器 / goimports 干净。它另有两个自检入口：`--self-test` 证明门禁验的是工作树而非 HEAD，
-`--verify-scope` 证明导出范围恰好覆盖四类边界行为。
+`make check-ci` 执行与 `make check` 相同的质量门禁。
 
 门禁有两条自动执行点，覆盖前提不同、互不替代：
 
@@ -210,7 +204,7 @@ make hooks
 （质量门禁走「质量门禁」一节的两条执行点，不在这条部署流水线上），进程由 Supervisor 托管。
 环境边界：服务器无 Docker、不跑本机 MySQL/Redis（应用连接远程实例，配置在 `env.yml`）；
 数据库 schema 由外部维护；项目提供 `migrate` 命令的最小运行时（配置、日志、数据库），
-模块生成器产出 goose 单文件迁移草稿，经 DBA 审阅后再显式执行。
+迁移 SQL 需包含 Up/Down 区段，经 DBA 审阅后再显式执行。
 
 ### 生产发布
 
@@ -303,7 +297,7 @@ REQUIRE_DB_INTEGRATION=1使缺依赖失败；日常check仍不依赖数据库。
 
 - 配置说明：`config/README.md`
 - pprof 默认关闭；启用后使用独立回环地址端点。
-- 模块生成器生成含 Up/Down 区段的 goose 单文件 SQL 草稿。执行走内置的 `migrate` CLI
+- 迁移 SQL 使用含 Up/Down 区段的 goose 单文件格式。执行走内置的 `migrate` CLI
   （`make migrate-up` / `migrate-status`，连库验证见 `make migrate-verify`），
   上线前须经 DBA 审阅。
 

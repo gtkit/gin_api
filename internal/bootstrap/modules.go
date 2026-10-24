@@ -23,7 +23,6 @@ import (
 	"github.com/gtkit/gin-api/internal/runtime/module/account"
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
-	// scaffold:module-imports
 )
 
 // services 保存启动时装配好的业务模块产物，供中间件、路由和 worker 装配阶段复用。
@@ -40,8 +39,6 @@ import (
 //
 // 仅增加字段不会自动构造服务，也不会自动注册路由。业务 application 不依赖
 // 本结构体；跨模块所需能力通过各自声明的窄接口注入。
-// 使用模块生成器时，上述服务字段、构造和路由接线会自动添加。
-// 保留 scaffold 标记，供生成器定位插入点。
 type services struct {
 	// auth 是本地认证模块的装配产物；auth.mode 为 external 时是零值。
 	//
@@ -50,7 +47,6 @@ type services struct {
 	auth authruntime.Assembly
 	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
 	accounts account.Assembly
-	// scaffold:module-service-fields
 }
 
 // middlewares 聚合路由装配所需的 Gin 中间件与授权取用函数。
@@ -111,8 +107,6 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 		return services{}, fmt.Errorf("build account sources: %w", accountErr)
 	}
 	svc.accounts = accounts
-
-	// scaffold:module-services
 
 	return svc, nil
 }
@@ -182,8 +176,6 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 		return nil, err
 	}
 
-	// scaffold:module-authorizers
-
 	// 把恒拒绝的占位在启动时说清楚：否则"某个接口一直 403"会变成一桩悬案，
 	// 而最坏的排查结果是有人把它改成凭 JWT role claim 放行。
 	for _, id := range reg.IDs() {
@@ -197,7 +189,7 @@ func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
 	return reg, nil
 }
 
-// newAuthorizeByID 返回按授权者标识取中间件的函数，供生成模块的路由使用。
+// newAuthorizeByID 返回按授权者标识取中间件的函数，供业务模块路由使用。
 //
 // 未登记的标识返回**恒拒绝**中间件并记一条错误日志，既不 panic 也不放行：
 // middleware.Authorize 对 nil authorizer 是 panic，而那会把一个装配问题变成
@@ -208,7 +200,7 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 		authorizer, ok := reg.Lookup(id)
 		if !ok {
 			logger.Errorf("authorizer %q is not registered; denying every request to the routes "+
-				"that reference it (register it at the scaffold:module-authorizers marker)", id)
+				"that reference it (register it in buildAuthorizers)", id)
 			authorizer = sharedauth.DenyAll(fmt.Sprintf("authorizer %q is not registered", id))
 		}
 		return middleware.Authorize(authorizer, id)
@@ -216,7 +208,7 @@ func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.Handl
 }
 
 // buildEngine 通过统一路由入口挂载各模块，并初始化 Gin engine。
-// 新增模块由生成器在 scaffold:modules 标记前追加 Register 调用。
+// 新增模块在 RegisterModules 中追加 Register 调用。
 func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
 
@@ -243,8 +235,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	// 引用了未注册策略、或在不保证身份的路由上引用身份作用域策略，
 	// 若被静默跳过/丢弃，配置漏项、拼写错误或作用域误配都会让保护
 	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
-	rateLimitStager, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
-	_ = rateLimitStager // 供 scaffold:modules 注入的业务路由使用。
+	_, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -260,7 +251,6 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 				RateLimit: preIdentityRateLimits,
 			})
 		}
-		// scaffold:modules
 	}
 
 	engine, err := router.New(cfg.Env, opt)
@@ -277,7 +267,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 // buildWorkers 组装进程级后台任务。
 //
 // 母版按配置与已登记的处理器/周期任务装配队列 worker；未启用或集合为空时不注册。
-// 其余后台任务由使用者在 scaffold:module-workers 标记前追加一行 Worker 构造；
+// 其余后台任务在本函数中追加 Worker 构造；
 // 需要 application service 或装配期 ctx 时，在调用点把它们加进形参即可——
 // 调用点只有一处，签名跟着真实消费者走，不为尚不存在的 worker 预留。
 //
@@ -289,9 +279,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
 func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任：
-	// defer 覆盖**全部**错误出口，而不只是末尾的构造校验——scaffold:module-workers
-	// 扩展段加入多个"构造 + 注册指标"块之后，任何中途 return 都不得让此前
-	// 已注册的回调逃逸回滚（bootstrap-module-assembly spec）。
+	// 新增任务构造或指标注册时，中途返回也必须回收此前注册的回调。
 	cleanupsBefore := len(inf.metricsCleanup)
 	defer func() {
 		if err != nil {
@@ -302,25 +290,23 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 
 	// 队列消费者：未启用队列或未注册任何处理器时不注册。
 	//
-	// 处理器由使用者在下方标记处按 tasks.Registrar 追加。没有处理器就不注册
+	// 处理器通过下方的 tasks.Registrar 参数追加。没有处理器就不注册
 	// 消费者——一个空转的 worker 只会让关停多等一轮、让监控里多一个永远
 	// 空闲的实例，而不会处理任何东西。
 	if consumer := newAsynqConsumerWorker(tasks.NewObservedConsumer(
 		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-consumer", inf.recorder,
-		// scaffold:task-handlers
 	)); consumer != nil {
 		workers = append(workers, consumer)
 	}
 
 	// 周期任务调度器：未启用队列/调度器、或未声明任何周期任务时不注册。
 	//
-	// 周期任务由使用者在下方标记处按 tasks.PeriodicTask 追加，**每条都必须声明
+	// 周期任务通过下方的 tasks.PeriodicTask 参数追加，**每条都必须声明
 	// 重复投递时靠什么保证正确**（零值在构造期被拒绝）——底层调度器没有任何
 	// 跨实例协调，租约只把重复降到易主窗口内，消除不了它。
 	scheduler, schedulerErr := tasks.NewScheduler(
 		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-scheduler",
 		schedulerObserver(),
-		// scaffold:periodic-tasks
 	)
 	if schedulerErr != nil {
 		return nil, fmt.Errorf("build task scheduler: %w", schedulerErr)
@@ -328,8 +314,6 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	if worker := newAsynqSchedulerWorker(scheduler); worker != nil {
 		workers = append(workers, worker)
 	}
-
-	// scaffold:module-workers
 
 	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
 	if err != nil {

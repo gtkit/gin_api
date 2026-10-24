@@ -157,5 +157,5 @@ func (r *ChannelRepository) GetByCode(ctx context.Context, code string) (models.
 - **GORM `AutoMigrate` 仅限本地临时验证，生产禁止依赖它自动改表。**
 - 本项目用 `gtkit/migratex`，迁移文件在 `database/migrations/`，执行走内置 `migrate` CLI
   （`make migrate-up` / `make migrate-status`），连库验证用 `make migrate-verify`。
-- 模块生成器产出的 `.up.sql` / `.down.sql` 是**草稿**，上线前须经 DBA 审阅。
+- 迁移 SQL 使用包含 Up/Down 区段的单文件格式，上线前须经 DBA 审阅。
 - 迁移必须可审计：up/down 或等价回滚方案、索引、唯一约束、默认值、comment、数据修复步骤。

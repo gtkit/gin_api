@@ -22,7 +22,7 @@ func TestEnvOverrideRejectsLegacyConfigKeys(t *testing.T) {
 		{"APP_APPLICATION__WRITERTIMEOUT", "1", "writertimeout"},
 		{"APP_JWT__PRIVATE_KEY_PATH", "", "private_key_path"},
 		{"APP_JWT__PUBLIC_KEY_PATH", "retired.public.pem", "public_key_path"},
-		{"APP_MODULES__USER__PAGE_SIZE", "20", "user"},
+		{"APP_MODULES__USER__PAGE_SIZE", "20", "modules"},
 	} {
 		t.Run(tc.variable, func(t *testing.T) {
 			t.Setenv(tc.variable, tc.value)

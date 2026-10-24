@@ -45,9 +45,7 @@ func doPreflight(t *testing.T, engine *gin.Engine, path, method string) *httptes
 // 后果比"少一个头"严重得多：浏览器据 404 直接拦下请求，而同一路径的实际请求
 // 返回 200。开发者看到"CORS 失败"、用 curl 一切正常，排查方向被引向错误的地方。
 //
-// 影响面不是零：脚手架模块模板默认生成 `/:id` 路由，所以每个 `make module`
-// 产出的模块只要配了 AllowedOrigins 就命中。仓内现有两个业务模块恰好都没有
-// 参数路由，门禁因此一直全绿。
+// 开启 CORS 的参数路由必须使用实际路径匹配，不能只比较注册时的模式字符串。
 func TestPreflightOnParameterizedRouteIsNotMistakenForMissingPath(t *testing.T) {
 	t.Parallel()
 

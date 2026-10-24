@@ -45,7 +45,7 @@ func ExecuteWithBuildInfo(info BuildInfo) error {
 }
 
 // NewRootCmd 构造 root cobra 命令，并把所有经 RegisterRootCommand 注册的子命令
-// （server / migrate / jwt / module / project / doctor 等）挂载上去。
+// （server / migrate / jwt / project / doctor 等）挂载上去。
 // SilenceUsage/SilenceErrors 关闭 cobra 默认的用法与错误输出，错误统一交给调用方处理。
 func NewRootCmd(signals *signalSupervisor) *cobra.Command {
 	return newRootCmd(signals, BuildInfo{})

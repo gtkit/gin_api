@@ -4,7 +4,7 @@
 
 ```bash
 make check      # 提交前
-make check-ci   # 推送前（额外跑脚手架防腐冒烟）
+make check-ci   # 推送前，与 check 使用同一组门禁
 ```
 
 **权威清单是 `Makefile` 的 `check` 目标**，本文只做导读。改动门禁时以 Makefile 为准。
@@ -96,8 +96,6 @@ import 路径，不碰 shell 脚本。硬编码母版路径的正则在派生项
 |---|---|---|
 | `check-capability-inventory.sh` | `--self-test` | 每个声明的 scope 真的在扫；缺失条目确实触发失败 |
 | `check-capability-inventory.sh` | `--print-scope` | 覆盖范围与扫描行为同源 |
-| `check-generator.sh` | `--self-test` | 门禁验的是工作树而非 HEAD |
-| `check-generator.sh` | `--verify-scope` | 导出范围恰好覆盖四类边界行为 |
 | `check-doc-refs.go` | `--self-test` | 已知的死引用确实被抓到，且一批良性形态（符号引用、外部模块名、glob、端点路径）零误报 |
 | `check-doc-refs.go` | `--print-scope` | 覆盖范围与扫描行为同源 |
 

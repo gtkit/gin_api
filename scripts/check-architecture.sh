@@ -320,13 +320,11 @@ fi
 
 # 默认构建的依赖闭包不得含仅为脚手架工具服务的第三方库。
 #
-# 模块生成器与项目实例化器由 `scaffold` 构建约束门控（见 internal/scaffold、
-# internal/projectinit）。本判据证伪的是"隔离失效"：任何一个文件漏了构建约束，
-# 这两个库就会重新出现在默认构建里。隔离前的实测值是 12 个包。
+# 项目初始化工具由 `scaffold` 构建约束门控；x/tools 由开发期检查脚本使用。
+# 该依赖不应进入服务默认构建。
 #
 # 注意判据的边界：它约束**构建闭包**，不是 go.mod 的 require 列表。
-# `go mod tidy` 枚举全部构建约束组合，这两个库仍会作为 direct require 保留——
-# 因此任何文档都不得把它表述为"移除了这两个依赖"。
+# x/tools 仍在模块依赖中，不能把构建隔离表述为删除该依赖。
 # fail-closed：`go list` 自身失败必须是失败，不能当成"没有匹配"。
 #
 # 反证测试发现过这个洞：把 2>/dev/null 套在 go list 上时，一个编译不过的
@@ -339,7 +337,7 @@ if ! go list -deps . >"$scaffold_deps_out" 2>"$scaffold_deps_out.err"; then
   sed 's/^/  /' "$scaffold_deps_out.err" | head -20
   fail=1
 else
-  scaffold_dep_hits="$(grep -E '^golang\.org/x/tools|^github\.com/gofrs/flock' "$scaffold_deps_out" || true)"
+  scaffold_dep_hits="$(grep -E '^golang\.org/x/tools' "$scaffold_deps_out" || true)"
   if [ -n "$scaffold_dep_hits" ]; then
     echo "FAIL: default build pulls in scaffold-only dependency package(s); a file is missing its '//go:build scaffold' constraint"
     printf '%s\n' "$scaffold_dep_hits" | sed 's/^/  /'

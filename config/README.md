@@ -46,7 +46,6 @@ config/
 - `email`、`sms`、`news`：通知渠道与告警配置。
 - `ratelimit`、`cache`、`outbound`：限流、响应缓存和出站请求。
 - `telemetry`、`tasks`：可观测性导出与异步任务，默认关闭。
-- `modules`：业务模块配置，按实际模块添加。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 

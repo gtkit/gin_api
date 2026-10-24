@@ -89,18 +89,13 @@ openssl pkey -pubin -in config/pem/dev-2026-10.public.pem -pubcheck -noout
 开发机可将 `./bin/gin_api` 替换为 `go run .`。
 
 
-## module
+## project init
 
-生成模块、repository、model、HTTP、runtime 装配、测试和 migration SQL：
-
-开发期工具，由 `scaffold` 构建约束门控，不在服务二进制里：
+完成新项目的应用身份设置与仓库初始化，仅在 `scaffold` 构建标签下提供：
 
 ```bash
-go run -tags scaffold . module admin --access authenticated
-go run -tags scaffold . module staff --field nickname:string --field status:uint8 --access admin
-go run -tags scaffold . module draft --no-bootstrap --dry-run --access optional
+go run -tags scaffold . project init --name my_service --dry-run
 ```
 
-`make module NAME=admin ARGS="..."` 是同一件事的封装形式。
-
-完整参数和生成文件说明见 `cmd/MODULE_GENERATOR.md`。
+`make project-init NAME=my_service ARGS="--dry-run"` 是同一命令的封装。
+详细流程见 [新项目使用说明](../SCAFFOLD.md)。

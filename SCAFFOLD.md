@@ -66,9 +66,8 @@ make project-init NAME=your_project ARGS=--dry-run
 make project-init NAME=your_project
 ```
 
-`project init` 与 `module` 是**开发期工具**，由 `scaffold` 构建约束门控——它们不在服务二进制里
-（`module` 会重写 `modules.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃 git 历史，
-两者对已经跑起来的派生项目都不存在正确用法）。上面的 make 目标已把 tag 封装好；
+`project init` 是开发期工具，由 `scaffold` 构建约束门控，不在服务二进制里。
+显式传入 `--force-reinit-git` 会重建 Git 仓库；上面的 make 目标已把 tag 封装好，
 裸命令形式是 `go run -tags scaffold . project init --name your_project`。
 
 `project init` 会：
@@ -112,9 +111,9 @@ make project-init NAME=your_project
 
 ## 之后
 
-- 用生成器加业务模块：`make module NAME=<name> ARGS="--field title:string ... --access authenticated"`（自动接线进分阶段 `modules.go`，见 `cmd/MODULE_GENERATOR.md`）。
+- 按业务需要实现模块，在 `internal/bootstrap/modules.go` 显式装配服务与路由，新增模型同步登记到 `cmd/migrate.go`。
 - `user` 模块保留作为认证/参考起点（它是 `sharedauth.UserVerifier` 提供者），按新项目需要改造或替换。
-- 提交前跑 `make check`；改动触及生成器/模板/`modules.go` 时再跑 `make check-ci`（额外含脚手架防腐冒烟 `check-generator`）。质量门禁全部在本地执行——部署脚本与 CI 配置是外部冻结方案，其中不含质量 job。
+- 提交前跑 `make check`；CI 使用相同的 `make check-ci` 入口。部署脚本与部署 CI 配置是外部冻结方案，其中不含质量 job。
 
 ## JWT 密钥轮换操作手册
 
@@ -317,11 +316,11 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | `ginx` | auth HTTP handler 的绑定/响应辅助 |
 | `goerr` | 中间件、响应、事务及缓存的错误处理 |
 | `verify` | `internal/bootstrap/validation.go` 的校验注册与中文消息，以及响应校验 |
-| `json/v2` | 进程 JSON 后端、模型及生成器模板 |
+| `json/v2` | 进程 JSON 后端及模型 |
 
 ### 裁剪顺序
 
-1. 先确定保留能力和兼容范围，再从上表入口查全部调用方，包括 `_test.go`、构建标签、生成器模板和派生项目代码。
+1. 先确定保留能力和兼容范围，再从上表入口查全部调用方，包括 `_test.go`、构建标签和派生项目代码。
    例如核对文件上传和短信 SDK 引用：
 
    ```bash
@@ -352,8 +351,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 >
 > **首次 clone 后请确认工作区行尾是 LF**。仓库用 `.gitattributes` 固定 `eol=lf`；
 > 从更早版本升级的 clone 需执行一次 `git add --renormalize .`（先提交手头改动）。
-> CRLF 工作区会让 `make module` 生成器定位不到注入锚点、`golangci-lint` 报出数百条
-> 纯行尾的 gofmt 假阳性。
+> CRLF 工作区会让 `golangci-lint` 报出纯行尾的 gofmt 差异。
 
 ### 【默认开启】开箱即生效，无需接线
 
@@ -487,7 +485,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
 然后在 `internal/bootstrap/modules.go` 的 `opt.RegisterModules` 里加一行
-`xxxhttp.Register(v1, ...)`。`make module` 生成的模板已经是这个形状。
+`xxxhttp.Register(v1, ...)`。
 
 **新增路由时必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
 而编译、`go vet` 与全部测试都不会有任何异常——这是选择 gin 惯用写法的代价，
@@ -595,8 +593,8 @@ telemetry:
 
 | 能力 | 如何启用 |
 |------|---------|
-| 后台任务 | 在 `modules.go` 的 `scaffold:module-workers` 标记前追加一行 `Worker` 构造 |
-| 具名授权实现 | 在 `buildAuthorizers` 的 `scaffold:module-authorizers` 标记前注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
+| 后台任务 | 在 `modules.go` 的 `buildWorkers` 中追加 `Worker` 构造 |
+| 具名授权实现 | 在 `buildAuthorizers` 中注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
 | 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
@@ -615,7 +613,7 @@ telemetry:
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
 | 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
-| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `scaffold:periodic-tasks` 标记处追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
+| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
 
 ### 告警扇出的对外副作用
 

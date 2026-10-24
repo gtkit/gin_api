@@ -36,8 +36,7 @@ internal/
     telemetry/               → OTel 导出装配
   pkg/                       → 项目内部共享包（仅本仓可 import）
   shared/                    → 跨模块共享的轻量语义
-  scaffold/                  → 开发期模块生成器（//go:build scaffold 门控）
-  projectinit/               → 项目实例化器（同上门控）
+  projectinit/               → 项目实例化器（//go:build scaffold 门控）
 pkg/                         → 对外可复用包（可被仓库外项目 import）
 ```
 
@@ -57,7 +56,7 @@ main 直接使用 `gtkit/logger/v2` 包级 API；access 原生实例经 bootstra
 
 server 启动总预算 30 秒，单次资源构造最多 10 秒，父 deadline 只能收紧。
 migration 的总启动预算为 15 秒，仅构造配置、通知/日志和数据库，使用迁移凭据及迁移专用 opener；
-DDL 的命令预算与连接启动预算分开。doctor/JWT/module 保持最小装配。
+DDL 的命令预算与连接启动预算分开。doctor/JWT 保持最小装配。
 
 HTTP 中间件由 `internal/router/middleware.go` 在最终 metrics 就绪后直接构造，
 保持 Recovery、RequestID、可选 tracing、访问日志、metrics、内层 Recovery、安全头、
@@ -97,22 +96,20 @@ HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留
 
 ## 开发期工具的构建隔离
 
-`internal/scaffold`、`internal/projectinit` 与它们的 `cmd` 入口（`cmd/module.go`、
-`cmd/project.go`）由 `//go:build scaffold` 门控，**不进服务二进制**：`module` 会重写
-`internal/bootstrap/modules.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃
-git 历史——两者对派生项目都不存在正确用法。
+`internal/projectinit` 与入口 `cmd/project.go` 由 `//go:build scaffold` 门控，
+**不进服务二进制**。`project init` 用于新项目初始化，显式使用 `--force-reinit-git`
+会重建 Git 仓库，运行服务无需携带该能力。
 
 口径分工是硬约束，两边都不能省：
 
 | 入口 | 带 tag？ | 原因 |
 |------|---------|------|
-| `go build` / `Dockerfile` / `make build` | **否** | 服务二进制里不该有生成器 |
-| `vet` / `lint` / `test` / `coverage` | **是** | 这些包的测试锁定着模块生成与项目实例化两组行为；不带 tag 跑，它们根本不会被编译，保护会静默消失而 `make check` 依然全绿 |
+| `go build` / `Dockerfile` / `make build` | **否** | 服务二进制不包含项目初始化工具 |
+| `vet` / `lint` / `test` / `coverage` | **是** | 覆盖项目初始化相关代码与测试 |
 
 两条可执行判据在 `scripts/check-architecture.sh`：默认构建的依赖闭包不得含
-`golang.org/x/tools` 与 `github.com/gofrs/flock`（`go list` 自身失败也算失败，
-不能当成"没有匹配"）；`cmd` 包另有一对测试分别断言两命令在默认构建下缺席、
-在带 tag 构建下在场。
+`golang.org/x/tools`（`go list` 自身失败也算失败，不能当成"没有匹配"）；
+`cmd` 包另有一对测试分别断言 `project` 命令在默认构建下缺席、在带 tag 构建下在场。
 
 `cmd/modulepath.go` **不加 tag**——`resolveModulePath()` 被 `cmd/migrate.go` 消费，
 `migrate` 是运行期命令。
@@ -166,7 +163,7 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 `internal/bootstrap/providers.go` 只负责基础设施视图与进程级装配顺序；
 `internal/bootstrap/modules.go` 集中维护模块服务、认证授权、HTTP 路由及后台任务的接线，
-并持有全部模块装配标记。两者同属 `bootstrap` 包，不增加运行时注册层或修改模块内路由职责。
+两者同属 `bootstrap` 包，不增加运行时注册层或修改模块内路由职责。
 
 Runtime 先读取配置并校验本地 JWT 密钥、TLS 证书，再创建日志、数据库、Redis 和缓存。
 TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；预绑定仍重新检查当前有效期，
@@ -198,25 +195,10 @@ worker 必须先于路由（readiness 要读 worker 状态）。
 service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增基础设施时才往 `infra` 加字段，
 不提前占坑。
 
-模块生成器经 `modules.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
-不重构阶段函数。前四个是**注入型**（生成器在标记前插入接线行），后四个是**校验型**
-（生成器只断言标记存在；这些位置的内容是业务判断，由使用者手写）：
-
-| 标记 | 位置 | 类型 |
-|---|---|---|
-| `scaffold:module-imports` | import 区 | 注入 |
-| `scaffold:module-service-fields` | `services` struct 字段 | 注入 |
-| `scaffold:module-services` | `buildServices` 构造 | 注入 |
-| `scaffold:modules` | `buildEngine` 的 `RegisterModules` 闭包 | 注入 |
-| `scaffold:module-authorizers` | `buildAuthorizers` 具名授权注册 | 校验 |
-| `scaffold:task-handlers` | `buildWorkers` 的队列消费者处理器参数表 | 校验 |
-| `scaffold:periodic-tasks` | `buildWorkers` 的周期任务调度器参数表 | 校验 |
-| `scaffold:module-workers` | `buildWorkers` 的 Worker 集合 | 校验 |
-
-生成器另外注入 `internal/platform/config/modules.go`（`scaffold:module-config-fields` /
-`scaffold:module-config-validators`）、`config/env.yml.example`（`scaffold:module-config-example`）
-与 `cmd/migrate.go`（`scaffold:migrate-models`）。改动这些文件的结构时必须同步维护标记与
-`internal/scaffold` 的插入逻辑及测试，避免标记与真实结构脱节导致自动接线失效。
+新增模块时，在 `services` 增加实际需要的产物字段，`buildServices` 调用模块装配入口，
+`buildEngine` 的 `RegisterModules` 注册路由。具名授权在 `buildAuthorizers` 注册，
+任务与调度器在 `buildWorkers` 接入。新增持久化模型同时登记到 `cmd/migrate.go` 的
+`WithDDLModels`，并添加经过审阅的迁移 SQL；新增配置字段同步更新配置示例与校验。
 
 ### 选择性 DDD 战术
 

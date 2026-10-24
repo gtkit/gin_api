@@ -47,8 +47,8 @@ loopback 可用的完整跑更高。取下界保证两种环境的 `make check` 
 
 ### 带 tag 的测试口径
 
-`internal/scaffold`、`internal/projectinit` 与 `cmd/{module,project}.go` 由 `//go:build scaffold`
-门控。**测试与覆盖率入口必须带该 tag**，否则这些包根本不会被编译，它们的保护会静默消失
+`internal/projectinit` 与 `cmd/project.go` 由 `//go:build scaffold`
+门控。**测试与覆盖率入口必须带该 tag**，否则项目初始化相关测试不会被编译，其保护会静默消失
 而 `make check` 依然全绿。`make` 的相关目标已封装好，直接跑 `make check` 即可。
 
 ## 测试分层

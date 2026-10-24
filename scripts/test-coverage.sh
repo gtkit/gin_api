@@ -42,12 +42,10 @@ mkdir -p "$(dirname "$profile")"
 
 # GO_BUILD_TAGS 让验证口径覆盖被构建约束门控的代码（当前是 `scaffold`）。
 #
-# 必须带上：模块生成器与项目实例化器的测试锁定着 module-scaffold-wiring 与
-# project-instantiation 两组需求。不带 tag 跑，这些测试根本不会被编译，两组需求
-# 会在无人察觉的情况下集体失去门禁保护——而 `make check` 依然全绿。
+# 必须带上以覆盖项目初始化工具的测试；不带 tag 时这些测试不会被编译。
 #
 # 分工是「构建口径排除脚手架，验证口径包含脚手架」：go build 与 Dockerfile 不带
-# tag（服务二进制里不该有生成器），测试/vet/lint 带 tag。
+# tag（服务二进制不包含项目初始化工具），测试/vet/lint 带 tag。
 if [ -n "${GO_BUILD_TAGS:-}" ]; then
   go test -tags "$GO_BUILD_TAGS" -race -count=1 -timeout=5m -covermode=atomic -coverprofile="$profile" "$@"
 else

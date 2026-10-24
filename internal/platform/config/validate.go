@@ -148,9 +148,6 @@ func (c *Config) Validate() error {
 	if err := validateProxyConfig(c.Proxy, c.Env); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateModuleConfigs(c.Modules); err != nil {
-		errs = append(errs, err)
-	}
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
