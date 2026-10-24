@@ -25,6 +25,9 @@ import (
 // 归一化成错误是让状态码进入熔断统计的唯一通道。用 errors.Is 判别。
 var ErrDownstreamServerError = errors.New("httpclient: downstream returned a server error status")
 
+// Internal classification only; callers receive the original response error.
+var errClientResponse = errors.New("httpclient: client response excluded from breaker")
+
 // Attempt 是一次下游调用的执行体。
 //
 // status 是本次调用的 HTTP 状态码（没有响应时为 0），err 是传输层错误。
@@ -55,6 +58,9 @@ func NewDownstreams(cfg config.OutboundConfig) (*Downstreams, error) {
 		ConsecutiveFailures: cfg.Breaker.ConsecutiveFailures,
 		OpenTimeout:         cfg.Breaker.OpenTimeout,
 		HalfOpenMaxRequests: cfg.Breaker.HalfOpenMaxRequests,
+		IsFailure: func(err error) bool {
+			return !errors.Is(err, errClientResponse) && breaker.DefaultIsFailure(err)
+		},
 	}, factory.Names()...)
 	return &Downstreams{factory: factory, breakers: registry}, nil
 }
@@ -115,11 +121,17 @@ func (d *Downstreams) execute(
 	}
 
 	var status int
+	var responseErr error
 	doErr := d.breakers.Do(name, func() error {
-		s, runErr := run(ctx, client)
-		status = s
-		return runErr
+		status, responseErr = run(ctx, client)
+		if status >= http.StatusBadRequest && status < http.StatusInternalServerError && status != http.StatusTooManyRequests {
+			return errClientResponse
+		}
+		return responseErr
 	})
+	if errors.Is(doErr, errClientResponse) {
+		return status, responseErr
+	}
 	return status, doErr
 }
 

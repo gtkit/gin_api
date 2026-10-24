@@ -67,6 +67,8 @@ func newTestVerifier(t *testing.T, opts Options) (*Verifier, *fakeSender, *minir
 // 的用例，让这些用例在禁 loopback 的受限环境也能执行。
 type stubRedis struct{}
 
+func (stubRedis) Process(context.Context, redis.Cmder) error { panic("unexpected Redis command") }
+
 func (stubRedis) ScriptLoad(context.Context, string) *redis.StringCmd { return nil }
 func (stubRedis) EvalSha(context.Context, string, []string, ...any) *redis.Cmd {
 	return nil

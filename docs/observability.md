@@ -13,6 +13,10 @@
 main 直接调用 SDK 包级函数，结构化字段使用 `zap.Field`；access 由 bootstrap 经 router
 装配参数传入 `GinLogger`，中间件直接调用原生 `*logger.Logger`，不另设日志门面。
 
+main 和 access 共用按日期及文件大小轮转的策略（`division: both`），均使用
+`log.maxsize`、`maxage`、`maxbackups` 和 `compress`。`maxsize` 的单位是 MiB；
+`maxage`、`maxbackups` 为 0 时保留 SDK 默认值，不表示无限保留。
+
 ```go
 logger.Info("user created", zap.Int("user_id", userID))
 logger.ErrorCtx(ctx, "query failed", zap.Error(err))

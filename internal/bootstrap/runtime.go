@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 
@@ -25,6 +26,8 @@ type Runtime struct {
 	cache     httpcache.ResponseCache
 	// jwt 是轮换密钥体系（签发器 + 验签器 + 密钥集）。
 	jwt *jwtauth.Assembly
+	// certificate is validated before resources open and reused by HTTP.
+	certificate *tls.Certificate
 	// Abnormal file flush and normal Close share the native logging owner.
 	drain        func(context.Context) error
 	force        <-chan struct{}
@@ -53,6 +56,20 @@ func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *R
 		return nil, err
 	}
 	ApplyRuntimeTimezone(cfg)
+	jwtAssembly, err := initJWTWithConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("init jwt: %w", err)
+	}
+	if jwtAssembly == nil {
+		return nil, errors.New("jwt assembly is nil")
+	}
+	var certificate *tls.Certificate
+	if cfg.App.EnableHTTPS {
+		certificate, err = loadAndVerifyCertificate(newHTTPConfig(cfg))
+		if err != nil {
+			return nil, fmt.Errorf("init tls: %w", err)
+		}
+	}
 	owners, err := openRuntimeResources(ctx, cfg, factories, false, budget)
 	if err != nil {
 		return nil, err
@@ -70,19 +87,12 @@ func newRuntime(ctx context.Context, opts Options, budget *rollbackBudget) (_ *R
 		return nil, fmt.Errorf("build resource view: %w", err)
 	}
 	logResourceStates(resources)
-	jwtAssembly, err := initJWTWithConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("init jwt: %w", err)
-	}
-	if jwtAssembly == nil {
-		return nil, errors.New("jwt assembly is nil")
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	logger.Infof("jwt active kid=%s, previous keys=%d", jwtAssembly.KeySet.ActiveKID(), len(cfg.JWT.Previous))
 	return &Runtime{config: cfg, resources: resources, owners: owners, cache: owners.cache,
-		jwt: jwtAssembly, drain: owners.logs.Drain, force: opts.forceSignal()}, nil
+		jwt: jwtAssembly, certificate: certificate, drain: owners.logs.Drain, force: opts.forceSignal()}, nil
 }
 
 // logResourceStates 在启动完成时把非健康的资源状态打印一次。

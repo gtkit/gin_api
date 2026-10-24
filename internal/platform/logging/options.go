@@ -23,20 +23,27 @@ func mainOptions(cfg *config.Config, notifier news.AlertSink) []logger.Option {
 		logger.WithLevel(strings.TrimSpace(cfg.Log.Level)), // 空值由库回退默认 info
 		logger.WithConsole(cfg.Log.ConsoleStdout != 0),
 		logger.WithFile(cfg.Log.FileStdout != 0),
-		logger.WithDivision("daily"),
-		logger.WithMaxSize(cfg.Log.MaxSize), // 0 由库回退默认
-		logger.WithCompress(cfg.Log.Compress != 0),
 	}
+	opts = append(opts, fileOptions(cfg.Log)...)
 	if notifier != nil {
 		opts = append(opts, logger.WithMessager(&News{notifier: notifier}), logger.WithMessagerQueueSize(alertQueueLimit))
 	}
-	// MaxAge/MaxBackups 的 0 在库内语义为「关闭清理、永久保留」，与「未配置」不同；
-	// 未配置时不透传，保留库默认的保留策略。
-	if cfg.Log.MaxAge > 0 {
-		opts = append(opts, logger.WithMaxAge(cfg.Log.MaxAge))
+	return opts
+}
+
+// fileOptions shares rotation and retention between main and access logs.
+func fileOptions(cfg config.LogConfig) []logger.Option {
+	opts := []logger.Option{
+		logger.WithDivision("both"),
+		logger.WithMaxSize(cfg.MaxSize), // 0 retains the SDK default.
+		logger.WithCompress(cfg.Compress != 0),
 	}
-	if cfg.Log.MaxBackups > 0 {
-		opts = append(opts, logger.WithMaxBackups(cfg.Log.MaxBackups))
+	// Zero means unspecified here, not the SDK's unlimited retention.
+	if cfg.MaxAge > 0 {
+		opts = append(opts, logger.WithMaxAge(cfg.MaxAge))
+	}
+	if cfg.MaxBackups > 0 {
+		opts = append(opts, logger.WithMaxBackups(cfg.MaxBackups))
 	}
 
 	return opts
@@ -47,12 +54,13 @@ func accessOptions(cfg *config.Config) []logger.Option {
 	if value := strings.TrimSpace(cfg.Log.Path); value != "" {
 		path = value + "_access"
 	}
-	return []logger.Option{
+	opts := []logger.Option{
 		logger.WithPath(path), logger.WithBasePath(resource.WriteRoot()),
 		logger.WithLevel(strings.TrimSpace(cfg.Log.Level)), logger.WithConsole(cfg.Log.ConsoleStdout != 0),
-		logger.WithFile(cfg.Log.FileStdout != 0), logger.WithDivision("daily"),
+		logger.WithFile(cfg.Log.FileStdout != 0),
 		logger.WithBuffered(true), logger.WithReplaceGlobals(false),
 	}
+	return append(opts, fileOptions(cfg.Log)...)
 }
 
 // resolvePath 空白路径回退到默认值；锚定交给库的 WithBasePath。

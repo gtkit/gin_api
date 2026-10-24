@@ -46,6 +46,7 @@ func prebindHTTP(cfg HTTPConfig) (*prebindResult, error) {
 			return nil, err
 		}
 		certificate = cert
+		warnCertificateExpiry(cert)
 	}
 
 	addr := net.JoinHostPort(cfg.Host, cfg.Port)
@@ -74,19 +75,28 @@ func (p *prebindResult) Close() error {
 //	证书尚未生效 / 已过期   → 启动失败（每个客户端都会握手失败）
 //	证书临近过期           → 告警，正常启动
 func loadAndVerifyCertificate(cfg HTTPConfig) (*tls.Certificate, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
-	if err != nil {
-		// 不回显文件内容，只报路径：私钥内容绝不能进日志。
-		return nil, fmt.Errorf("load tls key pair (cert=%s key=%s): %w", cfg.CertFile, cfg.KeyFile, err)
+	var cert tls.Certificate
+	if cfg.TLSConfig != nil && len(cfg.TLSConfig.Certificates) > 0 {
+		cert = cfg.TLSConfig.Certificates[0]
+	} else {
+		var err error
+		cert, err = tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load tls key pair (cert=%s key=%s): %w", cfg.CertFile, cfg.KeyFile, err)
+		}
 	}
 
 	if len(cert.Certificate) == 0 {
 		return nil, errors.New("tls key pair contains no certificate")
 	}
 
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return nil, fmt.Errorf("parse tls leaf certificate: %w", err)
+	leaf := cert.Leaf
+	if leaf == nil {
+		var err error
+		leaf, err = x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil, fmt.Errorf("parse tls leaf certificate: %w", err)
+		}
 	}
 
 	now := time.Now()
@@ -97,11 +107,16 @@ func loadAndVerifyCertificate(cfg HTTPConfig) (*tls.Certificate, error) {
 	case now.After(leaf.NotAfter):
 		return nil, fmt.Errorf(
 			"tls certificate expired at %s; every handshake would fail", leaf.NotAfter.UTC())
-	case leaf.NotAfter.Sub(now) < certExpiryWarnWindow:
-		logger.Warnf("tls certificate expires at %s (in %s); renew it before then",
-			leaf.NotAfter.UTC(), leaf.NotAfter.Sub(now).Truncate(time.Hour))
 	}
 
 	cert.Leaf = leaf
 	return &cert, nil
+}
+
+// Warn at prebind, after logging is installed, rather than during local validation.
+func warnCertificateExpiry(cert *tls.Certificate) {
+	if remaining := time.Until(cert.Leaf.NotAfter); remaining < certExpiryWarnWindow {
+		logger.Warnf("tls certificate expires at %s (in %s); renew it before then",
+			cert.Leaf.NotAfter.UTC(), remaining.Truncate(time.Hour))
+	}
 }

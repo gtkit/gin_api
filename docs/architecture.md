@@ -164,6 +164,10 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
+Runtime 先读取配置并校验本地 JWT 密钥、TLS 证书，再创建日志、数据库、Redis 和缓存。
+TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；预绑定仍重新检查当前有效期，
+并在日志已就绪后报告临期告警。端口预绑定仍先于 worker 启动。
+
 当前模块仅借用 Runtime 的基础设施，`buildServices` 不创建或拥有独立客户端，
 不维护空的模块清理栈。真正创建资源的 provider 在构造成功处登记到 `providerCleanup`：
 失败时逆序回滚，成功时把清理责任交给 `App`，在 HTTP 与 worker 收尾后、关闭共享基础设施前执行。

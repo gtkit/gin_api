@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"slices"
@@ -271,6 +272,10 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	}
 
 	cfg := runtime.Config()
+	httpConfig := newHTTPConfig(cfg)
+	if runtime.certificate != nil {
+		httpConfig.TLSConfig.Certificates = []tls.Certificate{*runtime.certificate}
+	}
 	if runtime.owners == nil || nilResource(runtime.owners.logs) {
 		return infra{}, errors.New("runtime logging is not initialized")
 	}
@@ -284,7 +289,7 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 		resources:    resources,
 		cfg:          cfg,
 		mysqlDB:      mysqlDB,
-		httpConfig:   newHTTPConfig(cfg),
+		httpConfig:   httpConfig,
 	}, nil
 }
 

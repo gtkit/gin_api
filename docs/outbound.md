@@ -63,6 +63,8 @@ case errors.Is(err, httpclient.ErrDownstreamServerError):
   不存在「重试路径用了另一个没有防护的客户端」。
 - 重试判据是 `httpclient.RetryableFailure(status, err)`：传输层错误、429、5xx 重试；
   4xx 与 501 不重试；调用方取消/超时不重试（没人在等它的结果了）。
+- 普通 4xx（429 除外）从熔断统计中排除，即使响应解码失败也不累计或清零已有的
+  连续失败。解码错误仍原样交给调用方；5xx、传输错误和 429 的既有分类保持不变。
 - **超时是每次尝试的超时**，不是全部重试的总预算：最坏耗时约 `(Attempts+1) × Timeout` 加退避。
   排端点预算时按这个算。
 - `Client(name)` 可取原始客户端，只用于 `Do`/`DoIdempotent` 覆盖不了的编排

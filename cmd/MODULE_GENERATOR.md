@@ -89,6 +89,9 @@ database/migrations/<version>_create_admins_table.sql
 
 分页归一化位于 application 层；repository 查询始终使用显式 `LIMIT` 和 `OFFSET`。响应包含 `list` 和 `paging`。
 
+生成的 repository 只提供当前列表与详情使用的 `List`、`Get`，不预置字段投影参数或
+`ExistsByID`。模型不自动实现二进制序列化；需要缓存或专用投影查询时，再按实际消费方添加。
+
 ## Migration
 
 生成器创建成对的 up/down SQL：

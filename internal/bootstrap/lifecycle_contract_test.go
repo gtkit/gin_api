@@ -173,7 +173,7 @@ func TestRuntimeConfigurationFailureOpensNothing(t *testing.T) {
 		t.Fatal(f.events)
 	}
 }
-func TestRuntimeJWTFailsAndRollsBackResources(t *testing.T) {
+func TestRuntimeJWTFailsBeforeOpeningResources(t *testing.T) {
 	f := newLifecycleFixture(t)
 	root := errors.New("jwt failed")
 	original := initJWTWithConfig
@@ -182,7 +182,9 @@ func TestRuntimeJWTFailsAndRollsBackResources(t *testing.T) {
 	if r, err := NewRuntime(t.Context(), f.options()); r != nil || !errors.Is(err, root) {
 		t.Fatal(err)
 	}
-	f.assertStopped(t, "cache", "redis", "database", "logging")
+	if !slices.Equal(f.events, []string{"open:configuration"}) {
+		t.Fatalf("resources opened for invalid JWT: %v", f.events)
+	}
 }
 func TestRuntimeClosePreservesParentAndSharedBudget(t *testing.T) {
 	for _, mode := range []string{"total", "shorter", "canceled", "force"} {

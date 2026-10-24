@@ -3,6 +3,7 @@
 // 正确性由本包兑现，调用方只需注入存储与发送器：
 //   - 校验在 Redis 侧原子完成「取码 + 尝试计数 + 超限销毁 + 命中即删」，
 //     同一验证码不可能通过第二次校验（含并发提交）；
+//   - 签发在同一脚本内保存新码并重置计数，禁止自动重放状态变更命令；
 //   - 签发先过发送节流（SetNX 原子），间隔内的重复请求不生成、不发送——
 //     节流保护的是真实计费动作；
 //   - 验证码由加密安全随机源生成；Redis 键由目标经 SHA-256 派生，
@@ -42,10 +43,8 @@ var (
 // 定义窄接口而不是直接吃 *redis.Client：单测不需要真实 Redis 也能替身。
 type RedisClient interface {
 	ScriptLoad(ctx context.Context, script string) *redis.StringCmd
-	EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *redis.Cmd
+	Process(ctx context.Context, cmd redis.Cmder) error
 	SetNX(ctx context.Context, key string, value any, ttl time.Duration) *redis.BoolCmd
-	Set(ctx context.Context, key string, value any, ttl time.Duration) *redis.StatusCmd
-	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
 // Sender 把验证码发往目标（手机号 / 邮箱）。实现方负责渠道细节与模板。
@@ -133,6 +132,13 @@ end
 return 0
 `
 
+// Publishing a new code and resetting its attempts is one state transition.
+const storeScript = `
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1
+`
+
 // Verifier 签发并校验一次性验证码。并发安全。
 type Verifier struct {
 	client RedisClient
@@ -141,10 +147,11 @@ type Verifier struct {
 	// verifySHA 缓存校验脚本的 SHA；Redis 重启清空脚本缓存时
 	// 在 NOSCRIPT 上重载重写（先例：tokenstore）。
 	verifySHA atomic.Pointer[string]
+	storeSHA  atomic.Pointer[string]
 }
 
 // New 构造 Verifier。必需依赖与参数边界在装配期校验；
-// 校验脚本在构造期加载，Redis 不可达即装配失败（fail-fast）。
+// 脚本在构造期加载，Redis 不可达即装配失败（fail-fast）。
 func New(ctx context.Context, client RedisClient, sender Sender, opts Options) (*Verifier, error) {
 	if client == nil {
 		return nil, errors.New("verifycode: redis client is required")
@@ -163,6 +170,11 @@ func New(ctx context.Context, client RedisClient, sender Sender, opts Options) (
 		return nil, fmt.Errorf("verifycode: load verify script: %w", err)
 	}
 	v.verifySHA.Store(&sha)
+	storeSHA, err := client.ScriptLoad(ctx, storeScript).Result()
+	if err != nil {
+		return nil, fmt.Errorf("verifycode: load store script: %w", err)
+	}
+	v.storeSHA.Store(&storeSHA)
 	return v, nil
 }
 
@@ -244,14 +256,12 @@ func (v *Verifier) Send(ctx context.Context, target string) error {
 	return nil
 }
 
-// store 落码并清零尝试计数。两步非原子的最坏结果是新码继承旧计数，
-// 方向是 fail-closed（更早触发超限），可接受。
+// store atomically publishes the code and resets the previous attempt count.
 func (v *Verifier) store(ctx context.Context, hashed, code string) error {
-	if err := v.client.Set(ctx, v.codeKey(hashed), code, v.opts.TTL).Err(); err != nil {
-		return fmt.Errorf("verifycode: store code: %w", err)
-	}
-	if err := v.client.Del(ctx, v.attemptsKey(hashed)).Err(); err != nil {
-		return fmt.Errorf("verifycode: reset attempts: %w", err)
+	_, err := v.eval(ctx, &v.storeSHA, storeScript,
+		[]string{v.codeKey(hashed), v.attemptsKey(hashed)}, code, v.opts.TTL.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("verifycode: store code and reset attempts: %w", err)
 	}
 	return nil
 }
@@ -289,21 +299,44 @@ func (v *Verifier) runVerify(ctx context.Context, hashed, code string) (int64, e
 	keys := []string{v.codeKey(hashed), v.attemptsKey(hashed)}
 	args := []any{code, v.opts.MaxAttempts, v.opts.TTL.Milliseconds()}
 
-	res, err := v.client.EvalSha(ctx, *v.verifySHA.Load(), keys, args...).Int64()
-	if err != nil && isNoScript(err) {
-		// Redis 重启会清空脚本缓存。重载后重试，而不是让这次校验失败。
-		sha, loadErr := v.client.ScriptLoad(ctx, verifyScript).Result()
-		if loadErr != nil {
-			return 0, fmt.Errorf("verifycode: reload verify script: %w", loadErr)
-		}
-		v.verifySHA.Store(&sha)
-		res, err = v.client.EvalSha(ctx, sha, keys, args...).Int64()
-	}
+	res, err := v.eval(ctx, &v.verifySHA, verifyScript, keys, args...)
 	if err != nil {
 		return 0, fmt.Errorf("verifycode: run verify script: %w", err)
 	}
 	return res, nil
 }
+
+// eval reloads only missing scripts; uncertain writes are not replayed here.
+func (v *Verifier) eval(ctx context.Context, cached *atomic.Pointer[string], script string, keys []string, args ...any) (int64, error) {
+	run := func(sha string) (int64, error) {
+		argv := make([]any, 0, 3+len(keys)+len(args))
+		argv = append(argv, "evalsha", sha, len(keys))
+		for _, key := range keys {
+			argv = append(argv, key)
+		}
+		argv = append(argv, args...)
+		cmd := &noRetryScriptCmd{Cmd: redis.NewCmd(ctx, argv...)}
+		cmd.SetFirstKeyPos(3)
+		if err := v.client.Process(ctx, cmd); err != nil {
+			return 0, err
+		}
+		return cmd.Int64()
+	}
+	res, err := run(*cached.Load())
+	if err != nil && isNoScript(err) {
+		sha, loadErr := v.client.ScriptLoad(ctx, script).Result()
+		if loadErr != nil {
+			return 0, fmt.Errorf("reload script: %w", loadErr)
+		}
+		cached.Store(&sha)
+		res, err = run(sha)
+	}
+	return res, err
+}
+
+type noRetryScriptCmd struct{ *redis.Cmd }
+
+func (*noRetryScriptCmd) NoRetry() bool { return true }
 
 // hash 把目标散列进键：明文手机号/邮箱不得出现在 Redis 键里
 // （键会进监控、慢日志与 RDB）。截断 128 bit，碰撞概率可忽略。
