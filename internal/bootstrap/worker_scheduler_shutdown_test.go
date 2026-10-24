@@ -11,7 +11,6 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alicebob/miniredis/v2/server"
-	"github.com/gtkit/gin-api/internal/pkg/singleton"
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/testutil"
@@ -22,7 +21,7 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 	testutil.RequireLoopback(t)
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr(), ReadTimeout: 5 * time.Second})
-	var resourceCloses, extensionCloses, timeouts atomic.Int32
+	var resourceCloses, extensionCloses atomic.Int32
 	t.Cleanup(func() {
 		if resourceCloses.Load() == 0 {
 			if err := client.Close(); err != nil {
@@ -36,7 +35,6 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	// Hold one real queue script response while the cron job is in flight.
-	// Lease commands use a different key namespace and remain available.
 	srv.Server().SetPreHook(func(_ *server.Peer, command string, args ...string) bool {
 		if strings.EqualFold(command, "evalsha") || strings.EqualFold(command, "eval") {
 			for _, arg := range args[2:] {
@@ -49,13 +47,10 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 		}
 		return false
 	})
-	observed := make(chan error, 4)
 	scheduler, err := tasks.NewScheduler(config.TasksConfig{
 		Enabled: true, ShutdownTimeout: 20 * time.Millisecond,
-		Scheduler: config.SchedulerConfig{Enabled: true, LeaseName: "bootstrap-drain", LeaseTTL: time.Minute},
-	}, client, "blocked-scheduler", tasks.SchedulerObserver{
-		RoundFailed: func(_ string, err error) { timeouts.Add(1); observed <- err },
-	}, tasks.PeriodicTask{Spec: "@every 1s", TaskType: "test:drain", Guarantee: singleton.GuaranteeIdempotent})
+		Scheduler: config.SchedulerConfig{Enabled: true},
+	}, client, "blocked-scheduler", tasks.PeriodicTask{Spec: "@every 1s", TaskType: "test:drain"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,14 +91,6 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 	if !errors.Is(stopErr, ErrWorkerNotExited) {
 		t.Fatalf("StopKind prematurely confirmed scheduler exit: %v", stopErr)
 	}
-	select {
-	case err := <-observed:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("shutdown observation = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("scheduler shutdown timeout was not observed")
-	}
 	owned := &lifecycleComponent{stop: func(context.Context) error { resourceCloses.Add(1); return client.Close() }}
 	cleanup := &providerCleanup{}
 	cleanup.push("shared extension", cleanupExtensions, func(context.Context) error { extensionCloses.Add(1); return nil })
@@ -123,8 +110,8 @@ func TestSchedulerDrainTimeoutPreservesSharedResources(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("late scheduler exit was not collected")
 	}
-	if len(manager.LiveWorkers()) != 0 || timeouts.Load() != 1 {
-		t.Fatalf("late exit tracking: live=%v timeouts=%d", manager.LiveWorkers(), timeouts.Load())
+	if len(manager.LiveWorkers()) != 0 {
+		t.Fatalf("late exit tracking: live=%v", manager.LiveWorkers())
 	}
 	if err := app.closeExtensions(t.Context()); err != nil {
 		t.Fatal(err)

@@ -98,129 +98,57 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 
 ## 执行指标
 
-默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；singleton 使用
-`singletonObserver` 的可选 `ExecutionObserver` 回调；队列消费者通过
+默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；队列消费者通过
 `tasks.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
-原 `tasks.NewConsumer` 与 `singleton.Observer` 接口继续可用，不强制自定义实现升级。
 
 实际任务每次结束记录 `worker.executions` 与 `worker.execution.duration`（秒），
-按装配期 worker 名、kind、有限 outcome 聚合。未获租约不计执行，续租/释放不计入耗时；
-队列重试各计一次。自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
-不要把进程存活时间当任务耗时。标签和旧 `worker.runs` 的口径见
+按装配期 worker 名、kind、有限 outcome 聚合。队列重试各计一次。
+自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
+不要把进程存活时间当任务耗时。指标口径见
 [Worker 单次执行](observability.md#worker-单次执行)。
-
-## 单实例执行
-
-多副本部署下定时任务在每个实例上都会跑。`internal/pkg/singleton` 提供基于 Redis 租约的
-单实例执行。
-
-**注册时必须声明重复执行时靠什么保证正确**，零值会被拒绝：
-
-| 声明 | 含义 |
-|---|---|
-| `GuaranteeIdempotent` | 重复执行无副作用差异（如批量 `DELETE ... LIMIT`，第二次影响 0 行） |
-| `GuaranteeFenced` | 每个写操作携带 `Held.Fence` 序号，且**写路径拒绝比已见值更小的序号** |
-
-这个约束不是形式主义。**锁不是正确性保证**：网络分区、进程长时间暂停（GC、宿主机挂起）、
-租约过期后旧实例恢复，都会让两个实例同时在跑。声明强迫作者在注册时就回答
-「重复执行会怎样」，而不是把问题留到事故现场。
-
-两个容易混淆的概念：
-
-- **随机 token** 只解决「别删掉/续期别人的锁」（compare-and-delete / compare-and-renew）；
-- **fence 序号**才解决「租约过期后旧实例仍在写」。它必须单调递增，且由下游拒绝旧序号。
-
-把随机 token 当 fencing 用，是一个看起来能工作、实际毫无保护的组合：
-两个随机值之间没有先后关系，下游无从判断谁更旧。
-
-单实例 worker 的 `Prepare` 会在启动期用随机探测键真跑一遍抢锁/续租/释放——
-只 PING 不能证明当前 ACL 能执行脚本，也不能证明锁键与 fence 键在同一个集群 slot。
 
 ## 定时任务
 
-两种机制，按「按间隔」还是「按时刻」选：
-
-| | `singleton.Runner` | 周期任务调度器 |
-|---|---|---|
-| 触发 | 固定间隔（`time.Ticker`） | cron 表达式 |
-| 能表达「每天 03:00」 | 否 | 是 |
-| 重启后 | 相位漂移到重启时刻 | 时刻不变 |
-| 依赖 | Redis | Redis + 任务队列 |
-| 执行方式 | 本进程直接执行 | 投递到队列，由消费者执行 |
-
-固定间隔的任务用 `Runner`——它更简单，且不依赖任务队列。
-
-通用约束：
-
-- 可重复执行；重复运行不造成重复扣款、发送、删除。
-- 明确时区、错过执行的补偿策略、最长运行时间。
-- 长任务拆小批次，记录游标或 checkpoint。
-- 调度入口只做调度，业务逻辑下沉 application service。
+只需在本进程按固定间隔执行时，在普通 LongRunning worker 中使用
+`time.Ticker`，监听 `ctx.Done()` 并为每次执行设置超时。
+需要 cron 表达式并通过队列消费时，使用下面的周期任务调度器。
 
 ### 周期任务调度器（`internal/pkg/tasks`）
 
-默认关闭，配 `tasks.scheduler.enabled` 启用（要求 `tasks.enabled` 也开着——
-调度器投递的任务需要有人消费）。
-
+默认关闭，配 `tasks.scheduler.enabled` 启用，同时启用 `tasks.enabled`。
 在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加声明：
 
 ```go
 tasks.PeriodicTask{
-    Spec:      "0 3 * * *",              // 每天 03:00
-    TaskType:  "cleanup:ai-conversations", // 必须有对应的已注册处理器
-    Payload:   cleanupPayload{Scope: "expired"},
-    Guarantee: singleton.GuaranteeIdempotent,
+    Spec:     "0 3 * * *",                // 每天 03:00
+    TaskType: "cleanup:ai-conversations", // 必须有对应的已注册处理器
+    Payload:  cleanupPayload{Scope: "expired"},
 },
 ```
 
-**触发时刻、任务类型与重复执行保证写在代码里，不在配置里**：配置里的 cron spec
-可能指向一个没有处理器的任务类型，而那种失配的表现是任务按时入队、
-一直重试到进死信队列，配置文件看起来完全正常。
+触发时刻、任务类型和投递选项写在代码里。调度器只在当前进程内运行，
+每个启用它的进程都会独立投递；将来部署多个副本时，应单独安排调度职责。
 
-#### 多副本下的重复投递
+队列仍可能重试，处理器需要按业务要求保证幂等。明确任务时区、错过执行的补偿策略
+和最长运行时间；长任务拆小批次，记录处理进度。调度入口只负责投递，
+业务逻辑放在 application service。
 
-底层调度器**没有任何跨实例协调**——每个实例的触发点到了就各自投递一次，
-N 个副本就是每次触发投递 N 次。
+投递选项通过 `PeriodicTask.Options` 显式设置，例如队列、重试次数和超时。
+调度器不自动添加去重窗口；业务需要时可显式使用 `asynqx.WithTaskUnique`，
+但投递去重不能替代处理器的业务幂等。
 
-因此调度经 Redis 租约选主：取得租约后才启动调度器，失去租约时请求停止并等待真实退出。
-这不是能靠「只在一个实例上启用」约束的事——那需要部署侧记住并正确执行，
-而它出错时没有任何症状，只表现为下游被执行了 N 次。
-
-**租约把重复降到易主窗口内，消除不了它。** 租约过期而旧 leader 尚未察觉的窗口内，
-两个实例会同时认为自己是 leader。网络分区、进程长时间暂停（GC、宿主机挂起）
-都会拉长这个窗口。
-
-每条周期任务都**必须声明 `GuaranteeIdempotent`**，由业务处理器保证重复投递安全。
-零值、`GuaranteeFenced` 与未知枚举在构造期拒绝。虽然复用 `singleton.Guarantee` 类型，
-周期任务当前不把 fence 放进消息，也没有消费者写入校验，不能承诺 fencing。
-一般 `singleton.Runner` 仍支持把 `Held.Fence` 交给执行函数，不受此限制影响。
-
-声明了 `GuaranteeIdempotent` 的任务会自动附加投递去重窗口（`tasks.scheduler.unique_ttl`）
-作为第二道防线。它同样不是保证：底层的唯一性锁在**任务成功完成时**就释放，
-不是维持整个 TTL，一个很快跑完的任务配合实例间时钟偏移仍可能被投递两次。
-有了它就放松声明要求，正好是把「看起来能工作」当成「正确」。
-
-#### 生命周期
+### 生命周期
 
 调度器是 `KindProducer` + `LifecycleLongRunning` + 非 required：
 
-- 关停时**最先**停——先停生产者再停消费者，在飞的任务才能被处理完；
-- 底层真实退出且续租 goroutine 结束后，使用原 token 主动释放租约；
-- 非 required：调度器不可用时实例仍能提供同步接口，而周期任务本就允许迟到。
+- `Prepare` 构造并注册一个实例，校验 cron、payload 和投递选项；注册失败会回收该实例。
+- `Run` 启动这个实例，等待取消；关停时先停止调度器，再停止队列消费者。
+- 首次 `Shutdown` 按 `tasks.shutdown_timeout` 等待；超时后继续等待同一实例实际退出，并保留超时错误。
+- `Cleanup(ctx)` 支持重复等待，遵守调用方预算。
+- 非 required：准备失败会降级该能力，实例仍可提供同步接口。
 
-`Prepare` 会实测租约能力（真跑一遍抢锁/续租/释放）并验证全部 cron spec 可解析。
-spec 写错如果留到运行期才发现，表现是这个任务**永远不触发**——
-而没有任何人在等一个不存在的信号。
-
-每一轮显式 `Start`，在停止请求后用 `tasks.shutdown_timeout` 等待 `Shutdown`。
-首次等待超时会立即发出一次 `RoundFailed`，并保留在本轮返回错误中；同一个 `Run`
-goroutine 随后继续等待同一实例真实退出，期间不创建下一代、不主动释放本轮租约。
-租约仍可能自然过期，跨实例重叠的风险由业务幂等承担。
-
-`Cleanup(ctx)` 同样等待当前代实例的幂等 `Shutdown`，超时不清除实例归属。
-整体退出预算仍由 `WorkerManager` 管理：底层未退出时，worker 保持未退出状态，
-`App` 跳过扩展及共享客户端的关闭并报告错误。晚退出后，supervisor 才执行 worker 清理；
-晚退出不消除首次排空超时记录。2026-10-24 已通过关停阻塞、失租后两代切换、重复 Cleanup 及 App 资源安全门的故障注入和 race 回归，另验证真实 UniqueTTL 入队选项；证据见[修复计划第 9.3 节](review-remediation-plan-2026-10-23.md#93-追加测试授权与最终执行记录)。
+底层尚未退出时，`WorkerManager` 保持 worker 的未退出状态，
+`App` 不提前关闭它使用的扩展和共享 Redis。实例停止后，管理器完成清理。
 
 ## 异步任务队列（`internal/pkg/tasks`）
 

@@ -1,6 +1,6 @@
 // Package errx 提供跨层复用的错误判定。
 //
-// 独立成包是为了让 bootstrap 与 internal/pkg 下的组件（singleton 等）
+// 独立成包是为了让 bootstrap 与 internal/pkg 下的组件（tasks 等）
 // 共用同一份判定——同一个缺陷模式在多处各写一遍，就会在其中几处写错。
 // 本包不依赖仓库内任何其他包。
 package errx
@@ -44,8 +44,7 @@ func IsPureCancellation(err error) bool {
 // IsPureAbort 报告错误树的**全部**分支是否都归结为"被中止"
 // （context.Canceled 或 context.DeadlineExceeded）。
 //
-// 比 IsPureCancellation 宽一档，供那些把取消与超时同等看待的判定点使用
-// （如单实例执行器：两者都不算任务失败，因为原因是关停或失去租约）。
+// 比 IsPureCancellation 宽一档，供断路器、重试等把取消与超时同等看待的判定点使用。
 // 同样必须逐成员判定：混入真实故障的聚合错误若被整体判成"中止"，
 // 那个故障就从指标与告警里消失了。
 func IsPureAbort(err error) bool {

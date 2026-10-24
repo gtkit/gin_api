@@ -22,7 +22,7 @@ type TasksConfig struct {
 	// TaskTimeout 是单个任务的默认处理超时。
 	TaskTimeout time.Duration `mapstructure:"task_timeout"`
 	// ShutdownTimeout 是关停时等待在处理任务完成的预算。
-	// 调度器首次等待也使用此预算；超时会上报故障，仍跟踪同一实例直到真实退出。
+	// 调度器首次等待也使用此预算；保留超时错误，并等待同一实例真实退出。
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 	// RedisDB 是队列使用的 Redis 逻辑库号。
 	//
@@ -33,88 +33,10 @@ type TasksConfig struct {
 	Scheduler SchedulerConfig `mapstructure:"scheduler"`
 }
 
-// SchedulerConfig 是周期任务调度的配置。
-//
-// 只承载开关与租约参数。**触发时刻、任务类型与幂等保证在代码里声明**
-// （见 internal/pkg/tasks 的 PeriodicTask）：把 cron spec 放配置里，
-// 就可能出现"配置声明了一个任务，代码里没有对应处理器"的失配——
-// 它的表现是任务按时入队、一直重试到进死信队列，而配置文件看起来完全正常。
+// SchedulerConfig 控制当前进程的周期任务调度。
+// 触发时刻、任务类型和投递选项在代码中的 PeriodicTask 声明。
 type SchedulerConfig struct {
-	// Enabled 是调度器开关。关闭时不构造调度器、不建租约、不注册 worker。
-	//
-	// 它独立于 tasks.enabled：调度器投递的任务需要有人消费，因此启用它
-	// 要求队列本身也启用（见 validateTasksConfig）。反过来只开队列不开调度器
-	// 是正常配置——大多数任务由业务代码触发，不需要 cron。
 	Enabled bool `mapstructure:"enabled"`
-	// LeaseName 是选主租约的名字，同一部署内的所有副本必须一致。
-	//
-	// 不一致的后果是每个副本各自持有一把"自己的锁"并同时调度，
-	// 而每一把锁看起来都工作正常。
-	LeaseName string `mapstructure:"lease_name"`
-	// LeaseTTL 是租约时长。续租周期取其 1/3。
-	//
-	// 取值权衡：太短会在 Redis 抖动时频繁易主，每次易主都要重建调度器；
-	// 太长会让 leader 崩溃后的空窗期变长——那段时间里没有任何实例在调度。
-	LeaseTTL time.Duration `mapstructure:"lease_ttl"`
-	// RetryInterval 是未抢到租约时的重试间隔。
-	RetryInterval time.Duration `mapstructure:"retry_interval"`
-	// UniqueTTL 是投递去重窗口，作用于声明了幂等保证的任务。
-	// 周期任务只接受 GuaranteeIdempotent，当前消息链路不提供 fencing。
-	//
-	// 这是**第二道防线**，不是正确性保证：底层的唯一性锁在任务成功完成时
-	// 就释放，不是维持整个 TTL。一个很快跑完的任务，配合实例间的时钟偏移，
-	// 仍可能被投递两次——这正是每个周期任务都必须声明重复执行保证的原因。
-	UniqueTTL time.Duration `mapstructure:"unique_ttl"`
-}
-
-// 调度器未配置时的兜底值。
-//
-// 租约取 2m、重试取 10s：与 internal/pkg/singleton 既有单实例任务的量级一致。
-// 去重窗口取 1m：必须 ≥ 1s（底层要求），且应小于最密的触发间隔——
-// 大于触发间隔会把两次**本应各自执行**的触发去重成一次。
-const (
-	schedulerDefaultLeaseTTL      = 2 * time.Minute
-	schedulerDefaultRetryInterval = 10 * time.Second
-	schedulerDefaultUniqueTTL     = time.Minute
-	schedulerMinUniqueTTL         = time.Second
-	// minSchedulerLeaseTTL 是租约时长的下限。
-	//
-	// 续租周期是租期的 1/3，因此 5s 的租期意味着每 1.67s 一次续租往返。
-	// 低于这个量级时，一次正常的网络抖动就会被判成失去租约——而每次误判
-	// 都会停掉调度器、释放租约、重新抢锁、重建调度器，代价远大于它防住的东西。
-	minSchedulerLeaseTTL = 5 * time.Second
-)
-
-// EffectiveLeaseName 返回生效的租约名。
-func (c SchedulerConfig) EffectiveLeaseName() string {
-	if name := strings.TrimSpace(c.LeaseName); name != "" {
-		return name
-	}
-	return "task-scheduler"
-}
-
-// EffectiveLeaseTTL 返回生效的租约时长。
-func (c SchedulerConfig) EffectiveLeaseTTL() time.Duration {
-	if c.LeaseTTL > 0 {
-		return c.LeaseTTL
-	}
-	return schedulerDefaultLeaseTTL
-}
-
-// EffectiveRetryInterval 返回生效的抢锁重试间隔。
-func (c SchedulerConfig) EffectiveRetryInterval() time.Duration {
-	if c.RetryInterval > 0 {
-		return c.RetryInterval
-	}
-	return schedulerDefaultRetryInterval
-}
-
-// EffectiveUniqueTTL 返回生效的去重窗口。
-func (c SchedulerConfig) EffectiveUniqueTTL() time.Duration {
-	if c.UniqueTTL > 0 {
-		return c.UniqueTTL
-	}
-	return schedulerDefaultUniqueTTL
 }
 
 // 未配置时的兜底值。
@@ -214,47 +136,5 @@ func validateTasksConfig(cfg TasksConfig, redis RedisConfig) error {
 			"tasks.shutdown_timeout %s exceeds the %s cap", cfg.EffectiveShutdownTimeout(), maxTasksShutdownTimeout))
 	}
 
-	errs = append(errs, validateSchedulerConfig(cfg.Scheduler)...)
-
 	return errors.Join(errs...)
-}
-
-// validateSchedulerConfig 校验周期任务调度配置。
-//
-// 只在队列已启用的前提下调用（调用点在 validateTasksConfig 的 Enabled 分支内）：
-// 调度器投递的任务由既有消费者处理，队列关着时它无处可投。
-func validateSchedulerConfig(cfg SchedulerConfig) []error {
-	if !cfg.Enabled {
-		return nil
-	}
-
-	var errs []error
-
-	// 负值一律拒绝，不静默回退：回退让"配了一个非法值"与"没配"变成同一种结果，
-	// 而使用者以为自己配的那个值正在生效。
-	if cfg.LeaseTTL < 0 || cfg.RetryInterval < 0 || cfg.UniqueTTL < 0 {
-		errs = append(errs, errors.New(
-			"tasks.scheduler: negative lease_ttl / retry_interval / unique_ttl are not allowed "+
-				"(they silently fall back to defaults, so the configured value never takes effect)"))
-	}
-
-	// 去重窗口有下限：底层要求唯一性 TTL ≥ 1s，小于它的取值会让投递直接失败，
-	// 而失败发生在触发时刻——没有人在那个时刻看着日志。
-	if cfg.UniqueTTL > 0 && cfg.UniqueTTL < schedulerMinUniqueTTL {
-		errs = append(errs, fmt.Errorf(
-			"tasks.scheduler.unique_ttl %s is below the %s minimum required by the queue backend",
-			cfg.UniqueTTL, schedulerMinUniqueTTL))
-	}
-
-	// 续租周期取租期的 1/3，租期过短会让续租过于频繁而毫无收益；
-	// 更重要的是它必须显著大于一次 Redis 往返，否则正常延迟就会被误判成失去租约，
-	// 表现为调度器反复易主、每次易主都重建一遍。
-	if ttl := cfg.EffectiveLeaseTTL(); ttl < minSchedulerLeaseTTL {
-		errs = append(errs, fmt.Errorf(
-			"tasks.scheduler.lease_ttl %s is below the %s minimum: a lease this short is renewed "+
-				"so often that ordinary redis latency reads as lease loss, and every false loss "+
-				"rebuilds the scheduler", ttl, minSchedulerLeaseTTL))
-	}
-
-	return errs
 }

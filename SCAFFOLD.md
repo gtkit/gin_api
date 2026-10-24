@@ -293,7 +293,7 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
-| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者接线与 `modules.go` 的消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。`internal/pkg/singleton` 直接使用 Redis，不随 asynqx 自动移除。 |
+| 异步队列与调度：`asynqx` | `internal/pkg/tasks/`、`internal/bootstrap/worker_tasks.go`、`internal/bootstrap/worker_scheduler.go` | 需要任务投递、消费或周期调度时保留。移除需核对 `providers.go` 的生产者接线与 `modules.go` 的消费者/调度器接线、生产者生命周期、`tasks` 配置、Redis 必需性推导和测试。 |
 | HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
 | 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
 
@@ -507,58 +507,13 @@ func Register(r *gin.RouterGroup, deps Deps) {
 全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / 统一错误响应 / CORS / 体积上限）
 在 `internal/router/init.go` 里按固定顺序装配，顺序有测试锁定。
 
-### 后台任务的单实例执行
+### 后台定时任务
 
-多副本部署下，定时任务在每个实例上都会跑。`internal/pkg/singleton` 提供
-基于 Redis 的租约，让每轮只有一个实例执行。
-
-**注册时必须声明重复执行时靠什么保证正确**，零值会被拒绝：
-
-| 声明 | 含义 |
-|------|------|
-| `GuaranteeIdempotent` | 重复执行无副作用差异（如批量 `DELETE ... LIMIT`，第二次影响 0 行） |
-| `GuaranteeFenced` | 每个写操作携带 `Held.Fence` 序号，且**写路径拒绝比已见值更小的序号** |
-
-这个约束不是形式主义。**锁不是正确性保证**：网络分区、进程长时间暂停（GC、
-宿主机挂起）、租约过期后旧实例恢复，都会让两个实例同时在跑。声明强迫作者
-在注册时就回答"重复执行会怎样"，而不是把问题留到事故现场。
-
-两个容易混淆的概念：
-
-- **随机 token** 只解决"别删掉/续期别人的锁"（compare-and-delete / compare-and-renew）；
-- **fence 序号**才解决"租约过期后旧实例仍在写"。它必须单调递增，且由下游拒绝旧序号。
-
-把随机 token 当 fencing 用是一个看起来能工作、实际毫无保护的组合：
-两个随机值之间没有先后关系，下游无从判断谁更旧。
-
-新增单实例任务：
-
-```go
-lease, err := singleton.NewLease(ctx, redisClient, prefix, "my-task", 2*time.Minute)
-runner, err := singleton.NewRunner(lease, func(ctx context.Context, held singleton.Held) error {
-    // 幂等任务：忽略 held.Fence
-    // fenced 任务：把 held.Fence 传给写路径，并在那里 WHERE fence < :fence
-    return doWork(ctx)
-}, singleton.Config{
-    Interval:   time.Hour,
-    Guarantee:  singleton.GuaranteeIdempotent,
-    MaxRuntime: 30 * time.Minute,
-    // Observer 别留空：零值是 nopObserver，任务会**完全静默**地跑——
-    // 续租失败导致的中止（LeaseLost）也不会有任何日志或指标。
-    // singletonObserver 已按事件性质分好级别：租约抢到/被别的实例持有记 Debug
-    // （多副本下每轮都发生，记 Warn 会让正常运行看起来像持续故障），
-    // 续租丢失与任务失败记 Warn 并计入 worker.runs 的 failure，
-    // 成功计入 success——成功数是失败数的分母，没有它"失败了 3 次"无从解读。
-    Observer: singletonObserver{recorder: inf.recorder},
-})
-```
-
-再用 `newSingletonWorker` 包成 Worker 注册进 `buildWorkers`。它的 `Prepare`
-会在启动期用随机探测键真跑一遍抢锁/续租/释放——只 PING 不能证明当前 ACL
-能执行脚本，也不能证明锁键与 fence 键在同一个集群 slot。
-
-`singletonObserver` 的上述分级与计数由 `internal/bootstrap/singleton_observer_test.go`
-钉住（含 `recorder` 为 nil 时不 panic——未接指标是正常形态）。
+周期任务在当前进程内调度，通过队列交给已注册的处理器执行。
+在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中追加
+`tasks.PeriodicTask`，配置 `tasks.enabled` 和 `tasks.scheduler.enabled`。
+固定间隔的本地工作可直接使用监听取消的 `time.Ticker` 循环。
+注册方式及关停行为见 [后台任务与调度](docs/workers-and-scheduling.md)。
 
 ### 接指标导出
 
@@ -600,11 +555,11 @@ telemetry:
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
-| 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 实际执行次数/耗时、连续失败与最后成功时间、DB 连接池、认证事件。执行指标覆盖 OneShot、singleton 和队列处理尝试，具体口径见 `docs/observability.md`。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
+| 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 实际执行次数/耗时、DB 连接池、认证事件。执行指标覆盖 OneShot 和队列处理尝试，具体口径见 `docs/observability.md`。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
-| 写操作审计（`internal/pkg/auditlog` + `internal/middleware/audit.go` + `internal/repository/auditlog` + `operation_audit_logs` 表） | 母版不接线。装配四步：① `auditlog.New(repo, Options{})` 构造记录器；② 把 `recorder.Run` 注册为 consumer worker（HTTP 停止后 drain 存量）；③ 在需要审计的路由组（认证之后）挂 `middleware.OperationAudit(recorder.Enqueue)`；④ 保留期清理接 singleton 周期任务调 `repo.DeleteOlderThan`（保留期是合规决定，母版不定值）。**语义是尽力而为**：队列满载与落库故障丢弃并计数告警，不阻塞业务；不记请求体/响应体/query。不用时删除：包目录 ×3 + 中间件文件 + `internal/models/operation_audit.go` + 对应迁移 |
+| 写操作审计（`internal/pkg/auditlog` + `internal/middleware/audit.go` + `internal/repository/auditlog` + `operation_audit_logs` 表） | 母版不接线。装配四步：① `auditlog.New(repo, Options{})` 构造记录器；② 把 `recorder.Run` 注册为 consumer worker（HTTP 停止后 drain 存量）；③ 在需要审计的路由组（认证之后）挂 `middleware.OperationAudit(recorder.Enqueue)`；④ 保留期清理接普通定时任务调 `repo.DeleteOlderThan`（保留期是合规决定，母版不定值）。**语义是尽力而为**：队列满载与落库故障丢弃并计数告警，不阻塞业务；不记请求体/响应体/query。不用时删除：包目录 ×3 + 中间件文件 + `internal/models/operation_audit.go` + 对应迁移 |
 | 文件上传（`internal/pkg/upload` + `gtkit/gouploader`，版本由母版钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，母版纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
 | 上传文件回源安全（`internal/pkg/upload` + `internal/middleware/uploadheaders.go`） | 在上传文件的静态服务/下载路由组上挂 `middleware.UploadedFileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
 | 验证码（`internal/pkg/verifycode`） | 母版不构造实例。装配处 `verifycode.New(ctx, redis客户端, sender, Options{})` 按渠道各建一个实例（短信/邮件用不同 `KeyPrefix`），sender 用闭包适配 `internal/pkg/sms`/`mail`。包内兑现：Lua 原子签发与重置计数、原子校验（命中即毁、尝试超限销毁）、SetNX 发送节流、Redis 键经 SHA-256 不落明文手机号/邮箱。状态变更脚本禁止不确定结果的自动重试，仅在 NOSCRIPT 时重载；超时后由调用方处理未知结果，不自动重发验证码。**⚠ `Options.Debug` 是显式后门（固定码 + 只存不发），仅限本地/自动化测试装配，生产环境不得注入**——包内不做环境判断，责任在装配处 |
@@ -613,7 +568,7 @@ telemetry:
 | 熔断（`internal/pkg/breaker`） | 随出站客户端自动生效，阈值配 `outbound.breaker`（零值取保守默认：连续失败 5 次熔断、60s 后半开）。实例**按下游名各自独立**，一个下游的故障不会熔断另一个 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
 | 任务队列（`internal/pkg/tasks`，asynq） | 配 `tasks.enabled` + `tasks.queues`（权重必须为正）+ `tasks.redis_db`（**必须同时出现在 `redis.dbs` 里**，否则队列按"redis 未配置"处理）。`shutdown_timeout` 必须小于容器 SIGKILL 宽限期，否则 drain 会被杀掉、在处理的任务既没完成也没重新入队 |
-| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加 `tasks.PeriodicTask` 声明。**每条都必须声明重复投递时靠什么保证正确**，零值在构造期被拒绝——底层调度器没有任何跨实例协调，N 个副本就是每次触发投递 N 次；本包用 Redis 租约选主把它降到易主窗口内，但**消除不了**。触发时刻写在代码里而非配置里：配置里的 cron 可能指向一个没有处理器的任务类型，其表现是任务按时入队、一直重试到进死信队列。详见 `docs/workers-and-scheduling.md` |
+| 周期任务调度（`internal/pkg/tasks`，cron） | 配 `tasks.scheduler.enabled`（要求 `tasks.enabled` 也开着），并在 `modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加 `tasks.PeriodicTask` 声明，在当前进程内调度。触发时刻、任务类型和投递选项写在代码里；队列处理器按业务要求保证幂等。详见 `docs/workers-and-scheduling.md` |
 
 ### 告警扇出的对外副作用
 
@@ -654,7 +609,6 @@ telemetry:
 | `internal/pkg/metrics` | OTel 记录点封装，默认 no-op（见上表「指标（OTel）」） |
 | `internal/pkg/jwtauth` | JWT 签发/验签与多密钥轮换（见上文「JWT 密钥轮换操作手册」） |
 | `internal/pkg/credential` / `internal/pkg/tokenstore` | 本地认证模式的口令哈希与刷新令牌存储（见「认证：两种模式二选一」；切到 `external` 后可整体删除） |
-| `internal/pkg/singleton` | 基于 Redis 租约的单实例执行（见上文「后台任务的单实例执行」） |
 | `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，由 `internal/platform/notification/mail` / `internal/platform/notification/sms` 的 Owner 构造；`internal/pkg/news` 借用发送能力（见上文「告警扇出的对外副作用」） |
 
 配置里的 `application` / `ssl` / `cors` / `log` / `database` / `redis` / `env` 是进程与连接的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。

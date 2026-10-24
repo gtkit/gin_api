@@ -23,6 +23,10 @@ func TestEnvOverrideRejectsLegacyConfigKeys(t *testing.T) {
 		{"APP_JWT__PRIVATE_KEY_PATH", "", "private_key_path"},
 		{"APP_JWT__PUBLIC_KEY_PATH", "retired.public.pem", "public_key_path"},
 		{"APP_MODULES__USER__PAGE_SIZE", "20", "modules"},
+		{"APP_TASKS__SCHEDULER__LEASE_NAME", "", "lease_name"},
+		{"APP_TASKS__SCHEDULER__LEASE_TTL", "0", "lease_ttl"},
+		{"APP_TASKS__SCHEDULER__RETRY_INTERVAL", "0", "retry_interval"},
+		{"APP_TASKS__SCHEDULER__UNIQUE_TTL", "0", "unique_ttl"},
 	} {
 		t.Run(tc.variable, func(t *testing.T) {
 			t.Setenv(tc.variable, tc.value)

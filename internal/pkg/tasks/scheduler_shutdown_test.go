@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gtkit/asynqx"
-	"github.com/gtkit/gin-api/internal/pkg/singleton"
 	"github.com/hibiken/asynq"
 )
 
@@ -28,7 +27,10 @@ type controlledScheduler struct {
 }
 
 func newControlledScheduler() *controlledScheduler {
-	return &controlledScheduler{started: make(chan struct{}), stopping: make(chan struct{}), waitingAgain: make(chan struct{}), drained: make(chan struct{})}
+	return &controlledScheduler{
+		started: make(chan struct{}), stopping: make(chan struct{}),
+		waitingAgain: make(chan struct{}), drained: make(chan struct{}),
+	}
 }
 
 func (r *controlledScheduler) Register(context.Context, string, string, any, ...asynqx.TaskOption) (string, error) {
@@ -73,228 +75,134 @@ func awaitSchedulerSignal(t *testing.T, signal <-chan struct{}) {
 	}
 }
 
-func TestSchedulerShutdownTimeoutRetainsRoundAndLease(t *testing.T) {
-	for _, loseLease := range []bool{false, true} {
-		name := "parent cancellation"
-		if loseLease {
-			name = "lease renewal failure"
-		}
-		t.Run(name, func(t *testing.T) {
-			srv, client := newTestRedis(t)
-			cfg := schedulerConfig()
-			cfg.ShutdownTimeout = 20 * time.Millisecond
-			cfg.Scheduler.LeaseTTL = 90 * time.Millisecond
-			inner := newControlledScheduler()
-			failures := make(chan error, 8)
-			lost := make(chan struct{})
-			var observed, builds atomic.Int32
-			s, err := NewScheduler(cfg, client, "shutdown-contract", SchedulerObserver{
-				RoundFailed: func(_ string, err error) { observed.Add(1); failures <- err },
-				LeaseLost:   func(string, error) { close(lost) },
-			}, idempotentTask())
-			if err != nil {
-				t.Fatal(err)
-			}
-			s.newRunner = func() (schedulerRunner, error) { builds.Add(1); return inner, nil }
-			ctx, cancel := context.WithCancel(t.Context())
-			done := make(chan struct{})
-			var runErr error
-			go func() { defer close(done); runErr = s.Run(ctx) }()
-			t.Cleanup(func() { cancel(); srv.SetError(""); inner.finish(); awaitSchedulerSignal(t, done) })
-			awaitSchedulerSignal(t, inner.started)
-			if loseLease {
-				srv.SetError("ERR injected renewal failure")
-				awaitSchedulerSignal(t, lost)
-			} else {
-				cancel()
-			}
-			select {
-			case failure := <-failures:
-				if !errors.Is(failure, context.DeadlineExceeded) {
-					t.Fatalf("shutdown failure = %v", failure)
-				}
-			case <-time.After(3 * time.Second):
-				t.Fatal("first shutdown timeout was not observed")
-			}
-			awaitSchedulerSignal(t, inner.waitingAgain)
-			select {
-			case <-done:
-				t.Fatal("Run returned while the underlying scheduler was still draining")
-			default:
-			}
-			if builds.Load() != 1 {
-				t.Fatalf("built %d instances before the first one exited", builds.Load())
-			}
-			lockKey := "tasks:singleton:{" + cfg.Scheduler.EffectiveLeaseName() + "}:lock"
-			if !srv.Exists(lockKey) {
-				t.Fatal("original lease was released before the underlying instance stopped")
-			}
-			s.mu.Lock()
-			owned := s.current
-			s.mu.Unlock()
-			cleanupCtx, cleanupCancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
-			cleanupErr := s.Cleanup(cleanupCtx)
-			cleanupCancel()
-			if !errors.Is(cleanupErr, context.DeadlineExceeded) {
-				t.Fatalf("Cleanup during drain = %v", cleanupErr)
-			}
-			s.mu.Lock()
-			stillOwned := s.current == owned && owned != nil
-			s.mu.Unlock()
-			if !stillOwned {
-				t.Fatal("Cleanup timeout discarded the current instance")
-			}
-			srv.SetError("")
-			cancel()
-			inner.finish()
-			awaitSchedulerSignal(t, done)
-			if !errors.Is(runErr, context.DeadlineExceeded) || observed.Load() != 1 {
-				t.Fatalf("late exit lost or repeated the timeout: err=%v observations=%d", runErr, observed.Load())
-			}
-			if srv.Exists(lockKey) || builds.Load() != 1 || inner.shutdowns.Load() < 2 {
-				t.Fatalf("lease/instance tracking drifted: lease=%t builds=%d shutdowns=%d", srv.Exists(lockKey), builds.Load(), inner.shutdowns.Load())
-			}
-			for range 3 {
-				if err := s.Cleanup(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
-func TestSchedulerLateCleanupCannotForgetNewGeneration(t *testing.T) {
+func TestSchedulerShutdownTimeoutWaitsForActualExit(t *testing.T) {
 	_, client := newTestRedis(t)
-	s, err := NewScheduler(schedulerConfig(), client, "cleanup-generation", SchedulerObserver{}, idempotentTask())
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := newControlledScheduler()
-	t.Cleanup(old.finish)
-	s.hold(old)
-	cleaned := make(chan error, 1)
-	go func() { cleaned <- s.Cleanup(t.Context()) }()
-	awaitSchedulerSignal(t, old.stopping)
-	next := newControlledScheduler()
-	next.finish()
-	want := s.hold(next)
-	old.finish()
-	if err := <-cleaned; err != nil {
-		t.Fatal(err)
-	}
-	s.mu.Lock()
-	got := s.current
-	s.mu.Unlock()
-	if got != want {
-		t.Fatal("late Cleanup removed the next generation")
-	}
-	if err := s.Cleanup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSchedulerRoundPreservesOperationAndReleaseFailures(t *testing.T) {
-	for _, phase := range []string{"build", "register", "start"} {
-		t.Run(phase, func(t *testing.T) {
-			srv, client := newTestRedis(t)
-			cause := errors.New("injected operation failure")
-			var failures []error
-			s, err := NewScheduler(schedulerConfig(), client, "round-errors", SchedulerObserver{
-				RoundFailed: func(_ string, err error) { failures = append(failures, err) },
-			}, idempotentTask())
-			if err != nil {
-				t.Fatal(err)
-			}
-			inner := newControlledScheduler()
-			inner.finish()
-			inner.registerHook = func() { srv.SetError("ERR injected release failure") }
-			s.newRunner = func() (schedulerRunner, error) {
-				if phase == "build" {
-					srv.SetError("ERR injected release failure")
-					return nil, cause
-				}
-				if phase == "register" {
-					inner.registerErr = cause
-				} else {
-					inner.startErr = cause
-				}
-				return inner, nil
-			}
-			acquired, err := s.leadOnce(t.Context())
-			if !acquired || !errors.Is(err, cause) || len(failures) != 2 {
-				t.Fatalf("acquired=%t err=%v failures=%v", acquired, err, failures)
-			}
-			if !errors.Is(err, failures[1]) {
-				t.Fatalf("release failure was not retained: %v", err)
-			}
-		})
-	}
-}
-
-func TestPeriodicTaskGuaranteeWhitelist(t *testing.T) {
-	t.Parallel()
-	for _, guarantee := range []singleton.Guarantee{singleton.GuaranteeUnspecified, singleton.GuaranteeIdempotent, singleton.GuaranteeFenced, 255} {
-		task := idempotentTask()
-		task.Guarantee = guarantee
-		err := task.validate()
-		if (err == nil) != (guarantee == singleton.GuaranteeIdempotent) {
-			t.Fatalf("guarantee=%d err=%v", guarantee, err)
-		}
-	}
-}
-
-func TestSchedulerRestartsOnlyAfterOldInstanceReallyExits(t *testing.T) {
-	srv, client := newTestRedis(t)
 	cfg := schedulerConfig()
-	cfg.ShutdownTimeout = 10 * time.Millisecond
-	first, next := newControlledScheduler(), newControlledScheduler()
-	lost := make(chan struct{})
-	var builds atomic.Int32
-	s, err := NewScheduler(cfg, client, "restart-contract", SchedulerObserver{
-		LeaseLost: func(string, error) { close(lost) },
-	}, idempotentTask())
+	cfg.ShutdownTimeout = 20 * time.Millisecond
+	inner := newControlledScheduler()
+	s, err := NewScheduler(cfg, client, "shutdown-contract", periodicTask())
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.newRunner = func() (schedulerRunner, error) {
-		if builds.Add(1) == 1 {
-			return first, nil
-		}
-		return next, nil
-	}
+	s.newRunner = func() (schedulerRunner, error) { return inner, nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	var runErr error
 	go func() { defer close(done); runErr = s.Run(ctx) }()
-	t.Cleanup(func() { cancel(); first.finish(); next.finish(); awaitSchedulerSignal(t, done) })
-	awaitSchedulerSignal(t, first.started)
-	srv.Del("tasks:singleton:{" + cfg.Scheduler.EffectiveLeaseName() + "}:lock")
-	awaitSchedulerSignal(t, lost)
-	awaitSchedulerSignal(t, first.waitingAgain)
-	if builds.Load() != 1 {
-		t.Fatalf("old instance is still draining but %d instances were built", builds.Load())
-	}
-	first.finish()
-	awaitSchedulerSignal(t, next.started)
-	if builds.Load() != 2 {
-		t.Fatalf("expected exactly one replacement after old exit, built %d", builds.Load())
-	}
+	t.Cleanup(func() { cancel(); inner.finish(); awaitSchedulerSignal(t, done) })
+	awaitSchedulerSignal(t, inner.started)
 	cancel()
-	next.finish()
+	awaitSchedulerSignal(t, inner.waitingAgain)
+	select {
+	case <-done:
+		t.Fatal("Run returned while the underlying scheduler was still draining")
+	default:
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	cleanupErr := s.Cleanup(cleanupCtx)
+	cleanupCancel()
+	if !errors.Is(cleanupErr, context.DeadlineExceeded) {
+		t.Fatalf("Cleanup during drain = %v", cleanupErr)
+	}
+	inner.finish()
 	awaitSchedulerSignal(t, done)
-	if runErr != nil {
-		t.Fatalf("complete replacement shutdown returned %v", runErr)
+	if !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("Run lost the original shutdown timeout: %v", runErr)
+	}
+	for range 3 {
+		if err := s.Cleanup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func TestPeriodicRegistrationPreservesQueueAndUniqueTTL(t *testing.T) {
+func TestSchedulerRejectsRepeatedRunWithoutStoppingCurrentRun(t *testing.T) {
+	_, client := newTestRedis(t)
+	s, err := NewScheduler(schedulerConfig(), client, "once", periodicTask())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := newControlledScheduler()
+	s.newRunner = func() (schedulerRunner, error) { return inner, nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	var runErr error
+	go func() { defer close(done); runErr = s.Run(ctx) }()
+	t.Cleanup(func() { cancel(); inner.finish(); awaitSchedulerSignal(t, done) })
+	awaitSchedulerSignal(t, inner.started)
+	if err := s.Run(t.Context()); err == nil {
+		t.Fatal("a second Run unexpectedly started")
+	}
+	if got := inner.shutdowns.Load(); got != 0 {
+		t.Fatalf("second Run stopped the active scheduler %d times", got)
+	}
+	cancel()
+	inner.finish()
+	awaitSchedulerSignal(t, done)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if err := s.Run(t.Context()); err == nil {
+		t.Fatal("a stopped scheduler unexpectedly restarted")
+	}
+}
+
+func TestSchedulerFailuresPreserveCauseAndCleanup(t *testing.T) {
+	for _, phase := range []string{"build", "register", "start"} {
+		t.Run(phase, func(t *testing.T) {
+			_, client := newTestRedis(t)
+			cfg := schedulerConfig()
+			cfg.ShutdownTimeout = 10 * time.Millisecond
+			s, err := NewScheduler(cfg, client, "errors", periodicTask())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cause := errors.New("injected " + phase + " failure")
+			inner := newControlledScheduler()
+			t.Cleanup(inner.finish)
+			s.newRunner = func() (schedulerRunner, error) {
+				switch phase {
+				case "build":
+					return nil, cause
+				case "register":
+					inner.registerErr = cause
+				case "start":
+					inner.startErr = cause
+				}
+				return inner, nil
+			}
+			done := make(chan struct{})
+			var runErr error
+			go func() { defer close(done); runErr = s.Run(t.Context()) }()
+			if phase != "build" {
+				awaitSchedulerSignal(t, inner.waitingAgain)
+				select {
+				case <-done:
+					t.Fatal("failed scheduler returned before releasing its resources")
+				default:
+				}
+				inner.finish()
+			}
+			awaitSchedulerSignal(t, done)
+			if !errors.Is(runErr, cause) {
+				t.Fatalf("operation failure was lost: %v", runErr)
+			}
+			if phase != "build" && !errors.Is(runErr, context.DeadlineExceeded) {
+				t.Fatalf("shutdown timeout was lost: %v", runErr)
+			}
+		})
+	}
+}
+
+func TestPeriodicRegistrationPreservesExplicitOptions(t *testing.T) {
 	srv, client := newTestRedis(t)
-	cfg := schedulerConfig()
-	cfg.Scheduler.UniqueTTL = 7 * time.Second
-	entry := idempotentTask()
+	entry := periodicTask()
 	entry.Spec = "@every 1s"
-	entry.Options = []asynqx.TaskOption{asynqx.WithTaskQueue("unique-contract")}
-	s, err := NewScheduler(cfg, client, "unique-contract", SchedulerObserver{}, entry)
+	const uniqueTTL = 7 * time.Second
+	entry.Options = []asynqx.TaskOption{
+		asynqx.WithTaskQueue("explicit-options"), asynqx.WithTaskUnique(uniqueTTL),
+	}
+	s, err := NewScheduler(schedulerConfig(), client, "explicit-options", entry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,14 +237,14 @@ func TestPeriodicRegistrationPreservesQueueAndUniqueTTL(t *testing.T) {
 	}
 	var uniqueKeys int
 	for _, key := range srv.Keys() {
-		if strings.HasPrefix(key, "asynq:{unique-contract}:unique:") {
+		if strings.HasPrefix(key, "asynq:{explicit-options}:unique:") {
 			uniqueKeys++
-			if ttl := srv.TTL(key); ttl != cfg.Scheduler.UniqueTTL {
-				t.Errorf("registered unique TTL=%s want=%s", ttl, cfg.Scheduler.UniqueTTL)
+			if ttl := srv.TTL(key); ttl != uniqueTTL {
+				t.Errorf("registered unique TTL=%s want=%s", ttl, uniqueTTL)
 			}
 		}
 	}
 	if uniqueKeys != 1 {
-		t.Fatalf("queue/unique options were not preserved: keys=%v", srv.Keys())
+		t.Fatalf("explicit queue/unique options were not preserved: keys=%v", srv.Keys())
 	}
 }

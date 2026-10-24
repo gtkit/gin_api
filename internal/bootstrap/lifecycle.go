@@ -44,8 +44,7 @@ var ErrForcedShutdown = errors.New("shutdown forced by a second signal")
 
 // IsPureCancellation 报告非 nil 错误树的全部分支是否都归结为 context.Canceled。
 //
-// 薄转发到 internal/pkg/errx：判定要被 bootstrap 与 singleton 等多处复用，
-// 而同一个缺陷模式各写一遍就会在其中几处写错（这次就漏了两处）。
+// 薄转发到 internal/pkg/errx，与 tasks 等组件共用同一判定。
 // 保留本导出符号：它已是包的公开 API，删除属破坏性变更。
 func IsPureCancellation(err error) bool { return errx.IsPureCancellation(err) }
 

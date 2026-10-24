@@ -172,7 +172,7 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 	// redis 必需时必须是 fail 而不是 degraded。
 	//
 	// 这条缺失的后果具体而危险：auth.mode: local 的部署里 Redis 是必需的
-	// （刷新令牌、撤销表、租约都在它上面）。此前 redis 检查把 required 写死为
+	// （刷新令牌、撤销表都在它上面）。此前 redis 检查把 required 写死为
 	// false，Redis 挂掉时 doctor --deep 报退出码 2「仅降级」，部署脚本据此放行，
 	// 紧接着服务因必需 Redis 失败而根本起不来——doctor 在它最该拦住的那一刻放了行。
 	//

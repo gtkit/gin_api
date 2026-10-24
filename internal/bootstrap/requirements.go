@@ -19,8 +19,8 @@ func RedisRequired(cfg *config.Config) bool {
 		return false
 	}
 
-	// 本地认证：刷新令牌存储、访问令牌撤销表与清理任务的单实例租约
-	// 全部以 Redis 为载体，Redis 不可用即认证不可用——此时实例不该被
+	// 本地认证：刷新令牌存储与访问令牌撤销表
+	// 以 Redis 为载体，Redis 不可用即认证不可用——此时实例不该被
 	// 判为 ready，否则 readiness 在对认证故障撒谎。
 	if cfg.Auth.LocalEnabled() {
 		return true

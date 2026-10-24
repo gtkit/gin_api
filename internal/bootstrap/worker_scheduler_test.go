@@ -8,7 +8,7 @@ import "testing"
 // 若它被当成 consumer，关停时它会在 HTTP 之后才停——那段时间里它仍在投递，
 // 而消费者正在 drain，新投递的任务这一轮没人处理。
 //
-// Lifecycle 同样是声明而非推断：调度器的 Run 是选主循环，在 ctx 取消之前返回
+// Lifecycle 同样是声明而非推断：调度器的 Run 持续调度，在 ctx 取消之前返回
 // （包括返回 nil）意味着所有周期任务都停了，而进程看起来完全正常——
 // 声明为 LongRunning 才能让管理器把那种退出上报为异常。
 func TestSchedulerWorkerIsAProducer(t *testing.T) {

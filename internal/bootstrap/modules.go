@@ -301,12 +301,9 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 
 	// 周期任务调度器：未启用队列/调度器、或未声明任何周期任务时不注册。
 	//
-	// 周期任务通过下方的 tasks.PeriodicTask 参数追加，**每条都必须声明
-	// 重复投递时靠什么保证正确**（零值在构造期被拒绝）——底层调度器没有任何
-	// 跨实例协调，租约只把重复降到易主窗口内，消除不了它。
+	// 周期任务通过下方的 tasks.PeriodicTask 参数追加，在当前进程内调度。
 	scheduler, schedulerErr := tasks.NewScheduler(
 		inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB), "asynq-scheduler",
-		schedulerObserver(),
 	)
 	if schedulerErr != nil {
 		return nil, fmt.Errorf("build task scheduler: %w", schedulerErr)

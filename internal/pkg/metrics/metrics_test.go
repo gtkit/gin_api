@@ -236,94 +236,6 @@ func TestDurationHistogramHasUsefulBuckets(t *testing.T) {
 	}
 }
 
-// TestWorkerHealthIsObservedAtCollectionTime 钉住状态量走异步回调。
-//
-// 主动上报的话，一个每天跑一次的任务这两个指标一天只有一个数据点，
-// 中间二十多小时没有值——告警规则拿不到数据，只能配"无数据"这种钝规则。
-func TestWorkerHealthIsObservedAtCollectionTime(t *testing.T) {
-	t.Parallel()
-
-	rec, reader := newTestRecorder(t)
-
-	health := WorkerHealth{ConsecutiveFailures: 3}
-	unregister, err := rec.RegisterWorkerHealth("cleanup", func() WorkerHealth { return health })
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := unregister(); err != nil {
-			t.Errorf("unregister(): %v", err)
-		}
-	})
-
-	m := collect(t, reader, "worker.consecutive_failures")
-	gauge, ok := m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 3 {
-		t.Fatalf("consecutive failures = %d, want 3", gauge.DataPoints[0].Value)
-	}
-
-	// **不重新注册**，只改状态再采一次：这正是异步回调的价值——
-	// 采集时读当前值，而不是等下一次业务事件来上报。
-	health = WorkerHealth{ConsecutiveFailures: 0, LastSuccess: time.Unix(1754000000, 0)}
-
-	m = collect(t, reader, "worker.consecutive_failures")
-	gauge, ok = m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 0 {
-		t.Fatalf("after a success the streak reads %d, want 0: the callback is not reading "+
-			"the current state", gauge.DataPoints[0].Value)
-	}
-
-	m = collect(t, reader, "worker.last_success_timestamp")
-	gauge, ok = m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 1754000000 {
-		t.Fatalf("last success = %d, want 1754000000", gauge.DataPoints[0].Value)
-	}
-}
-
-// TestNeverSucceededReportsZeroInsteadOfNothing 钉住"从未成功"也有数据点。
-//
-// 跳过上报会让这条序列在最需要它的时候（任务从启动起就一直失败）根本不存在，
-// 而"无数据"与"值为 0"在告警规则里是两种完全不同的处置。
-func TestNeverSucceededReportsZeroInsteadOfNothing(t *testing.T) {
-	t.Parallel()
-
-	rec, reader := newTestRecorder(t)
-	unregister, err := rec.RegisterWorkerHealth("never-ran", func() WorkerHealth {
-		return WorkerHealth{ConsecutiveFailures: 5}
-	})
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := unregister(); err != nil {
-			t.Errorf("unregister(): %v", err)
-		}
-	})
-
-	m := collect(t, reader, "worker.last_success_timestamp")
-	gauge, ok := m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if len(gauge.DataPoints) != 1 {
-		t.Fatalf("data points = %d, want 1: a worker that never succeeded must still report "+
-			"a series, otherwise the alert rule sees no data instead of a problem",
-			len(gauge.DataPoints))
-	}
-	if gauge.DataPoints[0].Value != 0 {
-		t.Errorf("last success = %d, want 0", gauge.DataPoints[0].Value)
-	}
-}
-
 // TestDBPoolStatsSplitByState 钉住连接池按状态分标签。
 func TestDBPoolStatsSplitByState(t *testing.T) {
 	t.Parallel()
@@ -376,16 +288,7 @@ func TestNilRecorderIsSafe(t *testing.T) {
 	// 不 panic 即通过。
 	rec.RecordRequest(ctx, "GET", "/x", 200, time.Millisecond)
 	rec.RecordRateLimitDecision(ctx, "p", RateLimitThrottled)
-	rec.RecordWorkerRun(ctx, "w", false)
 	rec.RecordAuthEvent(ctx, AuthLoginFailed)
-
-	unregister, err := rec.RegisterWorkerHealth("w", func() WorkerHealth { return WorkerHealth{} })
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth on a nil recorder: %v", err)
-	}
-	if err := unregister(); err != nil {
-		t.Fatalf("unregister: %v", err)
-	}
 }
 
 // TestNoMeterFallsBackToNoop 钉住 nil meter 走 no-op 而不是崩。

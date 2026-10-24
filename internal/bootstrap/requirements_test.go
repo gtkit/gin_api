@@ -7,7 +7,7 @@ import (
 )
 
 // TestRedisRequiredForLocalAuth 钉住认证对 Redis 必需性的贡献
-// （local-authentication spec）：刷新令牌存储、撤销表与单实例租约全在 Redis 上，
+// （local-authentication spec）：刷新令牌存储与撤销表都在 Redis 上，
 // 本地认证启用时 Redis 挂掉即认证不可用——readiness 不得再报 200 degraded。
 func TestRedisRequiredForLocalAuth(t *testing.T) {
 	t.Parallel()
@@ -48,7 +48,7 @@ func TestRedisRequiredForLocalAuth(t *testing.T) {
 // → 启动失败。运维看到的那句话读起来像配置缺失，而真实原因（Redis 不可达）
 // 不出现在错误里任何位置。
 //
-// 这条判据同时覆盖调度器：它的租约同样以 Redis 为载体，且以 tasks.enabled 为前提。
+// 这条判据同时覆盖调度器：它向 Redis 队列投递，且以 tasks.enabled 为前提。
 func TestRedisRequiredForTaskQueue(t *testing.T) {
 	t.Parallel()
 

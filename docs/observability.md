@@ -46,11 +46,11 @@ logger.ErrorCtx(ctx, "query failed", zap.Error(err))
 
 - 请求/任务总数：success / error / timeout / canceled
 - 耗时分布
-- 队列积压、租约超时、重试次数
+- 队列积压、任务超时、重试次数
 - 缓存 hit / miss / backfill / delete_failed
 
 母版已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 单次执行量/耗时、
-连续失败与最后成功时间、DB 连接池、认证事件。
+DB 连接池、认证事件。
 
 ### Worker 单次执行
 
@@ -60,7 +60,7 @@ logger.ErrorCtx(ctx, "query failed", zap.Error(err))
 | `worker.execution.duration` | Histogram / 秒 | 同一次执行从进入任务函数到返回或异常退出的耗时 |
 
 两项共用 `worker.name`、`worker.kind`、`worker.outcome` 三个标签。
-`worker.name` 必须在装配期确定；`worker.kind` 为 `one_shot`、`singleton`、`queue`，
+`worker.name` 必须在装配期确定；`worker.kind` 为 `one_shot`、`queue`，
 API 收到其他 kind 时统一归入 `other`。队列按 consumer 名聚合，不按任意任务类型、task ID
 或 payload 拆标签。
 
@@ -68,14 +68,13 @@ API 收到其他 kind 时统一归入 `other`。队列按 consumer 名聚合，�
 归入对应结果；与真实失败混合时保留 `failure`。`panic` 表示任务未正常返回，也包含
 `runtime.Goexit` 这类异常退出；埋点不 recover，不改变既有 panic 处理流程。
 
-默认装配覆盖 OneShot 的 `Run`、带 `singletonObserver` 的 singleton 实际任务函数、
+默认装配覆盖 OneShot 的 `Run`、
 `NewObservedConsumer` 创建的队列消费者每次处理尝试。队列重试会再次计数。
-没有执行任务、没抢到租约、租约续期/释放、Prepare/Cleanup 均不产生执行样本；
+没有执行任务、Prepare/Cleanup 均不产生执行样本；
 LongRunning 的整个存活时间也不作为一次任务耗时。自定义循环内的工作需在实际处理边界
 调用 `Recorder.RunWorker`，或自行调用 `RecordWorkerExecution`。
 
-旧 `worker.runs` 保留原口径，singleton 的租约丢失也可能计入其 failure，不能用作实际
-执行次数。既有健康指标 API 同样保留，新指标没有任务样本时不会伪造零次执行。
+没有任务样本时不会伪造零次执行。
 
 ### 标签基数是硬约束
 

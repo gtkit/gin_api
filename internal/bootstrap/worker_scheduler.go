@@ -3,8 +3,6 @@ package bootstrap
 import (
 	"context"
 
-	"github.com/gtkit/logger/v2"
-
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 )
 
@@ -39,7 +37,7 @@ func (w *asynqSchedulerWorker) Kind() WorkerKind { return KindProducer }
 // 本就允许迟到——它的下一个触发点会照常到来。
 func (w *asynqSchedulerWorker) Required() bool { return false }
 
-// Lifecycle 为 LifecycleLongRunning：Run 是选主循环，阻塞至 ctx 取消。
+// Lifecycle 为 LifecycleLongRunning：Run 持续调度，阻塞至 ctx 取消。
 //
 // 在此之前返回（包括返回 nil）会被管理器视为未预期退出并上报——
 // 那正是需要的：一个悄悄退出的调度器意味着所有周期任务都停了，
@@ -56,31 +54,4 @@ func (w *asynqSchedulerWorker) Run(ctx context.Context) error {
 
 func (w *asynqSchedulerWorker) Cleanup(ctx context.Context) error {
 	return w.scheduler.Cleanup(ctx)
-}
-
-// schedulerObserver 把调度器的运行期事件接到进程的日志栈。
-//
-// 事件经回调交出来而不是由 tasks 包直接写日志：那样包会绑定到某个具体日志库。
-//
-// 级别的分配基于"这件事是否需要人看"：
-//   - 抢到租约是状态变更，Info；
-//   - **被跳过是正常情况**——多副本下每一轮只有一个实例成为 leader，
-//     其余实例每次重试都会命中它。用 Debug，否则正常运行会持续刷屏，
-//     而刷屏的日志等于没有日志。
-//   - 失去租约与轮次失败需要关注，Warn。
-func schedulerObserver() tasks.SchedulerObserver {
-	return tasks.SchedulerObserver{
-		LeaseAcquired: func(scheduler string, fence int64) {
-			logger.Infof("task scheduler %q acquired the lease (fence=%d)", scheduler, fence)
-		},
-		LeaseSkipped: func(scheduler string) {
-			logger.Debugf("task scheduler %q: lease held by another instance", scheduler)
-		},
-		LeaseLost: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q lost the lease; shutdown requested: %v", scheduler, err)
-		},
-		RoundFailed: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q round failure (shutdown may still be in progress): %v", scheduler, err)
-		},
-	}
 }

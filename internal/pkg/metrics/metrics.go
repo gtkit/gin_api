@@ -66,13 +66,12 @@ type Recorder struct {
 
 	rateLimitDecisions metric.Int64Counter
 
-	workerRuns       metric.Int64Counter
 	workerExecutions metric.Int64Counter
 	workerDuration   metric.Float64Histogram
 
 	authEvents metric.Int64Counter
 
-	// meter 留着供后续注册异步回调（worker 健康、DB 连接池）。
+	// meter 留着供后续注册 DB 连接池的异步回调。
 	meter metric.Meter
 }
 
@@ -110,11 +109,6 @@ func New(meter metric.Meter) (*Recorder, error) {
 	)
 	instrument(err)
 
-	workerRuns, err := meter.Int64Counter(
-		"worker.runs",
-		metric.WithDescription("Background worker executions by outcome"),
-	)
-	instrument(err)
 	workerExecutions, err := meter.Int64Counter("worker.executions",
 		metric.WithDescription("Actual worker task invocations by outcome"))
 	instrument(err)
@@ -138,7 +132,6 @@ func New(meter metric.Meter) (*Recorder, error) {
 		requestDuration:    requestDuration,
 		requestsTotal:      requestsTotal,
 		rateLimitDecisions: rateLimitDecisions,
-		workerRuns:         workerRuns,
 		workerExecutions:   workerExecutions,
 		workerDuration:     workerDuration,
 		authEvents:         authEvents,
@@ -207,39 +200,22 @@ func (r *Recorder) RecordRateLimitDecision(ctx context.Context, policyID string,
 	))
 }
 
-// RecordWorkerRun 记录一次后台任务执行。
-func (r *Recorder) RecordWorkerRun(ctx context.Context, worker string, succeeded bool) {
-	if r == nil {
-		return
-	}
-
-	outcome := "success"
-	if !succeeded {
-		outcome = "failure"
-	}
-	r.workerRuns.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("worker.name", worker),
-		attribute.String("worker.outcome", outcome),
-	))
-}
-
 // WorkerKind identifies a fixed execution boundary, not a task payload or ID.
 type WorkerKind string
 
 const (
-	WorkerOneShot   WorkerKind = "one_shot"
-	WorkerSingleton WorkerKind = "singleton"
-	WorkerQueue     WorkerKind = "queue"
+	WorkerOneShot WorkerKind = "one_shot"
+	WorkerQueue   WorkerKind = "queue"
 )
 
 // RecordWorkerExecution records one invocation. worker must be a name fixed at
-// assembly time. Lease operations and the lifetime of a consumer are not invocations.
+// assembly time. The lifetime of a consumer is not an invocation.
 func (r *Recorder) RecordWorkerExecution(ctx context.Context, kind WorkerKind, worker string, elapsed time.Duration, err error, panicked bool) {
 	if r == nil {
 		return
 	}
 	switch kind {
-	case WorkerOneShot, WorkerSingleton, WorkerQueue:
+	case WorkerOneShot, WorkerQueue:
 	default:
 		kind = "other"
 	}
@@ -274,72 +250,6 @@ func (r *Recorder) RunWorker(ctx context.Context, kind WorkerKind, worker string
 	err = run(ctx)
 	returned = true
 	return err
-}
-
-// WorkerHealth 是后台任务的当前状态。
-type WorkerHealth struct {
-	// ConsecutiveFailures 是当前连续失败次数，成功一次即归零。
-	ConsecutiveFailures int
-	// LastSuccess 是最后一次成功的时刻；从未成功过时是零值。
-	LastSuccess time.Time
-}
-
-// RegisterWorkerHealth 以异步回调暴露后台任务的状态。
-//
-// **状态量必须走异步回调，不能由业务路径主动上报**。连续失败数与最后成功
-// 时间都是状态：主动上报要在"打得太密"与"错过变化"之间选，而两者都不对。
-// 一个每天跑一次的任务，主动上报意味着这两个指标一天只有一个数据点，
-// 中间二十多个小时是空的——告警规则拿不到值，只能配"无数据"这种钝规则。
-// 异步回调则在每个采集周期读一次当前值，与采集频率天然对齐。
-//
-// snapshot 在采集线程上被调用，必须并发安全且不阻塞。
-//
-// 返回的注销函数在进程关停时调用；不注销会让回调持有 worker 的引用，
-// 而那个 worker 已经停了——采集到的是一份永远不再变化的陈旧状态。
-func (r *Recorder) RegisterWorkerHealth(worker string, snapshot func() WorkerHealth) (func() error, error) {
-	if r == nil || snapshot == nil {
-		return func() error { return nil }, nil
-	}
-
-	failures, err := r.meter.Int64ObservableGauge(
-		"worker.consecutive_failures",
-		metric.WithDescription("Consecutive failures of a background worker"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("metrics: build worker failure gauge: %w", err)
-	}
-
-	lastSuccess, err := r.meter.Int64ObservableGauge(
-		"worker.last_success_timestamp",
-		metric.WithUnit("s"),
-		metric.WithDescription("Unix time of the last successful run; 0 when it never succeeded"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("metrics: build worker last-success gauge: %w", err)
-	}
-
-	attrs := metric.WithAttributes(attribute.String("worker.name", worker))
-	reg, err := r.meter.RegisterCallback(
-		func(_ context.Context, o metric.Observer) error {
-			health := snapshot()
-			o.ObserveInt64(failures, int64(health.ConsecutiveFailures), attrs)
-
-			// 从未成功过时报 0 而不是跳过：跳过会让这条序列在最需要它的时候
-			// （任务从启动起就一直失败）根本不存在，而"无数据"与"值为 0"
-			// 在告警规则里是两种完全不同的处置。
-			var ts int64
-			if !health.LastSuccess.IsZero() {
-				ts = health.LastSuccess.Unix()
-			}
-			o.ObserveInt64(lastSuccess, ts, attrs)
-			return nil
-		},
-		failures, lastSuccess,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("metrics: register worker health callback: %w", err)
-	}
-	return reg.Unregister, nil
 }
 
 // DBPoolStats 是连接池的当前用量，字段对应 database/sql.DBStats。

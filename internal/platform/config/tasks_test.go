@@ -117,3 +117,22 @@ func TestTasksEffectiveValues(t *testing.T) {
 		t.Fatalf("EffectiveQueues() = %v, want {high:3}", got)
 	}
 }
+
+func TestLoadRejectsRemovedSchedulerSettings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ key, value string }{
+		{"lease_name", `""`},
+		{"lease_ttl", "0"},
+		{"retry_interval", "0"},
+		{"unique_ttl", "0"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Parallel()
+			input := minimalConfigYAML() + "\ntasks:\n  scheduler:\n    " + tc.key + ": " + tc.value + "\n"
+			_, err := loadFromReader(strings.NewReader(input))
+			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected removed setting %s to be rejected, got %v", tc.key, err)
+			}
+		})
+	}
+}
