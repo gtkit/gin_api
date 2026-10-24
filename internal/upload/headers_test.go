@@ -1,4 +1,4 @@
-package middleware
+package upload
 
 import (
 	"net/http"
@@ -7,11 +7,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/gtkit/gin-api/internal/pkg/upload"
 )
 
-func serveUploadedFile(t *testing.T, policy upload.Policy, target string) *httptest.ResponseRecorder {
+func serveUploadedFile(t *testing.T, policy Policy, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -19,35 +17,35 @@ func serveUploadedFile(t *testing.T, policy upload.Policy, target string) *httpt
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 
-	UploadedFileHeaders(policy)(c)
+	FileHeaders(policy)(c)
 	c.String(http.StatusOK, "content")
 	return rec
 }
 
-// TestUploadedFileHeadersNosniffAlways 钉住 nosniff 恒定输出：与内联判定无关。
-func TestUploadedFileHeadersNosniffAlways(t *testing.T) {
+// TestFileHeadersNosniffAlways 钉住 nosniff 恒定输出：与内联判定无关。
+func TestFileHeadersNosniffAlways(t *testing.T) {
 	for _, target := range []string{"/uploads/a.png", "/uploads/a.html"} {
-		rec := serveUploadedFile(t, upload.DefaultPolicy(), target)
+		rec := serveUploadedFile(t, DefaultPolicy(), target)
 		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 			t.Fatalf("%s: X-Content-Type-Options = %q, want nosniff", target, got)
 		}
 	}
 }
 
-// TestUploadedFileHeadersForcesAttachment 钉住白名单外强制下载。
-func TestUploadedFileHeadersForcesAttachment(t *testing.T) {
+// TestFileHeadersForcesAttachment 钉住白名单外强制下载。
+func TestFileHeadersForcesAttachment(t *testing.T) {
 	tests := []struct {
 		name           string
-		policy         upload.Policy
+		policy         Policy
 		target         string
 		wantAttachment bool
 	}{
-		{name: "html forced", policy: upload.DefaultPolicy(), target: "/uploads/page.html", wantAttachment: true},
-		{name: "svg forced", policy: upload.DefaultPolicy(), target: "/uploads/logo.svg", wantAttachment: true},
-		{name: "no extension forced", policy: upload.DefaultPolicy(), target: "/uploads/blob", wantAttachment: true},
-		{name: "png inline", policy: upload.DefaultPolicy(), target: "/uploads/photo.png", wantAttachment: false},
+		{name: "html forced", policy: DefaultPolicy(), target: "/uploads/page.html", wantAttachment: true},
+		{name: "svg forced", policy: DefaultPolicy(), target: "/uploads/logo.svg", wantAttachment: true},
+		{name: "no extension forced", policy: DefaultPolicy(), target: "/uploads/blob", wantAttachment: true},
+		{name: "png inline", policy: DefaultPolicy(), target: "/uploads/photo.png", wantAttachment: false},
 		// 零值策略：图片也强制下载（fail-closed）。
-		{name: "zero policy forces png", policy: upload.Policy{}, target: "/uploads/photo.png", wantAttachment: true},
+		{name: "zero policy forces png", policy: Policy{}, target: "/uploads/photo.png", wantAttachment: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

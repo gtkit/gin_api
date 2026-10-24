@@ -1,15 +1,13 @@
-package middleware
+package upload
 
 import (
 	"path"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/gtkit/gin-api/internal/pkg/upload"
 )
 
-// UploadedFileHeaders 为上传文件的回源路由（静态服务 / 下载接口）设置响应安全头：
+// FileHeaders 为上传文件的回源路由（静态服务 / 下载接口）设置响应安全头：
 //
 //   - `X-Content-Type-Options: nosniff` 恒定输出——浏览器不得对响应做类型嗅探提升；
 //   - 按请求路径扩展名推断的类型不在 policy 白名单内时，强制
@@ -18,7 +16,7 @@ import (
 // 头必须在 c.Next() 之前写：http.ServeFile 在 handler 内开始写响应，
 // 事后没有机会再改头。ServeFile 只设置 Content-Type，不会覆盖这两个头。
 // 零值 policy 全部强制下载（fail-closed）。
-func UploadedFileHeaders(policy upload.Policy) gin.HandlerFunc {
+func FileHeaders(policy Policy) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		if !policy.AllowsInlinePath(c.Request.URL.Path) {

@@ -22,6 +22,10 @@ import (
 // TASKQUEUE: 启用可选队列时取消下一行 import 声明和 infra.tasksProducer 字段的注释。
 // import "github.com/gtkit/gin-api/internal/taskqueue"
 
+// UPLOAD: 启用本地上传时取消下面两个 import 声明及 infra.uploader 字段的注释。
+// import "github.com/gtkit/gin-api/internal/upload"
+// import "github.com/gtkit/gouploader"
+
 type providerSet struct {
 	cleanup    *providerCleanup
 	httpConfig HTTPConfig
@@ -49,6 +53,8 @@ type infra struct {
 	telemetry *telemetry.Provider
 	// TASKQUEUE: 供业务 service 显式注入的入队端，启用时取消注释。
 	// tasksProducer *taskqueue.Producer
+	// UPLOAD: 由业务服务共享的上传器，关闭由 providerCleanup 负责。
+	// uploader *gouploader.Uploader
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -154,6 +160,19 @@ func newProvidersWithBudget(
 	// TASKQUEUE: 启用时先恢复 taskqueue.go 的实现，再取消下面调用的注释。
 	// 必须位于 buildServices 之前，业务 service 才能通过 inf.tasksProducer 接收依赖。
 	// if err := buildTaskQueueProducer(&inf, cleanup); err != nil {
+	// 	return nil, err
+	// }
+
+	// UPLOAD: 先恢复 upload.go，再按实际部署填写目录、大小上限和类型白名单。
+	// 这组值仅为接线示例，两个存储目录均应由部署显式确定。
+	// uploadOptions := upload.LocalOptions{
+	// 	Dir:          "./storage/uploads",
+	// 	MaxFileSize:  16 << 20,
+	// 	AllowedTypes: []string{".jpg", ".png", ".pdf"},
+	// }
+	// if err := buildLocalUploader(&inf, cleanup, uploadOptions,
+	// 	gouploader.WithChunkTempDir("./storage/upload-chunks"),
+	// ); err != nil {
 	// 	return nil, err
 	// }
 

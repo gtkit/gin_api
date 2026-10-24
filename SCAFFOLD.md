@@ -289,7 +289,7 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 
 | 能力与 gtkit 模块 | 当前源码入口 | 保留条件与移除关联 |
 |---|---|---|
-| 上传：`gouploader` | `internal/pkg/upload/` | 派生项目接入文件上传或对象存储时保留。未接入时可评估移除封装及其测试；已接入时还须核对业务路由、存储策略和 Uploader 的 Close 调用。不要假定业务上传配置在母版已有统一字段。 |
+| 上传：`gouploader` | `internal/upload/` | 默认未接入；构造、关闭和路由接线均为 UPLOAD 注释。启用或删除按 [上传模块说明](internal/upload/README.md) 操作，目录、限制与存储策略由业务显式提供。 |
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
@@ -561,8 +561,8 @@ telemetry:
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
 | 写操作审计（`internal/pkg/auditlog` + `internal/middleware/audit.go` + `internal/repository/auditlog` + `operation_audit_logs` 表） | 母版不接线。装配四步：① `auditlog.New(repo, Options{})` 构造记录器；② 把 `recorder.Run` 注册为 consumer worker（HTTP 停止后 drain 存量）；③ 在需要审计的路由组（认证之后）挂 `middleware.OperationAudit(recorder.Enqueue)`；④ 保留期清理接普通定时任务调 `repo.DeleteOlderThan`（保留期是合规决定，母版不定值）。**语义是尽力而为**：队列满载与落库故障丢弃并计数告警，不阻塞业务；不记请求体/响应体/query。不用时删除：包目录 ×3 + 中间件文件 + `internal/models/operation_audit.go` + 对应迁移 |
-| 文件上传（`internal/pkg/upload` + `gtkit/gouploader`，版本由母版钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，母版纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
-| 上传文件回源安全（`internal/pkg/upload` + `internal/middleware/uploadheaders.go`） | 在上传文件的静态服务/下载路由组上挂 `middleware.UploadedFileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
+| 文件上传（`internal/upload` + `gtkit/gouploader`，版本由母版钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，母版纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
+| 上传文件回源安全（`internal/upload` + `internal/upload/headers.go`） | 在上传文件的静态服务/下载路由组上挂 `upload.FileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
 | 验证码（`internal/pkg/verifycode`） | 母版不构造实例。装配处 `verifycode.New(ctx, redis客户端, sender, Options{})` 按渠道各建一个实例（短信/邮件用不同 `KeyPrefix`），sender 用闭包适配 `internal/pkg/sms`/`mail`。包内兑现：Lua 原子签发与重置计数、原子校验（命中即毁、尝试超限销毁）、SetNX 发送节流、Redis 键经 SHA-256 不落明文手机号/邮箱。状态变更脚本禁止不确定结果的自动重试，仅在 NOSCRIPT 时重载；超时后由调用方处理未知结果，不自动重发验证码。**⚠ `Options.Debug` 是显式后门（固定码 + 只存不发），仅限本地/自动化测试装配，生产环境不得注入**——包内不做环境判断，责任在装配处 |
 | 图形验证码（`internal/pkg/captcha`） | 母版不构造实例。装配处 `captcha.New(redis客户端, Options{})`，`Generate` 返回 ID + base64 图片（答案只落 Redis），`Verify` 一次性消费：无论对错同一 ID 只有一次校验机会，猜错必须换新图 |
 | 出站 HTTP 客户端（`internal/pkg/httpclient`） | 在 `outbound.clients.<名字>` 下配 `base_url` 等，按名字取用。默认值：超时 10s、响应体上限 8 MiB、每主机 64 连接。**响应体上限不可省**——下游返回 HTML 错误页或被中间设备劫持时，没有上限就会被整个读进内存 |
@@ -616,37 +616,18 @@ telemetry:
 
 ### 接入文件上传 / 对象存储
 
-上传能力经 `github.com/gtkit/gouploader` 接入（**已在母版 go.mod，版本钉在 v1.8.1
-并随门禁验证**）：对象存储抽象（内置本地磁盘与 S3 兼容实现）、分片断点续传、
-STS 直传、大小与类型限制都在包内；云厂商 adapter 是独立 module，按需
-`go get github.com/gtkit/gouploader/{aliyun,tencent,huawei,aws}`。
+上传能力集中在 `internal/upload/`，使用 go.mod 锁定的 `github.com/gtkit/gouploader`。
+默认不注册上传或下载路由，目录外的构造、关闭和路由接线均以 UPLOAD 注释保留。
+普通主程序和 `make build` 不引入上传包及 SDK；`go build ./...` 仍会编译该可选包。
 
-该库自身不输出日志：无返回路径的错误（后台会话清理失败、被隔离的钩子 panic、
-降级放行、启动期安全建议）只经 `WithOnBackgroundError` 上报，未装配即丢弃。
-仓内入口 `upload.NewLocalUploader` 已默认把它接进 `logger/v2`，并排在 extra
-之前，传入自己的 `WithOnBackgroundError` 即可取代。**绕过该入口、直接用
-gouploader 原生 API 装配时须自行接上**，否则这些事件没有任何出口。
+本地磁盘使用 `upload.NewLocalUploader`，目录、大小上限和类型白名单三项必须显式设置。
+普通上传调用 `uploader.UploadService().Upload`；对象存储、分片、STS 直传继续使用 SDK 原生 API。
+后台错误默认接入项目 logger/v2，上传器的 `Close` 需要随进程生命周期执行。
 
-本地磁盘走仓内装配入口（三项必填，见注册位表）：
+上传路由复用 `middleware.MultipartBody`；上传文件的下载或回源路由使用
+`upload.FileHeaders`。鉴权、文件归属检查及文件记录由业务模块负责。
 
-```go
-uploader, err := upload.NewLocalUploader(upload.LocalOptions{
-    Dir:          cfg.UploadDir,
-    MaxFileSize:  32 << 20,
-    AllowedTypes: []string{".jpg", ".png", ".pdf"},
-})
-// 进程关停时 uploader.Close()（它持有分片孤儿清理的后台 goroutine）
-```
-
-对象存储与 STS 直传直接用 gouploader 原生 API（`gouploader.New` +
-`WithS3Storage` / 云厂商 adapter / `WithSTSProvider`），附加能力
-（分片参数、回调、公开 URL 构造）经 `NewLocalUploader` 的 extra 参数
-或原生 Option 透传。
-
-HTTP 路由、鉴权与响应头由业务侧负责（gouploader 明确不做）：上传路由按
-`docs/api-conventions.md` 挂 `middleware.MultipartBody(上限)`；**回源路由必须挂
-`middleware.UploadedFileHeaders`**（见上方注册位表），否则上传的 HTML/SVG
-会被浏览器内联渲染，构成存储型 XSS。
+初始化位置、启用步骤和删除方法见 [上传模块说明](internal/upload/README.md)。
 
 ### 本地开发依赖（可选）
 

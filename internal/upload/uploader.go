@@ -30,7 +30,7 @@ type LocalOptions struct {
 // 返回的 *gouploader.Uploader 持有后台清理 goroutine，进程关停时由
 // 调用方 Close。附加能力（分片参数、回调、公开 URL 构造等）经 extra
 // 透传；对象存储与 STS 直传直接用 gouploader 原生 API 构造即可。
-// 上传文件的回源路由务必挂 middleware.UploadedFileHeaders（见本包 Policy）。
+// 上传文件的回源路由务必挂 FileHeaders（见本包 Policy）。
 //
 // 后台错误默认有出口：gouploader 自 v1.8.0 起不再自行输出日志，无返回路径
 // 的错误（后台会话清理失败、被隔离的钩子 panic、宽松模式降级放行、启动期

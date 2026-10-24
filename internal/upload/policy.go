@@ -1,12 +1,11 @@
-// Package upload 提供上传文件回源服务的内联策略。
+// Package upload 提供可选上传器、文件展示策略和回源响应头。
 //
 // 用户上传的文件被静态服务或下载接口回源时，浏览器把 HTML/SVG 当文档渲染
-// 就是存储型 XSS。本包只回答一个问题：某个路径的内容能否内联展示——
+// 就是存储型 XSS。Policy 用于判断某个路径的内容能否内联展示——
 // 零值策略一律不能（fail-closed），白名单由构造方显式给出。
 //
-// 响应头的写出由 middleware.UploadedFileHeaders 承载；上传本身
-// （对象存储、分片、STS 直传）经 gtkit/gouploader 接入，见 SCAFFOLD.md
-// 「接入文件上传 / 对象存储」。
+// 响应头的写出由 FileHeaders 承载；上传本身
+// （对象存储、分片、STS 直传）经 gtkit/gouploader 接入，见本目录 README.md。
 package upload
 
 import (

@@ -182,6 +182,9 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	if _, wired := reflect.TypeFor[config.Config]().FieldByName("Tasks"); wired {
 		want = append(want, "task producer")
 	}
+	if _, wired := reflect.TypeFor[infra]().FieldByName("uploader"); wired {
+		want = append(want, "local uploader")
+	}
 	if !slices.Equal(names, want) {
 		t.Fatalf("registered provider resources = %v, want %v", names, want)
 	}
