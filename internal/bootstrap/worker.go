@@ -156,13 +156,17 @@ func validateWorkerContract(w Worker) error {
 	kind, lifecycle := w.Kind(), w.Lifecycle()
 
 	var errs []error
-	if kind == KindUnspecified {
+	switch kind {
+	case KindBootstrap, KindProducer, KindConsumer:
+	default:
 		errs = append(errs, fmt.Errorf(
-			"%w: worker %q must declare a kind (bootstrap|producer|consumer)", ErrWorkerContractViolation, name))
+			"%w: worker %q must declare a kind (bootstrap|producer|consumer), got %d", ErrWorkerContractViolation, name, kind))
 	}
-	if lifecycle == LifecycleUnspecified {
+	switch lifecycle {
+	case LifecycleLongRunning, LifecycleOneShot:
+	default:
 		errs = append(errs, fmt.Errorf(
-			"%w: worker %q must declare a lifecycle (long-running|one-shot)", ErrWorkerContractViolation, name))
+			"%w: worker %q must declare a lifecycle (long-running|one-shot), got %d", ErrWorkerContractViolation, name, lifecycle))
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)

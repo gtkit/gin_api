@@ -6,7 +6,7 @@ import (
 	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
-// Config 是 v2 的 typed runtime config。
+// Config 是服务的强类型运行配置。
 type Config struct {
 	Env      env.Env        `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
@@ -46,25 +46,13 @@ type AppConfig struct {
 	EnableHTTPS bool   `mapstructure:"ishttps"`
 	Name        string `mapstructure:"name"`
 	Port        string `mapstructure:"port"`
-	// ReadTimeoutSeconds 是**已废弃**的合并键。
-	//
-	// 保留字段只为让旧配置得到一条可读的迁移错误，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	//
-	// 它此前被赋给 ReadHeaderTimeout，于是 `readtimeout: 2` 让人以为整个请求
-	// 的读取上限是 2 秒，而读 body 仍可占用固定的 60 秒。
-	ReadTimeoutSeconds int `mapstructure:"readtimeout"`
 	// ReadHeaderTimeoutSeconds 是读取请求头的上限；<=0 时用内置默认值。
 	ReadHeaderTimeoutSeconds int `mapstructure:"read_header_timeout"`
 	// ReadTimeoutFullSeconds 是读取**整个请求（头 + 体）**的上限；<=0 时用内置默认值。
 	//
 	// 与上一项分开：只限读头挡不住慢 body，而那正是 slowloris 的形态。
-	ReadTimeoutFullSeconds int `mapstructure:"read_timeout"`
-	// WriteTimeoutSeconds 已废弃：非零即启动失败，见 validateAppConfig 的说明。
-	// 字段保留是为了让旧配置得到**一条可读的迁移错误**，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	WriteTimeoutSeconds int    `mapstructure:"writertimeout"`
-	Timezone            string `mapstructure:"timezone"`
+	ReadTimeoutFullSeconds int    `mapstructure:"read_timeout"`
+	Timezone               string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 	// DrainWaitSeconds 是优雅关停时「/ready 翻成 503」与「关闭 HTTP 监听」之间的等待秒数。
@@ -133,7 +121,7 @@ type DatabaseConfig struct {
 	MinVersion string `mapstructure:"min_version"`
 }
 
-// 数据库连接的默认值。留空时使用，避免存量配置因新增必填键而无法启动。
+// 数据库连接的默认值，未配置时使用。
 //
 // 连接池默认值刻意都是正数：0 在底层的含义分别是"无限连接数"与"无限生命周期"，
 // 都不是安全的默认——前者让数据库被打满，后者让已被服务端单方面断开的连接一直留在池里。
@@ -156,59 +144,59 @@ type DBCredentials struct {
 	Password string
 }
 
-// EmailConfig 是 SMTP 出站通道。Host 为空 = 不启用；启用时 From 必填。
-// AlertTo 非空即启用邮件告警通道（经 internal/pkg/news 扇出）。
+// EmailConfig controls the SMTP channel. A nonempty Host constructs a client in
+// notification.mail.Init; AlertTo independently opts it into alert fan-out.
+// Configuration validates values even when a composition selects pure logging.
 type EmailConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"` // 0 走库默认 25；587 提交口；465 配 implicit_ssl
-	User     string `mapstructure:"user"` // 空 = 不认证（可信内网中继）
-	Pass     string `mapstructure:"pass"`
-	From     string `mapstructure:"from"`
-	FromName string `mapstructure:"from_name"`
-	// ImplicitSSL 使用 465 端口式 SMTPS；默认策略为 STARTTLS 强制 TLS。
-	ImplicitSSL bool     `mapstructure:"implicit_ssl"`
-	AlertTo     []string `mapstructure:"alert_to"`
+	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client and requires other email fields empty.
+	Port        int      `mapstructure:"port"`         // SMTP port, 0 uses 25; allowed 0..65535; 465 normally requires ImplicitSSL.
+	User        string   `mapstructure:"user"`         // SMTP authentication user; empty uses no authentication (trusted relay only).
+	Pass        string   `mapstructure:"pass"`         // SMTP authentication secret used with User; empty sends no password.
+	From        string   `mapstructure:"from"`         // Envelope/header sender; valid address required when Host is set.
+	FromName    string   `mapstructure:"from_name"`    // Optional display name for From; empty adds no display name.
+	ImplicitSSL bool     `mapstructure:"implicit_ssl"` // true selects SMTPS; false retains the client's forced STARTTLS policy.
+	AlertTo     []string `mapstructure:"alert_to"`     // Valid recipients; empty disables email alerts but retains the configured client.
 }
 
-// Enabled 报告邮件通道是否启用。
+// Enabled reports whether SMTP client construction is configured, not whether alerts have recipients.
 func (c EmailConfig) Enabled() bool { return c.Host != "" }
 
-// SMSConfig 是出站短信通道。Provider 为空 = 不启用；当前仅支持 "aliyun"。
-// AlertPhones 与 AlertTemplate 同时非空即启用短信告警通道；
-// 告警模板必须声明 ${env} 变量（发送参数固定为 {"env": 环境名}）。
+// SMSConfig controls the default Aliyun SMS client and logical templates.
+// AlertPhones and AlertTemplate opt it into alerts together; alert parameters
+// contain env. Pluggable senders do not expand the configuration provider list.
 type SMSConfig struct {
-	Provider     string `mapstructure:"provider"`
-	AccessID     string `mapstructure:"access_id"`
-	AccessSecret string `mapstructure:"access_secret"`
-	RegionID     string `mapstructure:"region_id"` // 空走驱动默认 cn-hangzhou
-	SignName     string `mapstructure:"sign_name"`
-	// Templates 逻辑模板名 → 供应商模板；业务与告警都以逻辑名引用，
-	// 供应商编号只出现在配置里。
-	Templates     map[string]SMSTemplateConfig `mapstructure:"templates"`
-	AlertPhones   []string                     `mapstructure:"alert_phones"`
-	AlertTemplate string                       `mapstructure:"alert_template"`
+	Provider      string                       `mapstructure:"provider"`       // Empty disables the client and requires other SMS fields empty; only aliyun is accepted.
+	AccessID      string                       `mapstructure:"access_id"`      // Aliyun AccessKey ID; required when Provider is set, no fallback.
+	AccessSecret  string                       `mapstructure:"access_secret"`  // Aliyun AccessKey secret; required when Provider is set, no fallback.
+	RegionID      string                       `mapstructure:"region_id"`      // SMS region; empty uses the driver's cn-hangzhou default.
+	SignName      string                       `mapstructure:"sign_name"`      // Required default signature; a template may override it.
+	Templates     map[string]SMSTemplateConfig `mapstructure:"templates"`      // Logical names to provider templates; each entry requires Code, empty defines none.
+	AlertPhones   []string                     `mapstructure:"alert_phones"`   // Nonblank alert targets; empty disables SMS alerts, must be paired with AlertTemplate.
+	AlertTemplate string                       `mapstructure:"alert_template"` // Logical key in Templates, not provider ID; empty disables alerts, pair with AlertPhones. Template receives env.
 }
 
-// SMSTemplateConfig 是一条逻辑模板到供应商模板的映射。
+// SMSTemplateConfig maps one logical name to its provider template.
 type SMSTemplateConfig struct {
-	Code string `mapstructure:"code"`
-	// SignName 逐模板签名，空回退 SMSConfig.SignName。
-	SignName string `mapstructure:"sign_name"`
+	Code     string `mapstructure:"code"`      // Provider template ID; required for every defined logical template, no fallback.
+	SignName string `mapstructure:"sign_name"` // Per-template signature; empty falls back to SMSConfig.SignName.
 }
 
-// Enabled 报告短信通道是否启用。
+// Enabled reports whether SMS client construction is configured, not whether alerts have targets.
 func (c SMSConfig) Enabled() bool { return c.Provider != "" }
 
 type LogConfig struct {
-	SQL           int    `mapstructure:"sql"`
-	Compress      int    `mapstructure:"compress"`
-	ConsoleStdout int    `mapstructure:"consolestdout"`
-	FileStdout    int    `mapstructure:"filestdout"`
-	Level         string `mapstructure:"level"`
-	MaxAge        int    `mapstructure:"maxage"`
-	MaxBackups    int    `mapstructure:"maxbackups"`
-	MaxSize       int    `mapstructure:"maxsize"`
-	Path          string `mapstructure:"path"`
+	SQL int `mapstructure:"sql"`
+	// SQLSlowThresholdMS controls dedicated slow-query warnings. Nil uses 200ms;
+	// zero disables only that warning; positive values are milliseconds.
+	SQLSlowThresholdMS *int64 `mapstructure:"sql_slow_threshold_ms"`
+	Compress           int    `mapstructure:"compress"`
+	ConsoleStdout      int    `mapstructure:"consolestdout"`
+	FileStdout         int    `mapstructure:"filestdout"`
+	Level              string `mapstructure:"level"`
+	MaxAge             int    `mapstructure:"maxage"`
+	MaxBackups         int    `mapstructure:"maxbackups"`
+	MaxSize            int    `mapstructure:"maxsize"`
+	Path               string `mapstructure:"path"`
 	// AccessRequestBody 控制是否在 HTTP 访问日志中记录请求体。默认 false（不记录）。
 	// 开启后请求体仍会经敏感字段脱敏；非结构化 body 只记录 content-type 与大小占位。
 	AccessRequestBody bool `mapstructure:"access_request_body"`
@@ -224,7 +212,9 @@ type RedisConfig struct {
 	Password string `mapstructure:"password"`
 	// DBs 为需要初始化的逻辑库号；配置地址时必填且非负、不重复。
 	// 无 Redis 消费能力且地址为空时可省略；须包含各启用能力使用的库号。
-	DBs    []int  `mapstructure:"dbs"`
+	DBs []int `mapstructure:"dbs"`
+	// Prefix is shared by auth, rate limits and response caching. Empty falls back
+	// to App.Name without trimming or separators; whitespace-only is invalid.
 	Prefix string `mapstructure:"prefix"`
 
 	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，
@@ -261,7 +251,9 @@ type RateLimitConfig struct {
 // 装配层翻译成强类型并做全部校验。让配置结构直接复用强类型枚举会逼着
 // 使用者在 yaml 里写数字，而数字的含义只有读代码才知道。
 type RateLimitPolicyConfig struct {
-	ID          string  `mapstructure:"id"`
+	ID string `mapstructure:"id"`
+	// Rate 为每秒补充量，Burst 为突发容量；均必填且为正，无默认额度。
+	// Redis 策略按定点速率补满 Burst 并加 60s 余量，必须不超过 24h。
 	Rate        float64 `mapstructure:"rate"`
 	Burst       int     `mapstructure:"burst"`
 	Scope       string  `mapstructure:"scope"`
@@ -272,8 +264,9 @@ type RateLimitPolicyConfig struct {
 
 // JWTKeyConfig 是一把带 kid 的密钥。
 //
-// active 需要 Ed25519 PKCS#8 私钥（PRIVATE KEY，0600）与 PKIX 公钥（PUBLIC KEY）；
-// 路径必填，支持绝对路径或相对 APP_ROOT 的路径，不回落到默认密钥。
+// active 在 local 模式需要 Ed25519 PKCS#8 私钥（PRIVATE KEY，0600）与 PKIX 公钥（PUBLIC KEY）；
+// external 只需要公钥，私钥路径可留空且不会加载。必需路径不回落到默认密钥，
+// 支持绝对路径或相对 APP_ROOT 的路径。jwt generate/reencode 仍要求完整密钥对。
 // previous 只需要 PKIX 公钥（它们只用于验签，
 // 保留私钥意味着一把已经退役的密钥仍能签发新令牌——那正是轮换要终结的）。
 type JWTKeyConfig struct {
@@ -283,7 +276,7 @@ type JWTKeyConfig struct {
 }
 
 type JWTConfig struct {
-	// Active 是当前签发用的密钥。
+	// Active 是当前验签密钥；local 模式同时用于签发，external 仅加载公钥。
 	Active JWTKeyConfig `mapstructure:"active"`
 	// Previous 是仍接受验签的旧公钥，数量上限由 jwtauth 强制。
 	//
@@ -310,12 +303,6 @@ type JWTConfig struct {
 	// 与上一条**分开**：两者是不同的兼容维度（缺 kid vs 不同算法族），
 	// 共用一个开关会让其中一条的删除被另一条阻塞。
 	LaravelAcceptUntil string `mapstructure:"laravel_accept_until"`
-	// PrivateKeyPath / PublicKeyPath 是**已废弃**的单密钥路径。
-	//
-	// 保留字段是为了让旧配置得到一条可读的迁移错误，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	PrivateKeyPath string `mapstructure:"private_key_path"`
-	PublicKeyPath  string `mapstructure:"public_key_path"`
 	// TokenTTLHours 是签发 token 的有效期（小时）；正值覆盖，<=0 按认证模式回落：
 	// local 为 1 小时，external 为 720 小时（30 天），见 EffectiveTokenTTL。
 	//
@@ -352,20 +339,15 @@ const (
 // newsPlatforms 是启动校验用的平台白名单。
 var newsPlatforms = []string{NewsPlatformFeishu, NewsPlatformDingTalk, NewsPlatformWeCom}
 
-// NewsConfig 是告警通道配置。
-//
-// webhook 底层用 gtkit/msgbot，因此支持飞书 / 钉钉 / 企业微信三家；
-// Platform 留空按飞书处理，与本字段引入之前的行为一致。
+// NewsConfig configures the default robot and the separate image-message app.
+// Text alerts use only FSURL, Platform and Secret. The registered robot remains
+// available for explicit targets even when FSURL is empty.
 type NewsConfig struct {
-	// FSURL 是机器人 webhook 地址。字段名沿用历史（最初只支持飞书），
-	// 语义已是"告警 webhook"，各平台通用。
-	FSURL string `mapstructure:"fsurl"`
-	// Platform 是机器人平台：feishu（默认）、dingtalk 或 wecom。
-	Platform string `mapstructure:"platform"`
-	// Secret 是加签密钥，平台侧开启"加签"时必填。
-	Secret    string `mapstructure:"secret"`
-	AppID     string `mapstructure:"appid"`
-	AppSecret string `mapstructure:"appsecret"`
+	FSURL     string `mapstructure:"fsurl"`     // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
+	Platform  string `mapstructure:"platform"`  // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
+	Secret    string `mapstructure:"secret"`    // Optional platform signing secret; required operationally when platform-side signing is enabled.
+	AppID     string `mapstructure:"appid"`     // Image-message application ID; empty means not supplied, unused by text alert plugins.
+	AppSecret string `mapstructure:"appsecret"` // Image-message application secret; empty means not supplied, unused by text alert plugins.
 }
 
 type CORSConfig struct {

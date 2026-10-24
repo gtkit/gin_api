@@ -16,7 +16,7 @@
 // ── 覆盖范围 ────────────────────────────────────────────────────────────
 // 扫描**被 git 跟踪的** `*.md`，检查两类引用：
 //
-//  1. Markdown 行内链接 `[文字](相对路径)` —— 按 Markdown 语义相对文档所在目录解析。
+//  1. Markdown 行内链接：相对路径按文档目录解析，绝对文件路径直接检查目标。
 //  2. 反引号里的仓内路径 `docs/foo.md` —— 先按仓库根解析，再按文档所在目录解析，
 //     两者都不存在才算失败。
 //
@@ -42,6 +42,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,13 +91,20 @@ type ref struct {
 func (r ref) allowKey() string { return r.doc + ":" + stripAnchor(r.text) }
 
 func main() {
+	if err := run(); err != nil {
+		if _, writeErr := fmt.Fprintln(os.Stderr, err); writeErr != nil {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	switch {
 	case len(os.Args) > 1 && os.Args[1] == "--print-scope":
-		printScope()
-		return
+		return printScope()
 	case len(os.Args) > 1 && os.Args[1] == "--self-test":
-		selfTest()
-		return
+		return selfTest()
 	}
 
 	// 一律相对 git 顶层解析，不依赖当前工作目录。
@@ -105,32 +113,27 @@ func main() {
 	// 「引用解析不到」的假失败，而真正的原因（跑错了目录）一个字都不会出现。
 	root, err := repoRoot()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: %w", err)
 	}
 
 	docs, err := trackedDocs(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: %w", err)
 	}
 	// 空集合即失败：本仓必然有被跟踪的 markdown，扫到 0 份只可能是枚举坏了。
 	// 那种坏法的表现是"全绿"——自检覆盖的是判定逻辑，覆盖不到这里的枚举。
 	if len(docs) == 0 {
-		fmt.Fprintln(os.Stderr, "FAIL: no tracked *.md found — the scan set is empty, which cannot be right")
-		os.Exit(1)
+		return errors.New("FAIL: no tracked *.md found — the scan set is empty, which cannot be right")
 	}
 
 	dead, err := findDead(root, docs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: %w", err)
 	}
 
 	allowed, err := loadAllowlist(filepath.Join(root, allowlistPath))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: %w", err)
 	}
 
 	var unlisted []string
@@ -160,35 +163,61 @@ func main() {
 	failed := false
 	if len(unlisted) > 0 {
 		sort.Strings(unlisted)
-		fmt.Println("FAIL: documentation references must resolve to real paths")
-		fmt.Println("  Either fix the reference, or claim it in " + allowlistPath)
-		fmt.Println("  with an explicit owner and reason.")
+		if _, writeErr := fmt.Println("FAIL: documentation references must resolve to real paths"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
+		if _, writeErr := fmt.Println("  Either fix the reference, or claim it in " + allowlistPath); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
+		if _, writeErr := fmt.Println("  with an explicit owner and reason."); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
 		for _, f := range unlisted {
-			fmt.Println(" ", f)
+			if _, writeErr := fmt.Println(" ", f); writeErr != nil {
+				return fmt.Errorf("write tool output: %w", writeErr)
+			}
 		}
 		failed = true
 	}
 	if len(stale) > 0 {
 		sort.Strings(stale)
-		fmt.Println("FAIL: stale entries in " + allowlistPath + " (the reference now resolves, or is gone)")
-		fmt.Println("  Remove them — an exemption that no longer applies hides the next real defect.")
+		if _, writeErr := fmt.Println("FAIL: stale entries in " + allowlistPath + " (the reference now resolves, or is gone)"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
+		if _, writeErr := fmt.Println("  Remove them — an exemption that no longer applies hides the next real defect."); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
 		for _, s := range stale {
-			fmt.Println(" ", s)
+			if _, writeErr := fmt.Println(" ", s); writeErr != nil {
+				return fmt.Errorf("write tool output: %w", writeErr)
+			}
 		}
 		failed = true
 	}
 	if failed {
-		os.Exit(1)
+		return errors.New("documentation reference check failed")
 	}
 
-	fmt.Printf("doc reference check OK (%d docs, %d claimed exemptions)\n", len(docs), len(allowed))
+	if _, writeErr := fmt.Printf("doc reference check OK (%d docs, %d claimed exemptions)\n", len(docs), len(allowed)); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }
 
-func printScope() {
-	fmt.Println("scope: git-tracked *.md")
-	fmt.Println("  kind=link  markdown inline links [text](path), resolved against the doc's directory")
-	fmt.Println("  kind=path  backticked repo paths, resolved against repo root then the doc's directory")
-	fmt.Println("existence only: anchors, wrong-but-existing targets and Go symbol references are out of scope")
+func printScope() error {
+	if _, writeErr := fmt.Println("scope: git-tracked *.md"); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	if _, writeErr := fmt.Println("  kind=link  markdown inline links [text](path), resolved against the doc's directory"); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	if _, writeErr := fmt.Println("  kind=path  backticked repo paths, resolved against repo root then the doc's directory"); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	if _, writeErr := fmt.Println("existence only: anchors, wrong-but-existing targets and Go symbol references are out of scope"); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }
 
 func repoRoot() (string, error) {
@@ -336,7 +365,7 @@ func stripAnchor(s string) string {
 
 // resolves 报告引用是否指向一个真实存在的路径。
 //
-// 链接按 Markdown 语义只相对文档目录解析；反引号裸路径两种写法都常见，
+// 相对链接按文档目录解析，绝对链接直接检查目标；反引号裸路径两种写法都常见，
 // 因此先按仓库根再按文档目录试——只有两者都不存在才算失败。
 func resolves(root string, r ref) bool {
 	target := stripAnchor(r.text)
@@ -344,6 +373,10 @@ func resolves(root string, r ref) bool {
 		return true // 只有锚点，文件部分为空
 	}
 	target = strings.TrimSuffix(target, "/")
+	if filepath.IsAbs(target) {
+		_, err := os.Lstat(target)
+		return err == nil
+	}
 	docDir := filepath.Dir(r.doc)
 
 	candidates := []string{filepath.Join(root, docDir, target)}
@@ -392,32 +425,40 @@ func loadAllowlist(path string) (map[string]bool, error) {
 // 表现都是「全绿」，与文档引用全部正确一模一样。因此自检必须证明两件事：
 // 真实缺陷会被抓到，且正确的引用不会被误报。缺了后半条，判据会靠误报把自己
 // 逼进被整体放宽的结局。
-func selfTest() {
+func selfTest() (err error) {
 	dir, err := os.MkdirTemp("", "doc-refs-selftest-")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: self-test: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: self-test: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if removeErr := os.RemoveAll(dir); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove self-test fixture %s: %w", dir, removeErr))
+		}
+	}()
 
-	write := func(rel, content string) {
+	write := func(rel, content string) error {
 		full := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "FAIL: self-test: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("FAIL: self-test: %w", err)
 		}
 		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "FAIL: self-test: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("FAIL: self-test: %w", err)
 		}
+		return nil
 	}
 
 	// 真实存在的被引用目标。
-	write("docs/real.md", "real\n")
-	write("scripts/real.sh", "#!/bin/sh\n")
+	if err := write("docs/real.md", "real\n"); err != nil {
+		return err
+	}
+	if err := write("scripts/real.sh", "#!/bin/sh\n"); err != nil {
+		return err
+	}
 
-	write("docs/probe.md", strings.Join([]string{
-		"[dead link](missing.md)",               // 应报：链接目标不存在
+	if err := write("docs/probe.md", strings.Join([]string{
+		"[dead link](missing.md)", // 应报：链接目标不存在
+		"[absolute live](" + filepath.Join(dir, "docs/real.md") + "#section)",
+		"[absolute dead](" + filepath.Join(dir, "docs/absent.md") + ")",
 		"[live link](real.md)",                  // 不应报
 		"see `docs/missing.md` for details",     // 应报：反引号裸路径，仓库根解析失败
 		"see `docs/real.md` for details",        // 不应报：仓库根解析成功
@@ -437,17 +478,22 @@ func selfTest() {
 		"[anchored](real.md#section)",           // 不应报：锚点被剥离后存在
 		"[anchored dead](gone.md#sec)",          // 应报，且登记键须不含 `#`
 		"syntax demo `[文字](路径)` inline",         // 不应报：行内代码里的链接示例，不是链接
-	}, "\n")+"\n")
+	}, "\n")+"\n"); err != nil {
+		return err
+	}
 
 	// docs/nested/ 下的文档用文档目录相对写法引用 —— 证明两种解析都生效。
-	write("docs/nested/n.md", "see `sub/there.md` here\n")
-	write("docs/nested/sub/there.md", "there\n")
+	if err := write("docs/nested/n.md", "see `sub/there.md` here\n"); err != nil {
+		return err
+	}
+	if err := write("docs/nested/sub/there.md", "there\n"); err != nil {
+		return err
+	}
 
 	docs := []string{"docs/probe.md", "docs/nested/n.md"}
 	dead, err := findDead(dir, docs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: self-test: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: self-test: %w", err)
 	}
 
 	got := map[string]bool{}
@@ -455,8 +501,9 @@ func selfTest() {
 		got[r.kind+" "+r.text] = true
 	}
 
-	wantDead := []string{"link missing.md", "path docs/missing.md", "link gone.md#sec"}
+	wantDead := []string{"link missing.md", "path docs/missing.md", "link gone.md#sec", "link " + filepath.Join(dir, "docs/absent.md")}
 	wantAlive := []string{
+		"link " + filepath.Join(dir, "docs/real.md") + "#section",
 		"link real.md", "path docs/real.md", "path scripts/real.sh",
 		"path internal/pkg/log.AccessLog()", "path gorm.io/gorm",
 		"path cmd/{a,b}.go", "path docs/*.md",
@@ -501,13 +548,20 @@ func selfTest() {
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		fmt.Println("FAIL: self-test: the judge does not behave as documented")
-		for _, p := range problems {
-			fmt.Println(" ", p)
+		if _, writeErr := fmt.Println("FAIL: self-test: the judge does not behave as documented"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
 		}
-		os.Exit(1)
+		for _, p := range problems {
+			if _, writeErr := fmt.Println(" ", p); writeErr != nil {
+				return fmt.Errorf("write tool output: %w", writeErr)
+			}
+		}
+		return errors.New("documentation reference self-test failed")
 	}
 
-	fmt.Printf("doc reference self-test OK (%d dead detected, %d benign forms not flagged, all keys registrable)\n",
-		len(wantDead), len(wantAlive))
+	if _, writeErr := fmt.Printf("doc reference self-test OK (%d dead detected, %d benign forms not flagged, all keys registrable)\n",
+		len(wantDead), len(wantAlive)); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }

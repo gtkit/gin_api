@@ -10,9 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"golang.org/x/sync/semaphore"
 
@@ -121,9 +120,9 @@ func (h passwordHasher) CompareWithDummy(ctx context.Context, password string) e
 
 	err = h.hasher.CompareWithDummy(password)
 	if !errors.Is(err, credential.ErrMismatch) {
-		// 契约要求它恒为不匹配。真冒出别的错误说明底层实现变了——
-		// 如实返回而不是掩盖：这条路径上的静默会让防账号枚举的时间掩护
-		// 悄悄失效，而没有任何迹象。
+		// 掩护哈希异常等基础设施失败保留原因，不伪装成用户密码错误。
+		// 正常比对的匹配/不匹配都由credential映射为ErrMismatch，
+		// 此分支不会泄露正常情况下的账号存在性。
 		return err
 	}
 	return authapp.ErrInvalidCredentials
@@ -187,23 +186,18 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 	return err
 }
 
-// revocationList 把撤销表适配到 application 的端口。
-type revocationList struct {
-	list *tokenstore.RevocationList
-}
-
-func (l revocationList) Revoke(ctx context.Context, tokenID string, expiresAt time.Time) error {
-	return l.list.Revoke(ctx, tokenID, expiresAt)
-}
-
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
-func (authAuditor) Auditf(format string, args ...any) { logger.Infof(format, args...) }
+func (authAuditor) Auditf(ctx context.Context, format string, args ...any) {
+	logger.InfoCtx(ctx, fmt.Sprintf(format, args...))
+}
 
 // Failf 走 Warn：登录失败、重用检测、撤销失败都是安全排查的起点，
 // 与"某某登录成功"共用一个级别，告警规则就只能靠解析文本。
-func (authAuditor) Failf(format string, args ...any) { logger.Warnf(format, args...) }
+func (authAuditor) Failf(ctx context.Context, format string, args ...any) {
+	logger.WarnCtx(ctx, fmt.Sprintf(format, args...))
+}
 
 // eventRecorder 把认证事件转发给指标仪表。
 type eventRecorder struct {
@@ -225,7 +219,7 @@ var (
 	_ authapp.CredentialRepository = credentialRepo{}
 	_ authapp.PasswordHasher       = passwordHasher{}
 	_ authapp.RefreshStore         = refreshStore{}
-	_ authapp.RevocationList       = revocationList{}
+	_ authapp.RevocationList       = (*tokenstore.RevocationList)(nil)
 	_ authapp.Auditor              = authAuditor{}
 	_ authapp.EventRecorder        = eventRecorder{}
 )

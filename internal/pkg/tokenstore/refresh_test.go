@@ -28,7 +28,11 @@ func newTestStore(t *testing.T, ttl time.Duration) (*RefreshStore, *miniredis.Mi
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	store, err := NewRefreshStore(context.Background(), client, "test", ttl, strings.Repeat("r", 32))
 	if err != nil {

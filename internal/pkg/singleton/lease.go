@@ -209,7 +209,10 @@ func (l *Lease) Acquire(ctx context.Context) (Held, error) {
 	if !ok || len(values) != 2 {
 		return Held{}, fmt.Errorf("singleton: malformed acquire result %#v", raw)
 	}
-	acquired, _ := values[0].(int64)
+	acquired, ok := values[0].(int64)
+	if !ok {
+		return Held{}, fmt.Errorf("singleton: malformed acquire flag %T", values[0])
+	}
 	if acquired != 1 {
 		return Held{}, ErrNotAcquired
 	}
@@ -229,7 +232,11 @@ func (l *Lease) Renew(ctx context.Context, held Held) error {
 	if err != nil {
 		return fmt.Errorf("singleton: renew lease %q: %w", l.name, err)
 	}
-	if ok, _ := raw.(int64); ok != 1 {
+	renewed, ok := raw.(int64)
+	if !ok {
+		return fmt.Errorf("singleton: malformed renew result %T: %w", raw, ErrLeaseLost)
+	}
+	if renewed != 1 {
 		return ErrLeaseLost
 	}
 	return nil

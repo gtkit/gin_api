@@ -9,10 +9,9 @@
 ## 目录结构
 
 ```
-cmd/                         → CLI 入口、默认插件选择和显式注册
+cmd/                         → CLI 入口，选择 server/migration/doctor 等固定运行方式
 internal/
-  core/                      → 编译期插件契约与依赖注册器，不持有具体基础设施实现
-  plugin/                    → 六类能力接口；builtin/ 下为内置默认实现
+  core/                      → 资源状态错误，不持有具体基础设施实现
   appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
@@ -28,8 +27,12 @@ internal/
   middleware/                → Gin 中间件
   router/                    → 路由聚合、版本化模块注册、健康检查路由
   platform/
-    config/                  → 配置结构、默认值与校验（加载在 builtin/config）
+    config/                  → 配置结构、加载、默认值与校验
     data/                    → DB/Redis 借用视图、健康和追踪工具
+    mysql/、redis/           → 固定 SDK 连接的构造和关闭
+    responsecache/           → 响应缓存的构造和关闭
+    logging/                 → gtkit/logger 的 main/access 所有者
+    notification/            → 通知契约、接纳/排空及 robot/mail/sms/dispatch
     telemetry/               → OTel 导出装配
   pkg/                       → 项目内部共享包（仅本仓可 import）
   shared/                    → 跨模块共享的轻量语义
@@ -38,35 +41,39 @@ internal/
 pkg/                         → 对外可复用包（可被仓库外项目 import）
 ```
 
-### 编译期插件与资源所有权
+### 固定技术栈与资源所有权
 
-`internal/core` 只定义四方法 `Plugin` 契约（`Name`、`Init`、`Start`、`Stop`）和
-`PluginRegistry`。业务入口在编译期显式调用 `Register(plugin, dependencies...)`；注册器
-在初始化前校验重复名称、缺失依赖和循环依赖，按稳定拓扑顺序初始化/启动，按逆序停止并聚合
-错误。回调不在注册器锁内执行，重复停止是幂等的。
+配置在 `internal/platform/config` 直接加载与校验；时区在任何后台资源启动之前应用。
+`internal/bootstrap/resources.go` 以固定顺序构造通知通道、通知组合、日志、MySQL、Redis 和响应缓存。
+没有通用插件契约、依赖图、注册回调或运行时发现。命令入口只选择所需运行方式，
+业务 application 继续通过自己的窄端口访问仓储和外部服务。
 
-`internal/plugin` 定义配置、日志、数据库、Redis、响应缓存和 HTTP 中间件六类能力，
-`internal/plugin/builtin/` 提供默认实现。`cmd/plugins.go` 是默认选择的组合根：只构造和注册，
-配置读取、连接和日志实例创建都在 `Init`。Bootstrap 必须收到显式 registrar，消费具名能力，
-不回落到默认实现。替换只修改业务入口注册，不修改 Core；不使用 Go `plugin` 包、动态 `.so`
-或运行期发现。
+各具体资源用 `Open(ctx, Options)` 完成构造，成功返回拥有关闭权的 Owner；消费者只取得借用能力。
+`platform/data.Resources` 保存 DB/Redis 句柄与观测视图，不关闭连接。
+main 直接使用 `gtkit/logger/v2` 包级 API；access 原生实例经 bootstrap → router → middleware 注入。
+`platform/logging` 只管理构造和生命周期，不提供每条日志的转发、字段转换或接纳层。
+正常关停确认日志源结束后，Runtime 先关闭缓存、Redis、MySQL，再关闭日志，最后关闭通知组合、短信、邮件、机器人。
+部分构造失败会回收已取得的资源，清理错误与根因合并返回。
 
-默认依赖图为 config→logging→mysql/redis，cache 依赖 config/logging/redis，HTTP 中间件依赖
-config/logging。配置在 Init 才加载，因此图静态声明 cache→redis（已获准）；内存/禁用缓存
-仍不访问 Redis，required/optional Redis 规则按启用功能推导。迁移只注册 config/logging/mysql，
-选择迁移凭据和 OpenMigrationDB，保留 DDL 的命令超时。doctor/JWT/module 保持各自最小装配。
+server 启动总预算 30 秒，单次资源构造最多 10 秒，父 deadline 只能收紧。
+migration 的总启动预算为 15 秒，仅构造配置、通知/日志和数据库，使用迁移凭据及迁移专用 opener；
+DDL 的命令预算与连接启动预算分开。doctor/JWT/module 保持最小装配。
 
-插件独占自己创建的连接和缓存 Store；`platform/data.Resources` 只保存不带 `Close` 权限的
-借用视图。HTTP 链由所选 builder 在最终 metrics 就绪后构建，保留外层 Recovery 到请求体限制
-的原有顺序。WorkerManager、遥测、时区、校验器和 JSON 是固定骨架/工具，不新增插件或 MQ 接口。
+HTTP 中间件由 `internal/router/middleware.go` 在最终 metrics 就绪后直接构造，
+保持 Recovery、RequestID、可选 tracing、访问日志、metrics、内层 Recovery、安全头、
+错误处理、可选 CORS 和请求体上限的顺序。每个 engine 独立构造，无组件生命周期状态。
+缓存继续由具体路由显式挂载，带身份请求仍绕过缓存；Redis 必需性按已启用能力推导。
 
-插件回滚、停止总预算各 30 秒。Runtime.Close 保留父取消和更短 deadline；App/命令只在必要
-收尾边界建立独立预算并接第二信号。模块/扩展失败与插件回滚共享一个 30 秒截止时间。
-HTTP/worker 先分阶段退出，再逆序停止插件；日志最后由同一个 owner 排空。仍存活的 worker
-使共享插件停止被跳过，返回 ErrWorkerNotExited，仅尝试该 logger owner 的独立 Drain。
+模块/扩展失败和 Runtime 回滚共享独立的 30 秒清理预算；正常关闭保留父取消、更短 deadline 和第二信号。
+重复关闭共享首次结果，等待者可独立取消；关闭错误或 panic 不跳过后续所有者。
+HTTP/worker 仍分阶段退出，存活 worker 导致共享资源关闭跳过并返回 ErrWorkerNotExited。
+HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留仍被使用的资源。
+此时同一日志 owner 的 Drain 仅 `Zap().Sync()` 刷文件缓冲，不关闭 SDK 或通知渠道，
+不保证通知队列排空；日志源后来结束仍可正常 Close。
 
-context 需要实现合作：默认日志 SDK 的 void Sync、部分无 context 的 Close 无法硬中断。
-不以可遗弃 goroutine 隐藏未完成关闭，不把预算或 race 测试解释为任意插件隔离或永不 OOM。
+日志和通知的实际排空需要 SDK 与 sender 响应取消。SDK 的 void Sync、部分无 context 的 Close
+无法硬中断，不通过遗弃后台关闭 goroutine 隐藏尚未完成的 I/O。
+通知渠道的替换与关闭约束见 [通知渠道与替换方式](observability.md#通知渠道与替换方式)。
 
 ### `internal/pkg/` 与根 `pkg/` 的区别
 
@@ -92,7 +99,7 @@ context 需要实现合作：默认日志 SDK 的 void Sync、部分无 context 
 
 `internal/scaffold`、`internal/projectinit` 与它们的 `cmd` 入口（`cmd/module.go`、
 `cmd/project.go`）由 `//go:build scaffold` 门控，**不进服务二进制**：`module` 会重写
-`internal/bootstrap/providers.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃
+`internal/bootstrap/modules.go`，`project init` 带 `--force-reinit-git` 且会永久丢弃
 git 历史——两者对派生项目都不存在正确用法。
 
 口径分工是硬约束，两边都不能省：
@@ -157,13 +164,21 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
-模块自建的客户端由模块 `Assembly.Close` 交出清理入口。模块构造失败时先自行释放
-已建立部分；`buildServices` 与 `newProviders` 在后续失败时逆序回滚。装配成功后，
-清理责任移交 `App`，在 HTTP 与 worker 收尾之后、关闭共享基础设施之前执行。
-仍有未退出 worker 时跳过模块清理并返回错误，避免关闭它正在使用的客户端。
+`internal/bootstrap/providers.go` 只负责基础设施视图与进程级装配顺序；
+`internal/bootstrap/modules.go` 集中维护模块服务、认证授权、HTTP 路由及后台任务的接线，
+并持有全部模块装配标记。两者同属 `bootstrap` 包，不增加运行时注册层或修改模块内路由职责。
 
-`internal/bootstrap/providers.go` 的 `newProviders` 按七个阶段顺序编排，本函数只做顺序拼接、
-错误透传与失败回滚（`rollbackStack` 逆序撤销已产生的进程级副作用），不内联任何单个模块的装配细节：
+Runtime 先读取配置并校验本地 JWT 密钥、TLS 证书，再创建日志、数据库、Redis 和缓存。
+TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；预绑定仍重新检查当前有效期，
+并在日志已就绪后报告临期告警。端口预绑定仍先于 worker 启动。
+
+当前模块仅借用 Runtime 的基础设施，`buildServices` 不创建或拥有独立客户端，
+不维护空的模块清理栈。真正创建资源的 provider 在构造成功处登记到 `providerCleanup`：
+失败时逆序回滚，成功时把清理责任交给 `App`，在 HTTP 与 worker 收尾后、关闭共享基础设施前执行。
+仍有未退出 worker 时跳过扩展与共享资源清理并返回错误，避免关闭它正在使用的客户端。
+
+`internal/bootstrap/providers.go` 的 `newProvidersWithBudget` 按七个阶段顺序编排，本函数只做顺序拼接、
+错误透传与失败回滚（`providerCleanup` 逆序撤销已登记的真实副作用），不内联任何单个模块的装配细节：
 
 ```
 resolveInfra（基础设施与派生 HTTP 配置）
@@ -183,7 +198,7 @@ worker 必须先于路由（readiness 要读 worker 状态）。
 service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增基础设施时才往 `infra` 加字段，
 不提前占坑。
 
-模块生成器经 `providers.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
+模块生成器经 `modules.go` 的八个稳定标记接线，新增模块只产生「追加字段/追加行」级改动，
 不重构阶段函数。前四个是**注入型**（生成器在标记前插入接线行），后四个是**校验型**
 （生成器只断言标记存在；这些位置的内容是业务判断，由使用者手写）：
 
@@ -348,6 +363,9 @@ runtime 禁止：
 - repo 数据访问统一经 `mdbCtx(ctx)`。
 - repo 内部可用事务处理单 repo / 聚合内部的多语句写。
 - 跨多个 repo 的业务事务由 application 的 `TxManager.Do` 编排。
+- 同归属管理器的嵌套 `Do` 使用同一物理事务的savepoint；内层成功不独立提交，
+  内层失败回滚到savepoint，外层可显式处理后继续。未知/跨管理器、并行或已关闭的scope拒绝。
+  savepoint或回滚失败使外层不可提交；清理错误与原错误并列返回，panic在清理后继续传播。
 
 ## 配置管理
 

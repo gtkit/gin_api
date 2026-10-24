@@ -3,8 +3,10 @@
 package projectinit
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -42,6 +44,7 @@ type snapshot struct {
 	entries  []snapshotEntry
 	gitSaved bool   // 旧 .git 是否已被 rename 进快照
 	gitDir   string // 快照内旧 .git 的绝对路径
+	preserve bool   // a failed rollback retains the on-disk recovery copy
 }
 
 // newSnapshot 在项目根的**同级目录**下创建快照目录。
@@ -55,10 +58,33 @@ func newSnapshot(root string) (*snapshot, error) {
 		return nil, fmt.Errorf("create snapshot dir next to project root: %w", err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("chmod snapshot dir: %w", err)
+		return nil, errors.Join(fmt.Errorf("chmod snapshot dir: %w", err), os.RemoveAll(dir))
 	}
 	return &snapshot{dir: dir, root: root}, nil
+}
+
+// persistRecovery writes original bytes and presence/type semantics before any
+// project mutation. The private file stays in the already protected directory.
+func (s *snapshot) persistRecovery() error {
+	type recoveryEntry struct {
+		Path       string      `json:"path"`
+		Kind       entryKind   `json:"kind"`
+		Mode       fs.FileMode `json:"mode"`
+		Content    []byte      `json:"content"`
+		LinkTarget string      `json:"link_target"`
+	}
+	entries := make([]recoveryEntry, 0, len(s.entries))
+	for _, entry := range s.entries {
+		entries = append(entries, recoveryEntry{Path: entry.rel, Kind: entry.kind, Mode: entry.mode, Content: entry.content, LinkTarget: entry.linkDest})
+	}
+	data, err := json.Marshal(struct {
+		Root    string          `json:"root"`
+		Entries []recoveryEntry `json:"entries"`
+	}{Root: s.root, Entries: entries})
+	if err != nil {
+		return fmt.Errorf("encode project recovery copy: %w", err)
+	}
+	return writeFileAtomic(filepath.Join(s.dir, "recovery.json"), data, 0o600)
 }
 
 // capture 记录一个受影响路径的当前状态。路径不存在也要记（entryAbsent），
@@ -174,9 +200,9 @@ func (s *snapshot) restoreEntry(e snapshotEntry) error {
 // cleanup 删除快照目录。
 //
 // 只删自己创建的那个带随机后缀的目录，绝不递归删父目录。
-// 清理失败只返回错误供调用方告警，不改变主流程结论——但必须让调用方能打印绝对路径供人工处理。
+// 失败回滚的恢复副本保留；其他清理失败返回确切路径，不能掩盖为成功。
 func (s *snapshot) cleanup() error {
-	if s.dir == "" {
+	if s.dir == "" || s.preserve {
 		return nil
 	}
 	if err := os.RemoveAll(s.dir); err != nil {
@@ -190,19 +216,35 @@ func (s *snapshot) cleanup() error {
 //
 // 不直接 os.WriteFile：它在目标已存在时按原 mode 写，恢复不出原始权限；
 // 且非原子，中途失败会留下截断的文件。
-func writeFileAtomic(path string, content []byte, mode fs.FileMode) error {
+func writeFileAtomic(path string, content []byte, mode fs.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".projectinit-restore-")
 	if err != nil {
 		return fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // rename 成功后这次 remove 是 no-op。
+	closed, renamed := false, false
+	defer func() {
+		if !closed {
+			if closeErr := tmp.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close temporary file %s: %w", tmpName, closeErr))
+			}
+		}
+		if !renamed {
+			if removeErr := os.Remove(tmpName); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove temporary file %s: %w", tmpName, removeErr))
+			}
+		}
+	}()
 
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
+	n, err := tmp.Write(content)
+	if err == nil && n != len(content) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		return fmt.Errorf("write temp file for %s: %w", path, err)
 	}
+	closed = true
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file for %s: %w", path, err)
 	}
@@ -212,5 +254,6 @@ func writeFileAtomic(path string, content []byte, mode fs.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("rename temp file into %s: %w", path, err)
 	}
+	renamed = true
 	return nil
 }

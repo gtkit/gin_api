@@ -1,84 +1,128 @@
-package dao
+package data
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/logger/v2"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
-type queryLogCapture struct{ entries []applog.LogEntry }
-
-func (c *queryLogCapture) Log(_ context.Context, e applog.LogEntry) { c.entries = append(c.entries, e) }
-func TestGormLoggerUsesSelectedImplementation(t *testing.T) {
-	sink := &queryLogCapture{}
-	release, err := applog.Install(sink, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	ctx := applog.ContextWithRequestID(t.Context(), "sql-request")
+func TestGormDisabledBackendDoesNotMaterializeQuery(t *testing.T) {
+	native, _ := newNativeTestLogger(t, "fatal")
 	for _, tc := range []struct {
-		name      string
-		level     gormlogger.LogLevel
-		elapsed   time.Duration
-		queryErr  error
-		rows      int64
-		message   string
-		wantLevel applog.Level
+		name    string
+		elapsed time.Duration
+		err     error
 	}{
-		{"silent", gormlogger.Silent, time.Second, errors.New("hidden"), 1, "", 0},
-		{"fast warn", gormlogger.Warn, 0, nil, 1, "", 0},
-		{"not found", gormlogger.Warn, 0, gorm.ErrRecordNotFound, 0, "", 0},
-		{"error", gormlogger.Warn, 0, errors.New("query failure"), -1, "gorm query error", applog.LevelError},
-		{"slow", gormlogger.Warn, time.Second, nil, 2, "gorm slow query", applog.LevelWarn},
-		{"slow not found", gormlogger.Warn, time.Second, gorm.ErrRecordNotFound, 0, "gorm slow query", applog.LevelWarn},
-		{"verbose", gormlogger.Info, 0, nil, 1, "gorm query", applog.LevelInfo},
+		{"ordinary", 0, nil}, {"slow", time.Second, nil}, {"error", 0, errors.New("query failed")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sink.entries = nil
+			calls := 0
+			adapter := NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
+			fc := func() (string, int64) { calls++; return "SELECT ?", 1 }
+			adapter.Trace(t.Context(), time.Now().Add(-tc.elapsed), fc, tc.err)
+			if calls != 0 {
+				t.Fatalf("formatted suppressed SQL %d times", calls)
+			}
+			if err := native.SetLevel("info"); err != nil {
+				t.Fatal(err)
+			}
+			adapter.Trace(t.Context(), time.Now().Add(-tc.elapsed), fc, tc.err)
+			if calls != 1 {
+				t.Fatalf("dynamic level did not enable query: %d", calls)
+			}
+			if err := native.SetLevel("fatal"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestGormLoggerUsesNativeOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		level              gormlogger.LogLevel
+		elapsed            time.Duration
+		queryErr           error
+		rows               int64
+		message, wantLevel string
+	}{
+		{"silent", gormlogger.Silent, time.Second, errors.New("hidden"), 1, "", ""},
+		{"fast warn", gormlogger.Warn, 0, nil, 1, "", ""},
+		{"not found", gormlogger.Warn, 0, gorm.ErrRecordNotFound, 0, "", ""},
+		{"error", gormlogger.Warn, 0, errors.New("query failure"), -1, "gorm query error", "ERROR"},
+		{"slow", gormlogger.Warn, time.Second, nil, 2, "gorm slow query", "WARN"},
+		{"slow not found", gormlogger.Warn, time.Second, gorm.ErrRecordNotFound, 0, "gorm slow query", "WARN"},
+		{"verbose", gormlogger.Info, 0, nil, 1, "gorm query", "INFO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, read := newNativeTestLogger(t, "debug")
+			ctx := logger.ContextWithRequestID(t.Context(), "sql-request")
 			called := 0
 			NewGormLogger(&config.Config{}).LogMode(tc.level).Trace(ctx, time.Now().Add(-tc.elapsed), func() (string, int64) { called++; return "SELECT ?", tc.rows }, tc.queryErr)
+			entries := read()
 			if tc.message == "" {
-				if called != 0 || len(sink.entries) != 0 {
+				if called != 0 || len(entries) != 0 {
 					t.Fatal("formatted a suppressed query")
 				}
 				return
 			}
-			if called != 1 || len(sink.entries) != 1 {
-				t.Fatalf("fc=%d events=%d", called, len(sink.entries))
+			if called != 1 || len(entries) != 1 {
+				t.Fatalf("fc=%d events=%d", called, len(entries))
 			}
-			event := sink.entries[0]
-			if event.Message != tc.message || event.Level != tc.wantLevel || event.Alert {
-				t.Fatalf("event=%+v", event)
+			event := entries[0]
+			if event["msg"] != tc.message || event["level"] != tc.wantLevel {
+				t.Fatalf("event=%v", event)
 			}
-			fields := map[string]any{}
-			for _, field := range event.Fields {
-				fields[field.Key] = field.Value
+			source, ok := event["source"].(string)
+			if !ok || !strings.Contains(source, "gorm_logger_contract_test.go:") || event["sql"] != "SELECT ?" || event["trace_id"] != "sql-request" || event["request_id"] != "sql-request" {
+				t.Fatalf("fields=%v", event)
 			}
-			if fields["sql"] != "SELECT ?" || fields["trace_id"] != "sql-request" || !strings.Contains(fields["source"].(string), "gorm_logger_contract_test.go:") {
-				t.Fatalf("fields=%v", fields)
-			}
-			_, hasRows := fields["rows"]
+			_, hasRows := event["rows"]
 			if hasRows != (tc.rows >= 0) {
 				t.Fatal("changed unknown row semantics")
 			}
 		})
 	}
+	_, read := newNativeTestLogger(t, "debug")
 	verbose := NewGormLogger(&config.Config{Log: config.LogConfig{SQL: 1}})
 	silent := verbose.LogMode(gormlogger.Silent)
-	sink.entries = nil
-	silent.Info(ctx, "hidden")
-	verbose.Info(ctx, "info %d", 1)
-	verbose.Warn(ctx, "warn %d", 2)
-	verbose.Error(ctx, "error %d", 3)
-	if len(sink.entries) != 3 || sink.entries[0].Text() != "info 1" || sink.entries[1].Text() != "warn 2" || sink.entries[2].Text() != "error 3" {
-		t.Fatalf("printf forwarding=%+v", sink.entries)
+	silent.Info(t.Context(), "hidden")
+	verbose.Info(t.Context(), "info %d", 1)
+	verbose.Warn(t.Context(), "warn %d", 2)
+	verbose.Error(t.Context(), "error %d", 3)
+	entries := read()
+	if len(entries) != 3 || entries[0]["msg"] != "info 1" || entries[1]["msg"] != "warn 2" || entries[2]["msg"] != "error 3" {
+		t.Fatalf("printf forwarding=%v", entries)
+	}
+}
+
+func TestSQLSlowThresholdIsAnIndependentValue(t *testing.T) {
+	for _, threshold := range []*int64{nil, new(int64(0)), new(int64(1500))} {
+		_, read := newNativeTestLogger(t, "debug")
+		cfg := &config.Config{Log: config.LogConfig{SQLSlowThresholdMS: threshold}}
+		adapter := NewGormLogger(cfg)
+		if threshold != nil {
+			*threshold = 1
+		}
+		calls := 0
+		adapter.Trace(t.Context(), time.Now().Add(-time.Second), func() (string, int64) { calls++; return "SELECT ?", 1 }, nil)
+		wantSlow := threshold == nil
+		entries := read()
+		if (len(entries) == 1) != wantSlow || (calls == 1) != wantSlow {
+			t.Fatalf("threshold snapshot: entries=%v calls=%d", entries, calls)
+		}
+		adapter.LogMode(gormlogger.Silent).Trace(t.Context(), time.Now(), func() (string, int64) { t.Error("silent evaluated SQL"); return "", 0 }, errors.New("hidden"))
+		before := len(read())
+		adapter.Trace(t.Context(), time.Now(), func() (string, int64) { return "SELECT ?", 1 }, errors.New("visible error"))
+		entries = read()
+		if len(entries) != before+1 || entries[before]["level"] != "ERROR" {
+			t.Fatalf("error log disabled: %v", entries)
+		}
 	}
 }

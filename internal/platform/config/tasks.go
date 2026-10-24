@@ -22,6 +22,7 @@ type TasksConfig struct {
 	// TaskTimeout 是单个任务的默认处理超时。
 	TaskTimeout time.Duration `mapstructure:"task_timeout"`
 	// ShutdownTimeout 是关停时等待在处理任务完成的预算。
+	// 调度器首次等待也使用此预算；超时会上报故障，仍跟踪同一实例直到真实退出。
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 	// RedisDB 是队列使用的 Redis 逻辑库号。
 	//
@@ -34,7 +35,7 @@ type TasksConfig struct {
 
 // SchedulerConfig 是周期任务调度的配置。
 //
-// 只承载开关与租约参数。**触发时刻、任务类型与重复执行保证在代码里声明**
+// 只承载开关与租约参数。**触发时刻、任务类型与幂等保证在代码里声明**
 // （见 internal/pkg/tasks 的 PeriodicTask）：把 cron spec 放配置里，
 // 就可能出现"配置声明了一个任务，代码里没有对应处理器"的失配——
 // 它的表现是任务按时入队、一直重试到进死信队列，而配置文件看起来完全正常。
@@ -58,6 +59,7 @@ type SchedulerConfig struct {
 	// RetryInterval 是未抢到租约时的重试间隔。
 	RetryInterval time.Duration `mapstructure:"retry_interval"`
 	// UniqueTTL 是投递去重窗口，作用于声明了幂等保证的任务。
+	// 周期任务只接受 GuaranteeIdempotent，当前消息链路不提供 fencing。
 	//
 	// 这是**第二道防线**，不是正确性保证：底层的唯一性锁在任务成功完成时
 	// 就释放，不是维持整个 TTL。一个很快跑完的任务，配合实例间的时钟偏移，

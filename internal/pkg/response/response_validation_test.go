@@ -1,11 +1,17 @@
 package resp
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
 
+	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
+	"github.com/gtkit/goerr"
 	"github.com/gtkit/verify"
 )
 
@@ -42,7 +48,11 @@ func TestBindStructErrTranslatesValidationErrors(t *testing.T) {
 	render := func() (int, string) {
 		c, rec := newCtx()
 		BindStructErr(c, verr)
-		return rec.Code, decode(t, rec)["msg"].(string)
+		msg, ok := decode(t, rec)["msg"].(string)
+		if !ok {
+			t.Fatal("response msg is not a string")
+		}
+		return rec.Code, msg
 	}
 
 	code, msg := render()
@@ -85,7 +95,10 @@ func TestBindErrTranslatesValidationErrors(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	msg := decode(t, rec)["msg"].(string)
+	msg, ok := decode(t, rec)["msg"].(string)
+	if !ok {
+		t.Fatal("response msg is not a string")
+	}
 	if !strings.Contains(msg, "keyword") || !containsHan(msg) {
 		t.Errorf("msg = %q, want Chinese message naming field %q", msg, "keyword")
 	}
@@ -100,5 +113,69 @@ func TestBindErrPayloadTooLargeSkipsTranslation(t *testing.T) {
 	BindErr(c, &http.MaxBytesError{Limit: 1 << 20})
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestBindingFallbackKeepsCauseAndSafeMessage(t *testing.T) {
+	for _, input := range []string{`{"count":`, `{"count":"private-type"}`, `{"private_field":1}`, ``} {
+		var target struct {
+			Count int `json:"count"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(input))
+		decoder.DisallowUnknownFields()
+		cause := decoder.Decode(&target)
+		if cause == nil {
+			t.Fatalf("input %q did not produce a binding error", input)
+		}
+		assertSafeBindingError(t, cause)
+	}
+	assertSafeBindingError(t, errors.New("private-type /srv/config user=private-user token=private-token"))
+	assertSafeBindingError(t, nil)
+}
+
+func TestBindingBeforeTranslatorReadyUsesSafeMessage(t *testing.T) {
+	initZhValidation(t)
+	previous := validationTranslationReady.Swap(false)
+	t.Cleanup(func() { validationTranslationReady.Store(previous) })
+	cause := verify.Struct(struct {
+		InternalName string `binding:"required" json:"name"`
+	}{})
+	if cause == nil {
+		t.Fatal("missing validation error")
+	}
+	assertSafeBindingError(t, cause)
+}
+
+func assertSafeBindingError(t *testing.T, cause error) {
+	t.Helper()
+	for _, bind := range []struct {
+		name string
+		call func(*gin.Context, error)
+	}{{"BindErr", BindErr}, {"BindStructErr", BindStructErr}} {
+		t.Run(bind.name, func(t *testing.T) {
+			c, rec := newCtx()
+			bind.call(c, cause)
+			body := decode(t, rec)
+			if rec.Code != http.StatusUnprocessableEntity || body["msg"] != "请求参数格式错误" {
+				t.Fatalf("status=%d body=%v", rec.Code, body)
+			}
+			if body["code"] != float64(goerr.StatusValidateParams().Code()) {
+				t.Fatalf("business code changed: %v", body)
+			}
+			if cause != nil {
+				logged, exists := c.Get(loggedErrorKey)
+				root, ok := logged.(error)
+				causeKept := errors.Is(root, cause)
+				// ValidationErrors is a slice, so errors.Is cannot compare it.
+				// Match the original FieldError objects after unwrapping instead.
+				if expected, validation := errors.AsType[validator.ValidationErrors](cause); validation {
+					actual, found := errors.AsType[validator.ValidationErrors](root)
+					causeKept = found && slices.Equal(actual, expected)
+				}
+				if !exists || !ok || !causeKept {
+					t.Fatalf("diagnostic cause lost: %v", logged)
+				}
+			}
+		})
 	}
 }

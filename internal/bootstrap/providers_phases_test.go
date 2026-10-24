@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
+	"github.com/gtkit/gin-api/internal/runtime/module/account"
+	"gorm.io/gorm"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
@@ -61,7 +63,14 @@ func TestBuildMiddlewares(t *testing.T) {
 			}
 			rt := &Runtime{config: cfg, jwt: assembly}
 
-			mw, err := buildMiddlewares(services{}, rt)
+			// Account sources are an explicit dependency after the assembly
+			// split. Keep this fixture complete so a missing verifier cannot
+			// hide the Laravel parser branch that this test is exercising.
+			accounts, err := account.New(&gorm.DB{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mw, err := buildMiddlewares(services{accounts: accounts}, rt)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("buildMiddlewares expected error, got nil")
@@ -110,6 +119,7 @@ func jwtTestConfig(t *testing.T) *config.Config {
 	}
 
 	return &config.Config{
+		Auth: config.AuthConfig{Mode: config.AuthModeExternal},
 		JWT: config.JWTConfig{
 			Active: config.JWTKeyConfig{
 				KID: "test-kid", PrivateKeyPath: priPath, PublicKeyPath: pubPath,

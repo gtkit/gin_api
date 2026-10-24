@@ -395,11 +395,20 @@ func TestRefreshRotatesToActiveKID(t *testing.T) {
 	t.Parallel()
 
 	oldKey := newKeyPair(t, "kid-old")
-	oldSet, _ := NewKeySet(oldKey, nil)
-	oldParser, _ := NewParser(oldSet, ParserOptions{Issuer: "gin-api", Audiences: []string{"app"}}, 0)
-	oldIssuer, _ := NewIssuer(oldSet, oldParser, IssuerOptions{
+	oldSet, err := NewKeySet(oldKey, nil)
+	if err != nil {
+		t.Fatalf("NewKeySet: %v", err)
+	}
+	oldParser, err := NewParser(oldSet, ParserOptions{Issuer: "gin-api", Audiences: []string{"app"}}, 0)
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	oldIssuer, err := NewIssuer(oldSet, oldParser, IssuerOptions{
 		Issuer: "gin-api", Audiences: []string{"app"}, TTL: time.Hour,
 	})
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
 
 	ctx := context.Background()
 	laravelToken, err := oldIssuer.Issue(ctx, 11, "user")
@@ -408,11 +417,20 @@ func TestRefreshRotatesToActiveKID(t *testing.T) {
 	}
 
 	newKey := newKeyPair(t, "kid-new")
-	rotated, _ := NewKeySet(newKey, []VerificationKey{{KID: oldKey.KID, Public: oldKey.Public}})
-	rotatedParser, _ := NewParser(rotated, ParserOptions{Issuer: "gin-api", Audiences: []string{"app"}}, 0)
-	rotatedIssuer, _ := NewIssuer(rotated, rotatedParser, IssuerOptions{
+	rotated, err := NewKeySet(newKey, []VerificationKey{{KID: oldKey.KID, Public: oldKey.Public}})
+	if err != nil {
+		t.Fatalf("NewKeySet: %v", err)
+	}
+	rotatedParser, err := NewParser(rotated, ParserOptions{Issuer: "gin-api", Audiences: []string{"app"}}, 0)
+	if err != nil {
+		t.Fatalf("NewParser: %v", err)
+	}
+	rotatedIssuer, err := NewIssuer(rotated, rotatedParser, IssuerOptions{
 		Issuer: "gin-api", Audiences: []string{"app"}, TTL: time.Hour,
 	})
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
 
 	refreshed, err := rotatedIssuer.Refresh(ctx, laravelToken)
 	if err != nil {
@@ -532,7 +550,10 @@ func TestCacheDoesNotOutliveTokenExpiry(t *testing.T) {
 	t.Parallel()
 
 	active := newKeyPair(t, "kid")
-	keys, _ := NewKeySet(active, nil)
+	keys, err := NewKeySet(active, nil)
+	if err != nil {
+		t.Fatalf("NewKeySet: %v", err)
+	}
 	parser, err := NewParser(keys, ParserOptions{Issuer: "gin-api", Audiences: []string{"app"}}, 8)
 	if err != nil {
 		t.Fatalf("NewParser: %v", err)

@@ -1,4 +1,4 @@
-package dao
+package data
 
 import (
 	"context"
@@ -9,10 +9,7 @@ import (
 	"time"
 )
 
-// AvailabilityState 描述一个**已建立**的资源连接当前的可用性。
-//
-// 它只对运行期有意义：启动期连不上属于装配结果（required 即启动失败、
-// optional 即永久 Degraded），不是状态机的输入。
+// AvailabilityState 描述资源当前的可用性，包括等待首次恢复的可选连接。
 type AvailabilityState uint8
 
 const (
@@ -150,10 +147,7 @@ func NewAvailabilityTracker(
 
 // NewPermanentlyDegradedTracker 返回一个恒为 Degraded 且永不探测的跟踪器。
 //
-// 用于 optional 资源在**启动期**就连不上的情形：此时根本没有客户端可以探测，
-// 也不做热替换，因此这个进程在重启前都不会再拥有该能力。把它表达成一个
-// 明确的永久降级状态，而不是 nil——nil 会在每个消费点变成一次判空，
-// 而漏掉任何一处就是一次 panic。
+// 用于未配置或确实没有恢复能力的缺失句柄。
 func NewPermanentlyDegradedTracker(name string) *AvailabilityTracker {
 	return &AvailabilityTracker{
 		name:        name,
@@ -163,6 +157,15 @@ func NewPermanentlyDegradedTracker(name string) *AvailabilityTracker {
 		state:       AvailabilityDegraded,
 		transitions: map[AvailabilityState]uint64{AvailabilityDegraded: 1},
 	}
+}
+
+func newRecoverableDegradedTracker(name string, policy AvailabilityPolicy, probe func(context.Context) error) (*AvailabilityTracker, error) {
+	tracker, err := NewAvailabilityTracker(name, policy, probe)
+	if err != nil {
+		return nil, err
+	}
+	tracker.degradeLocked()
+	return tracker, nil
 }
 
 // Name 返回资源名（低基数，可直接作日志字段/metrics label）。

@@ -13,7 +13,7 @@ import (
 // 完全挡不住反查。
 const minRateLimitSecretLength = 32
 
-// validateRateLimitConfig 校验限流配置。
+// validateRateLimitConfig 校验密钥与枚举；数值及 Redis 补满/TTL 边界由装配期 Policy.Validate 统一校验。
 //
 // 策略集合为空时不校验密钥：母版默认不启用限流，强制配一个用不到的密钥
 // 只会让人随便填一个凑数，反而降低了它在真正启用时的可信度。

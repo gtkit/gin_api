@@ -14,6 +14,15 @@ import (
 // 一个表驱动测试会因此跑上十几秒。代价高低不改变本包的逻辑分支。
 const testCost = bcrypt.MinCost
 
+func TestDummyComparisonPreservesCorruptHashFailure(t *testing.T) {
+	t.Parallel()
+	h := &Hasher{cost: testCost, dummyHash: "bad"}
+	err := h.CompareWithDummy("unregistered password")
+	if !errors.Is(err, bcrypt.ErrHashTooShort) || errors.Is(err, ErrMismatch) {
+		t.Fatalf("corrupt timing-cover hash was hidden as password mismatch: %v", err)
+	}
+}
+
 func TestHashAndCompare(t *testing.T) {
 	t.Parallel()
 

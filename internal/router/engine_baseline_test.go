@@ -53,7 +53,7 @@ func TestEngineBaselineFields(t *testing.T) {
 	original := gin.Mode()
 	t.Cleanup(func() { gin.SetMode(original) })
 
-	engine, err := newRouterForTest("test", Options{})
+	engine, err := newRouterForTest(t, "test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestEngineBaselineFields(t *testing.T) {
 func newBaselineEngine(t *testing.T) *gin.Engine {
 	t.Helper()
 
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/ping", func(c *gin.Context) { c.Status(http.StatusOK) })
 		},
@@ -130,6 +130,9 @@ func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) resp.ResResult
 	var got resp.ResResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("响应体不是统一信封: %v; body = %q", err, rec.Body.String())
+	}
+	if got.RequestID == "" || got.RequestID != rec.Header().Get(middleware.RequestIDHeader) {
+		t.Fatalf("request ID mismatch: body=%q header=%q", got.RequestID, rec.Header().Get(middleware.RequestIDHeader))
 	}
 	return got
 }
@@ -252,7 +255,7 @@ func TestContextWithFallbackPropagatesDeadline(t *testing.T) {
 
 	var sawDeadline bool
 
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/deadline",
 				middleware.Timeout(time.Second, 100*time.Millisecond),

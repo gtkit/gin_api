@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -37,6 +38,15 @@ type finding struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		if _, writeErr := fmt.Fprintln(os.Stderr, err); writeErr != nil {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cacheDir := flag.String("cache", ".cache/security", "扫描产物目录")
 	waiversPath := flag.String("waivers", "security/waivers.yml", "漏洞豁免登记表")
 	secretsPath := flag.String("secret-allowlist", "security/secret-allowlist.yml", "密钥假阳性登记表")
@@ -45,8 +55,7 @@ func main() {
 	flag.Parse()
 
 	if *selfTest {
-		runSelfTest()
-		return
+		return runSelfTest()
 	}
 
 	var problems []string
@@ -54,17 +63,17 @@ func main() {
 	vulns, err := readGovulncheck(filepath.Join(*cacheDir, "govulncheck.json"))
 	if err != nil {
 		// 解析失败是门禁自身的故障，不可豁免。
-		fatalf("govulncheck 产物无法解析（扫描器错误不可豁免）：%v", err)
+		return fmt.Errorf("[security-eval] FAIL: govulncheck 产物无法解析（扫描器错误不可豁免）：%w", err)
 	}
 
 	secrets, err := readGitleaks(filepath.Join(*cacheDir, "gitleaks.json"))
 	if err != nil {
-		fatalf("gitleaks 产物无法解析（扫描器错误不可豁免）：%v", err)
+		return fmt.Errorf("[security-eval] FAIL: gitleaks 产物无法解析（扫描器错误不可豁免）：%w", err)
 	}
 	if *mode == "release" {
 		hist, herr := readGitleaks(filepath.Join(*cacheDir, "gitleaks-history.json"))
 		if herr != nil {
-			fatalf("gitleaks 全历史产物无法解析（扫描器错误不可豁免）：%v", herr)
+			return fmt.Errorf("[security-eval] FAIL: gitleaks 全历史产物无法解析（扫描器错误不可豁免）：%w", herr)
 		}
 		secrets = append(secrets, hist...)
 
@@ -75,18 +84,18 @@ func main() {
 		// 不扫至少不会让人以为镜像已经被检查过。
 		imageVulns, ierr := readTrivyImage(filepath.Join(*cacheDir, "trivy-image.json"))
 		if ierr != nil {
-			fatalf("trivy 镜像产物无法解析（扫描器错误不可豁免）：%v", ierr)
+			return fmt.Errorf("[security-eval] FAIL: trivy 镜像产物无法解析（扫描器错误不可豁免）：%w", ierr)
 		}
 		vulns = append(vulns, imageVulns...)
 	}
 
 	waivers, err := readWaivers(*waiversPath)
 	if err != nil {
-		fatalf("%v", err)
+		return fmt.Errorf("[security-eval] FAIL: %w", err)
 	}
 	secretAllow, err := readWaivers(*secretsPath)
 	if err != nil {
-		fatalf("%v", err)
+		return fmt.Errorf("[security-eval] FAIL: %w", err)
 	}
 
 	now := time.Now()
@@ -134,13 +143,20 @@ func main() {
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		fmt.Fprintln(os.Stderr, "[security-eval] FAIL:")
-		for _, p := range problems {
-			fmt.Fprintln(os.Stderr, "  -", p)
+		if _, writeErr := fmt.Fprintln(os.Stderr, "[security-eval] FAIL:"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
 		}
-		os.Exit(1)
+		for _, p := range problems {
+			if _, writeErr := fmt.Fprintln(os.Stderr, "  -", p); writeErr != nil {
+				return fmt.Errorf("write tool output: %w", writeErr)
+			}
+		}
+		return errors.New("security evaluation failed")
 	}
-	fmt.Printf("[security-eval] OK：漏洞 %d 条、密钥 %d 条，全部已处理\n", len(vulns), len(secrets))
+	if _, writeErr := fmt.Printf("[security-eval] OK：漏洞 %d 条、密钥 %d 条，全部已处理\n", len(vulns), len(secrets)); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }
 
 func staleEntries(entries map[string]waiver, used map[string]bool, kind string) []string {
@@ -431,11 +447,6 @@ func readGitleaks(path string) ([]finding, error) {
 	return out, nil
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[security-eval] FAIL: "+format+"\n", args...)
-	os.Exit(1)
-}
-
 // ---------------------------------------------------------------------------
 // 自检
 // ---------------------------------------------------------------------------
@@ -444,19 +455,27 @@ func fatalf(format string, args ...any) {
 //
 // 在临时目录里造 fixture，因此完全不触碰真实登记表与扫描产物。
 
-func runSelfTest() {
+func runSelfTest() (err error) {
 	dir, err := os.MkdirTemp("", "security-eval-selftest")
 	if err != nil {
-		fatalf("self-test: %v", err)
+		return fmt.Errorf("[security-eval] FAIL: self-test: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if removeErr := os.RemoveAll(dir); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove self-test fixture %s: %w", dir, removeErr))
+		}
+	}()
 
 	failed := false
+	var outputErr, fixtureErr error
 	expect := func(name string, got, want any) {
+		if outputErr != nil {
+			return
+		}
 		if fmt.Sprint(got) == fmt.Sprint(want) {
-			fmt.Printf("[self-test] OK: %s\n", name)
+			_, outputErr = fmt.Printf("[self-test] OK: %s\n", name)
 		} else {
-			fmt.Fprintf(os.Stderr, "[self-test] FAIL: %s => got %v, want %v\n", name, got, want)
+			_, outputErr = fmt.Fprintf(os.Stderr, "[self-test] FAIL: %s => got %v, want %v\n", name, got, want)
 			failed = true
 		}
 	}
@@ -464,7 +483,7 @@ func runSelfTest() {
 	writeFile := func(name, content string) string {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			fatalf("self-test write: %v", err)
+			fixtureErr = errors.Join(fixtureErr, fmt.Errorf("self-test write %s: %w", path, err))
 		}
 		return path
 	}
@@ -563,7 +582,13 @@ func runSelfTest() {
 	expect("a missing image report yields no findings", len(missing), 0)
 
 	if failed {
-		os.Exit(1)
+		return errors.Join(errors.New("security evaluation self-test failed"), outputErr, fixtureErr)
 	}
-	fmt.Println("[self-test] OK: every decision branch behaves as specified")
+	if err := errors.Join(outputErr, fixtureErr); err != nil {
+		return err
+	}
+	if _, writeErr := fmt.Println("[self-test] OK: every decision branch behaves as specified"); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }

@@ -25,7 +25,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
+
+	"github.com/gtkit/gin-api/internal/pkg/errx"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -63,7 +66,9 @@ type Recorder struct {
 
 	rateLimitDecisions metric.Int64Counter
 
-	workerRuns metric.Int64Counter
+	workerRuns       metric.Int64Counter
+	workerExecutions metric.Int64Counter
+	workerDuration   metric.Float64Histogram
 
 	authEvents metric.Int64Counter
 
@@ -110,6 +115,14 @@ func New(meter metric.Meter) (*Recorder, error) {
 		metric.WithDescription("Background worker executions by outcome"),
 	)
 	instrument(err)
+	workerExecutions, err := meter.Int64Counter("worker.executions",
+		metric.WithDescription("Actual worker task invocations by outcome"))
+	instrument(err)
+	workerDuration, err := meter.Float64Histogram("worker.execution.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of an actual worker task invocation"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.01, 0.1, 1, 5, 10, 30, 60, 300, 900, 3600))
+	instrument(err)
 
 	authEvents, err := meter.Int64Counter(
 		"auth.events",
@@ -126,6 +139,8 @@ func New(meter metric.Meter) (*Recorder, error) {
 		requestsTotal:      requestsTotal,
 		rateLimitDecisions: rateLimitDecisions,
 		workerRuns:         workerRuns,
+		workerExecutions:   workerExecutions,
+		workerDuration:     workerDuration,
 		authEvents:         authEvents,
 		meter:              meter,
 	}, nil
@@ -139,6 +154,14 @@ func New(meter metric.Meter) (*Recorder, error) {
 func (r *Recorder) RecordRequest(ctx context.Context, method, route string, status int, elapsed time.Duration) {
 	if r == nil {
 		return
+	}
+	// Methods are caller-controlled even on unmatched routes. Keep the label
+	// bounded using the HTTP semantic convention's known method set.
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch, "QUERY":
+	default:
+		method = "_OTHER"
 	}
 
 	attrs := metric.WithAttributes(
@@ -198,6 +221,59 @@ func (r *Recorder) RecordWorkerRun(ctx context.Context, worker string, succeeded
 		attribute.String("worker.name", worker),
 		attribute.String("worker.outcome", outcome),
 	))
+}
+
+// WorkerKind identifies a fixed execution boundary, not a task payload or ID.
+type WorkerKind string
+
+const (
+	WorkerOneShot   WorkerKind = "one_shot"
+	WorkerSingleton WorkerKind = "singleton"
+	WorkerQueue     WorkerKind = "queue"
+)
+
+// RecordWorkerExecution records one invocation. worker must be a name fixed at
+// assembly time. Lease operations and the lifetime of a consumer are not invocations.
+func (r *Recorder) RecordWorkerExecution(ctx context.Context, kind WorkerKind, worker string, elapsed time.Duration, err error, panicked bool) {
+	if r == nil {
+		return
+	}
+	switch kind {
+	case WorkerOneShot, WorkerSingleton, WorkerQueue:
+	default:
+		kind = "other"
+	}
+	outcome := "success"
+	switch {
+	case panicked:
+		outcome = "panic"
+	case errx.IsPureCancellation(err):
+		outcome = "canceled"
+	case errx.IsPureDeadline(err):
+		outcome = "timeout"
+	case err != nil:
+		outcome = "failure"
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("worker.name", worker),
+		attribute.String("worker.kind", string(kind)),
+		attribute.String("worker.outcome", outcome),
+	)
+	r.workerExecutions.Add(ctx, 1, attrs)
+	r.workerDuration.Record(ctx, max(elapsed.Seconds(), 0), attrs)
+}
+
+// RunWorker observes an invocation without recovering its panic or changing its
+// return value. A nil Recorder still runs the task.
+func (r *Recorder) RunWorker(ctx context.Context, kind WorkerKind, worker string, run func(context.Context) error) (err error) {
+	started := time.Now()
+	returned := false
+	defer func() {
+		r.RecordWorkerExecution(ctx, kind, worker, time.Since(started), err, !returned)
+	}()
+	err = run(ctx)
+	returned = true
+	return err
 }
 
 // WorkerHealth 是后台任务的当前状态。

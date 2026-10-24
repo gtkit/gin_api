@@ -2,7 +2,7 @@ package bootstrap
 
 import (
 	"errors"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -27,7 +27,7 @@ func TestRollbackWorkerMetricCleanups(t *testing.T) {
 			t.Fatalf("rollback returned %v, want nil", err)
 		}
 
-		if want := []string{"added-2", "added-1"}; !reflect.DeepEqual(calls, want) {
+		if want := []string{"added-2", "added-1"}; !slices.Equal(calls, want) {
 			t.Fatalf("rollback calls = %v, want %v (逆序、且不触碰既有回调)", calls, want)
 		}
 		if len(inf.metricsCleanup) != cleanupsBefore {

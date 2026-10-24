@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/asynqx"
@@ -116,6 +117,7 @@ type Consumer struct {
 	client   redis.UniversalClient
 	name     string
 	handlers []Registrar
+	recorder *metrics.Recorder
 
 	worker *asynqx.Worker
 	once   sync.Once
@@ -128,10 +130,18 @@ type Consumer struct {
 func NewConsumer(
 	cfg config.TasksConfig, client redis.UniversalClient, name string, handlers ...Registrar,
 ) *Consumer {
+	return NewObservedConsumer(cfg, client, name, nil, handlers...)
+}
+
+// NewObservedConsumer records each processing attempt under the configured
+// consumer name. Task IDs, payloads and arbitrary task types are not labels.
+func NewObservedConsumer(
+	cfg config.TasksConfig, client redis.UniversalClient, name string, recorder *metrics.Recorder, handlers ...Registrar,
+) *Consumer {
 	if !cfg.Enabled || len(handlers) == 0 {
 		return nil
 	}
-	return &Consumer{cfg: cfg, client: client, name: name, handlers: handlers}
+	return &Consumer{cfg: cfg, client: client, name: name, handlers: handlers, recorder: recorder}
 }
 
 // Name 返回低基数标识。
@@ -151,6 +161,7 @@ func (c *Consumer) Prepare(ctx context.Context) error {
 		asynqx.WithConcurrency(c.cfg.EffectiveConcurrency()),
 		asynqx.WithQueues(c.cfg.EffectiveQueues()),
 		asynqx.WithShutdownTimeout(c.cfg.EffectiveShutdownTimeout()),
+		asynqx.WithMiddleware(executionMetrics(c.recorder, c.name)),
 	)
 	if err != nil {
 		return fmt.Errorf("tasks: build worker: %w", err)

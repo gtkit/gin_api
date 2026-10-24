@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,55 @@ func TestAuthorizeMapsOutcomes(t *testing.T) {
 			engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/thing/7", nil))
 			if w.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestAuthorizePreservesContextErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantWrite  bool
+	}{
+		{name: "canceled", err: context.Canceled},
+		{name: "wrapped cancellation", err: fmt.Errorf("role lookup: %w", context.Canceled)},
+		{name: "cancellation with deadline", err: errors.Join(context.Canceled, context.DeadlineExceeded)},
+		{name: "deadline", err: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout, wantWrite: true},
+		{name: "wrapped deadline", err: fmt.Errorf("role lookup: %w", context.DeadlineExceeded), wantStatus: http.StatusGatewayTimeout, wantWrite: true},
+		{name: "cancellation with dependency failure", err: errors.Join(context.Canceled, errors.New("role source down")), wantStatus: http.StatusServiceUnavailable, wantWrite: true},
+		{name: "deadline with dependency failure", err: errors.Join(context.DeadlineExceeded, errors.New("role source down")), wantStatus: http.StatusServiceUnavailable, wantWrite: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wrote, reachedHandler bool
+			engine := gin.New()
+			engine.Use(func(c *gin.Context) {
+				c.Next()
+				wrote = c.Writer.Written()
+			}, ErrorHandler(), func(c *gin.Context) {
+				ginc.SetPrincipal(c, sharedauth.Principal{UserID: 42})
+				c.Next()
+			}, Authorize(&stubAuthorizer{err: tt.err}, "role.admin"))
+			engine.GET("/protected", func(c *gin.Context) {
+				reachedHandler = true
+				c.Status(http.StatusNoContent)
+			})
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil))
+			if reachedHandler {
+				t.Fatal("authorization failure reached the protected handler")
+			}
+			if wrote != tt.wantWrite {
+				t.Fatalf("response written = %t, want %t", wrote, tt.wantWrite)
+			}
+			if tt.wantWrite && w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			if !tt.wantWrite && w.Body.Len() != 0 {
+				t.Fatal("client cancellation wrote a response body")
 			}
 		})
 	}

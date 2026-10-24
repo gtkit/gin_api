@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	defaultlogging "github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gouploader"
+	"github.com/gtkit/logger/v2"
 )
 
 // plainHashStore 只实现 HashStore，**不**实现 UserScopedHashStore。
@@ -62,7 +62,9 @@ func TestBackgroundErrorsReachRepoLogger(t *testing.T) {
 	initUploadTestLogging(t, logDir)
 
 	newAdvisoryTriggeringUploader(t)
-	applog.Sync()
+	if err := logger.Default().Zap().Sync(); err != nil {
+		t.Fatal(err)
+	}
 
 	logged := readAllLogs(t, logDir)
 	if !strings.Contains(logged, "UserScopedHashStore") {
@@ -94,7 +96,9 @@ func TestCallerCanReplaceBackgroundErrorSink(t *testing.T) {
 	newAdvisoryTriggeringUploader(t, gouploader.WithOnBackgroundError(func(err error) {
 		captured = append(captured, err.Error())
 	}))
-	applog.Sync()
+	if err := logger.Default().Zap().Sync(); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(captured) == 0 {
 		t.Fatal("装配方注入的回调未收到启动期安全建议")
@@ -129,23 +133,22 @@ func readAllLogs(t *testing.T, dir string) string {
 		if err != nil {
 			t.Fatalf("read %s: %v", e.Name(), err)
 		}
-		sb.Write(b)
+		if _, err := sb.Write(b); err != nil {
+			t.Fatalf("collect log output: %v", err)
+		}
 	}
 	return sb.String()
 }
 
-type uploadLoggingConfiguration struct{ cfg *config.Config }
-
-func (c uploadLoggingConfiguration) Value() (*config.Config, error) { return c.cfg, nil }
 func initUploadTestLogging(t *testing.T, dir string) {
 	t.Helper()
-	logging := defaultlogging.New(defaultlogging.Options{Configuration: uploadLoggingConfiguration{&config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "upload"), Level: "debug", FileStdout: 1}}}})
+	owner, err := defaultlogging.Open(t.Context(), defaultlogging.Options{Config: &config.Config{Log: config.LogConfig{Path: filepath.Join(dir, "upload"), Level: "debug", FileStdout: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
-		if err := logging.Stop(context.Background()); err != nil {
+		if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)
 		}
 	})
-	if err := logging.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
 }

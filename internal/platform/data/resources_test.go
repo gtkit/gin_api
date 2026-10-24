@@ -1,8 +1,7 @@
-package dao
+package data
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
@@ -31,7 +30,7 @@ func TestResourcesAccessorsOnZeroValue(t *testing.T) {
 	}
 }
 
-func TestResourcesFromClientsDoesNotOwnPluginClient(t *testing.T) {
+func TestResourcesFromClientsBorrowsDatabaseClient(t *testing.T) {
 	t.Parallel()
 
 	client, _ := newSQLMockOrmxClient(t)
@@ -39,14 +38,8 @@ func TestResourcesFromClientsDoesNotOwnPluginClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResourcesFromClients: %v", err)
 	}
-	if res.Mdb() == nil {
-		t.Fatal("ResourcesFromClients returned a view without the MySQL handle")
-	}
-	if err := res.Close(); err != nil {
-		t.Fatalf("view Close: %v", err)
-	}
-	if client.DB() == nil {
-		t.Fatal("view Close cleared the plugin-owned client")
+	if res.Mdb() != client.DB() {
+		t.Fatal("ResourcesFromClients did not borrow the owner's MySQL handle")
 	}
 	if err := client.Close(); err != nil {
 		t.Fatalf("client.Close: %v", err)
@@ -59,6 +52,60 @@ type fakeRedisHandle struct {
 	healthErr error
 }
 
+type recoveringRedisHandle struct {
+	*fakeRedisHandle
+	tracingCalls int
+}
+
+func (h *recoveringRedisHandle) ConfigureTracing() error { h.tracingCalls++; return nil }
+
+func TestResourcesRetainsOwnerBeforeFirstRedisConnection(t *testing.T) {
+	database, _ := newSQLMockOrmxClient(t)
+	handle := &recoveringRedisHandle{fakeRedisHandle: &fakeRedisHandle{healthErr: errors.New("offline")}}
+	resources, err := ResourcesFromClients(database, handle, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources.redis != handle || resources.RedisAvailability().State() != AvailabilityDegraded {
+		t.Fatal("recoverable owner was discarded")
+	}
+	if err := resources.InstrumentTracing("test"); err != nil || handle.tracingCalls != 1 {
+		t.Fatalf("tracing owner=%d err=%v", handle.tracingCalls, err)
+	}
+	if resources.PingRedis(t.Context()) == nil {
+		t.Fatal("offline owner reported healthy")
+	}
+	client := redis.NewClient(&redis.Options{Addr: "unused"})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	handle.clients = map[int]*redis.Client{0: client}
+	handle.stats = map[int]*redis.PoolStats{0: client.PoolStats()}
+	handle.healthErr = nil
+	if resources.Rdb(0) != client || resources.RedisAvailability().State() != AvailabilityDegraded {
+		t.Fatal("publication was lost or fabricated a healthy observation")
+	}
+	for _, want := range []AvailabilityState{AvailabilityProbing, AvailabilityHealthy} {
+		if err := resources.PingRedis(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got := resources.RedisAvailability().State(); got != want {
+			t.Fatalf("state=%s want=%s", got, want)
+		}
+	}
+	handle.healthErr = errors.New("disconnected again")
+	for range 3 {
+		if resources.PingRedis(t.Context()) == nil {
+			t.Fatal("disconnection was hidden")
+		}
+	}
+	if resources.RedisAvailability().State() != AvailabilityDegraded || resources.Rdb(0) != client {
+		t.Fatal("later disconnection replaced the client or bypassed the failure threshold")
+	}
+}
+
 func (h fakeRedisHandle) GetClient(db int) (*redis.Client, bool) {
 	client, ok := h.clients[db]
 	return client, ok
@@ -67,8 +114,6 @@ func (h fakeRedisHandle) GetClient(db int) (*redis.Client, bool) {
 func (h fakeRedisHandle) PoolStats() map[int]*redis.PoolStats { return h.stats }
 
 func (h fakeRedisHandle) HealthCheck(context.Context) error { return h.healthErr }
-
-func (h fakeRedisHandle) DB() *sql.DB { return nil }
 
 func TestResourcesFromClientsBuildsRedisViewAndProbesIt(t *testing.T) {
 	t.Parallel()
@@ -99,9 +144,6 @@ func TestResourcesFromClientsBuildsRedisViewAndProbesIt(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-	if err := resources.Close(); err != nil {
-		t.Fatalf("view Close: %v", err)
 	}
 	if err := redisClient.Close(); err != nil {
 		t.Fatalf("redis client Close: %v", err)

@@ -2,11 +2,15 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 func policyConfig(mutate func(*config.RateLimitPolicyConfig)) config.RateLimitPolicyConfig {
@@ -308,8 +312,8 @@ func TestBuildRateLimitsRejectsRedisPolicyWithoutClient(t *testing.T) {
 	}
 }
 
-// TestUnreachableLimiterHonorsEachFailureMode 钉住"Redis 已配置但启动期
-// 不可达"时**按策略各自的降级模式**选执行体（resource-lifecycle spec）。
+// TestUnreachableLimiterHonorsEachFailureMode 钉住 Redis 初始缺席时共享后端
+// 仍按策略各自的降级模式处理请求。
 //
 // 两种模式要的东西不同：fail_open 要的是放行（限额不变，只是当下无法执行），
 // local_fallback 要的是一个真实的本地桶。给 local_fallback 一个恒不可用执行体
@@ -338,14 +342,28 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 				ID: "cfg.but.down", Rate: 1, Burst: 2, Scope: ratelimit.ScopeIP,
 				Store: ratelimit.StoreRedis, FailureMode: tt.mode, MaxKeys: 100,
 			}
-			limiter, err := unreachableLimiter(policy)
+			resources, err := data.ResourcesFromClients(&lifecycleComponent{db: &gorm.DB{}}, nil, true)
 			if err != nil {
-				t.Fatalf("unreachableLimiter: %v", err)
+				t.Fatal(err)
+			}
+			var backend *ratelimit.RedisBackend
+			limiter, err := buildLimiter(t.Context(), policy, resources, &backend, "test", true)
+			if err != nil {
+				t.Fatalf("buildLimiter: %v", err)
+			}
+			if backend == nil || backend.Health().Phase() != ratelimit.PhaseDegraded {
+				t.Fatal("shared backend was not retained")
 			}
 			defer limiter.Close()
 
-			decision, err := limiter.Check(context.Background(), "k")
-			if err != nil {
+			decision, err := limiter.Check(t.Context(), "k")
+			// 首次请求会探测缺失的客户端。fail_open 放行仍保留后端根因，
+			// 不能接受任意错误；local_fallback 成功使用本地桶时则返回 nil。
+			if tt.mode == ratelimit.FailureOpen {
+				if !errors.Is(err, errRedisUnavailable) {
+					t.Fatalf("first probe error = %v, want Redis unavailable", err)
+				}
+			} else if err != nil {
 				t.Fatalf("Check: %v", err)
 			}
 			if decision.Allowed() != tt.wantAllowed {
@@ -355,7 +373,7 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 			// 打穿 burst：只有真的在算限额的执行体才会开始拒绝。
 			var rejected bool
 			for range policy.Burst + 2 {
-				d, checkErr := limiter.Check(context.Background(), "k")
+				d, checkErr := limiter.Check(t.Context(), "k")
 				if checkErr != nil {
 					t.Fatalf("Check: %v", checkErr)
 				}
@@ -367,5 +385,39 @@ func TestUnreachableLimiterHonorsEachFailureMode(t *testing.T) {
 				t.Fatalf("rejected after exhausting the burst = %v, want %v", rejected, tt.wantEnforced)
 			}
 		})
+	}
+}
+
+func TestRedisCommandAdapterReportsMissingClient(t *testing.T) {
+	adapter := redisCommands{}
+	cmd := redis.NewCmd(t.Context(), "evalsha", "sha", 1, "key", "arg")
+	processErr := adapter.Process(t.Context(), cmd)
+	if !errors.Is(cmd.Err(), errRedisUnavailable) {
+		t.Fatalf("command error = %v, want Redis unavailable", cmd.Err())
+	}
+	for _, command := range []struct {
+		name string
+		err  error
+	}{
+		{name: "ScriptLoad", err: adapter.ScriptLoad(t.Context(), "return 1").Err()},
+		{name: "Process", err: processErr},
+		{name: "Del", err: adapter.Del(t.Context(), "key").Err()},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			if !errors.Is(command.err, errRedisUnavailable) {
+				t.Fatalf("error = %v, want Redis unavailable", command.err)
+			}
+		})
+	}
+}
+
+func TestConfiguredRedisPolicyRejectsRefillBeyondResidenceCap(t *testing.T) {
+	raw := policyConfig(func(p *config.RateLimitPolicyConfig) { p.Store = "redis"; p.Rate = 1; p.Burst = 86341 })
+	if _, err := toRateLimitPolicy(raw); err == nil {
+		t.Fatal("configured slow Redis policy bypassed assembly validation")
+	}
+	raw.Store = "local"
+	if _, err := toRateLimitPolicy(raw); err != nil {
+		t.Fatalf("Redis residence cap incorrectly applied to local policy: %v", err)
 	}
 }

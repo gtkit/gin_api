@@ -19,7 +19,7 @@ func TestRequestBodyLoggingKeepsFullBodyForHandler(t *testing.T) {
 	largeValue := strings.Repeat("a", 8*1024)
 	payload := fmt.Sprintf(`{"name":%q}`, largeValue)
 
-	engine := newMaxBytesTestEngine(1<<20, AccessLogOptions{LogRequestBody: true}, func(c *gin.Context) {
+	engine := newMaxBytesTestEngine(t, 1<<20, AccessLogOptions{LogRequestBody: true}, func(c *gin.Context) {
 		var req struct {
 			Name string `json:"name"`
 		}

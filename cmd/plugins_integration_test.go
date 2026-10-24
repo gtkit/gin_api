@@ -26,20 +26,75 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/gtkit/gin-api/internal/bootstrap"
-	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
 	"github.com/gtkit/gin-api/internal/router"
 	"github.com/gtkit/gin-api/internal/shared/env"
+	"github.com/gtkit/logger/v2"
 	"github.com/knadh/koanf/parsers/yaml"
 	"go.opentelemetry.io/otel"
 )
 
+// Run by Make before any other integration package can connect.
+func TestPluginIntegrationPrerequisites(t *testing.T) {
+	if os.Getenv("PLUGIN_INTEGRATION") != "1" {
+		if os.Getenv("REQUIRE_DB_INTEGRATION") == "1" {
+			t.Fatal("required plugin integration cannot skip its prerequisites")
+		}
+		t.Skip("set PLUGIN_INTEGRATION=1 to validate the isolated integration root")
+	}
+	if _, err := isolatedPluginRoot(os.Getenv("APP_ROOT")); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("isolated runtime config metadata validated; no dependency connection attempted")
+}
+
+func TestIsolatedPluginRoot(t *testing.T) {
+	project, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{"", project, filepath.Join(project, "cmd"), filepath.Join(t.TempDir(), "missing")} {
+		if _, err := isolatedPluginRoot(input); err == nil {
+			t.Fatalf("accepted unsafe root %q", input)
+		}
+	}
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config", "env")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(configDir, "env.yml")
+	if err := os.WriteFile(file, []byte("# metadata-only fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := isolatedPluginRoot(root)
+	want, pathErr := filepath.EvalSymlinks(root)
+	if err != nil || pathErr != nil || got != want {
+		t.Fatalf("valid root=%q err=%v pathErr=%v", got, err, pathErr)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outside, []byte("# no credentials\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := isolatedPluginRoot(root); err == nil || !strings.Contains(err.Error(), "escapes APP_ROOT") {
+		t.Fatalf("accepted config escape: %v", err)
+	}
+}
+
 // This opt-in suite performs only startup/session checks and isolated cache writes
 // on the existing local services. It never runs DDL, DML, FLUSH, or migrations.
-func TestPluginRegistryRealDependencies(t *testing.T) {
+func TestFixedRuntimeRealDependencies(t *testing.T) {
 	if os.Getenv("PLUGIN_INTEGRATION") != "1" {
+		if os.Getenv("REQUIRE_DB_INTEGRATION") == "1" {
+			t.Fatal("REQUIRE_DB_INTEGRATION=1 requires PLUGIN_INTEGRATION=1; refusing a silent skip")
+		}
 		t.Skip("set PLUGIN_INTEGRATION=1 to use existing local MySQL/Redis")
 	}
 	base := localPluginConfiguration(t)
@@ -56,10 +111,17 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 				if err != nil {
 					return
 				}
-				_ = conn.Close()
+				if err := conn.Close(); err != nil {
+					t.Errorf("conn.Close(): %v", err)
+				}
 			}
 		}()
-		defer func() { _ = listener.Close(); <-exited }()
+		defer func() {
+			if err := listener.Close(); err != nil {
+				t.Errorf("listener.Close(): %v", err)
+			}
+			<-exited
+		}()
 		broken := base
 		_, broken.Database.Port, err = net.SplitHostPort(listener.Addr().String())
 		if err != nil {
@@ -68,7 +130,7 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 		installPluginConfiguration(t, broken)
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		if runtime, err := bootstrap.NewRuntime(ctx, bootstrap.Options{RegisterPlugins: registerServerPlugins}); runtime != nil || err == nil || !strings.Contains(err.Error(), `init plugin "mysql"`) {
+		if runtime, err := bootstrap.NewRuntime(ctx, bootstrap.Options{}); runtime != nil || err == nil || !strings.Contains(err.Error(), "mysql") {
 			t.Fatalf("expected MySQL handshake failure, got %v", err)
 		}
 	})
@@ -77,7 +139,7 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 	}
 	t.Run("migration minimal readonly", func(t *testing.T) {
 		installPluginConfiguration(t, base)
-		runtime, err := bootstrap.NewMigrationRuntime(t.Context(), bootstrap.MigrationOptions{RegisterPlugins: registerMigrationPlugins})
+		runtime, err := bootstrap.NewMigrationRuntime(t.Context(), bootstrap.MigrationOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,26 +169,37 @@ func TestPluginRegistryRealDependencies(t *testing.T) {
 
 func localPluginConfiguration(t *testing.T) config.Config {
 	t.Helper()
-	projectRoot, err := filepath.Abs("..")
+	root, err := isolatedPluginRoot(os.Getenv("APP_ROOT"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Remove every inherited application override before loading the explicit
+	// isolated file. Host/port and synthetic key overrides below are owned here.
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "APP_") {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	privatePath, publicPath := pluginIntegrationKeys(t)
 	// Connection targets are forced before Load, so no configuration can redirect
 	// this suite to a remote service. Passwords remain inside normal application IO.
 	for key, value := range map[string]string{
-		"APP_ROOT": projectRoot, "APP_ENV": "test", "APP_DATABASE__HOST": "127.0.0.1", "APP_DATABASE__PORT": "3306",
+		"APP_ROOT": root, "APP_ENV": "test", "APP_DATABASE__HOST": "127.0.0.1", "APP_DATABASE__PORT": "3306",
 		"APP_REDIS__ADDR": "127.0.0.1:6379", "APP_AUTH__MODE": "external", "APP_CACHE__ENABLED": "false",
 		"APP_JWT__ACTIVE__KID": "plugin-itest", "APP_JWT__ACTIVE__PRIVATE_KEY_PATH": privatePath, "APP_JWT__ACTIVE__PUBLIC_KEY_PATH": publicPath,
 	} {
 		t.Setenv(key, value)
 	}
-	cfg, err := defaultconfig.Load()
+	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Preserve resolved local credentials in memory, then remove APP_ overrides so
-	// each subsequent registration really consumes its own complete temporary file.
+	// each subsequent runtime really consumes its own complete temporary file.
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(key, "APP_") {
@@ -138,6 +211,7 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	}
 	cfg.Env = env.Test
 	cfg.App.Name = fmt.Sprintf("plugin-itest-%d", time.Now().UnixNano())
+	cfg.Redis.Prefix = cfg.App.Name
 	cfg.App.Host = "127.0.0.1"
 	cfg.App.EnableHTTPS = false
 	cfg.App.DrainWaitSeconds = 1
@@ -165,6 +239,63 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	}
 	t.Log("real dependencies: MySQL=127.0.0.1:3306, Redis=127.0.0.1:6379; credentials omitted")
 	return *cfg
+}
+
+// Validate only metadata before Load or any connection. Never fall back to the
+// project's real runtime configuration, including through a config symlink.
+func isolatedPluginRoot(input string) (string, error) {
+	if strings.TrimSpace(input) == "" {
+		return "", errors.New("plugin integration requires an explicit isolated APP_ROOT")
+	}
+	root, err := filepath.Abs(input)
+	if err != nil {
+		return "", fmt.Errorf("resolve isolated APP_ROOT: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve isolated APP_ROOT: %w", err)
+	}
+	project, err := filepath.Abs("..")
+	if err != nil {
+		return "", err
+	}
+	project, err = filepath.EvalSymlinks(project)
+	if err != nil {
+		return "", err
+	}
+	projectRelative, err := filepath.Rel(project, root)
+	if err != nil {
+		return "", err
+	}
+	if projectRelative != ".." && !strings.HasPrefix(projectRelative, ".."+string(filepath.Separator)) {
+		return "", errors.New("plugin integration refuses project APP_ROOT; prepare an isolated runtime file")
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(root, "config", "env", "env.yml"))
+	if err != nil {
+		return "", fmt.Errorf("inspect isolated config: %w", err)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("isolated config escapes APP_ROOT")
+	}
+	projectRelative, err = filepath.Rel(project, path)
+	if err != nil {
+		return "", err
+	}
+	if projectRelative != ".." && !strings.HasPrefix(projectRelative, ".."+string(filepath.Separator)) {
+		return "", errors.New("isolated config resolves inside the source project")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("isolated config must be a regular file")
+	}
+	return root, nil
 }
 
 func pluginIntegrationKeys(t *testing.T) (string, string) {
@@ -225,15 +356,10 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 	t.Helper()
 	cfg := base
 	cfg.App.Name += "-" + store
+	cfg.Redis.Prefix = cfg.App.Name
 	cfg.Cache = config.CacheConfig{Enabled: true, Store: store, RedisDB: 0, TTL: 2 * time.Second, MaxBytes: 1 << 20, MaxBodyBytes: 4096}
 	installPluginConfiguration(t, cfg)
-	var selected bootstrap.PluginSet
-	register := func(r *core.PluginRegistry) (bootstrap.PluginSet, error) {
-		var err error
-		selected, err = registerServerPlugins(r)
-		return selected, err
-	}
-	runtime, err := bootstrap.NewRuntime(t.Context(), bootstrap.Options{RegisterPlugins: register})
+	runtime, err := bootstrap.NewRuntime(t.Context(), bootstrap.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,14 +368,17 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 			t.Error(err)
 		}
 	})
-	sqlDB := selected.Database.SQLDB()
-	redisClient := selected.Redis.DefaultClient()
-	if sqlDB == nil || redisClient == nil || !selected.Cache.Enabled() {
-		t.Fatalf("real capability states: SQL=%t Redis=%t cache=%t configuredCache=%t", sqlDB != nil, redisClient != nil, selected.Cache.Enabled(), runtime.Config().Cache.Enabled)
+	sqlDB, err := runtime.Resources().Mdb().DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisClient := runtime.Resources().Rdb(0)
+	if sqlDB == nil || redisClient == nil || !runtime.Cache().Enabled() {
+		t.Fatalf("real capability states: SQL=%t Redis=%t cache=%t configuredCache=%t", sqlDB != nil, redisClient != nil, runtime.Cache().Enabled(), runtime.Config().Cache.Enabled)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	if err := selected.Database.PingContext(ctx); err != nil {
+	if err := runtime.Resources().PingDB(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := redisClient.Ping(ctx).Err(); err != nil {
@@ -259,10 +388,23 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 	if err != nil {
 		t.Fatal(err)
 	}
+	accessLogger, err := logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(accessLogger.Sync)
 	var executions atomic.Int32
-	engine, err := router.New(env.Test, router.Options{Middleware: selected.Middleware, Metrics: recorder, RegisterModules: func(v1 *gin.RouterGroup) {
-		v1.GET("/cache-probe", selected.Cache.Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
-	}})
+	engine, err := router.New(env.Test, router.Options{
+		AccessLogger:    accessLogger,
+		AllowedOrigins:  cfg.CORS.AllowedOrigins,
+		LogRequestBody:  cfg.Log.AccessRequestBody,
+		LogResponseBody: cfg.Log.AccessResponseBody,
+		MaxBodyBytes:    cfg.App.MaxBodyBytes,
+		Metrics:         recorder,
+		RegisterModules: func(v1 *gin.RouterGroup) {
+			v1.GET("/cache-probe", runtime.Cache().Middleware(0), func(c *gin.Context) { c.String(http.StatusOK, "response-%d", executions.Add(1)) })
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +460,7 @@ func verifyRealPluginCacheAndClosure(t *testing.T, base config.Config, store str
 		t.Fatal("Redis client stayed open")
 	}
 	if sqlDB.Stats().OpenConnections != 0 || redisClient.PoolStats().TotalConns != 0 {
-		t.Fatal("owned connections remain after Stop")
+		t.Fatal("owned connections remain after Close")
 	}
 	t.Logf("%s: real HTTP cache hit, identity bypass, SQL/Redis pools closed", store)
 }

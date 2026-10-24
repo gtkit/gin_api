@@ -28,7 +28,11 @@ func newObserverWithReader(t *testing.T) (singletonObserver, *sdkmetric.ManualRe
 
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("provider.Shutdown(context.Background()): %v", err)
+		}
+	})
 
 	rec, err := metrics.New(provider.Meter("github.com/gtkit/gin-api"))
 	if err != nil {

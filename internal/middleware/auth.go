@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	gojwt "github.com/golang-jwt/jwt/v5"
+	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/gtkit/goerr"
 	jwtclaims "github.com/gtkit/gojwt/claims"
 
@@ -64,7 +64,7 @@ const maxTokenBytes = 8 << 10 // 8 KiB
 // 没有 ctx 就无法透传取消与超时——一个挂住的黑名单查询会把
 // 每个请求都拖到超时，而那时再改签名会波及全部调用点。
 type TokenParser interface {
-	ParseToken(ctx context.Context, token string, opts ...gojwt.ParserOption) (*jwtclaims.Claims, error)
+	ParseToken(ctx context.Context, token string, opts ...jwtv5.ParserOption) (*jwtclaims.Claims, error)
 }
 
 // RevocationChecker 报告访问令牌是否已被撤销。
@@ -217,6 +217,9 @@ func Authorize(authorizer sharedauth.Authorizer, authorizerID string) gin.Handle
 
 		allowed, err := authorizer.Authorize(c.Request.Context(), principal, authorizationRequest(c))
 		if err != nil {
+			if abortOnContextError(c, err) {
+				return
+			}
 			// 依赖故障不是拒绝：把"角色数据源挂了"映射成 403，
 			// 会让一次基础设施故障表现为全体用户突然失去权限。
 			abortWith(c, goerr.New(fmt.Errorf("authorization unavailable: %w", err), goerr.StatusDependencyUnavailable()))
@@ -253,7 +256,7 @@ func abortWith(c *gin.Context, err error) {
 
 // abortOnContextError 把纯 ctx 错误交给终态中间件，返回是否已接管。
 //
-// 认证链上的每一步都可能做 I/O（远端密钥集、用户校验、撤销查询），而请求
+// 认证和授权都可能做 I/O（密钥集、用户/撤销/角色查询），而请求
 // 预算到点与客户端断开是**请求级事实**，不是这一步的语义：写成 401 会让一次
 // 超时看起来像凭据无效，写成 503 会让它看起来像下游故障。两者都让客户端与
 // 网关按错误的方向处置。判定用纯错误树——混入真实故障的错误仍按各自语义走。
@@ -261,7 +264,7 @@ func abortOnContextError(c *gin.Context, err error) bool {
 	if !errx.IsPureAbort(err) {
 		return false
 	}
-	_ = c.Error(err)
+	c.Error(err).Type = gin.ErrorTypePrivate
 	c.Abort()
 	return true
 }

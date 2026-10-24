@@ -3,8 +3,10 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/singleton"
@@ -77,10 +79,14 @@ type singletonObserver struct {
 	recorder *metrics.Recorder
 }
 
+func (o singletonObserver) TaskFinished(ctx context.Context, task string, elapsed time.Duration, err error, panicked bool) {
+	o.recorder.RecordWorkerExecution(ctx, metrics.WorkerSingleton, task, elapsed, err, panicked)
+}
+
 // LeaseAcquired 记 Debug：多副本下每个周期都会有一条，Info 会刷屏。
 func (o singletonObserver) LeaseAcquired(task string, fence int64) {
 	logger.Debug("singleton lease acquired",
-		logger.String("task", task), logger.Int64("fence", fence))
+		zap.String("task", task), zap.Int64("fence", fence))
 }
 
 // LeaseSkipped 同样记 Debug：**这是正常情况**。
@@ -88,13 +94,13 @@ func (o singletonObserver) LeaseAcquired(task string, fence int64) {
 // 多副本部署下每轮只有一个实例能拿到租约，其余全部跳过。把它记成 Warn
 // 会让正常运行看起来像持续故障，而真正的问题会淹没在里面。
 func (o singletonObserver) LeaseSkipped(task string) {
-	logger.Debug("singleton lease held by another instance", logger.String("task", task))
+	logger.Debug("singleton lease held by another instance", zap.String("task", task))
 }
 
 // LeaseLost 记 Warn：任务被中止了，且原因通常是 Redis 出了问题。
 func (o singletonObserver) LeaseLost(task string, err error) {
 	logger.Warn("singleton lease lost, the task was canceled",
-		logger.String("task", task), logger.Err(err))
+		zap.String("task", task), zap.Error(err))
 	o.recorder.RecordWorkerRun(context.Background(), task, false)
 }
 
@@ -108,6 +114,6 @@ func (o singletonObserver) TaskSucceeded(task string) {
 
 // TaskFailed 记 Warn 并计入指标。
 func (o singletonObserver) TaskFailed(task string, err error) {
-	logger.Warn("singleton task failed", logger.String("task", task), logger.Err(err))
+	logger.Warn("singleton task failed", zap.String("task", task), zap.Error(err))
 	o.recorder.RecordWorkerRun(context.Background(), task, false)
 }

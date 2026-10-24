@@ -15,12 +15,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/runtime/resource"
-
-	"golang.org/x/sync/errgroup"
 )
 
 // CheckStatus 是单项检查的固定结论。
@@ -174,16 +173,15 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) Report {
 	checks := buildChecks(cfg, opts)
 	results := make([]CheckResult, len(checks))
 
-	group := new(errgroup.Group)
+	var group sync.WaitGroup
 	for i, chk := range checks {
-		group.Go(func() error {
+		group.Go(func() {
 			results[i] = runCheck(ctx, chk, opts.Timeout)
-			return nil
 		})
 	}
-	// 各子任务恒返回 nil：一项检查失败不该取消其余检查——
+	// 一项检查失败不取消其余检查——
 	// doctor 的价值恰恰在于一次跑完给出全景，而不是停在第一个问题上。
-	_ = group.Wait()
+	group.Wait()
 
 	slices.SortFunc(results, func(a, b CheckResult) int { return cmp.Compare(a.Name, b.Name) })
 	report.Checks = results
@@ -263,23 +261,22 @@ func countJoined(err error) int {
 //
 // 只看文件元数据，绝不读取内容——doctor 的输出会被粘贴到各种地方，
 // 而私钥一旦出现在任何一份日志里就等于泄漏。
-// checkJWTKeys 校验**当前生效的**密钥文件。
-//
-// 曾经读的是 cfg.JWT.PrivateKeyPath / PublicKeyPath——那是密钥轮换落地前的
-// 单密钥字段，如今已废弃且恒为空。空路径被循环直接跳过，于是这项检查在
-// 密钥完全缺失时照样报 pass：它检查的是一个不再被使用的字段。
-//
-// **那比不检查更糟**：doctor 的用途正是回答"这份配置能不能起来"，
-// 而它给出的是一个虚假的肯定。
 func checkJWTKeys(cfg *config.Config) CheckResult {
-	paths := []string{cfg.JWT.Active.PrivateKeyPath, cfg.JWT.Active.PublicKeyPath}
+	paths := []struct {
+		path    string
+		private bool
+	}{{cfg.JWT.Active.PrivateKeyPath, true}, {cfg.JWT.Active.PublicKeyPath, false}}
 	// 退役公钥仍参与验签，缺失会让持有旧令牌的用户在轮换后集体失效。
 	for _, previous := range cfg.JWT.Previous {
-		paths = append(paths, previous.PublicKeyPath)
+		paths = append(paths, struct {
+			path    string
+			private bool
+		}{previous.PublicKeyPath, false})
 	}
 
 	var missing, insecure int
-	for _, p := range paths {
+	for _, key := range paths {
+		p := key.path
 		// 空路径算缺失，**不能跳过**。
 		//
 		// 跳过正是上一版失效的方式：废弃字段恒为空，于是每条路径都被跳过，
@@ -290,14 +287,14 @@ func checkJWTKeys(cfg *config.Config) CheckResult {
 			continue
 		}
 		info, err := os.Stat(resource.ResolvePath(p))
-		if err != nil {
+		if err != nil || !info.Mode().IsRegular() {
 			missing++
 			continue
 		}
 		// 权限判定按平台分流（keyperm_unix.go / keyperm_windows.go）：
 		// Unix 权限位在 Windows 上没有对应语义，就地写 &0o077 会让该平台恒报过宽。
 		// 上面的存在性判定不分平台——它在任何平台上都成立。
-		if keyPermissionTooOpen(info) {
+		if keyPermissionTooOpen(info, key.private) {
 			insecure++
 		}
 	}
@@ -306,15 +303,15 @@ func checkJWTKeys(cfg *config.Config) CheckResult {
 	case missing > 0:
 		return CheckResult{
 			Status: StatusFail, ErrorCode: CodeMissing,
-			Detail: fmt.Sprintf("%d configured key file(s) are missing or unreadable", missing),
+			Detail: fmt.Sprintf("%d configured key file(s) are missing, non-regular or inaccessible", missing),
 		}
 	case insecure > 0:
 		return CheckResult{
 			Status: StatusFail, ErrorCode: CodeInsecurePerm,
-			Detail: fmt.Sprintf("%d key file(s) are readable by group or others; use 0600", insecure),
+			Detail: fmt.Sprintf("%d key file(s) have unsafe permissions; private keys require no group/other access, public keys must not be group/other writable", insecure),
 		}
 	default:
-		return CheckResult{Status: StatusPass, ErrorCode: CodeOK, Detail: "key files present with tight permissions"}
+		return CheckResult{Status: StatusPass, ErrorCode: CodeOK, Detail: "regular key files present with role-appropriate permissions"}
 	}
 }
 
@@ -348,9 +345,13 @@ func checkLogDir(cfg *config.Config, deep bool) CheckResult {
 		}
 	}
 	name := f.Name()
-	_ = f.Close()
+	closeErr := f.Close()
 	// 探针文件立即删除：doctor 只读不改，留下的文件本身就是一次修改。
-	_ = os.Remove(name)
+	removeErr := os.Remove(name)
+	if cleanupErr := errors.Join(closeErr, removeErr); cleanupErr != nil {
+		return CheckResult{Status: StatusFail, ErrorCode: CodePermission,
+			Detail: fmt.Sprintf("log probe cleanup failed (%s): %v", name, cleanupErr)}
+	}
 
 	return CheckResult{Status: StatusPass, ErrorCode: CodeOK, Detail: "log directory is writable"}
 }

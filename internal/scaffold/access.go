@@ -106,7 +106,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 				"权威角色源，表里有 admin 角色行的账号即通行。" +
 				"未建表或表为空时一律拒绝，因此空库上的表现仍是 403——" +
 				"但不要据此以为这条路由是关着的。" +
-				"换成 IAM / IdP 同步表时只改 providers.go 里 svc.roles 的构造，路由代码无需改动。" +
+				"换成 IAM / IdP 同步表时只改 internal/runtime/module/account/module.go 里的角色源构造，路由代码无需改动。" +
 				"绝不要改成仅凭 JWT 的 role claim 放行——那是一次签发当成持续有效的高权限。",
 		}, nil
 	case AccessOptionCustom:
@@ -119,7 +119,7 @@ func ResolveAccessChoice(access string, public bool, moduleName string) (accessC
 			Note: fmt.Sprintf(
 				"模块要求自定义授权 %s。该标识**尚未注册**，装配层会兜底为恒拒绝并打一条"+
 					"错误日志：可编译、可启动，所有请求都被拒绝，不留 TODO、不默许放行。"+
-					"接入真实实现的方式是在 providers.go 的 scaffold:module-authorizers 标记处"+
+					"接入真实实现的方式是在 modules.go 的 scaffold:module-authorizers 标记处"+
 					"注册它，路由代码无需改动。", id),
 		}, nil
 	}

@@ -18,6 +18,8 @@ cp config/env.yml.example config/env/env.yml
 
 `config/env/env.yml` 不进入 Git。配置缺失、YAML 无法解析或关键字段校验失败时，进程 fail-fast。
 
+配置只使用当前字段，不保留旧键别名或专门的迁移诊断。YAML 和 `APP_` 环境变量覆盖中的未知键统一在解码阶段拒绝。
+
 ## 目录
 
 ```text
@@ -40,13 +42,17 @@ config/
 - `redis`：地址、密码和初始化 DB 列表。
 - `log`：日志级别、路径和滚动策略。
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
-- `email`、`sms`、`aliyun`、`news`、`baidu`：外部服务配置。
-- `pay`：微信支付和支付宝配置；未启用时不要求密钥。
-- `llm`：provider、模型、超时和会话配置。
+- `auth`：本地认证或外部身份模式。
+- `email`、`sms`、`news`：通知渠道与告警配置。
+- `ratelimit`、`cache`、`outbound`：限流、响应缓存和出站请求。
+- `telemetry`、`tasks`：可观测性导出与异步任务，默认关闭。
+- `modules`：业务模块配置，按实际模块添加。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 
 字段结构以 `internal/platform/config/types.go` 和 `config/env.yml.example` 为准。
+请求读取超时使用 `application.read_header_timeout` 和 `application.read_timeout`；
+JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 
 ## 核心字段校验
 
@@ -60,6 +66,51 @@ config/
 校验只检查配置，不修改原值；多项错误仍一次聚合返回。连接池与 Redis 规则保持原样：
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
+
+## MySQL 预编译语句与 ProxySQL
+
+`internal/platform/mysql/open.go` 的 `buildOpenOptions` 固定传入 `ormx.WithPrepareStmt(true)`，
+服务连接和迁移连接都使用这组选项。当前 YAML **没有** `database.prepare_stmt` 等开关，
+不能通过增加一个未被读取的字段来关闭它。
+
+ProxySQL 支持 MySQL 预编译语句，不能把启用 PrepareStmt 一概判定为不兼容。
+需要关注的是预编译语句生命周期与后端连接复用：按
+[ProxySQL 官方说明](https://proxysql.com/documentation/mysql-prepared-statements-pooling-and-caching)，
+持有未关闭的预编译语句会限制相应客户端会话的后端连接复用；长期缓存语句会影响连接共享效率。
+SQL 文本 `PREPARE` 与驱动使用的二进制预编译协议还有不同的复用约束。
+
+接入具体部署前，应记录 ProxySQL/MySQL 版本、路由规则、连接池上限和超时，验证参数化查询、
+事务、连接回收/重连和后端切换，并观察实际后端连接占用及预编译语句统计。
+`database.maxopenconn` 是单个应用连接池上限，不能据此直接推断 ProxySQL 的总后端连接需求。
+本仓没有针对指定 ProxySQL 部署的联调结果，不承诺任意版本/配置兼容，也不因缺少说明而认定现有查询会失败。
+若部署验证表明需要关闭缓存，再单独实施配置与代码变更，并同步示例和验收；本文不改变当前默认行为。
+
+## 通知通道与告警开关
+
+默认 server 和 migration 均直接构造机器人、邮件、短信渠道及通知组合，再打开日志。构造发生在各组件 Open，不发送启动测试消息。配置校验与原规则一致；没有告警目标不等于无需提供已启用客户端的必填配置。
+
+| 字段 | 用途、启用与约束 | 留空/默认与关联 |
+|---|---|---|
+| `news.fsurl` | 默认文本告警 http(s) webhook；显式目标只覆盖本次机器人地址 | 空跳过默认机器人发送；已注册机器人仍支持显式目标，邮件/短信不受影响 |
+| `news.platform` | `feishu/dingtalk/wecom`；忽略大小写和首尾空白 | 空按飞书处理；沿用现有验证白名单 |
+| `news.secret` | 平台签名密钥，不写日志 | 空不配置签名；平台要求加签时须提供 |
+| `news.appid/appsecret` | 图片消息应用凭据字段 | 默认空；文本通知不读取；图片调用方构造 msgbot/feishu.App 后传给 `SendPicMsg` |
+| `email.host` | SMTP 客户端开关；非空才构造 | 空禁用且其他 email 字段须为空；非空要求 from |
+| `email.port` | SMTP 端口，0..65535 | 0 用库默认 25；465 通常配 implicit_ssl=true |
+| `email.user/pass` | SMTP 认证账号/密码 | user 空不认证（仅可信中继）；pass 空不提供密码 |
+| `email.from/from_name` | 发件地址与显示名 | host 非空时 from 必填合法地址；from_name 空不设置 |
+| `email.implicit_ssl` | true 选 SMTPS | false 使用客户端强制 STARTTLS 策略 |
+| `email.alert_to` | 合法告警收件地址列表 | 空不发邮件告警；非空仍要求有效 host/from；主题 `[env] service alert`，正文为原告警参数用空格连接 |
+| `sms.provider` | 默认短信客户端开关，仅 `aliyun` | 空禁用且其他 SMS 字段须为空；实现可替换不等于新增供应商配置 |
+| `sms.access_id/access_secret` | Aliyun 凭据 | provider 非空时必填，无默认值 |
+| `sms.region_id` | 短信区域 | 空用驱动默认 cn-hangzhou |
+| `sms.sign_name` | 必填全局签名 | 模板级 sign_name 非空时覆盖它 |
+| `sms.templates` | 逻辑名到供应商模板的映射；每项 code 必填 | 空没有模板；每项 sign_name 空用全局签名 |
+| `sms.alert_phones/alert_template` | 告警号码与逻辑模板名，须成对；模板须存在 | 同时空则不发短信告警；模板收到 `{"env": 环境名}`，供应商模板应与该参数一致 |
+
+三个通道依次尽力发送：机器人→邮件→逐个号码短信，每次有独立 10 秒预算，也受调用取消和关闭预算约束；不增加项目重试。日志只有一个 64 条待处理队列，满队列可丢弃，不能当作可靠消息存储。所有发送有真实副作用，短信可能计费；本地验收仅用替身和回环服务。
+
+纯日志组合可直接构造日志且不传 `logging.Options.Notification`；默认入口仍选择现有通知实现。替换、资源边界及关闭限制见 [可观测性说明](../docs/observability.md#通知渠道与替换方式)。本次没有新增配置项或部署数据迁移。
 
 ## 密钥规则
 
@@ -90,9 +141,41 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 显式 `--out-dir <dir> --kid <kid>` 优先，使用 kid.private.pem/kid.public.pem 且无需 env；相对显式目录基于当前工作目录。
 命令拒绝覆盖已有文件；完整命令见 [cmd/README.md](../cmd/README.md#jwt)。
 
-`jwt.active.kid` 和两条密钥路径必填，路径可为绝对路径或相对 `APP_ROOT` 的路径；
-无隐式默认密钥。现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
+`jwt.active.kid` 与公钥路径在两种认证模式下均必填；`auth.mode=local` 还要求私钥路径。
+`external` 只加载公钥验签，不构造签发器，也不解析或读取 active 私钥路径，路径可留空。
+路径可为绝对路径或相对 `APP_ROOT` 的路径，无隐式默认密钥。
+现有 `jwtpri.pem` / `jwtpub.pem` 也可显式配置，文件名不决定编码。
 `jwt.previous` 仅配置仍需验签的旧公钥（最多 8 个）；`issuer` 与 `audiences` 必填。
+
+### JWT 文件权限与启动校验
+
+`server` 在 `bootstrap.NewApp → newRuntime → jwtauth.Assemble` 中读取密钥，
+进入 `App.Run` 提供服务之前就会校验；不依赖操作者先执行 `doctor`。
+`internal/pkg/jwtauth/assemble.go` 按认证模式选择签发或仅验签能力；local 模式再按
+有效配置的 `env` 决定私钥是否严格检查。实际文件检查位于 `internal/pkg/jwtauth/keyset.go`。
+
+| 文件/环境 | server 的现有规则 | 部署建议 |
+|---|---|---|
+| active 私钥，local 且 `env: prod` | `mode & 0077` 必须为 0，即 group/other 无任何权限；失败阻断启动 | 使用 0600，或服务进程可读的 0400；不要求权限值恰好等于 0600 |
+| active 私钥，local 且 `env: dev/test` | 不强制上述权限位条件；仍校验文件存在、可读、普通文件及密钥格式 | 同样建议收紧到 0600，不把开发放宽当成生产规则 |
+| active 私钥，external 各环境 | 不读取，也不要求文件存在 | 验签服务只挂载公钥 |
+| active 与 previous 公钥，Unix 各环境 | `mode & 0022` 必须为 0，禁止 group/other 写入；允许他人只读 | 使用 0644 或可读的 0444，防止验签公钥被其他账户改写 |
+
+符号链接会先解析到实际目标，再检查目标文件类型、权限与内容。目录、设备等非普通文件会被拒绝；
+读取的私钥须为 Ed25519 PKCS#8 PEM，公钥须为 Ed25519 PKIX PEM；local 的 active 密钥还必须配对。
+这些格式与配对校验在 dev/test 下也保留。`jwt generate` 和 `jwt reencode` 仍按各自规则
+要求并处理完整密钥对，server 的 external 模式不改变两条命令的语义。
+
+`doctor` 的 `jwt_keys` 只看元数据：Unix 下不分环境，私钥都要求 group/other 无权限，
+公钥都禁止 group/other 写入。因此 dev/test 的宽权限私钥可能通过 server 的权限分支，
+却被 doctor 标为失败；doctor 也不能证明 PEM 内容有效或公私钥配对。
+
+以上权限位规则以 Unix 为准。Windows 使用 ACL，doctor 只保留存在性/普通文件检查，
+不检查 ACL；server 的 prod 私钥权限位判断也不能作为 Windows ACL 安全证明。
+生产交付平台为 Linux，部署时应在目标平台确认文件归属、可读性与权限，
+不能把 Windows 本地生成或 doctor 通过视为生产权限验收。
+
+### 令牌寿命与旧密钥转换
 
 `jwt.token_ttl_hours` 正值覆盖访问令牌寿命，<=0 时 `auth.mode=local` 默认 1 小时、
 `external` 默认 720 小时。`auth.refresh_ttl` 仍控制本地认证的独立刷新令牌，

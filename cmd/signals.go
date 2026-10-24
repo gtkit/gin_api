@@ -9,7 +9,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // signalSupervisor 是进程内**唯一**的 OS 信号监督者

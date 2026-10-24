@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	gojwt "github.com/gtkit/gojwt"
+	"github.com/gtkit/gojwt"
 
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -32,6 +32,7 @@ func testJWTConfig(t *testing.T) *config.Config {
 	}
 
 	return &config.Config{
+		Auth: config.AuthConfig{Mode: config.AuthModeLocal},
 		JWT: config.JWTConfig{
 			Active: config.JWTKeyConfig{
 				KID:            "test-kid",

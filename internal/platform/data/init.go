@@ -1,29 +1,37 @@
-package dao
+package data
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
-const slowTime = 200 * time.Millisecond
-
-// NewGormLogger uses the selected project logger. Parameters are always omitted
+// NewGormLogger implements the GORM protocol using gtkit/logger directly. Parameters are always omitted
 // at every SQL log level, including errors and slow queries.
 func NewGormLogger(cfg *config.Config) gormlogger.Interface {
 	level := gormlogger.Warn
+	threshold := (config.LogConfig{}).EffectiveSQLSlowThreshold()
 	if cfg != nil && cfg.Log.SQL != 0 {
 		level = gormlogger.Info
 	}
-	return &gormLogger{logLevel: level}
+	if cfg != nil {
+		threshold = cfg.Log.EffectiveSQLSlowThreshold()
+	}
+	return &gormLogger{logLevel: level, slowThreshold: threshold}
 }
 
-type gormLogger struct{ logLevel gormlogger.LogLevel }
+type gormLogger struct {
+	logLevel      gormlogger.LogLevel
+	slowThreshold time.Duration
+}
 
 var _ gormlogger.Interface = (*gormLogger)(nil)
 
@@ -39,7 +47,10 @@ func (l *gormLogger) Info(ctx context.Context, msg string, data ...any) {
 	if l.logLevel < gormlogger.Info {
 		return
 	}
-	l.emit(ctx, applog.LevelInfo, msg, data)
+	if !logger.Default().Zap().Core().Enabled(zapcore.InfoLevel) {
+		return
+	}
+	logger.InfoCtx(ctx, fmt.Sprintf(msg, data...), l.messageFields(ctx)...)
 }
 
 // Warn 在日志级别不低于 Warn 时按 Printf 风格输出 Warn 日志，附带 source 调用位置。
@@ -47,7 +58,10 @@ func (l *gormLogger) Warn(ctx context.Context, msg string, data ...any) {
 	if l.logLevel < gormlogger.Warn {
 		return
 	}
-	l.emit(ctx, applog.LevelWarn, msg, data)
+	if !logger.Default().Zap().Core().Enabled(zapcore.WarnLevel) {
+		return
+	}
+	logger.WarnCtx(ctx, fmt.Sprintf(msg, data...), l.messageFields(ctx)...)
 }
 
 // Error 在日志级别不低于 Error 时按 Printf 风格输出 Error 日志，附带 source 调用位置。
@@ -55,7 +69,10 @@ func (l *gormLogger) Error(ctx context.Context, msg string, data ...any) {
 	if l.logLevel < gormlogger.Error {
 		return
 	}
-	l.emit(ctx, applog.LevelError, msg, data)
+	if !logger.Default().Zap().Core().Enabled(zapcore.ErrorLevel) {
+		return
+	}
+	logger.ErrorCtx(ctx, fmt.Sprintf(msg, data...), l.messageFields(ctx)...)
 }
 
 // Trace 记录一次 SQL 执行：出错时（除被忽略的 gorm.ErrRecordNotFound 外）输出 Error 日志；
@@ -75,17 +92,26 @@ func (l *gormLogger) Trace(
 
 	switch {
 	case err != nil && l.logLevel >= gormlogger.Error && !recordNotFoundIgnored:
+		if !logger.Default().Zap().Core().Enabled(zapcore.ErrorLevel) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
-		applog.Log(ctx, applog.LogEntry{Level: applog.LevelError, Message: "gorm query error", Fields: append(fields, applog.Err(err)), CallerSkip: 1})
-	case slowTime != 0 && elapsed > slowTime && l.logLevel >= gormlogger.Warn:
+		logger.ErrorCtx(ctx, "gorm query error", append(fields, zap.Error(err))...)
+	case l.slowThreshold > 0 && elapsed > l.slowThreshold && l.logLevel >= gormlogger.Warn:
+		if !logger.Default().Zap().Core().Enabled(zapcore.WarnLevel) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
-		applog.Log(ctx, applog.LogEntry{Level: applog.LevelWarn, Message: "gorm slow query", Fields: append(fields, applog.Duration("slow_threshold", slowTime)), CallerSkip: 1})
+		logger.WarnCtx(ctx, "gorm slow query", append(fields, zap.Duration("slow_threshold", l.slowThreshold))...)
 	case l.logLevel == gormlogger.Info:
+		if !logger.Default().Zap().Core().Enabled(zapcore.InfoLevel) {
+			return
+		}
 		sql, rows := fc()
 		fields := l.traceFields(ctx, elapsed, sql, rows)
-		applog.Log(ctx, applog.LogEntry{Level: applog.LevelInfo, Message: "gorm query", Fields: fields, CallerSkip: 1})
+		logger.InfoCtx(ctx, "gorm query", fields...)
 	}
 }
 
@@ -94,28 +120,28 @@ func (*gormLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string
 	return sql, nil
 }
 
-func (l *gormLogger) emit(ctx context.Context, level applog.Level, message string, args []any) {
-	fields := []applog.Field{applog.String("source", callerSource())}
-	if id := applog.RequestIDFromContext(ctx); id != "" {
-		fields = append(fields, applog.String("trace_id", id))
+func (l *gormLogger) messageFields(ctx context.Context) []zap.Field {
+	fields := []zap.Field{zap.String("source", callerSource())}
+	if id := logger.RequestIDFromContext(ctx); id != "" {
+		fields = append(fields, zap.String("trace_id", id))
 	}
-	applog.Log(ctx, applog.LogEntry{Level: level, Message: message, Format: true, Args: args, Fields: fields, CallerSkip: 2})
+	return fields
 }
 
 // traceFields 组装 Trace 日志的公共字段。
-func (l *gormLogger) traceFields(ctx context.Context, elapsed time.Duration, sql string, rows int64) []applog.Field {
+func (l *gormLogger) traceFields(ctx context.Context, elapsed time.Duration, sql string, rows int64) []zap.Field {
 	const maxTraceFields = 6
-	fields := make([]applog.Field, 0, maxTraceFields)
+	fields := make([]zap.Field, 0, maxTraceFields)
 	fields = append(fields,
-		applog.String("source", callerSource()),
-		applog.Duration("elapsed", elapsed),
-		applog.String("sql", sql),
+		zap.String("source", callerSource()),
+		zap.Duration("elapsed", elapsed),
+		zap.String("sql", sql),
 	)
 	if rows >= 0 {
-		fields = append(fields, applog.Int64("rows", rows))
+		fields = append(fields, zap.Int64("rows", rows))
 	}
-	if traceID := applog.RequestIDFromContext(ctx); traceID != "" {
-		fields = append(fields, applog.String("trace_id", traceID))
+	if traceID := logger.RequestIDFromContext(ctx); traceID != "" {
+		fields = append(fields, zap.String("trace_id", traceID))
 	}
 	return fields
 }

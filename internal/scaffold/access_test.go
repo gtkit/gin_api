@@ -3,6 +3,7 @@
 package scaffold
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,7 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 	}{
 		{name: "public", public: true, want: "g.GET(\"\", handler.List)"},
 		{name: "authenticated", access: AccessOptionAuthenticated, want: "g.Use(deps.Auth)"},
+		{name: "optional", access: AccessOptionOptional, want: "g.Use(deps.OptionalAuth)"},
 		{name: "admin", access: AccessOptionAdmin, want: `deps.Authorize("role.admin")`},
 		{name: "custom", access: AccessOptionCustom, want: `deps.Authorize("module.admin.custom")`},
 	}
@@ -152,6 +154,15 @@ func TestGeneratedModuleCarriesChosenAccessPolicy(t *testing.T) {
 
 			assertFileContains(t,
 				root+"/internal/module/admin/transport/http/router.go", tt.want)
+			router, err := os.ReadFile(root + "/internal/module/admin/transport/http/router.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodyCheck := strings.Index(string(router), "g.Use(middleware.NoBody())")
+			accessChecks := strings.Index(string(router), "g.Use(preAuth...)")
+			if bodyCheck < 0 || accessChecks < 0 || bodyCheck > accessChecks {
+				t.Fatal("generated GET routes must reject request bodies before rate limiting and authentication")
+			}
 		})
 	}
 }
@@ -192,7 +203,7 @@ func TestGeneratedWiringFillsEveryAccessDependency(t *testing.T) {
 				t.Fatalf("GenerateWithOptions: %v", err)
 			}
 
-			providers := root + "/internal/bootstrap/providers.go"
+			providers := root + "/internal/bootstrap/modules.go"
 			// 模板 Deps 声明的每个依赖都必须被填上，与所选策略无关：
 			// 留空能编译，却在启动或首个请求上以空值调用崩溃。
 			for _, field := range []string{
@@ -254,7 +265,7 @@ func TestAccessChoiceRateLimitScopeMatchesIdentity(t *testing.T) {
 // （access-policy-enforcement spec 的「生成器提示与真实机制一致」）。
 //
 // 这条判据是补的，因为分叉真的发生过：提示长期写着「当前没有权威角色源，
-// role.admin 是恒拒绝的占位实现，所有请求都会 403」，而 providers.go 早已把
+// role.admin 是恒拒绝的占位实现，所有请求都会 403」，而 modules.go 早已把
 // role.admin 注册成查 user_roles 表的真实判定（见 CHANGELOG 与 SCAFFOLD.md）。
 //
 // 方向危险才是重点：使用者被告知"这条路由现在全 403、上线前必须自己替换
@@ -282,6 +293,11 @@ func TestAdminAccessNoteMatchesTheRealAuthorizer(t *testing.T) {
 	// 必须点出权威来源，否则使用者无从判断"谁能通过"。
 	if !strings.Contains(choice.Note, "user_roles") {
 		t.Errorf("admin 提示未点出权威角色源 user_roles\n提示全文: %s", choice.Note)
+	}
+	// 账号与角色源独立于可删除的 auth 模块；替换提示必须给出实际
+	// 组合根，不能继续指向 bootstrap 中已经删除的 svc.roles 字段。
+	if !strings.Contains(choice.Note, "internal/runtime/module/account/module.go") || strings.Contains(choice.Note, "svc.roles") {
+		t.Errorf("admin 提示未指向当前角色源组合根\n提示全文: %s", choice.Note)
 	}
 	// custom 选项确实是未注册的恒拒绝，它的提示**应当**保留那套表述——
 	// 缺了这条反向锚，一个把两个选项提示都改空的实现也能让上面的断言通过。

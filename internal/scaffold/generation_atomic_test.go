@@ -39,8 +39,8 @@ func TestGenerateZeroWritesWhenAnchorMissing(t *testing.T) {
 		file   string // 被破坏锚点所在文件（相对 root）
 		anchor string
 	}{
-		{"providers 校验型锚点缺失", "internal/bootstrap/providers.go", "\t// scaffold:module-workers\n"},
-		{"providers 注入型锚点缺失", "internal/bootstrap/providers.go", "\t// scaffold:module-services\n"},
+		{"module assembly 校验型锚点缺失", "internal/bootstrap/modules.go", "\t// scaffold:module-workers\n"},
+		{"module assembly 注入型锚点缺失", "internal/bootstrap/modules.go", "\t// scaffold:module-services\n"},
 		{"config 字段锚点缺失", "internal/platform/config/modules.go", "\t// scaffold:module-config-fields\n"},
 		{"config 示例锚点缺失", "config/env.yml.example", "  # scaffold:module-config-example\n"},
 	}
@@ -65,7 +65,7 @@ func TestGenerateZeroWritesWhenAnchorMissing(t *testing.T) {
 
 			// 记录三个被注入文件的破坏后内容，失败后必须原样。
 			watched := []string{
-				"internal/bootstrap/providers.go",
+				"internal/bootstrap/modules.go",
 				"internal/platform/config/modules.go",
 				"config/env.yml.example",
 			}
@@ -107,11 +107,11 @@ func TestGenerateZeroWritesWhenAnchorMissing(t *testing.T) {
 func TestGenerateRestoresFilesWhenCommitFails(t *testing.T) {
 	root := createProjectFixture(t)
 
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
 	modulesPath := filepath.Join(root, "internal", "platform", "config", "modules.go")
 	examplePath := filepath.Join(root, "config", "env.yml.example")
 	originals := map[string]string{}
-	for _, p := range []string{providersPath, modulesPath, examplePath} {
+	for _, p := range []string{assemblyPath, modulesPath, examplePath} {
 		content, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatalf("ReadFile(%s): %v", p, err)
@@ -119,12 +119,11 @@ func TestGenerateRestoresFilesWhenCommitFails(t *testing.T) {
 		originals[p] = string(content)
 	}
 
-	// providers.go 是提交序列的最后一个目标：让它失败，前面的全部已写入，
-	// 恢复因此必须真正发生。
+	// 模块装配在配置等目标之后写入：让它失败，验证前面已写入的文件确实恢复。
 	original := writeGeneratedFile
 	defer func() { writeGeneratedFile = original }()
 	writeGeneratedFile = func(path string, data []byte, perm os.FileMode) error {
-		if strings.HasSuffix(path, filepath.Join("bootstrap", "providers.go")) {
+		if strings.HasSuffix(path, filepath.Join("bootstrap", "modules.go")) {
 			return errors.New("injected write failure")
 		}
 		return os.WriteFile(path, data, perm)
@@ -162,19 +161,22 @@ func TestGenerateRestoresFilesWhenCommitFails(t *testing.T) {
 // 不并行：通过包级临时文件写入缝注入失败。
 func TestGeneratePartialWriteDoesNotCorruptTarget(t *testing.T) {
 	root := createProjectFixture(t)
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	before, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	before, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
 
-	// providers.go 是既有文件的更新目标：让它的临时文件"写一半后报磁盘错误"。
+	// 模块装配文件与配置文件同名；只让前者的临时文件写一半后报磁盘错误。
 	original := tempFileWriter
 	defer func() { tempFileWriter = original }()
+	var assemblyWriteFailed bool
 	tempFileWriter = func(f *os.File, data []byte) (int, error) {
-		if strings.Contains(f.Name(), "providers.go-") {
-			n, _ := f.Write(data[:len(data)/2])
-			return n, errors.New("injected disk failure")
+		if filepath.Dir(f.Name()) == filepath.Dir(assemblyPath) &&
+			strings.HasPrefix(filepath.Base(f.Name()), "."+filepath.Base(assemblyPath)+"-") {
+			assemblyWriteFailed = true
+			n, err := f.Write(data[:len(data)/2])
+			return n, errors.Join(errors.New("injected disk failure"), err)
 		}
 		return f.Write(data)
 	}
@@ -188,18 +190,21 @@ func TestGeneratePartialWriteDoesNotCorruptTarget(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "injected disk failure") {
 		t.Fatalf("error %q does not carry the write failure cause", err)
 	}
+	if !assemblyWriteFailed {
+		t.Fatal("write failure did not reach the module assembly file")
+	}
 
 	// 目标必须原样：部分写只允许污染临时文件。
-	after, err := os.ReadFile(providersPath)
+	after, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	if string(after) != string(before) {
-		t.Fatal("providers.go was corrupted by a partial write")
+		t.Fatal("modules.go was corrupted by a partial write")
 	}
 
 	// 不残留 .tmp。
-	entries, err := os.ReadDir(filepath.Dir(providersPath))
+	entries, err := os.ReadDir(filepath.Dir(assemblyPath))
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
@@ -222,12 +227,12 @@ func TestGenerateRollbackKeepsForeignFilesInCreatedDirs(t *testing.T) {
 	moduleDir := filepath.Join(root, "internal", "module", "admin")
 	foreignFile := filepath.Join(moduleDir, "foreign.txt")
 
-	// providers.go 是提交序列的最后一个目标：此前模块目录与文件均已写入。
+	// 写模块装配文件时，此前生成的模块目录与文件均已写入。
 	// 在失败前把一个外来文件放进新建的模块目录，模拟并发出现的使用者产物。
 	original := writeGeneratedFile
 	defer func() { writeGeneratedFile = original }()
 	writeGeneratedFile = func(path string, data []byte, perm os.FileMode) error {
-		if strings.HasSuffix(path, filepath.Join("bootstrap", "providers.go")) {
+		if strings.HasSuffix(path, filepath.Join("bootstrap", "modules.go")) {
 			if err := os.WriteFile(foreignFile, []byte("user content"), 0o644); err != nil {
 				t.Fatalf("plant foreign file: %v", err)
 			}
@@ -342,7 +347,11 @@ func TestGenerationLockRejectsConcurrentRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first lock: %v", err)
 	}
-	defer release()
+	defer func() {
+		if err := release(); err != nil {
+			t.Errorf("release generation lock: %v", err)
+		}
+	}()
 
 	if _, err := acquireGenerationLock(root); err == nil {
 		t.Fatal("a second generation acquired the lock while the first still holds it")

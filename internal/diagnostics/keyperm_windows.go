@@ -16,6 +16,6 @@ import "os"
 //
 // 若将来需要在 Windows 上真正判定密钥保护，得走 golang.org/x/sys/windows 读 DACL，
 // 那是一套独立的语义，不应伪装成 Unix 权限位。
-func keyPermissionTooOpen(os.FileInfo) bool {
+func keyPermissionTooOpen(os.FileInfo, bool) bool {
 	return false
 }

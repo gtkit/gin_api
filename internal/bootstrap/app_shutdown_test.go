@@ -474,7 +474,9 @@ func TestAppDoesNotRegisterSignalHandlers(t *testing.T) {
 	}
 
 	cancel()
-	<-errCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run after cancellation: %v", err)
+	}
 }
 
 // TestCleanupBudgetIsCutByForceSignal 钉住清理预算能被第二个信号切断。
@@ -517,7 +519,10 @@ func TestCleanupBudgetIsCutByForceSignal(t *testing.T) {
 	coordinator.Force()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StopAll: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("cleanup was not cut by the force signal; the second signal cannot force an exit")
 	}

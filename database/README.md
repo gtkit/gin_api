@@ -70,6 +70,14 @@ mysql -h<host> -u<user> -p <db> -e 'SHOW CREATE TABLE <table>\G'
 判断依据放在实际 schema 上而不是命令的退出码：退出码只说明客户端那侧发生了
 什么，说明不了服务端做完了多少。
 
+## AI 模块移除后的历史迁移
+
+AI 应用代码、模型和 DDL 模型注册已移除。本次保留
+`migrations/20260901000001_create_ai_tables.sql`、`ddl/create_ai_conversations_table.sql`
+和 `ddl/create_ai_messages_table.sql`，未执行任何数据库操作。
+因此现有表和数据不变，完整执行旧迁移的新库仍会创建 AI 表；这些 SQL 是历史文件，
+不表示当前服务还提供 AI 功能。删除或重做历史迁移需单独确认部署和数据兼容范围。
+
 ## 重新生成基线
 
 基线内容**由模型生成，不手写**。重新生成的完整步骤：

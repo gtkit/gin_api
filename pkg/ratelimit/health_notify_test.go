@@ -335,7 +335,12 @@ func TestRegistryCloseDoesNotHoldTheLock(t *testing.T) {
 	registry.Freeze()
 
 	closed := make(chan struct{})
-	go func() { _ = registry.Close(); close(closed) }()
+	go func() {
+		if err := registry.Close(); err != nil {
+			t.Errorf("registry.Close(): %v", err)
+		}
+		close(closed)
+	}()
 
 	select {
 	case <-blocking.entered:

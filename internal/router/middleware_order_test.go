@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,17 +39,31 @@ var wantMiddlewareOrder = []string{
 // TestGlobalMiddlewareOrderIsExact 锁住全局中间件顺序。
 func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
-	engine, err := newRouterForTest("test", Options{
-		Middleware: testMiddlewareWithOrigins([]string{"https://example.com"}),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	got := middlewareNames(engine)
-	if !reflect.DeepEqual(got, wantMiddlewareOrder) {
-		t.Fatalf("middleware chain = %v, want exactly %v", got, wantMiddlewareOrder)
+	for _, tc := range []struct {
+		name          string
+		cors, tracing bool
+	}{
+		{name: "base"}, {name: "CORS", cors: true}, {name: "tracing", tracing: true}, {name: "all", cors: true, tracing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opt := Options{TracingEnabled: tc.tracing, ServiceName: "router-order"}
+			want := slices.Clone(wantMiddlewareOrder)
+			if tc.cors {
+				opt.AllowedOrigins = []string{"https://example.com"}
+			} else {
+				want = slices.Delete(want, 7, 8)
+			}
+			if tc.tracing {
+				want = slices.Insert(want, 2, "Middleware")
+			}
+			engine, err := newRouterForTest(t, "test", opt)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if got := middlewareNames(engine); !slices.Equal(got, want) {
+				t.Fatalf("middleware chain = %v, want exactly %v", got, want)
+			}
+		})
 	}
 }
 
@@ -59,7 +74,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 func TestCorsIsOptional(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{})
+	engine, err := newRouterForTest(t, "test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -79,7 +94,7 @@ func TestCorsIsOptional(t *testing.T) {
 func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{})
+	engine, err := newRouterForTest(t, "test", Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -99,7 +114,7 @@ func TestSystemProbesAreOutsideTheAPIVersion(t *testing.T) {
 func TestModulesAreMountedUnderTheAPIVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/thing", func(c *gin.Context) { c.Status(http.StatusOK) })
 		},
@@ -123,7 +138,7 @@ func TestTrustedProxiesMustBeExplicit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var gotIP string
-	engine, err := newRouterForTest("test", Options{
+	engine, err := newRouterForTest(t, "test", Options{
 		RegisterModules: func(v1 *gin.RouterGroup) {
 			v1.GET("/ip", func(c *gin.Context) {
 				gotIP = c.ClientIP()

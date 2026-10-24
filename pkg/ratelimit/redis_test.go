@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -44,17 +45,22 @@ func (f *fakeRedis) ScriptLoad(ctx context.Context, _ string) *redis.StringCmd {
 	return cmd
 }
 
-func (f *fakeRedis) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
+func (f *fakeRedis) Process(_ context.Context, command redis.Cmder) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	cmd := redis.NewCmd(ctx)
+	cmd, ok := command.(interface{ SetVal(any) })
+	if !ok {
+		err := fmt.Errorf("unexpected Redis command %T", command)
+		command.SetErr(err)
+		return err
+	}
 	idx := f.evalCalls
 	f.evalCalls++
 
 	if idx < len(f.evalErrs) && f.evalErrs[idx] != nil {
-		cmd.SetErr(f.evalErrs[idx])
-		return cmd
+		command.SetErr(f.evalErrs[idx])
+		return f.evalErrs[idx]
 	}
 	switch {
 	case len(f.evalResults) == 0:
@@ -64,7 +70,7 @@ func (f *fakeRedis) EvalSha(ctx context.Context, _ string, _ []string, _ ...any)
 	default:
 		cmd.SetVal(f.evalResults[len(f.evalResults)-1])
 	}
-	return cmd
+	return nil
 }
 
 func (f *fakeRedis) Del(ctx context.Context, _ ...string) *redis.IntCmd {
@@ -148,8 +154,8 @@ func TestRedisBackendFailsWhenScriptCannotLoad(t *testing.T) {
 //     TTL 的常量；真实 TTL 由 bucketTTL 算出（探针策略约 61s）。运维照它等
 //     10 秒等不到键消失。
 //
-// 清理仍然会被尝试（见断言），只是失败被就地丢弃——依据是两个键都在创建
-// 它们的同一段 Lua 里 PEXPIRE。
+// 清理仍然尝试；错误由ProbeCleanupError保留及可选回调通知。
+// 两个键在创建它们的同一段Lua里设置PEXPIRE，不因DEL权限不足阻断能力。
 func TestRedisBackendToleratesUncleanProbe(t *testing.T) {
 	t.Parallel()
 
@@ -160,6 +166,9 @@ func TestRedisBackendToleratesUncleanProbe(t *testing.T) {
 	}
 	if backend == nil {
 		t.Fatal("构造成功却返回 nil 后端")
+	}
+	if !errors.Is(backend.ProbeCleanupError(), fake.delErr) {
+		t.Fatal("cleanup diagnostic lost")
 	}
 	if _, _, del := fake.counts(); del == 0 {
 		t.Error("清理是尽力而为，但必须真的尝试过")

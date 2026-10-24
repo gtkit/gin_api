@@ -6,10 +6,12 @@ import (
 	"fmt"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 // rateLimitAssembly 是限流的装配产物。
@@ -30,7 +32,7 @@ func buildRateLimits(
 		return rateLimitAssembly{}, nil
 	}
 
-	keys, err := ratelimit.NewKeyBuilder(cfg.RateLimit.KeyHMACSecret, cfg.App.Name)
+	keys, err := ratelimit.NewKeyBuilder(cfg.RateLimit.KeyHMACSecret, cfg.EffectiveRedisPrefix())
 	if err != nil {
 		return rateLimitAssembly{}, fmt.Errorf("build rate limit key builder: %w", err)
 	}
@@ -57,7 +59,7 @@ func buildRateLimits(
 			return rateLimitAssembly{}, errors.Join(convErr, registry.Close())
 		}
 
-		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.App.Name, degradedStartAllowed)
+		limiter, buildErr := buildLimiter(ctx, policy, resources, &redisBackend, cfg.EffectiveRedisPrefix(), degradedStartAllowed)
 		if buildErr != nil {
 			return rateLimitAssembly{}, errors.Join(buildErr, registry.Close())
 		}
@@ -95,35 +97,22 @@ func buildLimiter(
 	}
 
 	if *redisBackend == nil {
-		client := resources.Rdb(0)
-		if client == nil {
-			// 两种"拿不到客户端"必须分开处置（resource-lifecycle spec）。
-			//
-			// 未配置 = 配置矛盾（声明用 redis 却没给地址），一律启动失败。
-			if !resources.RedisConfigured() {
-				return nil, fmt.Errorf(
-					"rate limit policy %q uses the redis store but redis is not configured: "+
-						"either set redis.addr or switch the policy to the local store", policy.ID)
-			}
-			// 已配置但启动期不可达 = 运行期故障。存在 fail_closed 策略时仍失败
-			//（那种模式下不可达只能拒绝请求，实例不该被判为 ready）；
-			// 全是降级模式时按各策略自己的 FailureMode 顶替真实后端。
-			if !degradedStartAllowed {
-				return nil, fmt.Errorf(
-					"rate limit policy %q is fail_closed over the redis store but redis is "+
-						"unreachable at startup: that policy could only reject every request, "+
-						"so the instance must not come up", policy.ID)
-			}
-			return unreachableLimiter(policy)
+		if !resources.RedisConfigured() {
+			return nil, fmt.Errorf(
+				"rate limit policy %q uses the redis store but redis is not configured: "+
+					"either set redis.addr or switch the policy to the local store", policy.ID)
 		}
 		backendOpts := []ratelimit.Option{
 			ratelimit.WithKeyPrefix(keyPrefix),
 			ratelimit.WithObserver(rateLimitObserver{}),
+			ratelimit.WithProbeCleanupErrorHandler(func(err error) {
+				logger.Warn("rate limit probe cleanup failed; artifacts retain their TTL", zap.Error(err))
+			}),
 		}
 		if degradedStartAllowed {
 			backendOpts = append(backendOpts, ratelimit.WithDegradedStart())
 		}
-		backend, err := ratelimit.NewRedisBackend(ctx, client, backendOpts...)
+		backend, err := ratelimit.NewRedisBackend(ctx, redisCommands{resources: resources}, backendOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("build redis rate limit backend for %q: %w", policy.ID, err)
 		}
@@ -140,31 +129,39 @@ func buildLimiter(
 	return ratelimit.NewRedisLimiter(*redisBackend, policy)
 }
 
-// unreachableLimiter 为"Redis 已配置但启动期不可达"的策略选执行体。
-//
-// 两种降级模式要的东西不同，不能一视同仁：
-//
-//	fail_open      → 恒不可用执行体：它按 FailureMode 放行并置 Degraded，
-//	                 限额不变（只是当下无法执行）。
-//	local_fallback → 真实的本地桶：这个模式的语义就是"后端没了就用本地的"，
-//	                 给恒不可用执行体会落到保守方向（拒绝），把一个要求
-//	                 可用性的策略变成全量拒绝。
-//
-// 本地桶的代价是配额按副本各算一份（N 个副本 = N 倍总量）——这正是
-// local_fallback 已经接受的代价，与运行期回落到影子桶完全一致。
-//
-// 这条路径**不会自行恢复**：没有后端连接可探测，恢复靠进程重启。
-func unreachableLimiter(policy ratelimit.Policy) (ratelimit.Limiter, error) {
-	if policy.FailureMode == ratelimit.FailureLocalFallback {
-		logger.Warnf("redis is unreachable at startup; policy %q enforces its limit from a local "+
-			"bucket for this process lifetime (quota counts per replica; restart after redis recovers)",
-			policy.ID)
-		return ratelimit.NewLocalBackend(policy)
-	}
+// errRedisUnavailable 只表示本次命令没有取得可借用的 DB 0 客户端，
+// 不代表配置永久缺失；后续命令仍重新查询 Resources，以便接入恢复后的连接。
+// 三个命令共用该原因，使包装后的错误可以用 errors.Is 精确识别。
+var errRedisUnavailable = errors.New("redis is unavailable")
 
-	logger.Warnf("redis is unreachable at startup; policy %q applies its failure mode (%s) for this "+
-		"process lifetime (restart after redis recovers)", policy.ID, policy.FailureMode)
-	return ratelimit.NewUnavailableLimiter(policy), nil
+// redisCommands borrows the current DB 0 client once per command. Recovery and
+// ownership stay with Resources; algorithm, keys and retry policy stay in ratelimit.
+type redisCommands struct{ resources *data.Resources }
+
+func (r redisCommands) ScriptLoad(ctx context.Context, script string) *redis.StringCmd {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.ScriptLoad(ctx, script)
+	}
+	cmd := redis.NewStringCmd(ctx)
+	cmd.SetErr(errRedisUnavailable)
+	return cmd
+}
+
+func (r redisCommands) Process(ctx context.Context, cmd redis.Cmder) error {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.Process(ctx, cmd)
+	}
+	cmd.SetErr(errRedisUnavailable)
+	return errRedisUnavailable
+}
+
+func (r redisCommands) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	if client := r.resources.Rdb(0); client != nil {
+		return client.Del(ctx, keys...)
+	}
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetErr(errRedisUnavailable)
+	return cmd
 }
 
 // toRateLimitPolicy 把配置形态翻译成强类型策略。
@@ -270,7 +267,7 @@ type rateLimitObserver struct{}
 // 低基数事件，每次都记：它是排查"限流为什么突然放宽或收紧"的第一手线索。
 func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
 	logger.Warn("rate limit backend phase changed",
-		logger.String("from", from.String()), logger.String("to", to.String()))
+		zap.String("from", from.String()), zap.String("to", to.String()))
 }
 
 // FellBackToLocal 在首次降级到本地影子桶时记录一次。
@@ -279,5 +276,5 @@ func (rateLimitObserver) BackendPhaseChanged(from, to ratelimit.HealthPhase) {
 func (rateLimitObserver) FellBackToLocal(policyID string) {
 	logger.Warn("rate limit fell back to the local shadow bucket; "+
 		"the model is the same but the state is not carried over, so up to one burst may pass through",
-		logger.String("policy", policyID))
+		zap.String("policy", policyID))
 }

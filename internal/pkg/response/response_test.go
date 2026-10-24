@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/goerr"
+
+	"github.com/gtkit/logger/v2"
 )
 
 func TestMain(m *testing.M) {
@@ -367,8 +370,7 @@ func fmtErrorf(err error) error {
 
 // TestBindStructErrMapsValidationTo422 覆盖结构体绑定失败的映射。
 //
-// 422 而不是 400：客户端能区分"我发的 JSON 语法就不对"（400）与
-// "语法对但字段不合法"（422），两者的修法完全不同。
+// 绑定错误保持既有 422 契约，请求体超限另走 413。
 func TestBindStructErrMapsValidationTo422(t *testing.T) {
 	t.Parallel()
 
@@ -390,8 +392,8 @@ func TestBindErrMapsToValidation(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	if body := rec.Body.String(); !contains(body, "invalid query") {
-		t.Errorf("the response does not carry the validation detail: %s", body)
+	if body := decode(t, rec); body["msg"] != "请求参数格式错误" {
+		t.Errorf("msg = %v, want safe binding message", body["msg"])
 	}
 }
 
@@ -446,3 +448,87 @@ func TestErrorIsAnAliasOfErr(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+func TestErrorDiagnosticsPreserveTheWholeRootAndClientContract(t *testing.T) {
+	_, read := newNativeTestLogger(t, "info")
+	first, cleanup := errors.New("private primary"), errors.New("private cleanup")
+	root := fmt.Errorf("outer operation: %w", errors.Join(goerr.New(first, goerr.StatusNotFound(), "public message"), goerr.WithStack(cleanup)))
+	c, rec := newCtx()
+	c.Request = c.Request.WithContext(logger.ContextWithRequestID(c.Request.Context(), "generated-id"))
+	Err(c, root)
+	ObserveError(c, root)
+	if rec.Code != 404 || len(read()) != 1 {
+		t.Fatalf("status=%d entries=%d", rec.Code, len(read()))
+	}
+	fields := read()[0]
+	text, ok := fields["error"].(string)
+	if !ok || !strings.Contains(text, "outer operation") || !strings.Contains(text, "private cleanup") {
+		t.Fatalf("root lost: %v", fields)
+	}
+	causes, ok := fields["error_causes"].([]any)
+	if !ok || len(causes) < 5 {
+		t.Fatalf("cause tree lost: %v", fields)
+	}
+	frames := 0
+	for i, value := range causes {
+		cause, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("cause type %T", value)
+		}
+		parent, ok := cause["parent"].(float64)
+		if !ok {
+			t.Fatalf("parent has type %T", cause["parent"])
+		}
+		if parent >= float64(i) {
+			t.Fatal("invalid parent")
+		}
+		causeFrames, ok := cause["frames"].([]any)
+		if !ok {
+			t.Fatalf("frames have type %T", cause["frames"])
+		}
+		frames += len(causeFrames)
+	}
+	if frames == 0 {
+		t.Fatal("origin stacks lost")
+	}
+	body := decode(t, rec)
+	if body["msg"] != "public message" || body["request_id"] != "generated-id" || len(body) != 4 || strings.Contains(rec.Body.String(), "private") {
+		t.Fatalf("client contract: %s", rec.Body.String())
+	}
+}
+
+func TestDiagnosticFailureDoesNotChangeTheBusinessResponse(t *testing.T) {
+	_, read := newNativeTestLogger(t, "info")
+	c, rec := newCtx()
+	Err(c, goerr.New(errors.New(strings.Repeat("x", 17000)), goerr.StatusNotLoggedIn(), "please authenticate"))
+	if rec.Code != 401 || decode(t, rec)["msg"] != "please authenticate" || len(read()) != 1 {
+		t.Fatalf("response changed: %s", rec.Body.String())
+	}
+	found := false
+	for key := range read()[0] {
+		if key == "error_diagnostic_failure" {
+			found = true
+		}
+		if key == "error" {
+			t.Fatal("failed inspection was represented as a complete snapshot")
+		}
+	}
+	if !found {
+		t.Fatal("diagnostic failure ignored")
+	}
+	var knownNil *goerr.Item
+	c, rec = newCtx()
+	Err(c, knownNil)
+	if rec.Code != 500 {
+		t.Fatalf("typed nil status=%d", rec.Code)
+	}
+	var unknownNil *diagnosticNilError
+	fields := ErrorLogFields(unknownNil)
+	if len(fields) != 2 || fields[1].Key != "error_diagnostic_failure" {
+		t.Fatalf("typed nil diagnostic=%v", fields)
+	}
+}
+
+type diagnosticNilError struct{}
+
+func (*diagnosticNilError) Error() string { panic("typed-nil method must not run") }

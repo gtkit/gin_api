@@ -17,7 +17,7 @@ import "testing"
 // 在场方向的断言在 root_scaffold_test.go。
 //
 // 为什么这两条命令不能留在服务二进制里：`module` 会重写
-// internal/bootstrap/providers.go；`project init` 带 --force-reinit-git 且会永久
+// internal/bootstrap/modules.go；`project init` 带 --force-reinit-git 且会永久
 // 丢弃 git 历史。二者对派生项目都不存在正确用法——`project init` 在派生项目上
 // 只可能失败或造成破坏。
 func TestDefaultBuildExcludesScaffoldCommands(t *testing.T) {

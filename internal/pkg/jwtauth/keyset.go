@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 )
 
@@ -72,30 +73,13 @@ type KeySet struct {
 	ordered []VerificationKey
 }
 
-// NewKeySet 校验并构造密钥集。
-//
-// 校验项及其理由：
-//   - kid 格式：见 ValidateKID；
-//   - active 公私钥匹配：不匹配意味着签出的 token 谁也验不了，而这个错误
-//     只有在第一个真实请求上才会暴露；
-//   - kid 唯一：重复 kid 让"按 kid 精确选键"失去确定性——同一个 kid
-//     对应两把不同的公钥时，命中哪一把取决于遍历顺序；
-//   - previous 数量上限：见 maxPreviousKeys。
+// NewKeySet 校验签发私钥、公私钥配对及全部验签公钥。
 func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
-	var errs []error
-
-	if err := ValidateKID(active.KID); err != nil {
-		errs = append(errs, fmt.Errorf("active key: %w", err))
-	}
+	keys, keyErr := NewVerificationKeySet(VerificationKey{KID: active.KID, Public: active.Public}, previous)
+	errs := []error{keyErr}
 	if len(active.Private) != ed25519.PrivateKeySize {
 		errs = append(errs, errors.New("active key: private key is missing or has the wrong size"))
 	}
-	if len(active.Public) != ed25519.PublicKeySize {
-		errs = append(errs, errors.New("active key: public key is missing or has the wrong size"))
-	}
-
-	// 公私钥匹配必须实测，不能只看长度：长度对但不配对的一组密钥
-	// 会让签发成功、验签全败，而那在启动期完全看不出来。
 	if len(active.Private) == ed25519.PrivateKeySize && len(active.Public) == ed25519.PublicKeySize {
 		derived, ok := active.Private.Public().(ed25519.PublicKey)
 		if !ok || !derived.Equal(active.Public) {
@@ -103,6 +87,22 @@ func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
 				"active key: the configured public key does not match the private key; "+
 					"every token this process issues would fail verification"))
 		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	keys.active.Private = active.Private
+	return keys, nil
+}
+
+// NewVerificationKeySet 构造仅含公钥的验签密钥集，不能用于签发。
+func NewVerificationKeySet(active VerificationKey, previous []VerificationKey) (*KeySet, error) {
+	var errs []error
+	if err := ValidateKID(active.KID); err != nil {
+		errs = append(errs, fmt.Errorf("active key: %w", err))
+	}
+	if len(active.Public) != ed25519.PublicKeySize {
+		errs = append(errs, errors.New("active key: public key is missing or has the wrong size"))
 	}
 
 	if len(previous) > maxPreviousKeys {
@@ -143,7 +143,10 @@ func NewKeySet(active SigningKey, previous []VerificationKey) (*KeySet, error) {
 	ordered = append(ordered, VerificationKey{KID: active.KID, Public: active.Public})
 	ordered = append(ordered, previous...)
 
-	return &KeySet{active: active, previous: previous, byKID: byKID, ordered: ordered}, nil
+	return &KeySet{
+		active:   SigningKey{KID: active.KID, Public: active.Public},
+		previous: previous, byKID: byKID, ordered: ordered,
+	}, nil
 }
 
 // ActiveKID 返回签发用的 kid。
@@ -167,7 +170,7 @@ func (s *KeySet) OrderedKeys() []VerificationKey { return s.ordered }
 
 // LoadEd25519PrivateKey 从 PEM 文件读取私钥并校验文件形态与权限。
 func LoadEd25519PrivateKey(path string, strictPerm bool) (ed25519.PrivateKey, error) {
-	data, err := readKeyFile(path, strictPerm)
+	data, err := readKeyFile(path, strictPerm, false)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +192,7 @@ func LoadEd25519PrivateKey(path string, strictPerm bool) (ed25519.PrivateKey, er
 
 // LoadEd25519PublicKey 从 PEM 文件读取公钥。
 func LoadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
-	data, err := readKeyFile(path, false)
+	data, err := readKeyFile(path, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -212,11 +215,12 @@ func LoadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 // readKeyFile 读取密钥文件并校验它确实是普通文件。
 //
 // strictPerm 为真时（生产环境的私钥）要求 group/other 无任何权限位。
+// public为真时，Unix公钥还必须禁止group/other写入，允许0644等只读共享。
 //
 // 允许受控的 secret mount symlink：解析之后仍然检查目标类型与权限，
 // 因此符号链接本身不构成绕过。禁止目录、设备文件等非普通文件——
 // 那类路径要么读出垃圾，要么让进程挂在一个特殊文件上。
-func readKeyFile(path string, strictPerm bool) ([]byte, error) {
+func readKeyFile(path string, strictPerm, public bool) ([]byte, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve key path %s: %w", path, err)
@@ -233,6 +237,9 @@ func readKeyFile(path string, strictPerm bool) ([]byte, error) {
 		return nil, fmt.Errorf(
 			"private key %s is readable or writable by group/other (mode %04o); use 0600",
 			resolved, info.Mode().Perm())
+	}
+	if public && runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("public key %s is writable by group/other (mode %04o); remove group/other write access", resolved, info.Mode().Perm())
 	}
 
 	data, err := os.ReadFile(resolved)

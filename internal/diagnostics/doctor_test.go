@@ -32,6 +32,7 @@ func configWithRealKeys(t *testing.T) *config.Config {
 	}
 
 	cfg := validConfig()
+	cfg.Log.Path = filepath.Join(dir, "logs", "app_client")
 	cfg.JWT.Active.PrivateKeyPath = priv
 	cfg.JWT.Active.PublicKeyPath = pub
 	return cfg
@@ -355,32 +356,15 @@ func TestJWTKeyPermissions(t *testing.T) {
 	}
 }
 
-// TestJWTKeyCheckReadsTheActiveKeyNotTheRetiredFields 是防回归断言。
-//
-// 这项检查曾经读 cfg.JWT.PrivateKeyPath / PublicKeyPath——密钥轮换落地前的
-// 单密钥字段。它们如今恒为空，空路径被循环跳过，于是**密钥完全缺失时
-// 仍然报 pass**。而当时的测试同样在设置那两个废弃字段，因此一路全绿。
-//
-// 断言的形态刻意是"只填废弃字段"：如果哪天实现又退回去读它们，这里会变绿，
-// 从而暴露回归。
-func TestJWTKeyCheckReadsTheActiveKeyNotTheRetiredFields(t *testing.T) {
+func TestJWTKeyCheckRejectsMissingActiveKey(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	retired := filepath.Join(dir, "retired.pem")
-	if err := os.WriteFile(retired, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
 	cfg := validConfig()
-	cfg.JWT.PrivateKeyPath = retired
-	cfg.JWT.PublicKeyPath = retired
 	cfg.JWT.Active = config.JWTKeyConfig{}
 
 	got := checkJWTKeys(cfg)
 	if got.Status != StatusFail || got.ErrorCode != CodeMissing {
-		t.Fatalf("status=%q code=%q: an unconfigured active key must fail even when "+
-			"the retired single-key fields point at real files", got.Status, got.ErrorCode)
+		t.Fatalf("status=%q code=%q: an unconfigured active key must fail", got.Status, got.ErrorCode)
 	}
 }
 

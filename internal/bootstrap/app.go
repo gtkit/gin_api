@@ -9,17 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gtkit/gin-api/internal/pkg/httpclient"
-	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/internal/platform/telemetry"
-	"github.com/gtkit/gin-api/internal/plugin"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 // Options defines runtime startup options.
-// 配置改为从固定 config/env.yml 读取后，启动不再需要环境名参数。
+// 服务配置由统一加载入口提供；这里仅接收进程级协作对象，
+// 不再通过启动选项重复指定运行环境或配置内容。
 type Options struct {
 	// Shutdown 是进程级关停协调器，由**唯一的信号监督者**（cmd 层）构造并注入：
 	// 信号在 NewApp 之前就可能到达，协调器因此必须比 App 更早存在。
@@ -27,9 +24,8 @@ type Options struct {
 	// 为 nil 时 App 自建一个（单测与不接信号的命令走这条路），行为不变。
 	Shutdown *ShutdownCoordinator
 
-	// RegisterPlugins lets the process entry point choose concrete compile-time
-	// implementations. It is required; registration performs no component I/O.
-	RegisterPlugins PluginRegistrar
+	// factories is a package-private acquisition seam for lifecycle tests.
+	factories *runtimeFactories
 }
 
 // defaultWorkerShutdownTimeout 是 worker drain 的独立预算。
@@ -41,31 +37,12 @@ const defaultWorkerShutdownTimeout = 30 * time.Second
 
 // App owns the process lifecycle and assembled runtime dependencies.
 type App struct {
-	moduleCleanup func() error
-	runtime       *Runtime
-	httpConfig    HTTPConfig
-	httpServer    httpServer
-	workers       *WorkerManager
-	shutdown      *ShutdownCoordinator
-	// rateLimits 持有限流注册表；关停时必须关闭它，否则每条本地策略的
-	// 后台清理 goroutine 会一直活到进程退出。
-	rateLimits rateLimitAssembly
-	// outbound 持有出站 HTTP 客户端；关停时释放空闲连接，否则它们会一直
-	// 挂到对端超时——滚动重启时旧实例仍占着下游的连接配额。
-	outbound *httpclient.Downstreams
-	// cache 是 Runtime Cache 插件提供的 typed view；关闭权属于插件注册器。
-	// App 只保留它以兼容现有装配结构，不直接调用 Close。
-	cache plugin.ResponseCache
-	// telemetry 是 OTel 导出侧；关停时按独立预算 flush 已采集的数据。
-	telemetry *telemetry.Provider
-	// tasksProducer 是异步任务入队端；关停时释放它的连接。
-	tasksProducer *tasks.Producer
-	// metricsCleanup 注销指标的异步回调。
-	//
-	// 不注销的话，回调会继续持有已停掉的 worker 与已关闭的连接池——
-	// 采集到的是一份永远不再变化的陈旧状态，而运维看到的是"指标还在，
-	// 值不动了"，比没有指标更容易误判。
-	metricsCleanup []func() error
+	cleanup    *providerCleanup
+	runtime    *Runtime
+	httpConfig HTTPConfig
+	httpServer httpServer
+	workers    *WorkerManager
+	shutdown   *ShutdownCoordinator
 	// drainWait 是停 producer 之后、关 HTTP 之前的等待时长，
 	// 用于让负载均衡器观察到 /ready 的 503 并把本实例摘出转发目标。
 	drainWait time.Duration
@@ -76,6 +53,11 @@ type App struct {
 	// extClosed 保证扩展产物（限流注册表、指标回调）恰好释放一次，
 	// 正常关停序列与启动失败的提前返回共用（见 closeExtensions）。
 	extClosed atomic.Bool
+	// Only a successful Shutdown proves all HTTP log producers have returned.
+	httpStarted   bool
+	httpDrained   bool
+	extensionsErr error
+	pprofErr      error
 }
 
 func NewApp(ctx context.Context, options Options) (*App, error) {
@@ -101,20 +83,14 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	}
 
 	return &App{
-		moduleCleanup:  providers.moduleCleanup,
-		runtime:        runtime,
-		httpConfig:     providers.httpConfig,
-		httpServer:     providers.httpServer,
-		workers:        providers.workers,
-		shutdown:       providers.shutdown,
-		rateLimits:     providers.rateLimits,
-		outbound:       providers.outbound,
-		cache:          providers.cache,
-		telemetry:      providers.telemetry,
-		tasksProducer:  providers.tasksProducer,
-		metricsCleanup: providers.metricsCleanup,
-		drainWait:      drainWaitFrom(runtime.Config()),
-		status:         providers.status,
+		cleanup:    providers.cleanup,
+		runtime:    runtime,
+		httpConfig: providers.httpConfig,
+		httpServer: providers.httpServer,
+		workers:    providers.workers,
+		shutdown:   providers.shutdown,
+		drainWait:  drainWaitFrom(runtime.Config()),
+		status:     providers.status,
 	}, nil
 }
 
@@ -207,7 +183,9 @@ func (a *App) Run(ctx context.Context) (err error) {
 	prebindClosed := false
 	defer func() {
 		if !prebindClosed {
-			_ = bound.Close()
+			if closeErr := bound.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close prebound http listener: %w", closeErr))
+			}
 		}
 	}()
 
@@ -272,6 +250,7 @@ func (a *App) Run(ctx context.Context) (err error) {
 
 	// ③ HTTP。监听器所有权自此转交给 server，由 Shutdown/Close 关闭。
 	prebindClosed = true
+	a.httpStarted = true
 	serverErrCh := make(chan error, 1)
 	go func() {
 		serverErrCh <- serveHTTPServer(a.httpServer, a.httpConfig, bound.listener)
@@ -285,40 +264,25 @@ func (a *App) Run(ctx context.Context) (err error) {
 	return a.gracefulShutdown(ctx, serverErrCh, serverExited, pprofEndpoint)
 }
 
-// closeExtensions 释放所有权在 App 的模块客户端、限流、出站、缓存、入队与遥测产物。
+// closeExtensions 释放 provider 登记的模块、限流、出站、入队、遥测及指标回调。
 //
 // 幂等（CAS 保证恰好一次）：gracefulShutdown 在正常序列的正确位置调用它，
 // Run 的 defer 兜住全部提前返回——两处共用，不存在只被一条路径覆盖的释放。
 func (a *App) closeExtensions(ctx context.Context) error {
+	if a.httpStarted && !a.httpDrained {
+		a.extensionsErr = errors.New("skipping extension close: HTTP handlers are not confirmed stopped")
+		return a.extensionsErr
+	}
+	if live := a.workers.LiveWorkers(); len(live) > 0 {
+		a.extensionsErr = fmt.Errorf("skipping extension close, %d worker(s) still running (%s): %w",
+			len(live), strings.Join(live, ", "), ErrWorkerNotExited)
+		return a.extensionsErr
+	}
 	if !a.extClosed.CompareAndSwap(false, true) {
 		return nil
 	}
-	errs := []error{
-		a.closeModules(),
-		closeRateLimits(a.rateLimits), a.outbound.Close(),
-		// 入队端排在消费者停掉之后（worker 关停在前）：反过来会让正在收尾的
-		// 处理器无法再入队后续任务。用 Shutdown 而不是 Close：后者等在途投递
-		// 时不看任何 ctx，第二个信号切不断它。
-		a.tasksProducer.Shutdown(ctx),
-	}
-	// 遥测放在最后 flush：前面几步可能还会产出指标（关闭计数、错误），
-	// 先 flush 就把它们留在了本地。它自带独立预算，不会拖住关停。
-	errs = append(errs, a.telemetry.Shutdown(ctx))
-	for _, unregister := range a.metricsCleanup {
-		errs = append(errs, unregister())
-	}
-	return errors.Join(errs...)
-}
-
-// closeModules 排在共享依赖之前；仍存活的 worker 可能使用模块客户端，不能提前关闭。
-func (a *App) closeModules() error {
-	if a.moduleCleanup == nil {
-		return nil
-	}
-	if live := a.workers.LiveWorkers(); len(live) > 0 {
-		return fmt.Errorf("skipping module cleanup while workers are running: %w", ErrWorkerNotExited)
-	}
-	return a.moduleCleanup()
+	a.extensionsErr = a.cleanup.close(ctx)
+	return a.extensionsErr
 }
 
 // alertExitError 对非 nil 的退出错误发出一次进程级告警。
@@ -330,7 +294,7 @@ func alertExitError(err error) {
 	if err == nil {
 		return
 	}
-	logger.HErrorf("process exiting with error: %v", err)
+	logger.HError(fmt.Sprintf("process exiting with error: %v", err))
 }
 
 // shutdownRequested 非阻塞探测是否已有关停请求。
@@ -405,10 +369,12 @@ func (a *App) gracefulShutdown(
 	a.shutdown.WaitOrForce(a.drainWait)
 
 	// 3. 关主 HTTP 并等在途请求收尾。
-	if !serverExited {
+	if a.httpStarted || !serverExited {
 		collect(a.shutdownHTTP(base))
-		if err := <-serverErrCh; err != nil {
-			collect(err)
+		if !serverExited {
+			if err := <-serverErrCh; err != nil {
+				collect(err)
+			}
 		}
 	}
 
@@ -427,7 +393,7 @@ func (a *App) gracefulShutdown(
 	//     失败以零退出码结束。必须在全部 StopKind 与兜底清理之后执行。
 	collect(a.workers.TerminationErrors())
 
-	// 7. 释放扩展产物：模块客户端、限流注册表及出站/缓存/入队/遥测资源。
+	// 7. 释放扩展产物：模块客户端、限流注册表及出站/入队/遥测资源和指标回调。
 	//    排在 HTTP 与 worker 之后：在飞请求可能仍要做限流
 	//    判定，worker 停掉之前采集到的指标仍是有效状态。
 	//    与 Run 的 defer 共用同一个幂等入口，启动失败的提前返回同样被兜住。
@@ -465,6 +431,7 @@ func (a *App) stopKindWithBudget(base context.Context, kind WorkerKind) error {
 // Shutdown 会等在途请求收尾，而强制路径的前提正是"已经等不下去了"——
 // 此时继续 Shutdown 只会让进程在故障关停中无限滞留。
 func (a *App) shutdownHTTP(base context.Context) error {
+	a.httpStarted = true
 	if a.shutdown.Forced() {
 		logger.Warn("forced shutdown: closing http server without draining in-flight requests")
 		return a.httpServer.Close()
@@ -477,6 +444,7 @@ func (a *App) shutdownHTTP(base context.Context) error {
 		logger.Warnf("graceful http shutdown failed (%v); closing listeners", err)
 		return errors.Join(err, a.httpServer.Close())
 	}
+	a.httpDrained = true
 	return nil
 }
 
@@ -506,7 +474,8 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 	defer cancel()
 
 	if err := endpoint.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown pprof endpoint: %w", err)
+		a.pprofErr = fmt.Errorf("shutdown pprof endpoint: %w", err)
+		return a.pprofErr
 	}
 	return nil
 }
@@ -519,14 +488,17 @@ func (a *App) shutdownPprof(base context.Context, endpoint *pprofHandle) error {
 // 全部提前返回分支。
 func (a *App) closeResources(ctx context.Context) error {
 	if live := a.workers.LiveWorkers(); len(live) > 0 {
-		// 连接不关，**但日志照排空**：两者是不同的事，共用一个开关会让
-		// "现在不能关连接"顺带把退出告警与错误日志一起丢掉——而这条
-		// 异常退出路径恰恰是最需要留痕的那条。
+		// Live producers retain the native instances and notification channels.
+		// Only file buffers can be flushed safely here.
 		return errors.Join(fmt.Errorf("skipping resource close, %d worker(s) still running (%s): %w",
 			len(live), strings.Join(live, ", "), ErrWorkerNotExited), a.runtime.DrainLogs(ctx))
 	}
 	if a.runtime == nil {
 		return nil
+	}
+	if (a.httpStarted && !a.httpDrained) || a.extensionsErr != nil || a.pprofErr != nil {
+		return errors.Join(errors.New("skipping resource close: log producers are not confirmed stopped"),
+			a.runtime.DrainLogs(ctx))
 	}
 	return a.runtime.Close(ctx)
 }

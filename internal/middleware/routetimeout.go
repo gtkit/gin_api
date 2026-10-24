@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -10,30 +11,18 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
-// RouteTimeout 按路由的 TimeoutPolicy 返回对应的超时中间件。
-//
-// **这套机制是协作式的错误传播，不是强制终止器。** 三条必须写清楚的边界：
-//
-//  1. 业务 deadline 到点只**取消 ctx**。忽略 ctx 的 handler 会继续占用 goroutine
-//     直到它自己返回——没有任何机制能从外部终止一个 Go 函数。
-//  2. socket write deadline 到点只承诺**解除写阻塞 / 断连**，不承诺返回任何状态码，
-//     更不能终止 CPU 工作。
-//  3. 只有调用链**真的观察 ctx 并返回 DeadlineExceeded** 时，终态中间件才会写 504。
-//
-// 文档、注释与门禁都不得声称"ctx 到点必然 504"或"write deadline 能终止 goroutine"。
 // Timeout 给请求施加协作式超时，用法与任何 gin 中间件一致：
 //
 //	g := r.Group("/user", middleware.Timeout(5*time.Second, 2*time.Second))
 //
-// deadline 是业务预算（写进 ctx，handler 必须监听它）；writeGrace 是更晚的
-// socket 写宽限。**两级缺一不可**：write deadline 一旦过期这条连接的写就废了，
-// 无法再可靠写出 504，所以负责回 504 的必须是更短的业务预算。
-//
-// 参数非法直接 panic：那是装配错误，与 gin 生态的惯例一致
-// （gin-contrib 的中间件同样在配置非法时 panic），且它发生在启动期而非请求期。
+// deadline 取消业务 ctx，忽略 ctx 的 handler 仍会继续执行。调用链观察到
+// DeadlineExceeded 并返回后，终态中间件才会尝试写 504。
+// writeGrace 留给响应写出；更晚的 socket deadline 用于解除写阻塞或断连，
+// 不保证状态码，也不能强停 goroutine。非法参数属于装配错误，直接 panic。
 func Timeout(deadline, writeGrace time.Duration) gin.HandlerFunc {
 	if deadline <= 0 {
 		panic("middleware: timeout deadline must be positive")
@@ -49,9 +38,7 @@ func Timeout(deadline, writeGrace time.Duration) gin.HandlerFunc {
 // 流式响应没有固定的总时长，能约束的是"多久没有写出任何东西"。
 // handler 每写一块后调用 RenewStreamDeadline 续期。
 //
-// **不要用在 SSE 上**：gtkit/ssex 自己管连接级写 deadline——起流时解除
-// 全局 WriteTimeout，每次写出前后临时设置与恢复。再挂本中间件等于两套
-// 机制互相覆盖，谁最后设的谁生效，行为无法推理。
+// 不要与自行管理连接级写 deadline 的流式响应实现叠加，避免两套机制互相覆盖。
 //
 // 适用的是那些直接往 c.Writer 写的长响应：大文件下载、自研的分块推送。
 func StreamTimeout(idleWrite time.Duration) gin.HandlerFunc {
@@ -88,12 +75,8 @@ func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 
 // streamingTimeout 施加**可续期**的写空闲超时，不设总时长上限。
 //
-// 与固定的 WriteTimeout 的差别正是关键：后者是"从响应开始"的绝对上限，
-// 一条健康的长连接同样会被它切断；前者只在**对端不再收数据**时生效。
-//
-// 续期由 StreamKeepAlive 在每次成功 flush 后调用，必须发生在过期**之前**——
-// 标准库约定 write deadline 过期后再设置不能延长它。心跳间隔严格小于
-// IdleWrite 由 routespec 在注册期强制。
+// handler 每次成功 flush 后调用 RenewStreamDeadline，并自行保证写出或心跳
+// 间隔短于空闲预算；写阻塞时仍由 socket deadline 解除阻塞。
 func streamingTimeout(policy timeoutBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		restore := applyWriteDeadline(c, policy.idleWrite)
@@ -173,7 +156,7 @@ func renewWriteDeadline(c *gin.Context, idle time.Duration) error {
 // 可能高频出现，带上高基数字段会让日志后端的索引失控。
 func logWriteDeadlineIssue(op string, err error) {
 	logger.Warn("write deadline operation failed",
-		logger.String("op", op), logger.Err(err))
+		zap.String("op", op), zap.Error(err))
 }
 
 // IsTimeoutError 报告错误是否为业务 deadline 到点。
@@ -189,9 +172,9 @@ func IsTimeoutError(err error) bool {
 }
 
 // IsClientGone 报告错误是否为客户端主动断开。
-// 同样用纯错误树：混入真实故障的错误必须按故障处置，而不是静默不回包。
+// 纯中止错误树中取消优先于 deadline；混入真实故障时仍按故障处置。
 func IsClientGone(err error) bool {
-	return errx.IsPureCancellation(err)
+	return errx.IsPureAbort(err) && errors.Is(err, context.Canceled)
 }
 
 // respondGatewayTimeout 写 504 并中止链路。

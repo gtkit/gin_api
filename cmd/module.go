@@ -3,8 +3,11 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/gtkit/gin-api/internal/appmeta"
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/scaffold"
 
 	"github.com/spf13/cobra"
@@ -16,7 +19,7 @@ func init() {
 
 // newModuleCmd 构造 module 子命令：按分层约定一次性生成业务模块脚手架
 // （module 的 application/dto/transport/http + repository + model + 迁移草稿），
-// 并默认把新模块注册进 internal/bootstrap/providers.go。
+// 并默认把新模块注册进 internal/bootstrap/modules.go。
 //
 // 参数与 flag：
 //   - <name>          必填，模块名（ExactArgs(1)）。
@@ -24,7 +27,7 @@ func init() {
 //     int 系/uint 系/float/time.Time 等类型。
 //   - --force         覆盖已存在的生成文件。
 //   - --dry-run       只预览将创建/更新的文件，不落盘。
-//   - --no-bootstrap  跳过改写 providers.go 的自动注册（生成后需手动接线，见输出提示）。
+//   - --no-bootstrap  跳过改写 modules.go 的自动注册（生成后需手动接线，见输出提示）。
 func newModuleCmd(_ *rootOptions) *cobra.Command {
 	var force bool
 	var dryRun bool
@@ -59,12 +62,14 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 			// 而静默吞掉会让使用者配的 collation 悄悄没生效，生成的迁移与项目
 			// 基线不一致，差异只在数据量上来后才暴露。
 			var charset, collation string
-			if cfg, cfgErr := defaultconfig.Load(); cfgErr == nil {
+			if cfg, cfgErr := config.Load(); cfgErr == nil {
 				charset = cfg.Database.EffectiveCharset()
 				collation = cfg.Database.EffectiveCollation()
 			} else {
-				cmd.PrintErrf("warning: config not loaded (%v); the migration will use the "+
-					"built-in charset/collation defaults\n", cfgErr)
+				if _, writeErr := fmt.Fprintf(cmd.ErrOrStderr(), "warning: config not loaded (%v); the migration will use the "+
+					"built-in charset/collation defaults\n", cfgErr); writeErr != nil {
+					return errors.Join(cfgErr, commandError("write config warning", writeErr))
+				}
 			}
 
 			result, err := generator.GenerateWithOptions(args[0], scaffold.GenerateOptions{
@@ -81,14 +86,13 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 				return commandError("generate module scaffold", err)
 			}
 
-			printGenerationSummary(cmd, result)
-			return nil
+			return commandError("write generation summary", printGenerationSummary(cmd, result))
 		},
 	}
 
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing generated files")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview scaffold changes without writing files")
-	cmd.Flags().BoolVar(&noBootstrap, "no-bootstrap", false, "skip updating internal/bootstrap/providers.go to register the generated module")
+	cmd.Flags().BoolVar(&noBootstrap, "no-bootstrap", false, "skip updating internal/bootstrap/modules.go to register the generated module")
 	cmd.Flags().StringSliceVar(&fields, "field", nil, "repeatable field definition in name:type format, e.g. --field nickname:string")
 	cmd.Flags().StringVar(&access, "access", "",
 		"access policy for the generated routes: authenticated|optional|admin|custom (mutually exclusive with --public)")
@@ -100,7 +104,7 @@ func newModuleCmd(_ *rootOptions) *cobra.Command {
 
 // printGenerationSummary 打印一次脚手架生成的结果：逐条列出创建/更新/跳过的文件，
 // 再输出计数汇总。dry-run 模式下动词改为 "would create/update" 并提示未落盘。
-func printGenerationSummary(cmd *cobra.Command, result *scaffold.GenerateResult) {
+func printGenerationSummary(cmd *cobra.Command, result *scaffold.GenerateResult) error {
 	actionCreated := "created"
 	actionUpdated := "updated"
 	if result != nil && result.DryRun {
@@ -109,25 +113,36 @@ func printGenerationSummary(cmd *cobra.Command, result *scaffold.GenerateResult)
 	}
 
 	for _, path := range result.Created {
-		cmd.Printf("%s %s\n", actionCreated, path)
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", actionCreated, path); err != nil {
+			return err
+		}
 	}
 	for _, path := range result.Updated {
-		cmd.Printf("%s %s\n", actionUpdated, path)
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", actionUpdated, path); err != nil {
+			return err
+		}
 	}
 	for _, path := range result.Skipped {
-		cmd.Printf("skipped %s\n", path)
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "skipped %s\n", path); err != nil {
+			return err
+		}
 	}
 
-	cmd.Printf(
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(),
 		"summary created=%d updated=%d skipped=%d\n",
 		len(result.Created),
 		len(result.Updated),
 		len(result.Skipped),
-	)
+	); err != nil {
+		return err
+	}
 
 	if len(result.Created)+len(result.Updated) == 0 {
-		cmd.Println("no scaffold changes were applied")
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "no scaffold changes were applied")
+		return err
 	} else if result != nil && result.DryRun {
-		cmd.Println("dry-run mode: no files were written")
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "dry-run mode: no files were written")
+		return err
 	}
+	return nil
 }

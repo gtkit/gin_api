@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/models"
 )

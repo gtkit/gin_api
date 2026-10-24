@@ -15,7 +15,7 @@ import (
 	"github.com/gtkit/gin-api/internal/runtime/resource"
 
 	"github.com/gin-gonic/gin"
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 const (

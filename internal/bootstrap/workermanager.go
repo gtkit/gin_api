@@ -10,9 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 )
 
 const (
@@ -79,8 +80,9 @@ type preparedWorker struct {
 //
 // 启动顺序写死（见 Start 的注释），关停由 Stop 分相执行。
 type WorkerManager struct {
-	workers []Worker
-	budget  WorkerBudget
+	workers  []Worker
+	budget   WorkerBudget
+	recorder *metrics.Recorder
 
 	// started 保证 Start 至多执行一次（见 ErrLifecycleReused）。
 	started atomic.Bool
@@ -230,7 +232,7 @@ func (m *WorkerManager) prepareAll(ctx context.Context) error {
 		}
 
 		prepareCtx, cancel := withBoundedTimeout(ctx, m.budget.Prepare)
-		err := w.Prepare(prepareCtx)
+		err := invokeWorker(prepareCtx, w.Name(), w.Prepare)
 		cancel()
 
 		if err != nil {
@@ -267,7 +269,7 @@ func (m *WorkerManager) runRequiredOneShots(ctx context.Context) error {
 			return fmt.Errorf("worker startup budget exhausted before running %q: %w", w.Name(), err)
 		}
 
-		if err := m.runOnce(ctx, w); err != nil {
+		if err := m.invokeRun(ctx, w); err != nil {
 			return fmt.Errorf("required one-shot worker %q: %w", w.Name(), err)
 		}
 
@@ -280,14 +282,25 @@ func (m *WorkerManager) runRequiredOneShots(ctx context.Context) error {
 	return nil
 }
 
-// runOnce 同步执行一次 Run，并把 panic 转成错误。
-func (m *WorkerManager) runOnce(ctx context.Context, w Worker) (err error) {
+// invokeWorker 在三个生命周期边界统一保留 panic 的名称和栈。
+func invokeWorker(ctx context.Context, name string, phase func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = recoverWorkerPanic(w.Name(), r)
+			err = recoverWorkerPanic(name, r)
 		}
 	}()
-	return w.Run(ctx)
+	return phase(ctx)
+}
+
+// invokeRun observes one-shot work inside the existing panic boundary. A
+// long-running worker owns its per-task instrumentation rather than timing its lifetime.
+func (m *WorkerManager) invokeRun(ctx context.Context, worker Worker) error {
+	return invokeWorker(ctx, worker.Name(), func(ctx context.Context) error {
+		if worker.Lifecycle() == LifecycleOneShot {
+			return m.recorder.RunWorker(ctx, metrics.WorkerOneShot, worker.Name(), worker.Run)
+		}
+		return worker.Run(ctx)
+	})
 }
 
 // startBackgroundWorkers 启动 LongRunning 与 optional OneShot。
@@ -328,7 +341,7 @@ func (m *WorkerManager) supervise(ctx context.Context, rw *runningWorker) {
 	logger.Infof("starting worker %s (kind=%s lifecycle=%s required=%v)",
 		w.Name(), w.Kind(), w.Lifecycle(), w.Required())
 
-	err := m.runOnce(ctx, w)
+	err := m.invokeRun(ctx, w)
 
 	// 长期 worker 在 ctx 取消之前返回——**包括返回 nil**——一律是异常退出。
 	// 不做这个判定，一个静默返回 nil 的长期 worker 会让进程继续对外服务，
@@ -392,7 +405,7 @@ func (m *WorkerManager) reportRunFailure(w Worker, err error) {
 	if !w.Required() {
 		m.markDegraded(w.Name(), err)
 		// Error 而不是 Warn：能力已经没了，只是进程还活着。
-		logger.HErrorf("optional worker %s stopped and was marked degraded: %v", w.Name(), err)
+		logger.HError(fmt.Sprintf("optional worker %s stopped and was marked degraded: %v", w.Name(), err))
 		return
 	}
 
@@ -402,11 +415,11 @@ func (m *WorkerManager) reportRunFailure(w Worker, err error) {
 		// 入队成功也要落日志：关停开始后通道可能再无消费者（错误由
 		// TerminationErrors 在末端排空），不落日志的话，从入队到收割
 		// 之间这个错误在任何输出里都不存在。
-		logger.HErrorf("required worker failed: %v", wrapped)
+		logger.HError(fmt.Sprintf("required worker failed: %v", wrapped))
 	default:
 		// 通道容量按 worker 数分配，写满说明已有足够多的异常在等待处理；
 		// 丢弃后仍记录，避免在关停路径上阻塞。
-		logger.HErrorf("worker error channel is full, dropping: %v", wrapped)
+		logger.HError(fmt.Sprintf("worker error channel is full, dropping: %v", wrapped))
 	}
 }
 
@@ -602,7 +615,7 @@ func (m *WorkerManager) cleanupEntry(ctx context.Context, entry *preparedWorker)
 		}()
 	}
 
-	return entry.worker.Cleanup(cleanupCtx)
+	return invokeWorker(cleanupCtx, entry.worker.Name(), entry.worker.Cleanup)
 }
 
 func (m *WorkerManager) snapshotPrepared() []*preparedWorker {

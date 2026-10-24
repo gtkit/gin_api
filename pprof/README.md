@@ -61,14 +61,14 @@ brew install graphviz
 | 项 | 值 / 位置 | 说明 |
 | --- | --- | --- |
 | 启动入口 | `main.go` → `cmd.Execute()` → `server` 子命令 | cobra 多命令 |
-| 服务装配 | `internal/bootstrap/`（`app.go` / `providers.go` / `http.go`） | HTTP server 在此构建 |
+| 服务装配 | `internal/bootstrap/`（`app.go` / `providers.go` / `modules.go` / `http.go`） | HTTP server 在此构建 |
 | Gin engine 创建 | `internal/router/init.go` 的 `New(envName, opt)` | 返回 `*gin.Engine` |
 | 健康探针路由 | `internal/router/init.go:349` 注册 `GET /health`，处理逻辑在 `internal/router/health.go` | 附加路由的写法可参照它 |
 | 全局中间件栈 | `internal/router/init.go:218` 起 | `GinRecovery`→`RequestID`→〔otelgin〕→`GinLogger`→`Metrics`→`SecurityHeaders`→`ErrorHandler`→〔`Cors`〕→`MaxBytesLimit`（**无全局超时、无全局鉴权**——两者都按路由组挂） |
 | 业务监听地址 | `config.App.Host` + `config.App.Port` | 由 `-c <env>` 选择的配置文件提供 |
 | 环境判断 | `config.Env`，`IsProd()`/`IsTest()`/`IsDev()` | 控制是否启用 pprof |
 | 开发启动 | `make dev` = `go run -tags="sonic" . server -c dev` | |
-| 生产构建 | `make build` = `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags="sonic" -ldflags "-s -w"` + upx | PGO 的 `default.pgo` 放项目根目录即自动生效 |
+| 生产构建 | `make build` 默认 linux/amd64，含 `-trimpath`、sonic tag 与构建元数据；保留 `Linux`/`BUILD_FLAGS` 覆写。UPX 存在时压缩，缺失时跳过 | PGO 的 `default.pgo` 放项目根目录即自动生效 |
 | Go 版本 | 1.27（`go.mod`） | 完整支持 PGO |
 
 ---
@@ -97,7 +97,7 @@ pprof 端点会暴露**内存内容、调用栈、命令行参数**等敏感信�
 
 ## 六、关于 `.gitignore`
 
-- `pprof/*.md` 与 `pprof/scripts/*.sh` 被 git 跟踪，随仓库分发（派生项目经 `gonew` 继承）。
+- `pprof/*.md` 与 `pprof/scripts/*.sh` 被 git 跟踪，随仓库分发（派生项目经 `gonew` 继承）；`project init` 保留本目录，仅精确移除母版部署入口和两份 REVIEW 报告。
 - 采集产物（`profiles/`、`*.pprof`、`*.prof`、`*.pb.gz`、`*.out`）由 `pprof/.gitignore` 忽略。
 - PGO 的 `default.pgo` 在**项目根目录**且**必须提交**（官方最佳实践，见 `02` 文档），
   任何 `.gitignore` 都不该忽略它。

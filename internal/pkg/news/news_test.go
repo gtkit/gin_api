@@ -3,33 +3,37 @@ package news
 import (
 	"context"
 	"errors"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	newslib "github.com/gtkit/news"
+	"github.com/gtkit/msgbot/feishu"
 )
 
-type fakeAppNewser struct {
+type fakeImageSender struct {
 	sent []string
 }
 
-func (f *fakeAppNewser) Expired() int { return 0 }
-func (f *fakeAppNewser) SendImageMsg(_ context.Context, openID, filepath string) error {
+func (f *fakeImageSender) SendImageMessage(_ context.Context, openID, filepath string) error {
 	f.sent = append(f.sent, openID+":"+filepath)
 	return nil
 }
-func (f *fakeAppNewser) SendTextMsg(context.Context, string, string) error { return nil }
 
-var _ newslib.AppNewser = (*fakeAppNewser)(nil)
+var _ ImageMessageSender = (*fakeImageSender)(nil)
+
+// The real msgbot app must satisfy the consumer contract without an adapter.
+var _ ImageMessageSender = (*feishu.App)(nil)
 
 // newTestNotifier 直接构造一个 Notifier 实例。
 //
 // 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
 // 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
 func newTestNotifier(url, env, now string, sender func(context.Context, string, ...string) error, errLogger func(string)) *Notifier {
-	n, _ := NewWithConfig(nil) // nil 配置不启用任何通道，构造不可能失败
+	n, err := New(Options{})
+	if err != nil {
+		panic("construct disabled test notifier: " + err.Error())
+	}
 	n.defaultURL = url
 	n.envName = env
 	n.now = func() string { return now }
@@ -37,7 +41,11 @@ func newTestNotifier(url, env, now string, sender func(context.Context, string, 
 		n.webhookSender = sender
 	}
 	if errLogger != nil {
-		n.errorLogger = errLogger
+		n.report = func(delivery Delivery) {
+			if delivery.Result != "success" && delivery.Result != "disabled" {
+				errLogger("alert " + delivery.Channel + " send failed: result=" + delivery.Result)
+			}
+		}
 	}
 	return n
 }
@@ -82,7 +90,7 @@ func TestWarnLogsWebhookFailure(t *testing.T) {
 
 	n.Warn("", "body")
 
-	if len(logged) != 1 || !strings.Contains(logged[0], "hook down") {
+	if len(logged) != 1 || !strings.Contains(logged[0], "provider_error") {
 		t.Fatalf("webhook failure was not logged, got %v", logged)
 	}
 }
@@ -122,70 +130,14 @@ func TestNilNotifierIsSafeAndSilent(t *testing.T) {
 }
 
 func TestSendPicMsgSkipsBlankOpenIDs(t *testing.T) {
-	app := &fakeAppNewser{}
+	app := &fakeImageSender{}
 
-	if err := SendPicMsg(context.Background(), app, "u1, ,u2,,", "shot.png"); err != nil {
+	if err := SendPicMsg(t.Context(), app, "u1, ,u2,,", "shot.png"); err != nil {
 		t.Fatalf("SendPicMsg returned error: %v", err)
 	}
 
 	want := []string{"u1:shot.png", "u2:shot.png"}
-	if !reflect.DeepEqual(app.sent, want) {
+	if !slices.Equal(app.sent, want) {
 		t.Fatalf("sent=%v want=%v", app.sent, want)
-	}
-}
-
-// TestWebhookSenderSelectsPlatform 钉住三家平台可选，且留空按飞书兜底。
-//
-// platform 是后加的字段，历史配置里没有它——留空必须与引入本字段之前的
-// 行为一致，否则一次升级就会让所有存量部署的告警发不出去。
-func TestWebhookSenderSelectsPlatform(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		platform string
-		wantErr  string
-	}{
-		{name: "留空按飞书", platform: ""},
-		{name: "飞书", platform: "feishu"},
-		{name: "钉钉", platform: "dingtalk"},
-		{name: "企业微信", platform: "wecom"},
-		{name: "未知平台报错", platform: "slack", wantErr: "unknown alert platform"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			send := webhookSenderFor(tt.platform, "")
-			// 地址不可达：这里验的是平台选择与构造，不是真的发出去。
-			err := send(context.Background(), "http://127.0.0.1:1/hook", "msg")
-
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
-				}
-				return
-			}
-			// 构造成功即可；发送失败是预期的（地址不可达）。
-			if err != nil && strings.Contains(err.Error(), "unknown alert platform") {
-				t.Fatalf("平台 %q 被判为未知", tt.platform)
-			}
-		})
-	}
-}
-
-// TestWebhookSenderRejectsEmptyURL 钉住空 url 明确报错。
-//
-// 静默返回 nil 会让"配置漏填 fsurl"表现为"告警一切正常但没人收到"。
-func TestWebhookSenderRejectsEmptyURL(t *testing.T) {
-	t.Parallel()
-
-	err := webhookSenderFor("feishu", "")(context.Background(), "  ", "msg")
-	if err == nil {
-		t.Fatal("空 url 被接受了")
-	}
-	if !strings.Contains(err.Error(), "url is empty") {
-		t.Fatalf("错误 %q 没有指出是 url 为空", err)
 	}
 }

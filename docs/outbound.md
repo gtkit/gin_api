@@ -63,11 +63,27 @@ case errors.Is(err, httpclient.ErrDownstreamServerError):
   不存在「重试路径用了另一个没有防护的客户端」。
 - 重试判据是 `httpclient.RetryableFailure(status, err)`：传输层错误、429、5xx 重试；
   4xx 与 501 不重试；调用方取消/超时不重试（没人在等它的结果了）。
+- 普通 4xx（429 除外）从熔断统计中排除，即使响应解码失败也不累计或清零已有的
+  连续失败。解码错误仍原样交给调用方；5xx、传输错误和 429 的既有分类保持不变。
 - **超时是每次尝试的超时**，不是全部重试的总预算：最坏耗时约 `(Attempts+1) × Timeout` 加退避。
   排端点预算时按这个算。
 - `Client(name)` 可取原始客户端，只用于 `Do`/`DoIdempotent` 覆盖不了的编排
   （流式下载、自定义中间件）——**它不带熔断**，常规调用别用它。
 - 关停时 `Close` 释放全部空闲连接；滚动重启时旧实例不再占着下游的连接配额。
+
+## 请求关联
+
+`Factory` 创建的具名客户端（包括 `Downstreams` 内的客户端）在发送时读取该次请求的
+标准 `context.Context`，自动附带内部 `X-Request-ID` 和有效的 W3C `traceparent` / `tracestate`。
+调用时持续传入入口的 ctx 即可，前面的 `Do` / `DoIdempotent` 示例已满足这一要求。
+
+- 每次发送复制 request/header，不把关联字段写入客户端共享的默认 header，也不改调用方的原请求。
+- context 有对应值时覆盖该字段；没有内部 Request ID 或有效 span context 时保留显式 header，
+  不自动生成 ID 或 trace。使用 `context.Background()` 会失去入口关联。
+- 只传播 TraceContext，不自动转发 baggage、Authorization、Cookie 或其他入站 header。
+- 这层只传播现有 span context，不创建客户端 span，不更改采样、重试、熔断或超时预算。
+- 入站仍生成本服务的内部 Request ID，不采信来路的 `X-Request-ID`；因此本服务的出站日志
+  可用同一 ID 关联，但接收方若也重新生成 ID，需要结合 trace ID 串联整条链路。
 
 ## 熔断（`internal/pkg/breaker`）
 

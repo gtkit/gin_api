@@ -50,11 +50,16 @@ check_no_match() {
   rm -f "$tmp"
 }
 
-# Compile-time plugin boundaries: only entry points select built-in adapters.
+# Fixed SDKs are constructed by bootstrap, never by business consumers.
 check_no_match \
-  "bootstrap / business consumers select built-in plugins" \
-  "${MOD}/internal/plugin/builtin/" \
-  internal/bootstrap internal/module internal/router internal/platform internal/pkg internal/repository internal/runtime
+  "business consumers construct infrastructure owners" \
+  "${MOD}/internal/platform/(mysql|redis|responsecache|logging|notification)" \
+  internal/module internal/router internal/pkg internal/repository internal/runtime
+
+check_no_match \
+  "runtime uses generic plugin registration" \
+  'PluginRegistry|RegisterPlugins|PluginRegistrar' \
+  internal/bootstrap cmd
 
 check_no_match \
   "core imports a project or third-party package" \
@@ -65,13 +70,6 @@ check_no_match \
   "core imports an internal project package" \
   "${MOD}/internal/" \
   internal/core
-
-# Check only the capability package, not builtin descendants.
-capability_imports="$(go list -f '{{join .Imports "\n"}}' ./internal/plugin)" || { echo "FAIL: cannot enumerate plugin capability imports" >&2; exit 1; }
-if printf '%s\n' "$capability_imports" | grep -qE "^${MOD}/internal/plugin/builtin/"; then
-  echo "FAIL: capability package imports a built-in implementation" >&2
-  fail=1
-fi
 
 check_no_match \
   "dynamic plugin loading is forbidden" \
@@ -300,12 +298,9 @@ if [ -s "$dao_backdoor_hits" ]; then
 fi
 rm -f "$dao_backdoor_hits"
 
-while IFS= read -r -d '' file; do
-  if grep -qE 'func .*mdbCtx' "$file" && ! grep -q 'dbtx.DB(ctx, r.db)' "$file"; then
-    echo "FAIL: $file mdbCtx does not call dbtx.DB(ctx, r.db)"
-    fail=1
-  fi
-done < <(find internal/repository -type f -name '*.go' ! -name '*_test.go' -print0)
+if ! go run ./scripts/check-repository-context.go; then
+  fail=1
+fi
 
 # go.mod 不得含 replace。
 #

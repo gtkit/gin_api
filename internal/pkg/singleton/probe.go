@@ -26,7 +26,7 @@ const probeTTL = 5 * time.Second
 //
 // 探测用**独立的名字**，不碰真实任务的锁：用真名探测会把正在运行的实例
 // 的租约搅乱，那比不探测更糟。
-func Probe(ctx context.Context, client LeaseClient, prefix string) error {
+func Probe(ctx context.Context, client LeaseClient, prefix string) (err error) {
 	name, err := randomToken()
 	if err != nil {
 		return err
@@ -47,13 +47,17 @@ func Probe(ctx context.Context, client LeaseClient, prefix string) error {
 		return fmt.Errorf("singleton: probe could not acquire a lease (if this is a Redis "+
 			"Cluster, check that the lock and fence keys share a hash tag): %w", err)
 	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeTTL)
+		defer cancel()
+		if releaseErr := lease.Release(releaseCtx, held); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("singleton: probe cleanup: %w", releaseErr))
+		}
+	}()
 	if held.Fence <= 0 {
 		return fmt.Errorf("singleton: probe acquired a lease but got fence %d: the script's "+
 			"return shape does not match what this package parses", held.Fence)
 	}
-
-	// 尽力清理：即使后面的步骤失败，也不留一个占着五秒的锁。
-	defer func() { _ = lease.Release(context.WithoutCancel(ctx), held) }()
 
 	// 2. compare-and-renew 对**自己的**锁必须成功。
 	if err := lease.Renew(ctx, held); err != nil {
@@ -67,15 +71,15 @@ func Probe(ctx context.Context, client LeaseClient, prefix string) error {
 	// 延长新实例的锁，两个实例同时在跑且都以为自己独占。
 	foreign := Held{Token: held.Token + "-not-mine", Fence: held.Fence}
 	if err := lease.Renew(ctx, foreign); !errors.Is(err, ErrLeaseLost) {
-		return fmt.Errorf("singleton: probe renewed a lease it does not own (got %v): "+
+		return errors.Join(errors.New("singleton: probe renewed a lease it does not own: "+
 			"the renew script is not comparing the token, so a stale instance would keep "+
-			"extending the current holder's lease while believing it still owns one", err)
+			"extending the current holder's lease while believing it still owns one"), err)
 	}
 
 	// 4. 抢锁必须排他。
 	if _, err := lease.Acquire(ctx); !errors.Is(err, ErrNotAcquired) {
-		return fmt.Errorf("singleton: probe acquired an already-held lease (got %v): "+
-			"the lock is not exclusive", err)
+		return errors.Join(errors.New("singleton: probe acquired an already-held lease: "+
+			"the lock is not exclusive"), err)
 	}
 
 	// 5. compare-and-delete 对别人的 token 必须不删。
@@ -83,17 +87,20 @@ func Probe(ctx context.Context, client LeaseClient, prefix string) error {
 		return fmt.Errorf("singleton: probe release with a foreign token errored: %w", err)
 	}
 	if _, err := lease.Acquire(ctx); !errors.Is(err, ErrNotAcquired) {
-		return errors.New("singleton: probe deleted a lock it does not own: one expired " +
-			"lease would escalate into several instances running at once")
+		return errors.Join(errors.New("singleton: probe deleted a lock it does not own: one expired "+
+			"lease would escalate into several instances running at once"), err)
 	}
 
 	// 6. 自己的释放必须真的释放。
 	if err := lease.Release(ctx, held); err != nil {
 		return fmt.Errorf("singleton: probe could not release its own lease: %w", err)
 	}
-	if _, err := lease.Acquire(ctx); err != nil {
+	// 最终清理必须释放这次重新取得的 token，而非上一次已释放的 token。
+	reacquired, err := lease.Acquire(ctx)
+	if err != nil {
 		return fmt.Errorf("singleton: probe could not re-acquire after releasing: %w", err)
 	}
+	held = reacquired
 
 	return nil
 }

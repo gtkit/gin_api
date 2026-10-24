@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+type failedConsoleWriter struct{ cause error }
+
+func (w failedConsoleWriter) Write([]byte) (int, error) { return 0, w.cause }
+
+func TestConsoleFailureReachesExistingLogger(t *testing.T) {
+	cause := errors.New("console unavailable")
+	restore := setConsoleOutputForTest(failedConsoleWriter{cause})
+	defer restore()
+	_, read := newNativeTestLogger(t, "info")
+	Success("accepted")
+	entries := read()
+	if len(entries) != 1 || entries[0]["level"] != "ERROR" || entries[0]["error"] != cause.Error() {
+		t.Fatalf("console error missing: %v", entries)
+	}
+}
+
 // TestColoredOutputBytes 锁定三个打印函数的**逐字节**输出。
 //
 // 期望值是替换 `github.com/mgutz/ansi` 之前实测得到的字节：

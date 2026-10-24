@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/router"
 )
 

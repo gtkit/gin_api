@@ -20,11 +20,11 @@ const (
 type OperationAudit struct {
 	BaseID
 
-	OccurredAt time.Time `gorm:"column:occurred_at;type:datetime;not null;index:idx_operation_audit_logs_occurred_at;comment:发生时间"`
+	OccurredAt time.Time `gorm:"column:occurred_at;type:datetime;not null;index:idx_operation_audit_logs_occurred_at;index:idx_operation_audit_logs_user_occurred,priority:2;comment:发生时间"`
 	Method     string    `gorm:"column:method;size:10;not null;comment:HTTP方法"`
 	// Route 是路由模板（低基数，如 /api/v1/users/:id）；未匹配路由回退原始路径。
 	Route     string `gorm:"column:route;size:255;not null;comment:路由模板"`
-	Status    int    `gorm:"column:status;not null;comment:HTTP状态码"`
+	Status    int    `gorm:"column:status;type:int;size:32;not null;comment:HTTP状态码"`
 	LatencyMs int64  `gorm:"column:latency_ms;not null;comment:处理时延毫秒"`
 	// UserID 未认证请求为 0。
 	UserID    int64  `gorm:"column:user_id;not null;index:idx_operation_audit_logs_user_occurred,priority:1;comment:用户ID"`

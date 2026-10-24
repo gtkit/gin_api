@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -29,6 +30,15 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		if _, writeErr := fmt.Fprintln(os.Stderr, err); writeErr != nil {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	roots := os.Args[1:]
 	if len(roots) == 0 {
 		roots = []string{"internal", "cmd"}
@@ -51,15 +61,13 @@ func main() {
 			return nil
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "FAIL: walking %s: %v\n", root, err)
-			os.Exit(1)
+			return fmt.Errorf("FAIL: walking %s: %w", root, err)
 		}
 	}
 
 	allowed, err := loadAllowlist("scripts/package-vars-allowlist.txt")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("FAIL: %w", err)
 	}
 
 	var unlisted []string
@@ -71,15 +79,26 @@ func main() {
 
 	if len(unlisted) > 0 {
 		sort.Strings(unlisted)
-		fmt.Println("FAIL: package-level variables must not be rebound outside init()")
-		fmt.Println("  Either remove the rebinding, or claim it in scripts/package-vars-allowlist.txt")
-		fmt.Println("  with an explicit owner and reason.")
-		for _, f := range unlisted {
-			fmt.Println(" ", f)
+		if _, writeErr := fmt.Println("FAIL: package-level variables must not be rebound outside init()"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
 		}
-		os.Exit(1)
+		if _, writeErr := fmt.Println("  Either remove the rebinding, or claim it in scripts/package-vars-allowlist.txt"); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
+		if _, writeErr := fmt.Println("  with an explicit owner and reason."); writeErr != nil {
+			return fmt.Errorf("write tool output: %w", writeErr)
+		}
+		for _, f := range unlisted {
+			if _, writeErr := fmt.Println(" ", f); writeErr != nil {
+				return fmt.Errorf("write tool output: %w", writeErr)
+			}
+		}
+		return errors.New("package-var check failed")
 	}
-	fmt.Printf("package-var rebinding check OK (%d claimed sites)\n", len(allowed))
+	if _, writeErr := fmt.Printf("package-var rebinding check OK (%d claimed sites)\n", len(allowed)); writeErr != nil {
+		return fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return nil
 }
 
 // allowKey 由 findings 行提取 "文件:变量" 作为登记键。

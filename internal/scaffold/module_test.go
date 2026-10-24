@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
+func TestModuleGeneratorGenerateCreatesFilesAndUpdatesModuleAssembly(t *testing.T) {
 	t.Parallel()
 
 	root := createProjectFixture(t)
@@ -85,15 +85,15 @@ func TestModuleGeneratorGenerateCreatesFilesAndUpdatesProviders(t *testing.T) {
 	assertFileNotContains(t, filepath.Join(root, "internal", "module", "admin", "application", "service.go"),
 		`"github.com/gtkit/gin-api/internal/platform/config"`)
 
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	assertFileContains(t, providersPath, "adminapp \"github.com/gtkit/gin-api/internal/module/admin/application\"")
-	assertFileContains(t, providersPath, "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\"")
-	assertFileContains(t, providersPath, "adminhttp \"github.com/gtkit/gin-api/internal/module/admin/transport/http\"")
-	assertFileContains(t, providersPath, "adminService *adminapp.Service")
-	assertFileContains(t, providersPath, "adminSvc, err := adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
-	assertFileContains(t, providersPath, `return services{}, fmt.Errorf("assemble admin service: %w", err)`)
-	assertFileContains(t, providersPath, "svc.adminService = adminSvc")
-	assertFileContains(t, providersPath, "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService")
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	assertFileContains(t, assemblyPath, "adminapp \"github.com/gtkit/gin-api/internal/module/admin/application\"")
+	assertFileContains(t, assemblyPath, "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\"")
+	assertFileContains(t, assemblyPath, "adminhttp \"github.com/gtkit/gin-api/internal/module/admin/transport/http\"")
+	assertFileContains(t, assemblyPath, "adminService *adminapp.Service")
+	assertFileContains(t, assemblyPath, "adminSvc, err := adminruntime.NewService(inf.mysqlDB, inf.cfg.Modules.Admin)")
+	assertFileContains(t, assemblyPath, `return services{}, fmt.Errorf("assemble admin service: %w", err)`)
+	assertFileContains(t, assemblyPath, "svc.adminService = adminSvc")
+	assertFileContains(t, assemblyPath, "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService")
 
 	// 生成的代码必须符合架构边界（与 scripts/check-architecture.sh 一致）。
 	servicePath := filepath.Join(root, "internal", "module", "admin", "application", "service.go")
@@ -144,17 +144,17 @@ func TestModuleGeneratorGenerateIsIdempotentAndPreservesExistingModel(t *testing
 		t.Fatalf("expected existing model to be preserved, got %q", string(content))
 	}
 
-	providersContent, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "providers.go"))
+	assemblyContent, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "modules.go"))
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if count := strings.Count(string(providersContent), "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService"); count != 1 {
+	if count := strings.Count(string(assemblyContent), "adminhttp.Register(v1, adminhttp.Deps{Service: svc.adminService"); count != 1 {
 		t.Fatalf("expected single admin module registration, got %d", count)
 	}
-	if count := strings.Count(string(providersContent), "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\""); count != 1 {
+	if count := strings.Count(string(assemblyContent), "adminruntime \"github.com/gtkit/gin-api/internal/runtime/module/admin\""); count != 1 {
 		t.Fatalf("expected single admin runtime import, got %d", count)
 	}
-	if count := strings.Count(string(providersContent), "adminService *adminapp.Service"); count != 1 {
+	if count := strings.Count(string(assemblyContent), "adminService *adminapp.Service"); count != 1 {
 		t.Fatalf("expected single admin service field, got %d", count)
 	}
 
@@ -268,7 +268,7 @@ func TestModuleGeneratorDryRunDoesNotWriteFiles(t *testing.T) {
 		return time.Date(2026, 3, 24, 11, 12, 13, 0, time.UTC)
 	}
 
-	providersBefore, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "providers.go"))
+	assemblyBefore, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "modules.go"))
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -288,16 +288,16 @@ func TestModuleGeneratorDryRunDoesNotWriteFiles(t *testing.T) {
 		t.Fatalf("expected dry-run not to write model file, got err=%v", err)
 	}
 
-	providersAfter, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "providers.go"))
+	assemblyAfter, err := os.ReadFile(filepath.Join(root, "internal", "bootstrap", "modules.go"))
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if !bytes.Equal(providersBefore, providersAfter) {
-		t.Fatal("expected dry-run not to modify providers.go")
+	if !bytes.Equal(assemblyBefore, assemblyAfter) {
+		t.Fatal("expected dry-run not to modify modules.go")
 	}
 }
 
-func TestModuleGeneratorBootstrapFalseDoesNotModifyProviders(t *testing.T) {
+func TestModuleGeneratorBootstrapFalseDoesNotModifyModuleAssembly(t *testing.T) {
 	t.Parallel()
 
 	root := createProjectFixture(t)
@@ -309,8 +309,8 @@ func TestModuleGeneratorBootstrapFalseDoesNotModifyProviders(t *testing.T) {
 		return time.Date(2026, 3, 24, 12, 13, 14, 0, time.UTC)
 	}
 
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	before, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	before, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -323,39 +323,39 @@ func TestModuleGeneratorBootstrapFalseDoesNotModifyProviders(t *testing.T) {
 		t.Fatal("expected scaffold files to be created")
 	}
 
-	after, err := os.ReadFile(providersPath)
+	after, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	if !bytes.Equal(before, after) {
-		t.Fatal("expected bootstrap=false not to modify providers.go")
+		t.Fatal("expected bootstrap=false not to modify modules.go")
 	}
 	if _, err := os.Stat(filepath.Join(root, "internal", "models", "no_bootstrap_demo.go")); err != nil {
 		t.Fatalf("expected model file to be generated, got err=%v", err)
 	}
 }
 
-// TestProvidersMarkersPresentInRealProvidersFile 守卫脚手架生成器与真实 providers.go 的标记一致性。
-func TestProvidersMarkersPresentInRealProvidersFile(t *testing.T) {
+// TestModuleAssemblyMarkersPresentInRealModulesFile 守卫生成器与模块装配文件的标记一致性。
+func TestModuleAssemblyMarkersPresentInRealModulesFile(t *testing.T) {
 	t.Parallel()
 
-	providersPath := filepath.Join("..", "bootstrap", "providers.go")
-	content, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join("..", "bootstrap", "modules.go")
+	content, err := os.ReadFile(assemblyPath)
 	if err != nil {
-		t.Fatalf("ReadFile(%s) returned error: %v", providersPath, err)
+		t.Fatalf("ReadFile(%s) returned error: %v", assemblyPath, err)
 	}
 
-	imports, serviceFields, services, modules := providersMarkers()
+	imports, serviceFields, services, modules := moduleAssemblyMarkers()
 	for _, marker := range []string{imports, serviceFields, services, modules} {
 		if !strings.Contains(string(content), marker) {
-			t.Errorf("providers.go 缺少脚手架标记 %q；scaffold 生成器无法注入新模块", strings.TrimSpace(marker))
+			t.Errorf("modules.go 缺少脚手架标记 %q；scaffold 生成器无法注入新模块", strings.TrimSpace(marker))
 		}
 	}
 
-	// 校验型标记同样必须在真实 providers.go 中存在，否则 buildWorkers 阶段失去注册锚点。
-	for _, marker := range providersValidateOnlyMarkers() {
+	// 校验型标记同样必须在真实 modules.go 中存在，否则 buildWorkers 阶段失去注册锚点。
+	for _, marker := range moduleAssemblyValidationMarkers() {
 		if !strings.Contains(string(content), marker) {
-			t.Errorf("providers.go 缺少校验型脚手架标记 %q；buildWorkers 阶段失去后台任务注册锚点", strings.TrimSpace(marker))
+			t.Errorf("modules.go 缺少校验型脚手架标记 %q；buildWorkers 阶段失去后台任务注册锚点", strings.TrimSpace(marker))
 		}
 	}
 }
@@ -366,8 +366,8 @@ func TestModuleGeneratorMissingWorkerMarkerFails(t *testing.T) {
 	t.Parallel()
 
 	root := createProjectFixture(t)
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	before, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	before, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestModuleGeneratorMissingWorkerMarkerFails(t *testing.T) {
 	if broken == string(before) {
 		t.Fatal("fixture 未包含 scaffold:module-workers 标记，测试前提不成立")
 	}
-	if err := os.WriteFile(providersPath, []byte(broken), 0o644); err != nil {
+	if err := os.WriteFile(assemblyPath, []byte(broken), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
@@ -393,12 +393,12 @@ func TestModuleGeneratorMissingWorkerMarkerFails(t *testing.T) {
 		t.Fatalf("error %q does not name the missing anchor", err)
 	}
 
-	after, err := os.ReadFile(providersPath)
+	after, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	if string(after) != broken {
-		t.Fatal("providers.go was rewritten after worker marker failure")
+		t.Fatal("modules.go was rewritten after worker marker failure")
 	}
 }
 
@@ -416,8 +416,8 @@ func TestModuleGeneratorDoesNotRegisterWorker(t *testing.T) {
 		t.Fatalf("Generate returned error: %v", err)
 	}
 
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	content, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	content, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -445,17 +445,17 @@ func TestModuleGeneratorDoesNotRegisterWorker(t *testing.T) {
 	}
 }
 
-func TestModuleGeneratorMissingProviderMarkerDoesNotRewriteFile(t *testing.T) {
+func TestModuleGeneratorMissingModuleAssemblyMarkerDoesNotRewriteFile(t *testing.T) {
 	t.Parallel()
 
 	root := createProjectFixture(t)
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	before, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	before, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	broken := strings.Replace(string(before), "\t// scaffold:module-services\n", "", 1)
-	if err := os.WriteFile(providersPath, []byte(broken), 0o644); err != nil {
+	if err := os.WriteFile(assemblyPath, []byte(broken), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
@@ -464,21 +464,21 @@ func TestModuleGeneratorMissingProviderMarkerDoesNotRewriteFile(t *testing.T) {
 		t.Fatalf("NewModuleGenerator returned error: %v", err)
 	}
 	if _, err := generator.GenerateWithOptions("admin", GenerateOptions{Force: false, Bootstrap: true, Public: true}); err == nil {
-		t.Fatal("Generate returned nil error with missing provider marker")
+		t.Fatal("Generate returned nil error with missing module assembly marker")
 	}
 
-	after, err := os.ReadFile(providersPath)
+	after, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	if string(after) != broken {
-		t.Fatal("providers.go was partially rewritten after marker failure")
+		t.Fatal("modules.go was partially rewritten after marker failure")
 	}
 }
 
-// TestModuleGeneratorProvidersGoimportsClean 验证生成器注入后的 providers.go 已 goimports 干净：
+// TestModuleGeneratorModuleAssemblyGoimportsClean 验证生成器注入后的 modules.go 已 goimports 干净：
 // 用同一 goimports 引擎（formatWithImports，FormatOnly + local-prefix）再格式化一次应无变化（幂等）。
-func TestModuleGeneratorProvidersGoimportsClean(t *testing.T) {
+func TestModuleGeneratorModuleAssemblyGoimportsClean(t *testing.T) {
 	t.Parallel()
 
 	root := createProjectFixture(t)
@@ -494,18 +494,18 @@ func TestModuleGeneratorProvidersGoimportsClean(t *testing.T) {
 		t.Fatalf("Generate returned error: %v", err)
 	}
 
-	providersPath := filepath.Join(root, "internal", "bootstrap", "providers.go")
-	got, err := os.ReadFile(providersPath)
+	assemblyPath := filepath.Join(root, "internal", "bootstrap", "modules.go")
+	got, err := os.ReadFile(assemblyPath)
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 
-	reformatted, err := formatWithImports(providersPath, "github.com/gtkit/gin-api", got)
+	reformatted, err := formatWithImports(assemblyPath, "github.com/gtkit/gin-api", got)
 	if err != nil {
 		t.Fatalf("formatWithImports returned error: %v", err)
 	}
 	if !bytes.Equal(got, reformatted) {
-		t.Fatalf("generated providers.go is not goimports-clean:\n--- got ---\n%s\n--- reformatted ---\n%s", got, reformatted)
+		t.Fatalf("generated modules.go is not goimports-clean:\n--- got ---\n%s\n--- reformatted ---\n%s", got, reformatted)
 	}
 }
 
@@ -547,20 +547,17 @@ func createProjectFixture(t *testing.T) string {
 	root := t.TempDir()
 	files := map[string]string{
 		"go.mod": "module github.com/gtkit/gin-api\n\ngo 1.26.1\n",
-		// fixture 镜像真实 providers.go 的分阶段结构与全部脚手架标记
+		// fixture 镜像真实 modules.go 的分阶段结构与全部脚手架标记
 		// （四个注入型 + 四个校验型：scaffold:module-workers、
 		//  scaffold:module-authorizers、scaffold:task-handlers、
 		//  scaffold:periodic-tasks）。
 		// 后两个的缩进必须与真实文件一致（在调用参数表里，比语句层深一级）：
 		// 校验按含缩进的字面量匹配。
-		"internal/bootstrap/providers.go": `package bootstrap
+		"internal/bootstrap/modules.go": `package bootstrap
 
 import (
 	"github.com/gtkit/gin-api/internal/middleware"
-	aiapp "github.com/gtkit/gin-api/internal/module/ai/application"
-	aihttp "github.com/gtkit/gin-api/internal/module/ai/transport/http"
 	"github.com/gtkit/gin-api/internal/router"
-	airuntime "github.com/gtkit/gin-api/internal/runtime/module/ai"
 	// scaffold:module-imports
 )
 
@@ -570,7 +567,6 @@ type infra struct {
 }
 
 type services struct {
-	ai *aiapp.Service
 	// scaffold:module-service-fields
 }
 
@@ -580,14 +576,12 @@ type middlewares struct {
 
 func buildServices(inf infra) services {
 	var svc services
-	svc.ai = airuntime.NewService(inf.mysqlDB)
 	// scaffold:module-services
 	return svc
 }
 
 func buildEngine(svc services, mw middlewares) {
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		aihttp.Register(v1, aihttp.Deps{Service: svc.ai, Auth: mw.auth, RateLimit: rateLimitByID})
 		// scaffold:modules
 	}
 	_ = middleware.Auth

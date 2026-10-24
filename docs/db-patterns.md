@@ -26,7 +26,7 @@ type UserRepository interface {
 ## 数据访问统一经 `mdbCtx(ctx)`
 
 ```go
-// internal/repository/aiconversation/repository.go
+// internal/repository/useraccount/useraccount.go
 func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
     return dbtx.DB(ctx, r.db)
 }
@@ -37,6 +37,22 @@ func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
 **所有 GORM 访问走 `r.mdbCtx(ctx)`，禁止绕过它直接用 `r.db`。** 绕过的后果是那条语句
 不在调用方开启的事务里——它会成功提交，然后在事务回滚时留下来，成为一条没有对应主记录的孤儿数据。
 这类缺陷不报错、不进日志，只在对账时被发现。
+
+`dbtx.DB` 同时用 `WithContext(ctx)` 绑定调用方的取消和 deadline；因此业务查询统一走
+`mdbCtx(ctx)` 即可，不需要每条查询再重复 `WithContext`。不要用 `context.Background()` /
+`TODO()` 替换请求 ctx，也不要在查询链的 `Session` / `WithContext` 中抹掉它。
+
+架构检查已接入 `scripts/check-repository-context.go`：用 Go 类型信息检查
+`internal/repository/...` 当前构建条件下的生产文件，唯一豁免为底层 `dbtx` 包。
+检查 `mdbCtx` 确实返回 `dbtx.DB(自身 context 参数, 接收者 DB 字段)`，再追踪经典
+`*gorm.DB` 调用的局部来源，接受统一入口、其查询链/局部别名及受管 `Transaction` 内的句柄，
+拒绝裸 DB、Background/TODO 和无法证明的来源。
+
+这是保守的开发期检查：局部变量的所有赋值都参与判断；跨函数返回值、动态 `Session`
+选项、任意 `Scopes` 回调等无法证明时会报错，需要保持上述入口和直接可追踪的写法。
+它不分析测试文件、其他构建条件、GORM 泛型 API、反射/unsafe 或第三方内部执行，也不能
+证明驱动一定及时响应取消；实际取消行为仍需对应数据库集成验证。执行方式见
+[仓储 context 检查](../scripts/README.md#check-repository-contextgo)。
 
 ## 必须遵守
 

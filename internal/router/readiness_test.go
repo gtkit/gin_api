@@ -24,7 +24,7 @@ func (c *unconfiguredRedisChecker) PingRedis(context.Context) error {
 
 func TestReadinessSkipsUnconfiguredRedis(t *testing.T) {
 	checker := &unconfiguredRedisChecker{}
-	engine := newTestEngine(checker)
+	engine := newTestEngine(t, checker)
 	w := httptest.NewRecorder()
 	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	var body ReadinessResponse
@@ -169,8 +169,8 @@ func TestRunDependencyChecksOneFailureDoesNotCancelOthers(t *testing.T) {
 	if got := results["redis"].Error; got != "" {
 		t.Fatalf("redis error = %q, want empty for a healthy dependency", got)
 	}
-	if got := results["database"].Error; got != "down" {
-		t.Fatalf("database error = %q, want the underlying failure reason", got)
+	if got := results["database"].Error; got != "dependency check failed" {
+		t.Fatalf("database error = %q, want safe failure message", got)
 	}
 }
 

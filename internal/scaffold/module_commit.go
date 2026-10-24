@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,16 +90,28 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) (err error) {
 	if err != nil {
 		return fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
+	closed, renamed := false, false
 	defer func() {
-		if err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
+		if !closed {
+			if closeErr := tmp.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close temporary file %s: %w", tmp.Name(), closeErr))
+			}
+		}
+		if !renamed {
+			if removeErr := os.Remove(tmp.Name()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove temporary file %s: %w", tmp.Name(), removeErr))
+			}
 		}
 	}()
 
-	if _, err = tempFileWriter(tmp, data); err != nil {
+	n, err := tempFileWriter(tmp, data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
 		return fmt.Errorf("write temp file for %s: %w", path, err)
 	}
+	closed = true
 	if err = tmp.Close(); err != nil {
 		return fmt.Errorf("close temp file for %s: %w", path, err)
 	}
@@ -109,6 +122,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) (err error) {
 	if err = os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("rename temp file to %s: %w", path, err)
 	}
+	renamed = true
 	return nil
 }
 
@@ -118,7 +132,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) (err error) {
 // 拿不到锁立即报错而非等待：并发生成没有合并语义，等待只是把覆盖推迟。
 // flock 随进程退出自动释放，崩溃不留死锁；NFS 上语义不可靠——锁是防护带，
 // 正确性兜底是 verifyPlanUnchanged 的乐观校验，两者叠加。
-func acquireGenerationLock(root string) (release func(), err error) {
+func acquireGenerationLock(root string) (release func() error, err error) {
 	sum := sha256.Sum256([]byte(root))
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("gin-api-scaffold-%x.lock", sum[:8]))
 
@@ -131,7 +145,12 @@ func acquireGenerationLock(root string) (release func(), err error) {
 		return nil, fmt.Errorf("another generation is already running for this project "+
 			"(lock %s is held); wait for it to finish and re-run", path)
 	}
-	return func() { _ = lock.Unlock() }, nil
+	return func() error {
+		if err := lock.Unlock(); err != nil {
+			return fmt.Errorf("release generation lock %s: %w", path, err)
+		}
+		return nil
+	}, nil
 }
 
 // verifyPlanUnchanged 校验全部目标自规划读取以来未被并发改动

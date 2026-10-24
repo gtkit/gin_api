@@ -1,4 +1,4 @@
-package dao
+package data
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 // DatabaseHandle is the narrow database capability consumed by Resources.
-// It deliberately has no Close method; the lifecycle plugin owns closure.
+// It deliberately has no Close method; the concrete owner controls closure.
 type DatabaseHandle interface {
 	DB() *gorm.DB
 	SQLDB() *sql.DB
@@ -19,29 +19,28 @@ type DatabaseHandle interface {
 }
 
 // RedisHandle is the narrow Redis capability consumed by Resources.
-// It deliberately has no Close method; the lifecycle plugin owns closure.
+// It deliberately has no Close method; the concrete owner controls closure.
 type RedisHandle interface {
 	GetClient(int) (*redis.Client, bool)
 	PoolStats() map[int]*redis.PoolStats
 	HealthCheck(context.Context) error
 }
 
-// Requirements 声明本次装配对**可选**资源的必需性。
-//
-// MySQL 不设开关：本脚手架的每条业务路径都落库，"MySQL 可选"没有对应的运行形态，
-// 给它一个开关只会让人误以为存在无库运行模式。
-//
-// Redis 的必需性由**已启用的能力集合**推导，而不是由一个独立的开关配置——
-// 独立开关必然与真实依赖漂移：有人打开了依赖 Redis 的能力却忘了把开关也打开，
-// 于是 Redis 挂掉时进程照常报告 ready，而那个能力已经不工作了。
-type Requirements struct {
-	// Redis 为 true 时，Redis 连接失败即启动失败；
-	// 为 false 时连接失败只让该能力进入永久降级，进程继续启动。
-	Redis bool
+// RedisClientProvider supplies borrowed clients without transferring closure.
+type RedisClientProvider interface {
+	Client(int) *redis.Client
+	DefaultClient() *redis.Client
+	Configured() bool
 }
 
-// Resources is a non-owning, immutable view over initialized plugin capabilities.
-// The registry owns resource lifetimes; closing this view never closes clients.
+// RedisProvider combines the client and observation capabilities used at startup.
+type RedisProvider interface {
+	RedisClientProvider
+	RedisHandle
+}
+
+// Resources is a borrowed, immutable view over initialized clients.
+// Runtime retains their owners; this view has no Close method.
 type Resources struct {
 	mysqlView       DatabaseHandle
 	redis           RedisHandle
@@ -49,11 +48,8 @@ type Resources struct {
 	redisState      *AvailabilityTracker
 }
 
-// ResourcesFromClients creates a non-owning view over plugin-managed clients.
-//
-// The view is used by existing bootstrap and repository assembly code so the
-// refactor does not widen business dependencies. MySQL and Redis remain owned
-// by their respective lifecycle plugins and are not closed by this value.
+// ResourcesFromClients borrows the initialized MySQL and Redis clients.
+// It owns availability tracking, but never closes the borrowed clients.
 func ResourcesFromClients(
 	mysql DatabaseHandle,
 	redis RedisHandle,
@@ -63,7 +59,14 @@ func ResourcesFromClients(
 		return nil, errors.New("resources: mysql client is required")
 	}
 	var redisState *AvailabilityTracker
-	if redis == nil || len(redis.PoolStats()) == 0 {
+	_, recoverable := redis.(interface{ ConfigureTracing() error })
+	if redis != nil && len(redis.PoolStats()) == 0 && redisConfigured && recoverable {
+		tracker, err := newRecoverableDegradedTracker("redis", DefaultAvailabilityPolicy(), redis.HealthCheck)
+		if err != nil {
+			return nil, fmt.Errorf("resources: build recovering redis tracker: %w", err)
+		}
+		redisState = tracker
+	} else if redis == nil || len(redis.PoolStats()) == 0 {
 		redis = nil
 		redisState = NewPermanentlyDegradedTracker("redis")
 	} else {
@@ -124,7 +127,7 @@ func (r *Resources) RedisConfigured() bool {
 
 // RedisAvailability 返回 Redis 的可用性跟踪器。
 //
-// 永不为 nil（启动失败时是永久降级的跟踪器），因此消费方不需要判空。
+// 已构造资源视图中永不为 nil；可恢复 Owner 从 Degraded 开始接受真实观测。
 func (r *Resources) RedisAvailability() *AvailabilityTracker {
 	if r == nil {
 		return nil
@@ -134,7 +137,7 @@ func (r *Resources) RedisAvailability() *AvailabilityTracker {
 
 // PingRedis 执行一次 Redis 健康检查并把结果计入可用性状态。
 //
-// Redis 从未建立时直接返回错误，且不影响永久降级状态。
+// 可恢复 Owner 的真实结果推进状态；真正缺失的句柄保持永久降级。
 func (r *Resources) PingRedis(ctx context.Context) error {
 	if r == nil || r.redis == nil {
 		return errors.New("redis is not available in this process")
@@ -151,6 +154,3 @@ func (r *Resources) PingDB(ctx context.Context) error {
 	}
 	return r.mysqlView.PingContext(ctx)
 }
-
-// Close is retained for existing callers. Resource ownership stays in plugins.
-func (*Resources) Close() error { return nil }

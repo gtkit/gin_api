@@ -10,15 +10,17 @@ import (
 	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
+	"github.com/gtkit/gojwt"
 	"github.com/gtkit/gojwt/claims"
 )
 
 // Parser 实现 RotatingTokenParser。
 type Parser struct {
-	keys  *KeySet
-	opts  ParserOptions
-	cache *claimsCache
-	now   func() time.Time
+	opts    ParserOptions
+	cache   *claimsCache
+	now     func() time.Time
+	byKID   map[string]*gojwt.JwtEd25519
+	ordered []*gojwt.JwtEd25519
 }
 
 // NewParser 构造验签器。
@@ -26,7 +28,7 @@ type Parser struct {
 // cacheMaxEntries 为 0 表示禁用缓存；负值即配置错误（一个"负容量"的缓存
 // 没有任何合理解释，静默当成 0 会掩盖配置里的笔误）。
 func NewParser(keys *KeySet, opts ParserOptions, cacheMaxEntries int) (*Parser, error) {
-	if keys == nil {
+	if keys == nil || len(keys.OrderedKeys()) == 0 {
 		return nil, errors.New("jwt parser requires a key set")
 	}
 
@@ -53,7 +55,19 @@ func NewParser(keys *KeySet, opts ParserOptions, cacheMaxEntries int) (*Parser, 
 		return nil, errors.Join(errs...)
 	}
 
-	return &Parser{keys: keys, opts: opts, cache: newClaimsCache(cacheMaxEntries), now: time.Now}, nil
+	p := &Parser{
+		opts: opts, cache: newClaimsCache(cacheMaxEntries), now: time.Now,
+		byKID: make(map[string]*gojwt.JwtEd25519),
+	}
+	for _, key := range keys.OrderedKeys() {
+		verifier, err := gojwt.NewJwtEd25519Verifier(key.Public)
+		if err != nil {
+			return nil, fmt.Errorf("jwt verifier %q: %w", key.KID, err)
+		}
+		p.byKID[key.KID] = verifier
+		p.ordered = append(p.ordered, verifier)
+	}
+	return p, nil
 }
 
 // ParseToken 验签并校验全部标准 claims。
@@ -77,12 +91,13 @@ func (p *Parser) ParseToken(
 		}
 	}
 
-	parsed, err := p.parseUncached(token, opts...)
+	parsed, keyed, err := p.parseUncached(ctx, token, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	if useCache {
+	// 无 kid 的迁移令牌逐次检查截止时间，避免 exp 更晚的缓存越过迁移窗口。
+	if useCache && keyed {
 		p.cache.put(token, parsed)
 	}
 	// 返回深拷贝：调用方修改返回值不能影响缓存里的条目。
@@ -90,30 +105,57 @@ func (p *Parser) ParseToken(
 }
 
 // parseUncached 执行真正的验签。
-func (p *Parser) parseUncached(token string, opts ...jwtv5.ParserOption) (*claims.Claims, error) {
+func (p *Parser) parseUncached(ctx context.Context, token string, opts ...jwtv5.ParserOption) (*claims.Claims, bool, error) {
+	if len(token) > gojwt.MaxTokenBytes {
+		return nil, false, fmt.Errorf("%w: token exceeds %d bytes", ErrTokenInvalid, gojwt.MaxTokenBytes)
+	}
+	// 此处只选键并拒绝缺失的业务字段，不信任未验签结果。最终验签和日期
+	// 解码交给 SDK，保留其纳秒精度、严格 JSON 和算法检查，避免修改全局 TimePrecision。
+	rawClaims := &claims.Claims{}
+	header, _, err := jwtv5.NewParser().ParseUnverified(token, rawClaims)
+	if err != nil {
+		return nil, false, normalizeParseError(err)
+	}
+	if header.Method.Alg() != jwtv5.SigningMethodEdDSA.Alg() {
+		return nil, false, ErrTokenInvalid
+	}
+	kid := headerKID(header)
+	verifiers := p.ordered
+	if kid != "" {
+		verifier, ok := p.byKID[kid]
+		if !ok {
+			return nil, false, ErrUnknownKID
+		}
+		verifiers = []*gojwt.JwtEd25519{verifier}
+	} else if !p.unkeyedTokenAllowed() {
+		return nil, false, ErrUnkeyedTokenRejected
+	}
+	// SDK 兼容旧 token 时会补齐 token_id；应用策略要求原始 jti/token_id
+	// 都存在，必须在该规范化之前检查，不能让升级放宽撤销锚点的要求。
+	if err := p.verifyClaims(rawClaims, kid != ""); err != nil {
+		return nil, false, err
+	}
 	// 安全选项**最后**应用：jwtv5 后设选项覆盖先设的，调用方传入的
 	// WithValidMethods / WithoutClaimsValidation 之类若排在后面，就能把
 	// 算法白名单与 exp 必需一起关掉——一个本意是"补充"的入口变成了绕过口。
 	parserOpts := append(append([]jwtv5.ParserOption{}, opts...), p.baseParserOptions()...)
 
-	parsed, err := jwtv5.ParseWithClaims(token, &claims.Claims{}, p.keyFunc, parserOpts...)
-	if err != nil {
-		return nil, normalizeParseError(err)
+	for _, verifier := range verifiers {
+		var c *claims.Claims
+		c, err = verifier.ParseTokenContext(ctx, token, parserOpts...)
+		if err == nil {
+			return c, kid != "", nil
+		}
+		// 仅无 kid 存量 token 可以尝试下一把公钥；过期、格式和策略错误
+		// 不能通过换钥兜底。具名 token 的候选集始终只有一把密钥。
+		if !errors.Is(err, jwtv5.ErrTokenSignatureInvalid) {
+			break
+		}
 	}
-	if !parsed.Valid {
-		return nil, ErrTokenInvalid
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, false, err
 	}
-
-	c, ok := parsed.Claims.(*claims.Claims)
-	if !ok {
-		return nil, ErrTokenInvalid
-	}
-
-	hasKID := headerKID(parsed) != ""
-	if err := p.verifyClaims(c, hasKID); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return nil, false, normalizeParseError(err)
 }
 
 // baseParserOptions 是默认的解析选项。
@@ -126,40 +168,6 @@ func (p *Parser) baseParserOptions() []jwtv5.ParserOption {
 		jwtv5.WithLeeway(p.opts.ClockSkew),
 		jwtv5.WithExpirationRequired(),
 	}
-}
-
-// keyFunc 按 kid 选公钥。
-func (p *Parser) keyFunc(token *jwtv5.Token) (any, error) {
-	kid := headerKID(token)
-
-	if kid != "" {
-		key, ok := p.keys.PublicKeyFor(kid)
-		if !ok {
-			// **不做遍历兜底**。回退遍历会让 kid 形同虚设：攻击者把 header
-			// 里的 kid 改成任意值，验签就退回"逐个试"。
-			return nil, ErrUnknownKID
-		}
-		return key, nil
-	}
-
-	// 无 kid 的存量 token：只在明确的截止时刻之前接受。
-	if !p.unkeyedTokenAllowed() {
-		return nil, ErrUnkeyedTokenRejected
-	}
-	return p.orderedKeyFunc(token)
-}
-
-// orderedKeyFunc 为无 kid 的存量 token 逐个尝试公钥。
-//
-// jwtv5 的 keyFunc 只能返回一把密钥，因此这里返回一个 VerificationKeySet，
-// 由库按顺序尝试。顺序固定为 active 优先——绝大多数存量 token 由它签出。
-func (p *Parser) orderedKeyFunc(*jwtv5.Token) (any, error) {
-	ordered := p.keys.OrderedKeys()
-	keys := make([]jwtv5.VerificationKey, 0, len(ordered))
-	for _, k := range ordered {
-		keys = append(keys, k.Public)
-	}
-	return jwtv5.VerificationKeySet{Keys: keys}, nil
 }
 
 // unkeyedTokenAllowed 报告当前是否仍接受无 kid 的令牌。
@@ -267,6 +275,15 @@ func cloneClaims(c *claims.Claims) *claims.Claims {
 	cloned := *c
 	cloned.Audience = slices.Clone(c.Audience)
 	cloned.Roles = slices.Clone(c.Roles)
+	if c.ExpiresAt != nil {
+		cloned.ExpiresAt = new(*c.ExpiresAt)
+	}
+	if c.IssuedAt != nil {
+		cloned.IssuedAt = new(*c.IssuedAt)
+	}
+	if c.NotBefore != nil {
+		cloned.NotBefore = new(*c.NotBefore)
+	}
 	if c.AuthTime != nil {
 		cloned.AuthTime = new(*c.AuthTime)
 	}
@@ -274,6 +291,12 @@ func cloneClaims(c *claims.Claims) *claims.Claims {
 		cloned.Ext = make(map[string]any, len(c.Ext))
 		for key, value := range c.Ext {
 			cloned.Ext[key] = cloneClaimValue(value)
+		}
+	}
+	if c.Custom != nil {
+		cloned.Custom = make(map[string]any, len(c.Custom))
+		for key, value := range c.Custom {
+			cloned.Custom[key] = cloneClaimValue(value)
 		}
 	}
 	return &cloned

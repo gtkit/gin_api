@@ -24,6 +24,21 @@ func rotationConfig(mutate func(*JWTConfig)) JWTConfig {
 	return c
 }
 
+func TestJWTRotationPrivateKeyRequirementFollowsAuthMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []AuthMode{AuthModeLocal, AuthModeExternal} {
+		cfg := rotationConfig(func(c *JWTConfig) { c.Active.PrivateKeyPath = "" })
+		err := validateJWTRotation(cfg, mode, env.Test)
+		if (err != nil) != (mode == AuthModeLocal) {
+			t.Fatalf("mode=%s missing private key error=%v", mode, err)
+		}
+		cfg.Active.PublicKeyPath = ""
+		if err := validateJWTRotation(cfg, mode, env.Test); err == nil {
+			t.Fatalf("mode=%s accepted missing verification key", mode)
+		}
+	}
+}
+
 // TestValidateJWTRotation 覆盖轮换配置的全部约束。
 func TestValidateJWTRotation(t *testing.T) {
 	t.Parallel()
@@ -35,13 +50,6 @@ func TestValidateJWTRotation(t *testing.T) {
 		wantHint string
 	}{
 		{name: "minimal valid config", mutate: nil},
-		{
-			// 静默忽略废弃键比报错危险得多：使用者会以为自己配置的密钥
-			// 正在生效，而实际用的是另一组。
-			name:    "deprecated single-key paths rejected",
-			mutate:  func(c *JWTConfig) { c.PrivateKeyPath = "config/pem/jwtpri.pem" },
-			wantErr: true, wantHint: "no longer supported",
-		},
 		{
 			name:    "missing active kid",
 			mutate:  func(c *JWTConfig) { c.Active.KID = "" },
@@ -115,7 +123,7 @@ func TestValidateJWTRotation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), AuthModeLocal, env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)
@@ -184,7 +192,7 @@ func TestValidateJWTCutoffs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateJWTRotation(rotationConfig(tc.mutate), env.Dev)
+			err := validateJWTRotation(rotationConfig(tc.mutate), AuthModeLocal, env.Dev)
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("validateJWTRotation() = %v, want nil", err)

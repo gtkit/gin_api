@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -138,7 +139,7 @@ func (c *Config) Validate() error {
 	if err := validateJWTConfig(c.JWT); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateJWTRotation(c.JWT, c.Env); err != nil {
+	if err := validateJWTRotation(c.JWT, c.Auth.Mode, c.Env); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateAuthJWTCompatibility(c.Auth, c.JWT); err != nil {
@@ -309,30 +310,10 @@ func validateAppConfig(app AppConfig) error {
 		mustNonEmpty("application.port", app.Port),
 		mustPortRange("application.port", app.Port),
 	}
-	if app.ReadTimeoutSeconds != 0 {
-		errs = append(errs, errors.New(
-			"application.readtimeout is no longer supported: it only bounded reading the request "+
-				"headers while the body still had a fixed 60s budget, so the configured value "+
-				"understated the exposure. Split it into application.read_header_timeout and "+
-				"application.read_timeout"))
-	}
 	errs = append(errs,
 		mustNonNegative("application.read_header_timeout", app.ReadHeaderTimeoutSeconds),
 		mustNonNegative("application.read_timeout", app.ReadTimeoutFullSeconds),
 	)
-	if app.WriteTimeoutSeconds != 0 {
-		// 该键已废弃且**不提供静默兼容**。
-		//
-		// 它曾经设置 http.Server.WriteTimeout —— 一个所有路由共享的绝对写上限。
-		// 现在写超时由每条路由的 TimeoutPolicy 在连接级设置，服务器层恒为 0。
-		// 保留这个键并静默忽略，会让人以为自己配置了保护而实际没有；
-		// 因此这里直接拒绝启动，并在错误里给出迁移方向。
-		errs = append(errs, errors.New(
-			"application.writertimeout is no longer supported: the server-level write timeout is now a "+
-				"conservative fallback set in code, and routes that need longer writes extend the "+
-				"connection-level deadline per response via the route timeout middleware; "+
-				"remove this key from your config"))
-	}
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))
 
 	return errors.Join(errs...)
@@ -431,6 +412,9 @@ func validateRedisDBZeroConsumers(c Config) error {
 
 func validateRedisConfig(redis RedisConfig) error {
 	var errs []error
+	if redis.Prefix != "" && strings.TrimSpace(redis.Prefix) == "" {
+		errs = append(errs, errors.New("redis.prefix must not be whitespace-only"))
+	}
 	if redis.Addr != "" {
 		errs = append(errs, mustHostPort("redis.addr", redis.Addr))
 	}
@@ -618,6 +602,12 @@ func validateLogConfig(environment env.Env, logCfg LogConfig, appRoot string) er
 	case "", "debug", "info", "warn", "error", "dpanic", "panic", "fatal":
 	default:
 		errs = append(errs, errors.New("log.level must be one of debug, info, warn, error, dpanic, panic, fatal"))
+	}
+	if environment.IsProd() && strings.TrimSpace(logCfg.Level) == "debug" {
+		errs = append(errs, errors.New("log.level debug is not allowed in prod"))
+	}
+	if threshold := logCfg.SQLSlowThresholdMS; threshold != nil && (*threshold < 0 || *threshold > math.MaxInt64/int64(time.Millisecond)) {
+		errs = append(errs, errors.New("log.sql_slow_threshold_ms must be nonnegative and fit time.Duration"))
 	}
 	if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
 		errs = append(errs, err)

@@ -3,12 +3,14 @@
 package projectinit
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -310,7 +312,10 @@ func TestCommitFailureWithoutExistingGitKeepsStagedFiles(t *testing.T) {
 	if _, serr := os.Stat(filepath.Join(root, ".git")); serr != nil {
 		t.Fatalf("fresh repository must be kept when there is no old history to protect: %v", serr)
 	}
-	out, _ := gitOutput(t, root, "diff", "--cached", "--name-only")
+	out, err := gitOutput(t, root, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.TrimSpace(out) == "" {
 		t.Fatal("files should remain staged so the user can finish with a single git commit")
 	}
@@ -344,7 +349,7 @@ func TestRunStandardInstantiation(t *testing.T) {
 	}
 
 	// 母版专属部署入口已删除，且给出了自备部署入口的提示。
-	for _, rel := range motherDeploymentFiles {
+	for _, rel := range []string{".gitlab-ci.yml", "deployment.sh", "REVIEW.md", "REVIEW-my.md"} {
 		if _, err := os.Lstat(filepath.Join(root, rel)); !os.IsNotExist(err) {
 			t.Fatalf("%s should be removed from derived projects, err=%v", rel, err)
 		}
@@ -362,7 +367,10 @@ func TestRunStandardInstantiation(t *testing.T) {
 	assertSentinelsIntact(t, root)
 
 	// 分支名省略时精确为 main。
-	out, _ := gitOutput(t, root, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := gitOutput(t, root, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.TrimSpace(out) != "main" {
 		t.Fatalf("branch = %q, want main", strings.TrimSpace(out))
 	}
@@ -413,7 +421,10 @@ func TestRunPreservesLocalExcludeAndItsEffect(t *testing.T) {
 	}
 
 	// 真正的判据：哨兵目录没有进首个提交。
-	out, _ := gitOutput(t, root, "ls-files")
+	out, err := gitOutput(t, root, "ls-files")
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.Contains(out, "local-only-sentinel") {
 		t.Fatalf("sentinel path was committed despite the local exclude rule:\n%s", out)
 	}
@@ -434,7 +445,11 @@ func TestRunNoCommitStagesWithoutCommitting(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	staged, _ := gitOutput(t, root, "diff", "--cached", "--name-only")
+	staged, err := gitOutput(t, root, "diff", "--cached", "--name-only")
+
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.TrimSpace(staged) == "" {
 		t.Fatal("files should be staged with --no-commit")
 	}
@@ -442,7 +457,10 @@ func TestRunNoCommitStagesWithoutCommitting(t *testing.T) {
 	if _, err := gitOutput(t, root, "rev-parse", "HEAD"); err == nil {
 		t.Fatal("no commit should exist with --no-commit")
 	}
-	branch, _ := gitOutput(t, root, "symbolic-ref", "--short", "HEAD")
+	branch, err := gitOutput(t, root, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.TrimSpace(branch) != "main" {
 		t.Fatalf("unborn branch = %q, want main", strings.TrimSpace(branch))
 	}
@@ -461,7 +479,10 @@ func TestRunCustomBranch(t *testing.T) {
 	if _, err := init.Run(Options{Name: "my_service", Branch: "feature/x"}); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	out, _ := gitOutput(t, root, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := gitOutput(t, root, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		t.Fatalf("gitOutput: %v", err)
+	}
 	if strings.TrimSpace(out) != "feature/x" {
 		t.Fatalf("branch = %q, want feature/x", strings.TrimSpace(out))
 	}
@@ -487,6 +508,11 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	}
 	if len(result.Rewritten) == 0 || len(result.Deleted) == 0 {
 		t.Fatalf("dry-run should report planned changes, got rewritten=%v deleted=%v", result.Rewritten, result.Deleted)
+	}
+	for _, name := range []string{"REVIEW.md", "REVIEW-my.md"} {
+		if !slices.Contains(result.Deleted, name) {
+			t.Fatalf("dry-run omitted %s: %v", name, result.Deleted)
+		}
 	}
 	assertTreeUnchanged(t, root, before)
 }
@@ -532,7 +558,11 @@ func TestSnapshotLivesOutsideProjectRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSnapshot: %v", err)
 	}
-	defer func() { _ = snap.cleanup() }()
+	defer func() {
+		if err := snap.cleanup(); err != nil {
+			t.Errorf("snap.cleanup(): %v", err)
+		}
+	}()
 
 	rel, err := filepath.Rel(root, snap.dir)
 	if err == nil && !strings.HasPrefix(rel, "..") {
@@ -675,6 +705,8 @@ var sentinelFiles = map[string]string{
 	"docs/design/overview.md":   "# design overview\n\nnested sentinel\n",
 	"docs/design/data.json":     "{\"sentinel\":true}\n",
 	"internal/keep/keep_me.txt": "sentinel inside internal\n",
+	"pprof/README.md":           "# retained profiling toolbox\n",
+	"pprof/scripts/collect.sh":  "#!/bin/sh\n# retained tool\n",
 }
 
 // assertSentinelsIntact 断言全部中性哨兵仍存在且内容逐字节未变。
@@ -705,7 +737,6 @@ func newStubbedInitializer(root string) *Initializer {
 		gitInit:        func(string, string) error { return nil },
 		gitAdd:         func(string) error { return nil },
 		gitCommit:      func(string, string) error { return nil },
-		warnf:          func(string, ...any) {},
 	}
 }
 
@@ -747,6 +778,8 @@ const (
 		"Makefile":       fixtureMakefile,
 		".gitlab-ci.yml": "stages:\n  - deploy\n",
 		"deployment.sh":  "#!/bin/bash\necho deploy\n",
+		"REVIEW.md":      "# mother review\r\nprivate history\r\n",
+		"REVIEW-my.md":   "# mother manual review\n",
 	}
 	maps.Copy(files, sentinelFiles)
 
@@ -756,6 +789,11 @@ const (
 	// deployment.sh 是可执行文件；快照恢复必须连 +x 一起还原。
 	if err := os.Chmod(filepath.Join(root, "deployment.sh"), 0o755); err != nil {
 		t.Fatalf("chmod deployment.sh: %v", err)
+	}
+	for _, name := range []string{"REVIEW.md", "REVIEW-my.md"} {
+		if err := os.Chmod(filepath.Join(root, name), 0o640); err != nil {
+			t.Fatalf("chmod %s: %v", name, err)
+		}
 	}
 	return root
 }
@@ -897,4 +935,152 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
 	return string(b)
+}
+
+func TestRunPanicRetainsTheOriginalGitRecoveryCopy(t *testing.T) {
+	requireGit(t)
+	root := newFixture(t, "example.com/panic-recovery")
+	makeRealRepoWithHistory(t, root)
+	initializer := newRealGitInitializer(t, root)
+	failure := errors.New("self-check panic")
+	initializer.selfCheck = func(string) error { panic(failure) }
+	func() {
+		defer func() {
+			if got := recover(); got != failure {
+				t.Errorf("panic=%v", got)
+			}
+		}()
+		if _, err := initializer.Run(Options{Name: "new_service", ForceReinitGit: true}); err != nil {
+			t.Errorf("unexpected normal return: %v", err)
+		}
+	}()
+	copies, err := filepath.Glob(filepath.Join(filepath.Dir(root), ".projectinit-snapshot-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 {
+		t.Fatalf("original Git recovery copy lost after panic: copies=%v", copies)
+	}
+	backup := copies[0]
+	t.Cleanup(func() {
+		if err := os.RemoveAll(backup); err != nil {
+			t.Errorf("remove owned recovery fixture: %v", err)
+		}
+	})
+	if _, err := os.Stat(filepath.Join(backup, "git-dir", "HEAD")); err != nil {
+		t.Fatalf("old Git backup lost: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backup, "recovery.json")); err != nil {
+		t.Fatalf("original file recovery copy lost: %v", err)
+	}
+}
+
+func TestFailedRollbackRetainsOriginalBytesAndGit(t *testing.T) {
+	requireGit(t)
+	root := newFixture(t, "example.com/incomplete-recovery")
+	makeRealRepoWithHistory(t, root)
+	original := readFile(t, filepath.Join(root, projectMkPath))
+	initializer := newRealGitInitializer(t, root)
+	moved := root + "-test-owned-moved"
+	t.Cleanup(func() {
+		if err := os.RemoveAll(moved); err != nil {
+			t.Errorf("remove owned moved fixture: %v", err)
+		}
+	})
+	failure := errors.New("self-check failed")
+	initializer.selfCheck = func(string) error {
+		if err := os.Rename(root, moved); err != nil {
+			return err
+		}
+		if err := os.WriteFile(root, []byte("test-owned rollback obstruction"), 0o600); err != nil {
+			return err
+		}
+		return failure
+	}
+	_, err := initializer.Run(Options{Name: "new_service", ForceReinitGit: true})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "recovery retained at") {
+		t.Fatalf("rollback failure lost: %v", err)
+	}
+	copies, globErr := filepath.Glob(filepath.Join(filepath.Dir(root), ".projectinit-snapshot-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(copies) != 1 {
+		t.Fatalf("recovery copies=%v", copies)
+	}
+	backup := copies[0]
+	t.Cleanup(func() {
+		if err := os.RemoveAll(backup); err != nil {
+			t.Errorf("remove owned recovery fixture: %v", err)
+		}
+	})
+	bytes, readErr := os.ReadFile(filepath.Join(backup, "recovery.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var recovery struct {
+		Entries []struct {
+			Path    string    `json:"path"`
+			Content []byte    `json:"content"`
+			Kind    entryKind `json:"kind"`
+		}
+	}
+	if err := json.Unmarshal(bytes, &recovery); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range recovery.Entries {
+		if entry.Path == projectMkPath {
+			found = true
+			if string(entry.Content) != original || entry.Kind != entryRegular {
+				t.Fatal("original bytes or presence changed")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing original project identity")
+	}
+	if _, err := os.Stat(filepath.Join(backup, "git-dir", "HEAD")); err != nil {
+		t.Fatalf("old Git backup lost: %v", err)
+	}
+}
+
+func TestRelativeProjectRootHasAnAbsoluteSnapshotBoundary(t *testing.T) {
+	t.Parallel()
+	root := newFixture(t, "example.com/relative-root")
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(working, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := findProjectRoot(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != physical || !filepath.IsAbs(got) {
+		t.Fatalf("root=%q want %q", got, physical)
+	}
+	snapshot, err := newSnapshot(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Errorf("cleanup snapshot: %v", err)
+		}
+	}()
+	rel, err := filepath.Rel(got, snapshot.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("snapshot is inside the project: %s", rel)
+	}
 }

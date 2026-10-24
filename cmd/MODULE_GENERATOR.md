@@ -5,7 +5,7 @@
 ## 使用方式
 
 生成器由 `scaffold` 构建约束门控（它不属于服务二进制——它会重写
-`internal/bootstrap/providers.go`）。`make module` 已把 tag 封装好：
+`internal/bootstrap/modules.go`）。`make module` 已把 tag 封装好：
 
 ```bash
 make module NAME=admin ARGS="--access authenticated"
@@ -29,7 +29,7 @@ go run -tags scaffold . module article_tag --field title:string --field enabled:
 - `--field name:type`：可重复指定字段。
 - `--force`：覆盖允许更新的生成文件；model 不会被覆盖。
 - `--dry-run`：只输出计划，不写文件。
-- `--no-bootstrap`：不修改 `internal/bootstrap/providers.go`（默认会自动接线）。
+- `--no-bootstrap`：不修改 `internal/bootstrap/modules.go`（默认会自动接线）。
 
 支持字段类型：
 
@@ -64,13 +64,13 @@ internal/models/admin.go
 database/migrations/<version>_create_admins_table.sql
 ```
 
-默认还会通过以下稳定标记更新 `internal/bootstrap/providers.go`（分阶段装配结构，四个注入点）：
+默认还会通过以下稳定标记更新 `internal/bootstrap/modules.go`（分阶段装配结构，四个注入点）：
 
 ```go
 // scaffold:module-imports        // import 区：注入 app / http / runtime 三个包导入
 // scaffold:module-service-fields // services struct：注入 <name>Service *<name>app.Service 字段
 // scaffold:module-services       // buildServices：注入 svc.<name>Service = <name>runtime.NewService(inf.mysqlDB)
-// scaffold:modules               // buildEngine 的 v1Modules：注入 <name>http.NewModule(svc.<name>Service)
+// scaffold:modules               // buildEngine 的 RegisterModules：注入 <name>http.Register(v1, <name>http.Deps{...})
 ```
 
 标记缺失时生成命令返回错误，不会部分改写 providers 文件。
@@ -88,6 +88,9 @@ database/migrations/<version>_create_admins_table.sql
 - `page_size`：默认 20，最大 100。
 
 分页归一化位于 application 层；repository 查询始终使用显式 `LIMIT` 和 `OFFSET`。响应包含 `list` 和 `paging`。
+
+生成的 repository 只提供当前列表与详情使用的 `List`、`Get`，不预置字段投影参数或
+`ExistsByID`。模型不自动实现二进制序列化；需要缓存或专用投影查询时，再按实际消费方添加。
 
 ## Migration
 

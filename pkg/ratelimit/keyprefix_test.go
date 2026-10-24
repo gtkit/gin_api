@@ -3,6 +3,8 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,16 +23,24 @@ func (c *keyCapturingClient) ScriptLoad(ctx context.Context, _ string) *redis.St
 	return cmd
 }
 
-func (c *keyCapturingClient) EvalSha(
-	ctx context.Context, _ string, keys []string, _ ...any,
-) *redis.Cmd {
+func (c *keyCapturingClient) Process(_ context.Context, cmd redis.Cmder) error {
 	c.mu.Lock()
-	c.keys = append(c.keys, keys...)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	keyCount, ok := cmd.Args()[2].(int)
+	if !ok {
+		return fmt.Errorf("unexpected key count %T", cmd.Args()[2])
+	}
+	for _, key := range cmd.Args()[3 : 3+keyCount] {
+		value, ok := key.(string)
+		if !ok {
+			return fmt.Errorf("unexpected key type %T", key)
+		}
+		c.keys = append(c.keys, value)
+	}
 
-	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("probe stops here"))
-	return cmd
+	err := errors.New("probe stops here")
+	cmd.SetErr(err)
+	return err
 }
 
 func (c *keyCapturingClient) Del(ctx context.Context, _ ...string) *redis.IntCmd {
@@ -91,7 +101,9 @@ func TestKeyPrefixReachesTheBackend(t *testing.T) {
 				Scope: ScopeIP, Store: StoreRedis,
 				FailureMode: FailureClosed, MaxKeys: 100,
 			}
-			_, _ = backend.check(context.Background(), policy, tt.rawKey)
+			if _, err := backend.check(context.Background(), policy, tt.rawKey); err == nil || !strings.Contains(err.Error(), "probe stops here") {
+				t.Fatalf("capture fixture error: %v", err)
+			}
 
 			keys := client.captured()
 			if len(keys) == 0 {

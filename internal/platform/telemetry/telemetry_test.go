@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -101,7 +103,13 @@ func TestEnabledInstallsProvidersAndFlushes(t *testing.T) {
 
 	// 关停必须在预算内返回，即使收集端不可达。
 	start := time.Now()
-	_ = provider.Shutdown(context.Background())
+	if err := provider.Shutdown(context.Background()); err != nil {
+		dialErr, ok := errors.AsType[*net.OpError](err)
+		if !errors.Is(err, context.DeadlineExceeded) && (!ok || dialErr.Op != "dial") {
+			t.Fatalf("unexpected exporter shutdown failure: %v", err)
+		}
+		t.Logf("unreachable test collector reported within shutdown budget: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("Shutdown 耗时 %s，超出预算：它会把关停一起拖住", elapsed)
 	}
@@ -112,11 +120,10 @@ func TestEnabledInstallsProvidersAndFlushes(t *testing.T) {
 	}
 }
 
-// TestShutdownSurvivesCancelledContext 钉住"关停已被强制"不等于"遥测必然丢光"。
-//
-// 关停末期传进来的 ctx 很可能已被取消。Shutdown 用独立预算，让已采集的数据
-// 仍有机会送出，同时超时保证它不会反过来拖住关停。
-func TestShutdownSurvivesCancelledContext(t *testing.T) {
+// TestShutdownHandlesCancelledContextWithinBudget 检查取消原因不会被误判或拖住关停。
+// Provider沿用调用方的取消；独立关停预算由上层生命周期提供。
+// 本用例没有已导出的span证据，不能据耗时断言宣称数据已排空。
+func TestShutdownHandlesCancelledContextWithinBudget(t *testing.T) {
 	restore := snapshotGlobals()
 	defer restore()
 
@@ -136,7 +143,9 @@ func TestShutdownSurvivesCancelledContext(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	_ = provider.Shutdown(ctx)
+	if err := provider.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected canceled shutdown failure: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("已取消 ctx 下 Shutdown 耗时 %s", elapsed)
 	}

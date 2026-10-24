@@ -20,8 +20,9 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
-	defaultconfig "github.com/gtkit/gin-api/internal/plugin/builtin/config"
+	defaultconfig "github.com/gtkit/gin-api/internal/platform/config"
 
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 
@@ -53,13 +54,128 @@ func openTestDB(t *testing.T) *ormx.Client {
 		}
 	}()
 
-	return ormx.MustOpen(context.Background(),
+	client := ormx.MustOpen(t.Context(),
 		ormx.WithHost(cfg.Database.Host),
 		ormx.WithPort(cfg.Database.Port),
 		ormx.WithDatabase(cfg.Database.Name),
 		ormx.WithUser(cfg.Database.Username),
 		ormx.WithPassword(cfg.Database.Password),
 	)
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close integration db: %v", err)
+		}
+	})
+	return client
+}
+
+// A single connection makes an accidental independent nested Begin observable.
+// The temporary table belongs only to this test connection and disappears on Close.
+func TestIntegrationNestedTransactionsAreAtomic(t *testing.T) {
+	for _, mode := range []string{"outer-failure", "handled-inner-failure", "success", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			client := openTestDB(t)
+			if client == nil {
+				return
+			}
+			client.SQLDB().SetMaxOpenConns(1)
+			client.SQLDB().SetMaxIdleConns(1)
+			db := client.DB()
+			if err := db.WithContext(t.Context()).Exec("CREATE TEMPORARY TABLE remediation_tx (id INT PRIMARY KEY) ENGINE=InnoDB").Error; err != nil {
+				t.Fatal(err)
+			}
+			manager := dbtx.NewManager(db)
+			failure := errors.New("requested rollback")
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			var err error
+			var panicked any
+			func() {
+				defer func() { panicked = recover() }()
+				err = manager.Do(ctx, func(outer context.Context) error {
+					if err := dbtx.DB(outer, db).Exec("INSERT INTO remediation_tx VALUES (1)").Error; err != nil {
+						return err
+					}
+					innerErr := manager.Do(outer, func(inner context.Context) error {
+						if err := dbtx.DB(inner, db).Exec("INSERT INTO remediation_tx VALUES (2)").Error; err != nil {
+							return err
+						}
+						switch mode {
+						case "handled-inner-failure":
+							return failure
+						case "panic":
+							panic(failure)
+						default:
+							return nil
+						}
+					})
+					if mode == "handled-inner-failure" {
+						if !errors.Is(innerErr, failure) {
+							return errors.Join(errors.New("missing inner failure"), innerErr)
+						}
+						return dbtx.DB(outer, db).Exec("INSERT INTO remediation_tx VALUES (3)").Error
+					}
+					if innerErr != nil {
+						return innerErr
+					}
+					if mode == "outer-failure" {
+						return failure
+					}
+					return nil
+				})
+			}()
+			if mode == "panic" {
+				if panicked != failure {
+					t.Fatalf("panic=%v", panicked)
+				}
+			} else if mode == "outer-failure" {
+				if !errors.Is(err, failure) {
+					t.Fatalf("rollback error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			var count, sum int
+			if err := db.WithContext(ctx).Raw("SELECT COUNT(*), COALESCE(SUM(id),0) FROM remediation_tx").Row().Scan(&count, &sum); err != nil {
+				t.Fatal(err)
+			}
+			wantCount, wantSum := 0, 0
+			if mode == "success" {
+				wantCount, wantSum = 2, 3
+			}
+			if mode == "handled-inner-failure" {
+				wantCount, wantSum = 2, 4
+			}
+			if count != wantCount || sum != wantSum {
+				t.Fatalf("count=%d sum=%d, want %d/%d", count, sum, wantCount, wantSum)
+			}
+			t.Logf("max_open=1 mode=%s count=%d sum=%d", mode, count, sum)
+		})
+	}
+}
+
+func TestIntegrationPoolWaitRespectsDeadline(t *testing.T) {
+	client := openTestDB(t)
+	if client == nil {
+		return
+	}
+	client.SQLDB().SetMaxOpenConns(1)
+	conn, err := client.SQLDB().Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("release pool slot: %v", err)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	called := false
+	err = dbtx.NewManager(client.DB()).Do(ctx, func(context.Context) error { called = true; return nil })
+	if called || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("called=%v err=%v", called, err)
+	}
 }
 
 // TestIntegrationDoBindsCallerContext 钉住事务入口受调用方 ctx 约束。

@@ -36,20 +36,9 @@ v1.GET("/public/hot", cacheStager.Middleware(5*time.Second), handler)  // 覆盖
 键含方法与排序后的查询串；`memory` 后端走 ristretto（有界准入/淘汰），
 `redis` 后端的有界性由 Redis 的 maxmemory 策略负责。
 
-### 挂载者必须自己保证的三条
+### 响应准入
 
-底层的缓存判据是**请求期**的，拿不到响应头，而缓存写入发生在 handler 返回之后。
-因此下面三条无法由中间件兜住：
-
-1. **handler 不得设置 `Set-Cookie`**——它会被缓存并原样发给后续所有请求，
-   即第一个用户的会话被发给其他人。
-2. **不得依赖 `Cache-Control: private` / `no-store` 阻止缓存**——底层不看这个头，
-   声明了也照缓存。
-3. **不得依赖 `Vary`**——缓存键里没有它列出的请求头，同一 URL 对不同
-   `Accept-Language` / `Accept-Encoding` 会回放同一份。
-
-本包在缓存中间件外层加了一道**响应期审计**：命中上述任一条即记 Error 日志。
-它**挡不住泄漏**，只能让误用在日志里可见。
+响应阶段拒绝 Set-Cookie、Cache-Control 的 private/no-store/no-cache，以及除 Origin 外的 Vary；命中回放也会复检。带 Origin 的请求在请求阶段绕过，因此 Vary: Origin 可以与同源缓存组合。外层审计用于提示不适合挂缓存的路由，不替代准入。
 
 ## 进程内缓存（`internal/pkg/cache`）
 
@@ -65,16 +54,22 @@ article, err := c.GetOrLoad(ctx, key, func(ctx context.Context) (Article, error)
 c.Invalidate(key)                                  // 写 DB 成功后主动失效
 ```
 
-- **singleflight**：同一个键的并发加载只执行一次。热点键过期的瞬间所有并发请求同时回源，
-  一次 miss 会被放大成 N 次查询——而那一刻正是流量最高的时候。
+- **加载合并**：每个在途键保留一个 loader、一份类型化结果和一个共享完成通知。
+  等待者直接监听同一个通知与自己的 ctx，缓存内部不保存逐等待者 channel 或启动等待 goroutine。
 - **TTL 抖动**（默认 ±10%）：一批同时写入的键不会集体过期，回源尖峰不再周期性重演。
 - **容量上限 + LRU**：无界缓存在键空间随请求变化时会一直涨。那不是命中率问题，
   是一次必然发生的 OOM。
 - **失败不缓存**：缓存下来的错误会被固定住整个 TTL，故障早已恢复而调用方还在拿错误。
+- **loader panic**：在实际加载goroutine内恢复为可识别的 `ErrLoaderPanic`，返回固定文案并记录栈；
+  不缓存结果，释放在途登记。无视context的loader仍不能被强行终止。
 - **取消只影响当前调用方**：loader 拿到的是 `context.WithoutCancel` 的 ctx，
-  一个提前放弃的调用方不会连累其他等待者。
+  保留发起者的上下文值，并带独立加载超时（默认 30s）。一个提前放弃的调用方不会取消共享加载。
+- **在途上限**：默认最多 64 个不同键在加载，`WithMaxInflight` 可调整；达到上限时新键
+  立即返回 `ErrLoadsSaturated`，同键调用仍可共享结果。忽略 ctx 的 loader 持有名额直到真实退出。
+- **主动失效**：`Invalidate` 与加载提交使用同一同步边界，阻止已失效的旧加载回填。
+  已参与旧加载的等待者仍可能取得该次结果；本能力不提供读写强一致保证。
 
-三个问题缺一都会在生产上被发现，而且都是在流量最高的时候。
+2026-10-24 已通过受影响包的 race 验证，并覆盖失效提交交错、三批各 10,000 个取消等待者的存活堆、64 个忽略取消的 loader 及错误/panic/nil 广播。受控场景证据与验证边界见[修复计划第 9.3 节](review-remediation-plan-2026-10-23.md#93-追加测试授权与最终执行记录)。
 
 ## Redis / Pub-Sub / 延迟队列
 

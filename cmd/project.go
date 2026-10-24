@@ -3,6 +3,10 @@
 package cmd
 
 import (
+	"fmt"
+	"io"
+	"strings"
+
 	"github.com/gtkit/gin-api/internal/appmeta"
 	"github.com/gtkit/gin-api/internal/projectinit"
 
@@ -70,8 +74,7 @@ func newProjectInitCmd() *cobra.Command {
 				return commandError("run project init", err)
 			}
 
-			printProjectInitResult(cmd, result)
-			return nil
+			return printProjectInitResult(cmd, result)
 		},
 	}
 
@@ -85,14 +88,17 @@ func newProjectInitCmd() *cobra.Command {
 		"allow running inside an existing git repository; PERMANENTLY DISCARDS the existing git history")
 	cmd.Flags().BoolVar(&noCommit, "no-commit", false,
 		"initialize and stage everything but do not create the initial commit (no git identity required)")
-	_ = cmd.MarkFlagRequired("name")
+	if err := cmd.MarkFlagRequired("name"); err != nil {
+		panic(fmt.Errorf("register required project flag: %w", err))
+	}
 
 	return cmd
 }
 
 // printProjectInitResult 打印 project init 的执行结果：逐条列出被重写/删除的文件与提示信息，
 // dry-run 模式下动词改为 "would rewrite/delete" 并说明未落盘、未重建 git。
-func printProjectInitResult(cmd *cobra.Command, result *projectinit.Result) {
+func printProjectInitResult(cmd *cobra.Command, result *projectinit.Result) error {
+	var lines []string
 	rewriteAction := "rewrote"
 	deleteAction := "deleted"
 	if result.DryRun {
@@ -101,16 +107,18 @@ func printProjectInitResult(cmd *cobra.Command, result *projectinit.Result) {
 	}
 
 	for _, path := range result.Rewritten {
-		cmd.Printf("%s %s\n", rewriteAction, path)
+		lines = append(lines, fmt.Sprintf("%s %s\n", rewriteAction, path))
 	}
 	for _, path := range result.Deleted {
-		cmd.Printf("%s %s\n", deleteAction, path)
+		lines = append(lines, fmt.Sprintf("%s %s\n", deleteAction, path))
 	}
 	for _, note := range result.Notes {
-		cmd.Printf("note: %s\n", note)
+		lines = append(lines, fmt.Sprintf("note: %s\n", note))
 	}
 
 	if result.DryRun {
-		cmd.Println("dry-run mode: no files were written and git was not reinitialized")
+		lines = append(lines, "dry-run mode: no files were written and git was not reinitialized\n")
 	}
+	_, err := io.WriteString(cmd.OutOrStdout(), strings.Join(lines, ""))
+	return commandError("write project init summary", err)
 }

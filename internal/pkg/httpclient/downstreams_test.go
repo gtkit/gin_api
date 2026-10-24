@@ -28,7 +28,11 @@ func newTestDownstreams(t *testing.T, baseURL string, breakerCfg config.Outbound
 	if err != nil {
 		t.Fatalf("NewDownstreams: %v", err)
 	}
-	t.Cleanup(func() { _ = d.Close() })
+	t.Cleanup(func() {
+		if err := d.Close(); err != nil {
+			t.Errorf("d.Close(): %v", err)
+		}
+	})
 	return d
 }
 
@@ -66,7 +70,9 @@ func TestDoNormalizesServerErrorsIntoTheBreaker(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("oops"))
+		if _, err := w.Write([]byte("oops")); err != nil {
+			t.Errorf("test response I/O: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -118,7 +124,9 @@ func TestDoIdempotentRetriesWithTheSameProtectedClient(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
 				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte("oops"))
+				if _, err := w.Write([]byte("oops")); err != nil {
+					t.Errorf("test response I/O: %v", err)
+				}
 			}))
 			t.Cleanup(server.Close)
 
@@ -131,7 +139,7 @@ func TestDoIdempotentRetriesWithTheSameProtectedClient(t *testing.T) {
 			}
 
 			retry := RetryPolicy{Attempts: 2, WaitTime: time.Millisecond, MaxWaitTime: 10 * time.Millisecond}
-			_, _ = d.DoIdempotent(context.Background(), "orders", retry,
+			status, attemptErr := d.DoIdempotent(context.Background(), "orders", retry,
 				func(ctx context.Context, client *httpc.Client) (int, error) {
 					if client != factoryClient {
 						t.Fatal("重试执行体拿到的不是工厂客户端：防护上限没有被继承")
@@ -139,6 +147,10 @@ func TestDoIdempotentRetriesWithTheSameProtectedClient(t *testing.T) {
 					_, status, getErr := client.GetRaw(ctx, "/", nil)
 					return status, getErr
 				})
+			if status != tt.status || (tt.status >= 500 && !errors.Is(attemptErr, ErrDownstreamServerError)) ||
+				(tt.status < 500 && attemptErr != nil) {
+				t.Fatalf("retry result status=%d err=%v", status, attemptErr)
+			}
 
 			if got := calls.Load(); got != tt.wantCalls {
 				t.Fatalf("服务端收到 %d 次请求，want %d", got, tt.wantCalls)
@@ -172,7 +184,9 @@ func TestRetryBackoffIsCancelable(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("oops"))
+		if _, err := w.Write([]byte("oops")); err != nil {
+			t.Errorf("test response I/O: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -212,7 +226,9 @@ func TestZeroBackoffStillChecksCancellation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("oops"))
+		if _, err := w.Write([]byte("oops")); err != nil {
+			t.Errorf("test response I/O: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 

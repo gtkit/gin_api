@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"io"
 	"net/http"
 
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
@@ -66,41 +65,9 @@ func MaxBytesLimit(config MaxBytesLimitConfig) gin.HandlerFunc {
 
 		// 真实字节上限：读取超过 MaxBytes 时 Read 返回 *http.MaxBytesError，
 		// 由 logger / 绑定路径映射为 413。
-		body := http.MaxBytesReader(c.Writer, c.Request.Body, config.MaxBytes)
-
-		// 用包装器替换原始Body，确保始终能被正确关闭
-		c.Request.Body = &maxBytesReaderWrapper{
-			ReadCloser: body,
-			original:   c.Request.Body,
-			maxBytes:   config.MaxBytes,
-		}
+		// MaxBytesReader.Close 已经关闭底层 body，无需再次包装并重复关闭。
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, config.MaxBytes)
 
 		c.Next()
 	}
-}
-
-// maxBytesReaderWrapper 包装MaxBytesReader，确保正确关闭底层读取器.
-type maxBytesReaderWrapper struct {
-	io.ReadCloser
-	original io.ReadCloser
-	maxBytes int64
-	closed   bool
-}
-
-// Close 确保底层读取器被正确关闭.
-func (w *maxBytesReaderWrapper) Close() error {
-	if w.closed {
-		return nil
-	}
-	w.closed = true
-
-	// 关闭包装的读取器
-	if err := w.ReadCloser.Close(); err != nil {
-		// 尝试关闭原始读取器
-		w.original.Close()
-		return err
-	}
-
-	// 关闭原始读取器
-	return w.original.Close()
 }

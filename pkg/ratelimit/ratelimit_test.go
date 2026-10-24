@@ -176,12 +176,15 @@ func TestLocalBackendRejectsNewKeysAtBound(t *testing.T) {
 
 	ctx := context.Background()
 	for _, key := range []string{"a", "b"} {
-		if d, _ := backend.Check(ctx, key); !d.Allowed() {
+		if d, err := backend.Check(ctx, key); err != nil || !d.Allowed() {
 			t.Fatalf("key %q was rejected while under the key bound", key)
 		}
 	}
 
-	d, _ := backend.Check(ctx, "c")
+	d, err := backend.Check(ctx, "c")
+	if err != nil {
+		t.Fatalf("key capacity check: %v", err)
+	}
 	if d.Allowed() {
 		t.Fatal("a new key was accepted beyond the key bound")
 	}
@@ -503,7 +506,9 @@ func TestRegistryRejectsDuplicatesAndFreezes(t *testing.T) {
 		t.Fatal("registry accepted a registration after being frozen")
 	}
 
-	_ = reg.Close()
+	if err := reg.Close(); err != nil {
+		t.Errorf("reg.Close(): %v", err)
+	}
 }
 
 func TestFixedPointConversion(t *testing.T) {

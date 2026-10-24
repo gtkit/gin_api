@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,11 +103,15 @@ func (h *fakeHasher) dummyCallCount() int {
 }
 
 type fakeIssuer struct {
-	issued int
-	err    error
+	issued  int
+	err     error
+	onIssue func()
 }
 
 func (i *fakeIssuer) Issue(context.Context, int64, ...string) (string, error) {
+	if i.onIssue != nil {
+		i.onIssue()
+	}
 	if i.err != nil {
 		return "", i.err
 	}
@@ -115,6 +120,7 @@ func (i *fakeIssuer) Issue(context.Context, int64, ...string) (string, error) {
 }
 
 type fakeRefresh struct {
+	onIssue    func()
 	issueErr   error
 	consumeErr error
 	consumeUID int64
@@ -135,6 +141,9 @@ func (r *fakeRefresh) Peek(context.Context, string) (int64, error) {
 }
 
 func (r *fakeRefresh) Issue(context.Context, int64) (string, error) {
+	if r.onIssue != nil {
+		r.onIssue()
+	}
 	if r.issueErr != nil {
 		return "", r.issueErr
 	}
@@ -178,18 +187,25 @@ type fakeAuditor struct {
 	mu       sync.Mutex
 	audits   []string
 	failures []string
+	onAudit  func()
+	contexts []context.Context
 }
 
-func (a *fakeAuditor) Auditf(format string, _ ...any) {
+func (a *fakeAuditor) Auditf(ctx context.Context, format string, _ ...any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.audits = append(a.audits, format)
+	a.contexts = append(a.contexts, ctx)
+	if a.onAudit != nil {
+		a.onAudit()
+	}
 }
 
-func (a *fakeAuditor) Failf(format string, _ ...any) {
+func (a *fakeAuditor) Failf(ctx context.Context, format string, _ ...any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.failures = append(a.failures, format)
+	a.contexts = append(a.contexts, ctx)
 }
 
 func (a *fakeAuditor) failureCount() int {
@@ -237,6 +253,146 @@ func newHarness(t *testing.T) *harness {
 }
 
 // --- 用例 ---
+
+type authEventRecorderFunc func(context.Context, string)
+
+func (f authEventRecorderFunc) RecordAuthEvent(ctx context.Context, event string) {
+	f(ctx, event)
+}
+
+func TestLoginRecordsSuccessAfterTokenPair(t *testing.T) {
+	t.Parallel()
+	issueErr := errors.New("token issuer unavailable")
+	for _, tt := range []struct {
+		name       string
+		accessErr  error
+		refreshErr error
+		password   string
+		inactive   bool
+		missing    bool
+		wantErr    error
+		wantCalls  []string
+	}{
+		{name: "success", password: "pw", wantCalls: []string{"access", "refresh", "audit", EventLoginSucceeded}},
+		{name: "access issuance fails", password: "pw", accessErr: issueErr, wantErr: issueErr, wantCalls: []string{"access"}},
+		{name: "refresh issuance fails", password: "pw", refreshErr: issueErr, wantErr: issueErr, wantCalls: []string{"access", "refresh"}},
+		{name: "wrong password", password: "wrong", wantErr: ErrInvalidCredentials, wantCalls: []string{EventLoginFailed}},
+		{name: "inactive account", password: "pw", inactive: true, wantErr: ErrAccountInactive},
+		{name: "missing account", password: "pw", missing: true, wantErr: ErrInvalidCredentials, wantCalls: []string{EventLoginFailed}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			if !tt.missing {
+				h.creds.byPhone["13800000000"] = Credential{UserID: 42, PasswordHash: "hashed:pw", Active: !tt.inactive}
+			}
+			var calls []string
+			h.issuer.err = tt.accessErr
+			h.issuer.onIssue = func() { calls = append(calls, "access") }
+			h.refresh.issueErr = tt.refreshErr
+			h.refresh.onIssue = func() { calls = append(calls, "refresh") }
+			h.auditor.onAudit = func() { calls = append(calls, "audit") }
+			h.svc.events = authEventRecorderFunc(func(_ context.Context, event string) {
+				calls = append(calls, event)
+			})
+
+			pair, err := h.svc.Login(t.Context(), "13800000000", tt.password)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Login error = %v, want %v", err, tt.wantErr)
+			}
+			wantPair := TokenPair{}
+			if tt.wantErr == nil {
+				wantPair = TokenPair{AccessToken: "access-token", RefreshToken: "refresh-token", ExpiresIn: 900}
+			}
+			if pair != wantPair {
+				t.Errorf("Login pair = %+v, want %+v", pair, wantPair)
+			}
+			if !slices.Equal(calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", calls, tt.wantCalls)
+			}
+			if h.refresh.consumeCalls != 0 || len(h.refresh.revoked) != 0 || len(h.revoke.revoked) != 0 {
+				t.Error("Login unexpectedly consumed or revoked tokens")
+			}
+		})
+	}
+}
+
+func TestAuditPreservesRequestContext(t *testing.T) {
+	t.Parallel()
+	register := func(h *harness, ctx context.Context) error {
+		_, err := h.svc.Register(ctx, "13900000000", "pw", "nick")
+		return err
+	}
+	login := func(h *harness, ctx context.Context) error {
+		_, err := h.svc.Login(ctx, "13800000000", "pw")
+		return err
+	}
+	refresh := func(h *harness, ctx context.Context) error {
+		_, err := h.svc.Refresh(ctx, "refresh-token")
+		return err
+	}
+	for _, tt := range []struct {
+		name   string
+		setup  func(*harness)
+		invoke func(*harness, context.Context) error
+		want   int
+		err    error
+	}{
+		{name: "register", invoke: register, want: 1},
+		{name: "register token failure", setup: func(h *harness) { h.issuer.err = errors.New("signing unavailable") }, invoke: register, want: 2, err: ErrRegisteredLoginRequired},
+		{name: "login", invoke: login, want: 1},
+		{name: "login missing", setup: func(h *harness) { delete(h.creds.byPhone, "13800000000") }, invoke: login, want: 1, err: ErrInvalidCredentials},
+		{name: "login wrong password", setup: func(h *harness) { h.hasher.compareErr = ErrInvalidCredentials }, invoke: login, want: 1, err: ErrInvalidCredentials},
+		{name: "login inactive", setup: func(h *harness) { h.creds.byPhone["13800000000"] = Credential{UserID: 42, PasswordHash: "hashed:pw"} }, invoke: login, want: 1, err: ErrAccountInactive},
+		{name: "refresh reused", setup: func(h *harness) { h.refresh.peekErr, h.refresh.consumeErr = ErrRefreshReused, ErrRefreshReused }, invoke: refresh, want: 1, err: ErrRefreshRejected},
+		{name: "refresh revocation failure", setup: func(h *harness) {
+			h.refresh.peekErr, h.refresh.consumeErr = ErrRefreshReused, errors.New("revocation unavailable")
+		}, invoke: refresh, want: 2, err: ErrRefreshRejected},
+		{name: "logout both", invoke: func(h *harness, ctx context.Context) error {
+			return h.svc.Logout(ctx, "jti", time.Now().Add(time.Minute), "refresh-token")
+		}, want: 1},
+		{name: "logout access only", invoke: func(h *harness, ctx context.Context) error {
+			return h.svc.Logout(ctx, "jti", time.Now().Add(time.Minute), "")
+		}, want: 1},
+		{name: "limited login", setup: func(h *harness) { h.svc.accounts = denyAllAccounts{} }, invoke: login, want: 1, err: ErrAccountRateLimited},
+		{name: "limited register", setup: func(h *harness) { h.svc.accounts = denyAllAccounts{} }, invoke: register, want: 1, err: ErrAccountRateLimited},
+	} {
+		for _, mode := range []string{"active", "canceled", "no auditor"} {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+				h := newHarness(t)
+				h.creds.byPhone["13800000000"] = Credential{UserID: 42, PasswordHash: "hashed:pw", Active: true}
+				if tt.setup != nil {
+					tt.setup(h)
+				}
+				type requestKey struct{}
+				ctx, cancel := context.WithTimeout(context.WithValue(t.Context(), requestKey{}, t.Name()), time.Minute)
+				defer cancel()
+				if mode == "canceled" {
+					cancel()
+				}
+				want := tt.want
+				if mode == "no auditor" {
+					h.svc.auditor = nil
+					want = 0
+				}
+				if err := tt.invoke(h, ctx); !errors.Is(err, tt.err) {
+					t.Fatalf("operation error = %v, want %v", err, tt.err)
+				}
+				if len(h.auditor.contexts) != want {
+					t.Fatalf("audit count = %d, want %d", len(h.auditor.contexts), want)
+				}
+				for _, got := range h.auditor.contexts {
+					deadline, ok := got.Deadline()
+					wantDeadline, _ := ctx.Deadline()
+					if got != ctx || got.Value(requestKey{}) != t.Name() || !ok || !deadline.Equal(wantDeadline) || got.Err() != ctx.Err() {
+						t.Errorf("audit context lost identity, request value, deadline or cancellation: %v", got)
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestNewServiceRequiresEveryDependency(t *testing.T) {
 	t.Parallel()
@@ -764,8 +920,11 @@ func TestAccountNormalizationClosesTheRateLimitBypass(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	// PAD SPACE 下这是同一个数据库账号。
-	_, _ = svc.Login(ctx, "13800000000 ", "pw")
-	_, _ = svc.Login(ctx, "  13800000000", "pw")
+	for _, phone := range []string{"13800000000 ", "  13800000000"} {
+		if _, err := svc.Login(ctx, phone, "pw"); err != nil {
+			t.Fatalf("Login with account whitespace: %v", err)
+		}
+	}
 
 	for _, account := range seen.accounts {
 		if account != "13800000000" {

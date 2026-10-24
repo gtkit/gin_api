@@ -27,7 +27,11 @@ func newRateLimitTestOptions(t *testing.T) Options {
 		}
 	}
 	registry.Freeze()
-	t.Cleanup(func() { _ = registry.Close() })
+	t.Cleanup(func() {
+		if err := registry.Close(); err != nil {
+			t.Errorf("registry.Close(): %v", err)
+		}
+	})
 
 	keys, err := ratelimit.NewKeyBuilder(strings.Repeat("k", 32), "test-app")
 	if err != nil {

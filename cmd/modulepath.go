@@ -35,12 +35,11 @@ func resolveModulePath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve module path: build info unavailable and working directory unreadable: %w", err)
 	}
-	if p, err := modulePathFromGoMod(wd); err == nil {
-		return p, nil
+	p, err := modulePathFromGoMod(wd)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine the module path from build info or go.mod: %w", err)
 	}
-
-	return "", errors.New(
-		"cannot determine the module path: build info has no main module and no go.mod was found upward from the working directory")
+	return p, nil
 }
 
 // modulePathFromGoMod 从 startDir 向上查找 go.mod 并解析其 module 行。
@@ -50,6 +49,8 @@ func modulePathFromGoMod(startDir string) (string, error) {
 		path := filepath.Join(dir, "go.mod")
 		if p, err := readModuleDirective(path); err == nil {
 			return p, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("read module directive: %w", err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -59,12 +60,16 @@ func modulePathFromGoMod(startDir string) (string, error) {
 	}
 }
 
-func readModuleDirective(goModPath string) (string, error) {
+func readModuleDirective(goModPath string) (_ string, err error) {
 	f, err := os.Open(goModPath)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close %s: %w", goModPath, closeErr))
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

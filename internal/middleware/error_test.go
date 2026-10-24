@@ -20,7 +20,7 @@ func TestErrorHandlerUsesSharedEnvelope(t *testing.T) {
 	engine := gin.New()
 	engine.Use(ErrorHandler())
 	engine.GET("/boom", func(c *gin.Context) {
-		c.Error(errors.New("boom"))
+		c.Error(errors.New("boom")).Type = gin.ErrorTypePrivate
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
@@ -50,7 +50,7 @@ func TestErrorHandlerUsesGoerrWhenAvailable(t *testing.T) {
 	engine := gin.New()
 	engine.Use(ErrorHandler())
 	engine.GET("/params", func(c *gin.Context) {
-		c.Error(goerr.New(errors.New("name is required"), goerr.StatusParams()))
+		c.Error(goerr.New(errors.New("name is required"), goerr.StatusParams())).Type = gin.ErrorTypePrivate
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/params", nil)
@@ -75,7 +75,7 @@ func TestErrorHandlerDoesNotOverwriteWrittenResponse(t *testing.T) {
 	engine := gin.New()
 	engine.Use(ErrorHandler())
 	engine.GET("/written", func(c *gin.Context) {
-		c.Error(errors.New("boom"))
+		c.Error(errors.New("boom")).Type = gin.ErrorTypePrivate
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 			"code": 99999,
 			"msg":  "already written",

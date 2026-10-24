@@ -9,11 +9,8 @@ import (
 
 // 本文件只覆盖 With / From —— 事务句柄在 context 里的传递。
 //
-// DB 与 Manager.Do 不在此处：它们必须调用 gorm 的 WithContext / Transaction，
-// 而那需要真实的 gorm 内部状态（实测 `&gorm.DB{Config: ...}` 直接 nil 解引用）。
-// 为了覆盖它们而引入 sqlite 或 sqlmock，等于给每个用这套脚手架的项目
-// 强加一个它可能永远用不到的依赖——那笔账不该由使用者付。
-// 它们的覆盖归 `-tags integration` 的连库测试，发布门禁强制执行。
+// Manager.Do 的失败矩阵位于 transaction_test.go，复用项目已锁定的 sqlmock；
+// 真实 MySQL 的嵌套原子性与池等待由 integration_test.go 验证。
 
 // TestTransactionHandleRoundTrips 钉住事务句柄的存取。
 //

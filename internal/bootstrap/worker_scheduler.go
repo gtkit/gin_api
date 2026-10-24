@@ -3,7 +3,7 @@ package bootstrap
 import (
 	"context"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/pkg/tasks"
 )
@@ -77,10 +77,10 @@ func schedulerObserver() tasks.SchedulerObserver {
 			logger.Debugf("task scheduler %q: lease held by another instance", scheduler)
 		},
 		LeaseLost: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q lost the lease and stopped scheduling: %v", scheduler, err)
+			logger.Warnf("task scheduler %q lost the lease; shutdown requested: %v", scheduler, err)
 		},
 		RoundFailed: func(scheduler string, err error) {
-			logger.Warnf("task scheduler %q round failed, will retry: %v", scheduler, err)
+			logger.Warnf("task scheduler %q round failure (shutdown may still be in progress): %v", scheduler, err)
 		},
 	}
 }

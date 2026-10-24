@@ -7,13 +7,17 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gtkit/gin-api/internal/testutil"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 
 	"github.com/gtkit/verify"
 
@@ -123,6 +127,86 @@ func newTestApp(t *testing.T, server httpServer, workers ...Worker) *App {
 		shutdown:   NewShutdownCoordinator(),
 		drainWait:  0,
 	}
+}
+
+func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
+	f := newLifecycleFixture(t)
+	cfg := f.components[0].cfg
+	cfg.Env = "test"
+	cfg.App.Name = "provider-cleanup-test"
+	cfg.Auth.Mode = config.AuthModeExternal
+	cfg.RateLimit = config.RateLimitConfig{KeyHMACSecret: strings.Repeat("x", 32), Policies: []config.RateLimitPolicyConfig{
+		{ID: "default.ip", Scope: "ip", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
+		{ID: "default.user", Scope: "user", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
+	}}
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: sqlDB, SkipInitializeWithVersion: true}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.components[2].db, f.components[2].sql = db, sqlDB
+	f.components[2].stop = func(context.Context) error { return sqlDB.Close() }
+	mock.ExpectClose()
+	startupCtx, cancelStartup := context.WithCancel(t.Context())
+	defer cancelStartup()
+	app, err := NewApp(startupCtx, f.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, finish := cleanupContext(context.WithoutCancel(t.Context()), nil)
+		defer finish()
+		if err := app.closeExtensions(ctx); err != nil {
+			t.Error(err)
+		}
+		if err := app.closeResources(ctx); err != nil {
+			t.Error(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+	if app.cleanup == nil {
+		t.Fatal("provider cleanup ownership was not transferred to App")
+	}
+	var names []string
+	for _, step := range app.cleanup.steps {
+		names = append(names, step.name)
+	}
+	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients", "task producer"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("registered provider resources = %v, want %v", names, want)
+	}
+	if app.runtime.Cache() != f.components[4] {
+		t.Fatal("App did not retain Runtime's borrowed cache view")
+	}
+	cancelStartup()
+	type key struct{}
+	closeCtx := context.WithValue(t.Context(), key{}, "shutdown")
+	probeCalls := 0
+	app.cleanup.push("context probe", cleanupExtensions, func(ctx context.Context) error {
+		probeCalls++
+		if ctx != closeCtx || ctx.Err() != nil || ctx.Value(key{}) != "shutdown" {
+			t.Error("cleanup captured the canceled startup context")
+		}
+		return nil
+	})
+	if err := app.closeExtensions(closeCtx); err != nil {
+		t.Fatal(err)
+	}
+	if probeCalls != 1 || len(app.cleanup.steps) != 0 {
+		t.Fatalf("provider cleanup calls=%d remaining=%d", probeCalls, len(app.cleanup.steps))
+	}
+	f.assertStopped(t)
+	for range 2 {
+		if err := app.closeResources(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.assertStopped(t, "cache", "redis", "database", "logging")
 }
 
 // TestAppRunPhasedShutdownOrder 钉住分相关停顺序：
@@ -291,7 +375,10 @@ func TestAppRunOptionalWorkerFailureDoesNotStopProcess(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after optional failure and cancellation: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancellation")
 	}
@@ -372,7 +459,10 @@ func TestAppRunRequiredOneShotBlocksHTTP(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancellation")
 	}
@@ -495,12 +585,14 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 			server := newTestHTTPServer()
 			app := newTestApp(t, server, tt.workers...)
 
-			var unregisterCalls atomic.Int32
-			var moduleCalls atomic.Int32
-			app.moduleCleanup = func() error { moduleCalls.Add(1); return nil }
-			app.metricsCleanup = []func() error{
-				func() error { unregisterCalls.Add(1); return nil },
-			}
+			var calls []string
+			app.cleanup = newRecordingProviderCleanup(func(ctx context.Context, name string) error {
+				if ctx.Err() != nil {
+					t.Errorf("cleanup inherited canceled startup context: %v", ctx.Err())
+				}
+				calls = append(calls, name)
+				return nil
+			})
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -513,16 +605,17 @@ func TestAppReleasesExtensionsOnEveryExitPath(t *testing.T) {
 			}
 
 			select {
-			case <-errCh:
+			case err := <-errCh:
+				if (err == nil) != tt.driveShutdown {
+					t.Fatalf("Run error = %v, expected normal shutdown = %v", err, tt.driveShutdown)
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("Run did not return")
 			}
 
-			if got := moduleCalls.Load(); got != 1 {
-				t.Fatalf("module cleanup calls = %d, want exactly 1", got)
-			}
-			if got := unregisterCalls.Load(); got != 1 {
-				t.Fatalf("metrics unregister calls = %d, want exactly 1", got)
+			want := []string{"rate limits", "outbound http clients", "task producer", "telemetry", "db pool metrics", "worker metrics"}
+			if !slices.Equal(calls, want) {
+				t.Fatalf("extension cleanup order = %v, want %v", calls, want)
 			}
 		})
 	}
@@ -614,8 +707,8 @@ func TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail(t *testing.T) {
 	failure := errors.New("validator exploded")
 	initVerify = func(...verify.Option) error { return failure }
 	fixture := newLifecycleFixture(t)
-	if _, err := NewRuntime(t.Context(), Options{RegisterPlugins: fixture.register}); !errors.Is(err, failure) {
+	if _, err := NewRuntime(t.Context(), fixture.options()); !errors.Is(err, failure) {
 		t.Fatalf("validator failure lost: %v", err)
 	}
-	fixture.assertStopped(t, "middleware", "cache", "redis", "database", "logging", "config")
+	fixture.assertStopped(t, "cache", "redis", "database", "logging")
 }

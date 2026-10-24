@@ -49,7 +49,11 @@ func newTestVerifier(t *testing.T, opts Options) (*Verifier, *fakeSender, *minir
 
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	sender := &fakeSender{}
 	v, err := New(t.Context(), client, sender, opts)
@@ -62,6 +66,8 @@ func newTestVerifier(t *testing.T, opts Options) (*Verifier, *fakeSender, *minir
 // stubRedis 满足 RedisClient 但不可用：专供「构造失败发生在触碰存储之前」
 // 的用例，让这些用例在禁 loopback 的受限环境也能执行。
 type stubRedis struct{}
+
+func (stubRedis) Process(context.Context, redis.Cmder) error { panic("unexpected Redis command") }
 
 func (stubRedis) ScriptLoad(context.Context, string) *redis.StringCmd { return nil }
 func (stubRedis) EvalSha(context.Context, string, []string, ...any) *redis.Cmd {

@@ -43,7 +43,11 @@ func TestTimeoutIsEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = factory.Close() })
+	t.Cleanup(func() {
+		if err := factory.Close(); err != nil {
+			t.Errorf("factory.Close(): %v", err)
+		}
+	})
 
 	client, err := factory.Client("slow")
 	if err != nil {
@@ -81,7 +85,9 @@ func TestMaxResponseBytesIsEnforced(t *testing.T) {
 		for i := range oversized {
 			oversized[i] = 'x'
 		}
-		_, _ = w.Write(oversized)
+		if _, err := w.Write(oversized); err != nil {
+			t.Errorf("test response I/O: %v", err)
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -93,7 +99,11 @@ func TestMaxResponseBytesIsEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = factory.Close() })
+	t.Cleanup(func() {
+		if err := factory.Close(); err != nil {
+			t.Errorf("factory.Close(): %v", err)
+		}
+	})
 
 	client, err := factory.Client("chatty")
 	if err != nil {

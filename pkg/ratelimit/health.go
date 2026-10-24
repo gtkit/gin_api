@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -76,6 +77,7 @@ type HealthState struct {
 	nextProbeAt time.Time
 	// probeInFlight 是探测的单一所有权标记。
 	probeInFlight bool
+	generation    uint64
 	// pending 是待通知的相位迁移事件（受 mu 保护，入队序 = 迁移发生序）。
 	//
 	// 由公开入口在解锁前取走、解锁后发出：通知全程不持锁，因此 Observer
@@ -103,9 +105,11 @@ func NewHealthState(policy HealthPolicy, observer Observer) *HealthState {
 // nextProbeAt 取当前时刻而不是冷却之后：后端可能在进程启动的下一秒
 // 就恢复了，首个请求即可探测；探测失败后由既有冷却节奏接管。
 func (s *HealthState) forceDegraded() {
+	now := s.now()
 	s.mu.Lock()
 	s.transitionLocked(PhaseDegraded)
-	s.nextProbeAt = s.now()
+	s.probeInFlight = false
+	s.nextProbeAt = now
 	events := s.takePendingLocked()
 	s.mu.Unlock()
 
@@ -122,122 +126,139 @@ func (s *HealthState) Phase() HealthPhase {
 	return s.phase
 }
 
-// AllowRequest 报告本次请求是否应当真的去打后端。
-//
-// Degraded 期间只放行**一个**探测请求，其余一律走降级路径。
-// 没有这条，故障期每个请求都会去打一次已经出问题的后端，
-// 既拖慢自己（每个请求白等一次超时），又给后端持续加压。
-func (s *HealthState) AllowRequest(_ context.Context) bool {
-	if s == nil {
-		return true
-	}
+// healthAttempt 将完成结果绑定到准入时的健康代次和探测所有权。
+type healthAttempt struct {
+	generation uint64
+	probe      bool
+}
 
-	s.mu.Lock()
-	allowed := s.allowRequestLocked()
-	events := s.takePendingLocked()
-	s.mu.Unlock()
-
-	s.notify(events)
+// AllowRequest 报告是否允许访问后端。并发 Redis 调用在内部同时保存准入凭证。
+func (s *HealthState) AllowRequest(ctx context.Context) bool {
+	_, allowed := s.beginAttempt(ctx)
 	return allowed
 }
 
-func (s *HealthState) allowRequestLocked() bool {
-	switch s.phase {
-	case PhaseHealthy:
-		return true
-	case PhaseProbing:
-		// **探测的单一所有权由 probeInFlight 把关，不是相位。**
-		//
-		// 按相位放行是一个很容易写出的错误：第一个请求把相位从 Degraded
-		// 切到 Probing 之后，后续每个请求看到的都是 Probing，于是全部跟着
-		// 打后端——探测风暴照旧发生，而状态机看起来一切正常。
-		return !s.probeInFlight
-	case PhaseDegraded:
-		if s.probeInFlight || s.now().Before(s.nextProbeAt) {
-			return false
-		}
-		// CAS 式获取探测所有权：只有一个请求能走到后端。
-		s.probeInFlight = true
-		s.transitionLocked(PhaseProbing)
-		return true
-	default:
-		return true
+func (s *HealthState) beginAttempt(ctx context.Context) (healthAttempt, bool) {
+	if ctx.Err() != nil {
+		return healthAttempt{}, false
 	}
+	if s == nil {
+		return healthAttempt{}, true
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	allowed := s.allowRequestLocked(now)
+	attempt := healthAttempt{generation: s.generation, probe: allowed && s.probeInFlight}
+	events := s.takePendingLocked()
+	s.mu.Unlock()
+	s.notify(events)
+	return attempt, allowed
 }
 
-// Observe 上报一次后端调用的结果。
-//
-// 只有**依赖失败**（网络错误、超时、服务端错误）才计失败。
-// 业务上的"被限流"是正常结果，计进去会让一个正在生效的限流策略
-// 反过来把自己判成故障。
+func (s *HealthState) allowRequestLocked(now time.Time) bool {
+	if s.phase == PhaseHealthy {
+		return true
+	}
+	if s.probeInFlight || now.Before(s.nextProbeAt) {
+		return false
+	}
+	s.probeInFlight = true
+	s.transitionLocked(PhaseProbing)
+	return true
+}
+
+// Observe 上报独立健康样本；纯取消不计成功或失败。
+// RedisBackend 使用携带准入凭证的内部入口隔离迟到结果。
 func (s *HealthState) Observe(err error) {
 	if s == nil {
 		return
 	}
-
+	now := s.now()
 	s.mu.Lock()
-	wasProbing := s.phase == PhaseProbing
-	if wasProbing {
-		s.probeInFlight = false
-	}
-	if err != nil {
-		s.onFailureLocked(wasProbing)
-	} else {
-		s.onSuccessLocked(wasProbing)
-	}
+	s.observeLocked(healthAttempt{generation: s.generation, probe: s.probeInFlight}, err, now)
 	events := s.takePendingLocked()
 	s.mu.Unlock()
-
 	s.notify(events)
 }
 
-func (s *HealthState) onSuccessLocked(wasProbing bool) {
-	s.failures = 0
-
-	switch s.phase {
-	case PhaseHealthy:
+func (s *HealthState) observeAttempt(attempt healthAttempt, err error) {
+	if s == nil {
 		return
-	case PhaseProbing:
-		s.successes++
-		// 恢复比降级保守：需要连续成功且间隔足够。
-		if s.successes >= s.policy.SuccessThreshold && !s.now().Before(s.nextProbeAt) {
-			s.transitionLocked(PhaseHealthy)
-			s.successes = 0
+	}
+	now := s.now()
+	s.mu.Lock()
+	s.observeLocked(attempt, err, now)
+	events := s.takePendingLocked()
+	s.mu.Unlock()
+	s.notify(events)
+}
+
+func (s *HealthState) observeLocked(attempt healthAttempt, err error, now time.Time) {
+	if attempt.generation != s.generation {
+		return
+	}
+	if attempt.probe {
+		if !s.probeInFlight || s.phase != PhaseProbing {
 			return
 		}
-		// 未达标：退回 Degraded 等待下一次探测窗口。
-		s.transitionLocked(PhaseDegraded)
-		s.nextProbeAt = s.now().Add(s.policy.ProbeInterval)
-	case PhaseDegraded:
-		if wasProbing {
-			s.nextProbeAt = s.now().Add(s.policy.ProbeInterval)
-		}
+		s.probeInFlight = false
 	}
-}
-
-func (s *HealthState) onFailureLocked(wasProbing bool) {
-	s.successes = 0
-	s.failures++
-
-	switch s.phase {
-	case PhaseHealthy:
-		if s.failures >= s.policy.FailureThreshold {
-			s.degradeLocked()
+	if isPureCancellation(err) {
+		if attempt.probe {
+			s.transitionLocked(PhaseDegraded)
+			s.nextProbeAt = now.Add(s.policy.ProbeInterval)
 		}
-	case PhaseProbing:
-		// 探测失败立刻退回并重新开始冷却。
-		s.degradeLocked()
-	case PhaseDegraded:
-		if wasProbing {
-			s.nextProbeAt = s.now().Add(s.policy.Cooldown)
-		}
+		return
 	}
-}
+	if err != nil {
+		s.successes = 0
+		s.failures++
+		if attempt.probe || s.phase == PhaseHealthy && s.failures >= s.policy.FailureThreshold {
+			s.transitionLocked(PhaseDegraded)
+			s.nextProbeAt = now.Add(s.policy.Cooldown)
+		}
+		return
+	}
 
-func (s *HealthState) degradeLocked() {
+	s.failures = 0
+	if !attempt.probe {
+		return
+	}
+	s.successes++
+	if s.successes >= s.policy.SuccessThreshold {
+		s.transitionLocked(PhaseHealthy)
+		s.successes = 0
+		return
+	}
 	s.transitionLocked(PhaseDegraded)
-	s.successes = 0
-	s.nextProbeAt = s.now().Add(s.policy.Cooldown)
+	s.nextProbeAt = now.Add(s.policy.ProbeInterval)
+}
+
+// 只要错误树还包含真实故障，就不能因 errors.Is 命中取消而丢弃故障样本。
+func isPureCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		found := false
+		for _, child := range wrapped.Unwrap() {
+			if child == nil {
+				continue
+			}
+			if !isPureCancellation(child) {
+				return false
+			}
+			found = true
+		}
+		return found
+	case interface{ Unwrap() error }:
+		if child := wrapped.Unwrap(); child != nil {
+			return isPureCancellation(child)
+		}
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func (s *HealthState) transitionLocked(next HealthPhase) {
@@ -246,6 +267,7 @@ func (s *HealthState) transitionLocked(next HealthPhase) {
 	}
 	previous := s.phase
 	s.phase = next
+	s.generation++
 	// 相位迁移是低基数事件，可以每次都发；它是故障排查的第一手线索。
 	// 只入队不回调：通知在主锁之外发出（见 notify），Observer 阻塞
 	// 不得挡住限流判定，Observer 重入公开方法不得死锁。

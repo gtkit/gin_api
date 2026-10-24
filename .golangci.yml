@@ -84,8 +84,10 @@ linters:
     errcheck:
       # 检查类型断言中的 error（v, ok := x.(T) 中 ok 是否使用）
       check-type-assertions: true
-      # 是否检查 _ = someFunc()（不检查，太常见且有时是有意为之）
-      check-blank: false
+      # 丢弃返回的 error 同样检查；预期失败也必须明确分类处理。
+      check-blank: true
+      # 连输出和内存写接口也显式核对，不继承errcheck内置豁免。
+      disable-default-exclusions: true
 
     # ── govet：go vet 官方检查 ───────────────────────────
     govet:
@@ -279,7 +281,6 @@ linters:
       - comments              # 注释相关的常见误报
       - common-false-positives # 社区维护的常见误报列表
       - legacy                # 遗留代码兼容的误报
-      - std-error-handling    # 标准 error 处理模式的误报
 
     # 自定义排除规则
     rules:
@@ -292,7 +293,6 @@ linters:
           - gocognit    # 测试中不限制认知复杂度（表驱动测试可能很长）
           - cyclop      # 测试中不限制圈复杂度
           - nestif      # 测试中不限制嵌套深度
-          - errcheck    # 测试中允许忽略 error
           - dupword     # 测试中允许重复单词
           - perfsprint  # 测试中不检查 fmt 性能
           - unparam     # 测试中允许未使用参数（helper 函数签名统一）

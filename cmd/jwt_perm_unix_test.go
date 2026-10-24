@@ -5,6 +5,8 @@ package cmd
 import (
 	"os"
 	"testing"
+
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 )
 
 // TestJWTGeneratePermissions 钉住产物的文件权限。
@@ -36,5 +38,14 @@ func TestJWTGeneratePermissions(t *testing.T) {
 	}
 	if perm := pubInfo.Mode().Perm(); perm != 0o644 {
 		t.Fatalf("public key mode = %04o, want 0644", perm)
+	}
+	if _, err := jwtauth.LoadEd25519PublicKey(result.publicPath); err != nil {
+		t.Fatalf("generated public key unusable: %v", err)
+	}
+	if err := os.Chmod(result.publicPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jwtauth.LoadEd25519PublicKey(result.publicPath); err == nil {
+		t.Fatal("runtime accepted group/other writable public key")
 	}
 }

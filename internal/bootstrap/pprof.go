@@ -14,7 +14,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/logger/v2"
 )
 
 const (

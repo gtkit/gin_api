@@ -1,25 +1,17 @@
-package dao
+package data
 
 import (
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
-
-	"gorm.io/gorm"
 )
 
 // Match package names rather than paths so trimpath and local replaces behave alike.
-var (
-	adapterPackage = func() string {
-		pkg := reflect.TypeFor[gormLogger]().PkgPath()
-		return pkg
-	}()
-	gormHost = func() string {
-		pkg := reflect.TypeFor[gorm.DB]().PkgPath()
-		return pkg[:strings.IndexByte(pkg, '/')+1]
-	}()
-)
+const gormHost = "gorm.io/"
+
+// Only the project package path varies when the scaffold's module is renamed.
+var adapterPackage = reflect.TypeFor[gormLogger]().PkgPath()
 
 // callerSource skips this adapter, GORM, generated query and runtime frames.
 func callerSource() string {

@@ -64,7 +64,7 @@
 | --- | --- | --- |
 | 是否长期运行的服务 | 是（Gin HTTP 服务 + 后台 worker） | ✅ 长期运行最划算 |
 | 是否有稳定热路径 | 是（鉴权中间件、JSON 编解码、DB/Redis 访问、LLM/订单处理每请求都走） | ✅ 热点集中 |
-| 接口调用是否多 | 多（模块化分层、大量 interface 注入，见 `providers.go`） | ✅ 去虚拟化收益大 |
+| 接口调用是否多 | 多（模块化分层、大量 interface 注入，见 `modules.go`） | ✅ 去虚拟化收益大 |
 | Go 版本是否支持 | 1.27（`go.mod`），远超 PGO 要求的 1.21 | ✅ 完全支持 |
 | 接入成本 | 仅需放一个 `default.pgo` 到根目录，构建命令不用改 | ✅ 极低 |
 | 风险 | 几乎为零（不改业务代码，可随时 `-pgo=off` 回退） | ✅ 低风险 |
@@ -149,7 +149,9 @@ go build -a -x -tags="sonic" -o /dev/null . 2>&1 | grep pgoprofile
 ### 现有构建链路
 
 - **本地/部署机构建**：`make build`
-  = `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags="sonic" -ldflags "-s -w" -o bin/gin_api . && upx -9 bin/gin_api`
+  默认执行 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath`，追加现有 `BUILD_FLAGS`
+  中的 sonic tag、`-s -w` 和构建元数据，输出到 `bin/$(APP_NAME)`。可覆盖完整 `Linux` 或 `BUILD_FLAGS` 变量。
+  编译成功后，UPX 存在则执行 `upx -9`，缺失则提示并保留未压缩产物；压缩失败仍报错。
 - **CI**：两条流水线都只跑门禁、不做构建/发布——`.github/workflows/check.yml`
   （用 `go-version-file: go.mod` 取 Go 版本）与 `.gitlab-ci.yml` 的 `check` 阶段，
   内容都是 `make check`。

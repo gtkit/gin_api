@@ -64,7 +64,9 @@ func TestServeTLSUsesPreloadedCertificateAfterFilesRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS handshake failed after cert files were removed: %v", err)
 	}
-	_ = conn.Close()
+	if err := conn.Close(); err != nil {
+		t.Errorf("conn.Close(): %v", err)
+	}
 
 	if err := server.Close(); err != nil {
 		t.Fatalf("close server: %v", err)
@@ -88,7 +90,11 @@ func TestServeTLSFailsWithoutLoadedCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = listener.Close() }()
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("listener.Close(): %v", err)
+		}
+	}()
 
 	cfg := HTTPConfig{
 		Host: "127.0.0.1", Port: "0",

@@ -10,7 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	ginc "github.com/gtkit/gin-api/internal/pkg/ginc"
+	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 

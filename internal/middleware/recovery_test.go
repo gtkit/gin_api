@@ -62,6 +62,99 @@ func TestGinRecoveryReturnsSharedEnvelope(t *testing.T) {
 	}
 }
 
+func TestRecoveryNativeRequestContext(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   int32
+		level  string
+		status int
+		panic  func(*gin.Context)
+	}{
+		{"panic", recoveryLogCodePanicRecovered, "ERROR", http.StatusInternalServerError, func(*gin.Context) { panic("private panic") }},
+		{"started", recoveryLogCodeResponseStarted, "ERROR", http.StatusAccepted, func(c *gin.Context) {
+			c.String(http.StatusAccepted, "partial")
+			panic("private panic")
+		}},
+		{"disconnected", recoveryLogCodeClientClosedConn, "WARN", http.StatusOK, func(*gin.Context) { panic(http.ErrAbortHandler) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instance, records := newNativeTestLogger(t, "info")
+			gen, err := NewRequestIDGenerator()
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := gin.New()
+			engine.Use(GinRecovery(false), RequestID(gen))
+			entered := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+			release := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+			done := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+			engine.GET("/panic", func(c *gin.Context) {
+				slot := 0
+				if c.Query("slot") == "second" {
+					slot = 1
+				}
+				close(entered[slot])
+				<-release[slot]
+				tc.panic(c)
+			})
+			responses := [2]*httptest.ResponseRecorder{httptest.NewRecorder(), httptest.NewRecorder()}
+			for i, slot := range []string{"first", "second"} {
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/panic?slot="+slot, nil)
+				request.Header.Set(RequestIDHeader, "forged-request-id")
+				go func() {
+					engine.ServeHTTP(responses[i], request)
+					close(done[i])
+				}()
+			}
+			// Both request contexts exist before either panic is handled. Finish
+			// the second request first to expose a shared or last-request ID.
+			<-entered[0]
+			<-entered[1]
+			close(release[1])
+			<-done[1]
+			close(release[0])
+			<-done[0]
+			var ids []string
+			for _, response := range responses {
+				id := response.Header().Get(RequestIDHeader)
+				if id == "" || id == "forged-request-id" || response.Code != tc.status {
+					t.Fatalf("id=%q status=%d", id, response.Code)
+				}
+				ids = append(ids, id)
+			}
+			instance.Sync()
+			logs := records()
+			if len(logs) != 2 || ids[0] == ids[1] {
+				t.Fatalf("logs=%v ids=%v", logs, ids)
+			}
+			for i, record := range logs {
+				if record["request_id"] != ids[1-i] || record["level"] != tc.level || record["recovery_code"] != float64(tc.code) {
+					t.Fatalf("unexpected recovery record: %v", record)
+				}
+			}
+		})
+	}
+}
+
+func TestRecoveryWithoutRequestContext(t *testing.T) {
+	instance, records := newNativeTestLogger(t, "info")
+	engine := gin.New()
+	engine.Use(GinRecovery(false))
+	engine.GET("/panic", func(c *gin.Context) {
+		c.Request = nil
+		panic(http.ErrAbortHandler)
+	})
+	engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/panic", nil))
+	instance.Sync()
+	logs := records()
+	if len(logs) != 1 || logs[0]["recovery_code"] != float64(recoveryLogCodeClientClosedConn) {
+		t.Fatalf("missing recovery record: %v", logs)
+	}
+	if id := logs[0]["request_id"]; id != nil && id != "" {
+		t.Fatalf("requestless panic received fabricated id: %v", id)
+	}
+}
+
 func TestGinRecoveryDoesNotRewriteStartedResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

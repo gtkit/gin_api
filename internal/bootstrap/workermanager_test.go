@@ -58,6 +58,18 @@ func TestWorkerContractValidation(t *testing.T) {
 			wantHint: "name must not be empty",
 		},
 		{
+			name:     "unknown kind rejected",
+			worker:   &funcWorker{name: "x", kind: WorkerKind(200), lifecycle: Lifecycle(200)},
+			wantErr:  true,
+			wantHint: "kind",
+		},
+		{
+			name:     "unknown lifecycle rejected",
+			worker:   &funcWorker{name: "x", kind: KindConsumer, lifecycle: Lifecycle(200)},
+			wantErr:  true,
+			wantHint: "lifecycle",
+		},
+		{
 			name:     "one-shot must be bootstrap",
 			worker:   &funcWorker{name: "x", kind: KindConsumer, lifecycle: LifecycleOneShot},
 			wantErr:  true,
@@ -146,7 +158,9 @@ func TestLongRunningEarlyReturnIsUnexpectedExit(t *testing.T) {
 		t.Fatal("a long-running worker returned nil early and no error was reported")
 	}
 
-	_ = mgr.StopAll(context.Background())
+	if err := mgr.StopAll(context.Background()); err != nil && !errors.Is(err, ErrUnexpectedExit) {
+		t.Fatalf("StopAll after unexpected worker exit: %v", err)
+	}
 }
 
 // TestOneShotNormalReturnIsNotUnexpectedExit 反向证明：一次性任务正常返回

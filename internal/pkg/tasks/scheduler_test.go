@@ -42,7 +42,11 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) {
 	testutil.RequireLoopback(t)
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 	return srv, client
 }
 
@@ -201,7 +205,11 @@ func TestSecondInstanceDoesNotSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Acquire: %v", err)
 	}
-	t.Cleanup(func() { _ = first.lease.Release(ctx, held) })
+	t.Cleanup(func() {
+		if err := first.lease.Release(ctx, held); err != nil {
+			t.Errorf("first.lease.Release(ctx, held): %v", err)
+		}
+	})
 
 	// 第二个实例这一轮必须直接跳过，不构造调度器、不投递任何任务。
 	acquired, err := second.leadOnce(ctx)
@@ -296,7 +304,11 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder Acquire: %v", err)
 	}
-	t.Cleanup(func() { _ = holder.lease.Release(context.Background(), held) })
+	t.Cleanup(func() {
+		if err := holder.lease.Release(context.Background(), held); err != nil {
+			t.Errorf("holder.lease.Release(context.Background(), held): %v", err)
+		}
+	})
 
 	scheduler, err := NewScheduler(schedulerConfig(), client, "scheduler", SchedulerObserver{}, idempotentTask())
 	if err != nil {
@@ -396,7 +408,10 @@ func TestLeaseIsReleasedOnShutdown(t *testing.T) {
 
 	cancel()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run 未在 ctx 取消后返回")
 	}

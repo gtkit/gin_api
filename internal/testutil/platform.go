@@ -80,25 +80,30 @@ func RequireSignalDelivery(t *testing.T) {
 //
 // 用 sync.OnceValue 而非 sync.Once + 包级 bool：后者要在函数里重新绑定包级
 // 变量，是本仓明令禁止的形态（见 check-package-vars），与 loopbackUsable 同理。
-var symlinkUsable = sync.OnceValue(func() bool {
+var symlinkUsable = sync.OnceValue(func() (result capabilityProbe) {
 	dir, err := os.MkdirTemp("", "symlink-probe-")
 	if err != nil {
-		return false
+		return capabilityProbe{cause: err}
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
+	defer func() { result.cleanupErr = os.RemoveAll(dir) }()
 
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
-		return false
+		return capabilityProbe{cause: err}
 	}
-	return os.Symlink(target, filepath.Join(dir, "link")) == nil
+	err = os.Symlink(target, filepath.Join(dir, "link"))
+	return capabilityProbe{available: err == nil, cause: err}
 })
 
 // RequireSymlink 声明该测试需要创建符号链接，不具备则跳过。
 func RequireSymlink(t *testing.T) {
 	t.Helper()
 
-	if !symlinkUsable() {
-		t.Skip("skipped: this environment cannot create symbolic links")
+	result := symlinkUsable()
+	if result.cleanupErr != nil {
+		t.Fatalf("remove symlink probe directory: %v", result.cleanupErr)
+	}
+	if !result.available {
+		t.Skipf("skipped: this environment cannot create symbolic links: %v", result.cause)
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	logger "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gouploader"
+	"github.com/gtkit/logger/v2"
 )
 
 // LocalOptions 是本地磁盘上传器的必填参数。

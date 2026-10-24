@@ -7,12 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	defaultlogging "github.com/gtkit/gin-api/internal/plugin/builtin/logging"
+	"github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gin-api/internal/testutil"
-
-	loggerv2 "github.com/gtkit/logger/v2"
+	"github.com/gtkit/logger/v2"
 )
 
 // captureMessager 收集经 H 系列推送的消息，断言告警执行点。
@@ -43,11 +41,11 @@ func withCaptureMessager(t *testing.T) (*captureMessager, func()) {
 	t.Helper()
 
 	capture := &captureMessager{}
-	inst := loggerv2.MustNew(
-		loggerv2.WithConsole(true),
-		loggerv2.WithFile(false),
-		loggerv2.WithMessager(capture),
-		loggerv2.WithReplaceGlobals(false),
+	inst := logger.MustNew(
+		logger.WithConsole(true),
+		logger.WithFile(false),
+		logger.WithMessager(capture),
+		logger.WithReplaceGlobals(false),
 	)
 	drain := installTestLogger(t, inst)
 	return capture, drain
@@ -111,13 +109,13 @@ func (b *blockingMessager) SendTo(_, msg string) { b.Send(msg) }
 // the test's blocking sender before finishing.
 func TestSDKDrainWaitsForItsOwner(t *testing.T) {
 	block := &blockingMessager{entered: make(chan struct{}), release: make(chan struct{})}
-	inst := loggerv2.MustNew(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithMessager(block), loggerv2.WithReplaceGlobals(false))
+	inst := logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithMessager(block), logger.WithReplaceGlobals(false))
 	drain := installTestLogger(t, inst)
 	defer drain()
-	applog.HErrorf("stuck alert")
+	logger.HError("stuck alert")
 	waitClosed(t, block.entered, "messager did not receive alert")
 	runtime := &Runtime{drain: func(context.Context) error { drain(); return nil }}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	entered, done := make(chan struct{}), make(chan error, 1)
 	go func() { close(entered); done <- runtime.DrainLogs(ctx) }()
@@ -164,7 +162,7 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 			server := newTestHTTPServer()
 			app := newTestApp(t, server, tt.workers...)
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			errCh := make(chan error, 1)
 			go func() { errCh <- app.Run(ctx) }()
@@ -173,7 +171,9 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 				waitClosed(t, server.listenCalled, "server did not start")
 				cancel()
 			}
-			<-errCh
+			if err := <-errCh; (err != nil) != (tt.wantAlerts > 0) {
+				t.Fatalf("Run error = %v, expected error exit = %v", err, tt.wantAlerts > 0)
+			}
 
 			drain()
 			if got := countContaining(capture.snapshot(), "process exiting with error"); got != tt.wantAlerts {
@@ -183,19 +183,16 @@ func TestAppRunAlertsOnErrorExit(t *testing.T) {
 	}
 }
 
-type loggingTestConfiguration struct{}
-
-func (loggingTestConfiguration) Value() (*config.Config, error) { return &config.Config{}, nil }
-func installTestLogger(t *testing.T, inst *loggerv2.Logger) func() {
+func installTestLogger(t *testing.T, inst *logger.Logger) func() {
 	t.Helper()
-	p := defaultlogging.New(defaultlogging.Options{Configuration: loggingTestConfiguration{}, MainFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) { return inst, nil }, AccessFactory: func(...loggerv2.Option) (*loggerv2.Logger, error) {
-		return loggerv2.New(loggerv2.WithConsole(true), loggerv2.WithFile(false), loggerv2.WithReplaceGlobals(false))
+	owner, err := logging.Open(t.Context(), logging.Options{Config: &config.Config{}, MainFactory: func(...logger.Option) (*logger.Logger, error) { return inst, nil }, AccessFactory: func(...logger.Option) (*logger.Logger, error) {
+		return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
 	}})
-	if err := p.Init(t.Context()); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	drain := func() {
-		if err := p.Stop(context.Background()); err != nil {
+		if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)
 		}
 	}

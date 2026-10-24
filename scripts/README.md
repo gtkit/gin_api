@@ -23,6 +23,24 @@ make check-hooks  # 验证（已接入 make check）
 ./scripts/check-architecture.sh
 ```
 
+## check-repository-context.go
+
+架构检查中的 GORM context 子检查，使用 Go AST 和类型信息，加载
+`./internal/repository/...` 当前构建条件的生产文件。唯一豁免是本项目底层 `dbtx` 包。
+
+```bash
+GOWORK=off go run ./scripts/check-repository-context.go
+GOWORK=off go test -vet=off scripts/check-repository-context.go scripts/check-repository-context_test.go
+```
+
+核对 `mdbCtx` 的真实实现，并追踪经典 `*gorm.DB` 方法接收者的局部来源：裸字段/参数、
+错误 helper、丢失调用方 context、未知来源都失败；有效统一入口、查询链/别名和受管
+Transaction 的内联回调句柄可通过。包加载或类型检查失败也会失败，不能当作空结果通过。
+
+所有赋值都参与保守判断；不支持的跨函数来源、动态 Session/Scopes 需保留可直接追踪的
+写法。测试文件、其他构建条件、GORM 泛型 API、反射/unsafe 及驱动实际取消行为不在此检查
+证明范围内。完整约定见 [数据库规范](../docs/db-patterns.md#数据访问统一经-mdbctxctx)。
+
 ## check-capability-inventory.sh
 
 校验 `SCAFFOLD.md` 的预置能力清单是否穷尽。覆盖四处：`internal/pkg/*/`、`pkg/*/`、

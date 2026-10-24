@@ -46,9 +46,11 @@ func Assemble(cfg *config.Config) (*Assembly, error) {
 		return nil, fmt.Errorf("build jwt parser: %w", err)
 	}
 
-	// 寿命的唯一来源在 config（分认证模式的兜底也在那边）：
-	// 此前这里各存一份兜底，数值一旦分叉，客户端拿到的 expires_in
-	// 就会与令牌真实的 exp 对不上。
+	if cfg.Auth.Mode == config.AuthModeExternal {
+		return &Assembly{Parser: parser, KeySet: keys}, nil
+	}
+
+	// 签发寿命与认证响应中的 expires_in 共用配置来源。
 	ttl := cfg.JWT.EffectiveTokenTTL(cfg.Auth.Mode)
 
 	issuer, err := NewIssuer(keys, parser, IssuerOptions{
@@ -63,23 +65,14 @@ func Assemble(cfg *config.Config) (*Assembly, error) {
 	return &Assembly{Issuer: issuer, Parser: parser, KeySet: keys}, nil
 }
 
-// loadKeySet 读取并校验全部密钥文件。
+// loadKeySet 按认证模式读取密钥；external 不解析或读取私钥路径。
 func loadKeySet(cfg *config.Config) (*KeySet, error) {
-	// 生产环境对私钥权限 fail-fast；其余环境交给 readKeyFile 的普通校验。
-	//
-	// 分环境是有意的：开发机上密钥常来自 git-ignored 的临时文件，
-	// 权限不严格；而在生产上一把 group 可读的私钥等于把签发能力交给
-	// 同机器上的任何一个进程。
-	strictPerm := cfg.Env.IsProd()
-
-	privatePath := resource.ResolvePath(cfg.JWT.Active.PrivateKeyPath)
-	publicPath := resource.ResolvePath(cfg.JWT.Active.PublicKeyPath)
-
-	private, err := LoadEd25519PrivateKey(privatePath, strictPerm)
-	if err != nil {
-		return nil, fmt.Errorf("load active private key: %w", err)
+	switch cfg.Auth.Mode {
+	case config.AuthModeLocal, config.AuthModeExternal:
+	default:
+		return nil, fmt.Errorf("jwt assembly: unsupported auth mode %q", cfg.Auth.Mode)
 	}
-	public, err := LoadEd25519PublicKey(publicPath)
+	public, err := LoadEd25519PublicKey(resource.ResolvePath(cfg.JWT.Active.PublicKeyPath))
 	if err != nil {
 		return nil, fmt.Errorf("load active public key: %w", err)
 	}
@@ -93,6 +86,13 @@ func loadKeySet(cfg *config.Config) (*KeySet, error) {
 		previous = append(previous, VerificationKey{KID: prev.KID, Public: pub})
 	}
 
+	if cfg.Auth.Mode == config.AuthModeExternal {
+		return NewVerificationKeySet(VerificationKey{KID: cfg.JWT.Active.KID, Public: public}, previous)
+	}
+	private, err := LoadEd25519PrivateKey(resource.ResolvePath(cfg.JWT.Active.PrivateKeyPath), cfg.Env.IsProd())
+	if err != nil {
+		return nil, fmt.Errorf("load active private key: %w", err)
+	}
 	return NewKeySet(
 		SigningKey{KID: cfg.JWT.Active.KID, Private: private, Public: public},
 		previous,

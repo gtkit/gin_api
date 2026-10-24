@@ -23,7 +23,6 @@ func TestStandardPEMAssemblyAndGoJWTInterop(t *testing.T) {
 		ttl        time.Duration
 	}{
 		{"local default", "local", 0, time.Hour},
-		{"external default", "external", 0, 30 * 24 * time.Hour},
 		{"explicit lifetime", "local", 12, 12 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,6 +38,9 @@ func TestStandardPEMAssemblyAndGoJWTInterop(t *testing.T) {
 			assembly, err := Assemble(cfg)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if assembly.Issuer == nil {
+				t.Fatal("local assembly returned no issuer")
 			}
 			token, err := assembly.Issuer.Issue(t.Context(), 42, "user")
 			if err != nil {
@@ -93,13 +95,26 @@ func TestCacheCopiesGoJWTExpandedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	authTime := first.AuthTime.Time
-	first.Ext["tenant"].(map[string]any)["roles"].([]any)[0] = "admin"
+	firstTenant, ok := first.Ext["tenant"].(map[string]any)
+	if !ok {
+		t.Fatalf("tenant type %T", first.Ext["tenant"])
+	}
+	firstRoles, ok := firstTenant["roles"].([]any)
+	if !ok || len(firstRoles) != 1 {
+		t.Fatalf("roles=%v", firstTenant["roles"])
+	}
+	firstRoles[0] = "admin"
 	first.AuthTime.Time = time.Time{}
 	second, err := parser.ParseToken(t.Context(), token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Ext["tenant"].(map[string]any)["roles"].([]any)[0] != "user" || !second.AuthTime.Equal(authTime) {
+	secondTenant, ok := second.Ext["tenant"].(map[string]any)
+	if !ok {
+		t.Fatalf("cached tenant type %T", second.Ext["tenant"])
+	}
+	secondRoles, ok := secondTenant["roles"].([]any)
+	if !ok || len(secondRoles) != 1 || secondRoles[0] != "user" || !second.AuthTime.Equal(authTime) {
 		t.Fatal("caller mutation reached cached claims")
 	}
 }

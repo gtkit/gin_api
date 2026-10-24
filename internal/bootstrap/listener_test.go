@@ -76,13 +76,23 @@ func TestPrebindBindsPortBeforeServing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prebindHTTP: %v", err)
 	}
-	defer func() { _ = bound.Close() }()
+	defer func() {
+		if err := bound.Close(); err != nil {
+			t.Errorf("bound.Close(): %v", err)
+		}
+	}()
 
-	addr := bound.listener.Addr().(*net.TCPAddr)
+	addr, ok := bound.listener.Addr().(*net.TCPAddr)
+
+	if !ok {
+		t.Fatalf("listener address has type %T", bound.listener.Addr())
+	}
 	// 同一端口再绑一次必须失败——证明第一次真的占住了。
 	second, err := prebindHTTP(HTTPConfig{Host: "127.0.0.1", Port: strconv.Itoa(addr.Port)})
 	if err == nil {
-		_ = second.Close()
+		if err := second.Close(); err != nil {
+			t.Errorf("second.Close(): %v", err)
+		}
 		t.Fatal("binding an already-bound port succeeded; the prebind did not actually hold it")
 	}
 }
@@ -96,9 +106,19 @@ func TestPrebindReportsPortConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer func() { _ = held.Close() }()
+	defer func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("held.Close(): %v", err)
+		}
+	}()
 
-	port := strconv.Itoa(held.Addr().(*net.TCPAddr).Port)
+	addr, ok := held.Addr().(*net.TCPAddr)
+
+	if !ok {
+		t.Fatalf("listener address has type %T", held.Addr())
+	}
+
+	port := strconv.Itoa(addr.Port)
 	if _, err := prebindHTTP(HTTPConfig{Host: "127.0.0.1", Port: port}); err == nil {
 		t.Fatal("prebindHTTP succeeded on an occupied port")
 	} else if !strings.Contains(err.Error(), port) {
@@ -163,7 +183,11 @@ func TestPrebindTLSValidation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("prebindHTTP: %v", err)
 				}
-				defer func() { _ = bound.Close() }()
+				defer func() {
+					if err := bound.Close(); err != nil {
+						t.Errorf("bound.Close(): %v", err)
+					}
+				}()
 				if bound.certificate == nil {
 					t.Fatal("TLS enabled but no certificate was loaded")
 				}
@@ -171,7 +195,9 @@ func TestPrebindTLSValidation(t *testing.T) {
 			}
 
 			if err == nil {
-				_ = bound.Close()
+				if err := bound.Close(); err != nil {
+					t.Errorf("bound.Close(): %v", err)
+				}
 				t.Fatalf("prebindHTTP succeeded with %s certificate", tc.name)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
@@ -196,7 +222,11 @@ func TestPrebindTLSFailureDoesNotLeaveListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address has type %T", listener.Addr())
+	}
+	port := strconv.Itoa(addr.Port)
 	if err := listener.Close(); err != nil {
 		t.Fatalf("close probe listener: %v", err)
 	}
@@ -214,7 +244,9 @@ func TestPrebindTLSFailureDoesNotLeaveListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("port %s is still held after a failed prebind: %v", port, err)
 	}
-	_ = again.Close()
+	if err := again.Close(); err != nil {
+		t.Errorf("again.Close(): %v", err)
+	}
 }
 
 // TestPrebindMissingCertFiles 验证密钥文件缺失时报错且不泄漏文件内容。

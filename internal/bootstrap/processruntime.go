@@ -5,12 +5,13 @@ import (
 	"strings"
 	"time"
 
-	jwtauth "github.com/gtkit/gin-api/internal/pkg/jwtauth"
-	applog "github.com/gtkit/gin-api/internal/pkg/log"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gtkit/json"
+	"github.com/gtkit/json/v2"
 	"github.com/gtkit/verify"
 )
 
@@ -18,11 +19,11 @@ import (
 var (
 	initJWTWithConfig = jwtauth.Assemble
 	initVerify        = verify.New
-	checkJSONRuntime  = json.CheckJSON
+	checkJSONRuntime  = func() { logger.Infof("JSON backend: %s", json.Package) }
 )
 
 // initProcessRuntime initializes fixed process facilities after the selected
-// configuration and logging plugins are ready. The registry owns rollback.
+// configuration and logging are ready. Runtime owns failure rollback.
 func initProcessRuntime(cfg *config.Config) error {
 	installGinDiagnostics()
 	if err := initVerify(); err != nil {
@@ -30,16 +31,11 @@ func initProcessRuntime(cfg *config.Config) error {
 	}
 	checkJSONRuntime()
 
-	// 一家 LLM 厂商都没配：AI 端点整个不注册，而那与"路由写错了"从外部看一样。
-	for _, w := range cfg.AIWarnings() {
-		applog.Warn(w)
-	}
-
 	for _, w := range cfg.Proxy.Warnings(cfg.Env) {
-		applog.Warn(w)
+		logger.Warn(w)
 	}
 
-	applog.Infof("runtime initialized with env=%s", cfg.Env)
+	logger.Infof("runtime initialized with env=%s", cfg.Env)
 	return nil
 }
 
@@ -63,19 +59,19 @@ func (w logWriter) Write(p []byte) (int, error) {
 // gin.DefaultWriter / gin.DefaultErrorWriter 是包级全局且无并发保护，
 // 只允许在进程装配阶段安装一次，进入请求并发阶段后不再改动。
 func installGinDiagnostics() {
-	gin.DefaultWriter = logWriter{logf: applog.Infof}
-	gin.DefaultErrorWriter = logWriter{logf: applog.Warnf}
+	gin.DefaultWriter = logWriter{logf: logger.Infof}
+	gin.DefaultErrorWriter = logWriter{logf: logger.Warnf}
 }
 
-// ApplyRuntimeTimezone configures time.Local during configuration Init, before
-// the logging plugin starts background goroutines. Call once during startup.
+// ApplyRuntimeTimezone configures time.Local after loading configuration, before
+// logging starts background goroutines. Call once during startup.
 func ApplyRuntimeTimezone(cfg *config.Config) {
 	if cfg == nil || strings.TrimSpace(cfg.App.Timezone) == "" {
 		return
 	}
 	loc, err := time.LoadLocation(cfg.App.Timezone)
 	if err != nil {
-		applog.Warn("load runtime timezone failed", applog.String("timezone", cfg.App.Timezone), applog.Err(err))
+		logger.Warn("load runtime timezone failed", zap.String("timezone", cfg.App.Timezone), zap.Error(err))
 		return
 	}
 	// 在所有 goroutine 启动之前设置，后续应通过显式 *time.Location 传递。

@@ -1,8 +1,8 @@
-# compose.yaml —— **仅用于本地开发与测试**的依赖编排。
+# compose.yaml —— 仅用于本地开发与测试；默认依赖，app profile显式启动应用。
 #
 # 这不是生产部署方案，也不替代已冻结的 deployment.sh / .gitlab-ci.yml。
-# 它只做一件事：在本机拉起 MySQL 与 Redis，让 make migrate-verify、
-# 集成测试与本地联调有一套版本固定、可重复销毁的依赖。
+# 默认仅MySQL与Redis；显式应用入口见make dev-app-up/dev-app-up-existing。
+# 初次使用先准备隔离配置、临时钥和既有迁移，不自动对已有库执行DDL。
 #
 # 三条硬约束：
 #   1. **只绑 127.0.0.1**：绑 0.0.0.0 会把无密码/弱密码的开发库暴露到局域网，
@@ -56,6 +56,77 @@ services:
       start_period: 5s
     environment:
       REDIS_PASSWORD: ${DEV_REDIS_PASSWORD}
+
+  app:
+    profiles: [app]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Make从project.mk注入身份；未注入时由Dockerfile拒绝空名称。
+        APP_NAME: ${DEV_APP_NAME:-}
+        GOPROXY: ${DEV_GOPROXY:-https://proxy.golang.org,direct}
+        BUILD_COMMIT: ${DEV_BUILD_COMMIT:-unknown}
+        BUILD_TIME: ${DEV_BUILD_TIME:-unknown}
+    user: "${DEV_APP_UID:-1000}:${DEV_APP_GID:-1000}"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - >-
+        uid="$$(id -u)";
+        test "$$uid" -gt 0 || { echo "app profile refuses UID 0" >&2; exit 1; };
+        exec /app/bin/server "$$@"
+      - compose-app
+    command: [server]
+    environment:
+      APP_ROOT: /app
+      APP_ENV: dev
+      APP_APPLICATION__HOST: 0.0.0.0
+      APP_APPLICATION__PORT: "8008"
+      APP_APPLICATION__ISHTTPS: "false"
+      APP_APPLICATION__DRAIN_WAIT_SECONDS: "5"
+      APP_LOG__PATH: /app/logs/app
+      APP_DATABASE__HOST: ${DEV_APP_DB_HOST:-mysql}
+      APP_DATABASE__PORT: "${DEV_APP_DB_PORT:-3306}"
+      APP_DATABASE__NAME: ${DEV_APP_DB_NAME:-${DEV_MYSQL_DATABASE:-gin_api_dev}}
+      APP_DATABASE__USERNAME: ${DEV_APP_DB_USER:-root}
+      # 单横线保留“显式空密码”，未设置时才继承依赖服务的口令。
+      APP_DATABASE__PASSWORD: ${DEV_APP_DB_PASSWORD-${DEV_MYSQL_ROOT_PASSWORD}}
+      APP_REDIS__ADDR: ${DEV_APP_REDIS_ADDR:-redis:6379}
+      APP_REDIS__PASSWORD: ${DEV_APP_REDIS_PASSWORD-${DEV_REDIS_PASSWORD}}
+    ports:
+      - "127.0.0.1:${DEV_APP_PORT:-8008}:8008"
+    volumes:
+      - type: bind
+        source: ${DEV_APP_CONFIG:-./config/env/env.yml}
+        target: /app/config/env/env.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEV_APP_PEM_DIR:-./config/pem}
+        target: /app/config/pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DEV_APP_LOG_DIR:-./logs}
+        target: /app/logs
+        bind:
+          create_host_path: false
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8008/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    stop_signal: SIGTERM
+    stop_grace_period: 3m
 
 volumes:
   # 具名卷而非匿名卷：dev-down 之后数据仍在，重新 up 不必重建库。

@@ -153,19 +153,19 @@ func NewModuleGenerator(startDir string) (*ModuleGenerator, error) {
 	return &ModuleGenerator{root: root, modulePath: modulePath, now: time.Now}, nil
 }
 
-func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptions) (*GenerateResult, error) {
+func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptions) (_ *GenerateResult, err error) {
 	if g == nil {
 		return nil, fmt.Errorf("module generator is nil")
 	}
 
 	// 项目级建议锁包住"规划读取→提交"全程：两个生成进程交错读写共享
-	// 注册文件（providers.go / modules.go）会互相用陈旧内容覆盖。
+	// 模块装配与模块配置文件会互相用陈旧内容覆盖。
 	// dry-run 同样加锁——与真实提交并发的读取会看到半写状态。
 	release, err := acquireGenerationLock(g.root)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer func() { err = errors.Join(err, release()) }()
 
 	data, err := newModuleTemplateData(rawName, opts.Fields, g.modulePath)
 	if err != nil {
@@ -228,7 +228,7 @@ func (g *ModuleGenerator) GenerateWithOptions(rawName string, opts GenerateOptio
 		if err := g.updateConfigExample(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
-		if err := g.updateProviders(data, opts.DryRun, result, &plan); err != nil {
+		if err := g.updateModuleAssembly(data, opts.DryRun, result, &plan); err != nil {
 			return nil, err
 		}
 		if err := g.updateMigrateModels(data, opts.DryRun, result, &plan); err != nil {
@@ -576,20 +576,20 @@ func (g *ModuleGenerator) generatedMigrationFiles(data moduleTemplateData) ([]ge
 	}, nil
 }
 
-func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
-	providersPath := filepath.Join(g.root, "internal", "bootstrap", "providers.go")
-	content, err := os.ReadFile(providersPath)
+func (g *ModuleGenerator) updateModuleAssembly(data moduleTemplateData, dryRun bool, result *GenerateResult, plan *[]pendingWrite) error {
+	assemblyPath := filepath.Join(g.root, "internal", "bootstrap", "modules.go")
+	content, err := os.ReadFile(assemblyPath)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", g.rel(providersPath), err)
+		return fmt.Errorf("read %s: %w", g.rel(assemblyPath), err)
 	}
 
 	updated := string(content)
 	changed := false
 
-	// 校验型标记先于任何注入动作断言：缺失即中止，天然不会写出半改写的 providers.go。
-	for _, marker := range providersValidateOnlyMarkers() {
+	// 校验型标记先于任何注入动作断言：缺失即中止，天然不会写出半改写的 modules.go。
+	for _, marker := range moduleAssemblyValidationMarkers() {
 		if !strings.Contains(updated, marker) {
-			return fmt.Errorf("validate providers marker: anchor %q not found", strings.TrimSpace(marker))
+			return fmt.Errorf("validate module assembly marker: anchor %q not found", strings.TrimSpace(marker))
 		}
 	}
 
@@ -619,88 +619,88 @@ func (g *ModuleGenerator) updateProviders(data moduleTemplateData, dryRun bool, 
 			"RateLimit: rateLimitStager, Cache: inf.cache.Middleware})\n",
 		data.HTTPAlias, data.HTTPAlias, data.ServiceVar)
 
-	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := providersMarkers()
+	importsMarker, serviceFieldsMarker, servicesMarker, modulesMarker := moduleAssemblyMarkers()
 
 	updated, changedImport, err := ensureLineBefore(updated, appImport, importsMarker)
 	if err != nil {
-		return fmt.Errorf("update providers application import: %w", err)
+		return fmt.Errorf("update module assembly application import: %w", err)
 	}
 	changed = changed || changedImport
 
 	updated, changedImport, err = ensureLineBefore(updated, runtimeImport, importsMarker)
 	if err != nil {
-		return fmt.Errorf("update providers runtime import: %w", err)
+		return fmt.Errorf("update module assembly runtime import: %w", err)
 	}
 	changed = changed || changedImport
 
 	updated, changedImport, err = ensureLineBefore(updated, httpImport, importsMarker)
 	if err != nil {
-		return fmt.Errorf("update providers http import: %w", err)
+		return fmt.Errorf("update module assembly http import: %w", err)
 	}
 	changed = changed || changedImport
 
 	updated, changedField, err := ensureLineBefore(updated, fieldLine, serviceFieldsMarker)
 	if err != nil {
-		return fmt.Errorf("update providers service field: %w", err)
+		return fmt.Errorf("update module assembly service field: %w", err)
 	}
 	changed = changed || changedField
 
 	updated, changedService, err := ensureLineBefore(updated, serviceLine, servicesMarker)
 	if err != nil {
-		return fmt.Errorf("update providers service init: %w", err)
+		return fmt.Errorf("update module assembly service init: %w", err)
 	}
 	changed = changed || changedService
 
 	updated, changedModule, err := ensureLineBefore(updated, moduleLine, modulesMarker)
 	if err != nil {
-		return fmt.Errorf("update providers module list: %w", err)
+		return fmt.Errorf("update module assembly module list: %w", err)
 	}
 	changed = changed || changedModule
 
 	if !changed {
-		result.Skipped = append(result.Skipped, g.rel(providersPath))
+		result.Skipped = append(result.Skipped, g.rel(assemblyPath))
 		return nil
 	}
 
 	if dryRun {
-		result.Updated = append(result.Updated, g.rel(providersPath))
+		result.Updated = append(result.Updated, g.rel(assemblyPath))
 		return nil
 	}
 
 	// 用 goimports 格式化注入结果：把新增的本项目 import 归入正确分组（local-prefix=模块路径），
 	// 避免 marker 前插入 + gofmt 不跨组重排导致的「独立 import 组」不过 goimports。
-	formatted, err := formatWithImports(providersPath, g.modulePath, []byte(updated))
+	formatted, err := formatWithImports(assemblyPath, g.modulePath, []byte(updated))
 	if err != nil {
-		return fmt.Errorf("format %s: %w", g.rel(providersPath), err)
+		return fmt.Errorf("format %s: %w", g.rel(assemblyPath), err)
 	}
-	*plan = append(*plan, pendingWrite{path: providersPath, content: formatted, existed: true, original: content})
+	*plan = append(*plan, pendingWrite{path: assemblyPath, content: formatted, existed: true, original: content})
 
-	result.Updated = append(result.Updated, g.rel(providersPath))
+	result.Updated = append(result.Updated, g.rel(assemblyPath))
 	return nil
 }
 
-// providersMarkers 返回 updateProviders 使用的「注入型」稳定标记——生成器在每个
+// moduleAssemblyMarkers 返回 updateModuleAssembly 使用的「注入型」稳定标记——生成器在每个
 // 标记前插入新模块的接线行。标记归脚手架所有，不依赖任何业务模块长期存在。
-// 对应 providers.go 的分阶段结构：import 区、services struct 字段、
-// buildServices 构造、buildEngine 模块切片四处注入点。
+// 对应 modules.go 的分阶段结构：import 区、services struct 字段、
+// buildServices 构造、buildEngine 路由注册四处注入点。
 //
-// 另有「校验型」标记见 providersValidateOnlyMarkers——两类标记处理方式不同，
+// 另有「校验型」标记见 moduleAssemblyValidationMarkers——两类标记处理方式不同，
 // 不要把校验型标记接进本函数或 ensureLineBefore 的插入逻辑。
-func providersMarkers() (imports, serviceFields, services, modules string) {
+func moduleAssemblyMarkers() (imports, serviceFields, services, modules string) {
 	return "\t// scaffold:module-imports\n",
 		"\t// scaffold:module-service-fields\n",
 		"\t// scaffold:module-services\n",
 		"\t\t// scaffold:modules\n"
 }
 
-// providersValidateOnlyMarkers 返回「校验型」标记——生成器只断言其存在，不插入内容。
+// moduleAssemblyValidationMarkers 返回「校验型」标记——生成器只断言其存在，不插入内容。
 //
 // scaffold:module-workers 位于 buildWorkers 的 worker 集合内，是后台任务的注册锚点。
 // 它不参与注入：生成器不产出 worker 源码文件，且绝大多数模块不需要后台任务，
 // 自动注入只会给每个新模块塞进一个无实现的注册行或空转 ticker。
 // 但它仍须被生成器认领并校验，否则会退化成无人负责的裸注释——母版的分阶段装配结构
 // 被破坏时不会有任何信号，违反 scaffold-mother-integrity 的标记完整性要求。
-func providersValidateOnlyMarkers() []string {
+func moduleAssemblyValidationMarkers() []string {
 	return []string{
 		"\t// scaffold:module-workers\n",
 		// scaffold:module-authorizers 位于 buildAuthorizers 内，是模块专属授权实现的
@@ -772,11 +772,20 @@ func findProjectRoot(startDir string) (string, error) {
 	// 路径不存在时保持原样：那种情况由下面的向上查找报出更准确的错误。
 	if resolved, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
 		current = resolved
+	} else if !errors.Is(evalErr, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve project root symlinks: %w", evalErr)
 	}
 
 	for {
-		if fileExists(filepath.Join(current, "go.mod")) &&
-			fileExists(filepath.Join(current, "internal", "bootstrap", "providers.go")) {
+		moduleExists, err := fileExists(filepath.Join(current, "go.mod"))
+		if err != nil {
+			return "", err
+		}
+		assemblyExists, err := fileExists(filepath.Join(current, "internal", "bootstrap", "modules.go"))
+		if err != nil {
+			return "", err
+		}
+		if moduleExists && assemblyExists {
 			return current, nil
 		}
 
@@ -921,12 +930,11 @@ func splitWords(name string) []string {
 }
 
 func toPascalCase(words []string) string {
-	var builder strings.Builder
+	parts := make([]string, 0, len(words))
 	for _, word := range words {
-		builder.WriteString(strings.ToUpper(word[:1]))
-		builder.WriteString(word[1:])
+		parts = append(parts, strings.ToUpper(word[:1])+word[1:])
 	}
-	return builder.String()
+	return strings.Join(parts, "")
 }
 
 func lowerFirst(v string) string {
@@ -1034,7 +1042,16 @@ func sqlColumnDefinition(fieldType string) string {
 	}
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func fileExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect project file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("project file %s is not a regular file", path)
+	}
+	return true, nil
 }

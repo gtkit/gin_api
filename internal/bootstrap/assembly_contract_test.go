@@ -1,15 +1,17 @@
 package bootstrap
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/gtkit/gin-api/internal/core"
+	"github.com/alicebob/miniredis/v2"
+	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	defaulthttp "github.com/gtkit/gin-api/internal/plugin/builtin/httpmiddleware"
+	redisowner "github.com/gtkit/gin-api/internal/platform/redis"
+	"github.com/gtkit/gin-api/internal/testutil"
+	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel"
 
 	"gorm.io/gorm"
@@ -17,7 +19,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	data "github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/gin-api/internal/platform/data"
 )
 
 func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
@@ -25,10 +27,6 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	cfg.Env = "test"
 	cfg.App.Name = "assembly-contract"
 	cfg.Auth.Mode = config.AuthModeExternal
-	cfg.Modules.AI = config.AIModuleConfig{
-		DefaultProvider: "deepseek",
-		Providers:       map[string]config.AIProviderConfig{"deepseek": {APIKey: "test"}},
-	}
 	cfg.RateLimit = config.RateLimitConfig{KeyHMACSecret: strings.Repeat("x", 32), Policies: []config.RateLimitPolicyConfig{
 		{ID: "default.ip", Scope: "ip", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
 		{ID: "default.user", Scope: "user", Store: "local", Rate: 10, Burst: 10, MaxKeys: 100, FailureMode: "fail_open"},
@@ -52,19 +50,17 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	inf := infra{cfg: cfg, resources: resources, mysqlDB: &gorm.DB{}, rateLimits: limits, cache: cache}
-	installMiddlewareFixture(t, &inf)
+	installMetricsFixture(t, &inf)
 	runtime := &Runtime{config: cfg, resources: resources, jwt: jwt}
+	if runtime.TokenIssuer() != nil {
+		t.Fatal("external mode exposed a signing interface or a typed-nil issuer")
+	}
 	svc, err := buildServices(t.Context(), inf, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := svc.cleanup(); err != nil {
-			t.Error(err)
-		}
-	})
-	if svc.ai == nil || svc.auth.Service != nil || svc.accounts == nil || RedisRequired(cfg) {
-		t.Fatalf("unexpected assembly: ai=%v auth=%v accounts=%v", svc.ai, svc.auth.Service, svc.accounts)
+	if svc.auth.Service != nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil || RedisRequired(cfg) {
+		t.Fatalf("unexpected assembly: auth=%v accounts=%v", svc.auth.Service, svc.accounts)
 	}
 	mw, err := buildMiddlewares(svc, runtime)
 	if err != nil {
@@ -82,47 +78,87 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		path string
-		want int
+		method string
+		path   string
+		want   int
 	}{
-		{"/api/v1/ai/providers", http.StatusUnauthorized},
-		{"/api/v1/auth/login", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/ai/chat", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/ai/chat/stream", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/providers", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/conversations", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodPatch, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodDelete, "/api/v1/ai/conversations/1", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/auth/login", http.StatusNotFound},
+		{http.MethodGet, "/health", http.StatusOK},
 	} {
-		w := httptest.NewRecorder()
-		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
-		if w.Code != tc.want {
-			t.Fatalf("%s = %d, want %d", tc.path, w.Code, tc.want)
-		}
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != tc.want {
+				t.Fatalf("%s %s = %d, want %d", tc.method, tc.path, w.Code, tc.want)
+			}
+		})
 	}
-	// 同一个模块的缺失限流引用必须仍使装配失败，不能因 Redis 可选而放宽。
+	// 本地认证的缺失限流引用仍须使装配失败，不能因 Redis 可选而放宽。
+	svc.auth.Service = &authapp.Service{}
 	inf.rateLimits = rateLimitAssembly{}
-	installMiddlewareFixture(t, &inf)
+	installMetricsFixture(t, &inf)
 	if _, err := buildEngine(inf, svc, mw, nil); err == nil || !strings.Contains(err.Error(), "rate limit policy") {
 		t.Fatal("missing route policies accepted")
 	}
 }
 
-func TestServiceAssemblyErrorPaths(t *testing.T) {
+func TestServiceAssemblyRejectsBrokenLocalAuth(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name     string
-		provider string
-		local    bool
-	}{
-		{"later auth failure", "deepseek", true},
-		{"invalid ai provider", "unknown", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{Auth: config.AuthConfig{Mode: config.AuthModeExternal}}
-			cfg.Modules.AI = config.AIModuleConfig{DefaultProvider: tc.provider, Providers: map[string]config.AIProviderConfig{tc.provider: {APIKey: "test"}}}
-			if tc.local {
-				cfg.Auth.Mode = config.AuthModeLocal
-			}
-			inf := infra{cfg: cfg, resources: &data.Resources{}, mysqlDB: &gorm.DB{}}
-			if _, err := buildServices(t.Context(), inf, &Runtime{config: cfg}); err == nil {
-				t.Fatal("broken assembly accepted")
-			}
-		})
+	cfg := &config.Config{Auth: config.AuthConfig{Mode: config.AuthModeLocal}}
+	inf := infra{cfg: cfg, resources: &data.Resources{}, mysqlDB: &gorm.DB{}}
+	if _, err := buildServices(t.Context(), inf, &Runtime{config: cfg}); err == nil {
+		t.Fatal("broken assembly accepted")
+	}
+}
+
+// Local authentication and account authorization share infrastructure but keep
+// separate assemblies. Exercise the successful local branch as well as the
+// external branch above, so moving account construction into either branch
+// cannot silently remove User/VIP/Role verification from the other mode.
+func TestLocalIdentityAssemblyRetainsAllAccountPorts(t *testing.T) {
+	testutil.RequireLoopback(t)
+	server := miniredis.RunT(t)
+	cfg := jwtTestConfig(t)
+	cfg.App.Name = "local-identity-assembly"
+	cfg.Auth = config.AuthConfig{
+		Mode:                config.AuthModeLocal,
+		BcryptCost:          10,
+		RefreshReplaySecret: strings.Repeat("r", 32),
+	}
+	cfg.Redis = config.RedisConfig{Addr: server.Addr()}
+	client, err := redisowner.OpenRedis(t.Context(), cfg.Redis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	resources, err := data.ResourcesFromClients(&lifecycleComponent{db: &gorm.DB{}}, client, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwt, err := jwtauth.Assemble(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := buildServices(t.Context(), infra{cfg: cfg, resources: resources, mysqlDB: resources.Mdb()}, &Runtime{config: cfg, jwt: jwt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.auth.Service == nil || svc.auth.Revocation == nil || svc.accounts.Users == nil || svc.accounts.VIP == nil || svc.accounts.Roles == nil {
+		t.Fatalf("incomplete local identity assembly: %+v", svc)
+	}
+	if any(svc.accounts.Users) != any(svc.accounts.VIP) {
+		t.Fatal("local User and VIP ports do not share their account source")
 	}
 }
 
@@ -130,7 +166,11 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 	t.Parallel()
 	for _, resources := range []*data.Resources{nil, {}} {
 		checker := newHealthChecker(resources)
-		if checker.(*runtimeHealthChecker).RedisConfigured() {
+		runtimeChecker, ok := checker.(*runtimeHealthChecker)
+		if !ok {
+			t.Fatalf("health checker type %T", checker)
+		}
+		if runtimeChecker.RedisConfigured() {
 			t.Fatal("zero resources reported Redis configured")
 		}
 		if err := checker.PingDB(t.Context()); err == nil {
@@ -142,29 +182,13 @@ func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 	}
 }
 
-func installMiddlewareFixture(t *testing.T, inf *infra) {
+func installMetricsFixture(t *testing.T, inf *infra) {
 	t.Helper()
-	builder := defaulthttp.New(defaulthttp.Options{Configuration: loadedConfiguration{inf.cfg}})
-	registry := core.NewPluginRegistry()
-	if err := registry.Register(builder); err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := registry.Stop(context.Background()); err != nil {
-			t.Error(err)
-		}
-	})
-	inf.middleware = builder
+	inf.accessLogger = logger.MustNew(logger.WithConsole(true), logger.WithFile(false), logger.WithReplaceGlobals(false))
+	t.Cleanup(inf.accessLogger.Sync)
 	recorder, err := metrics.New(otel.Meter("assembly-contract"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	inf.recorder = recorder
 }
-
-type loadedConfiguration struct{ cfg *config.Config }
-
-func (c loadedConfiguration) Value() (*config.Config, error) { return c.cfg, nil }

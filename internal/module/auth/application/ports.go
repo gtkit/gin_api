@@ -36,7 +36,8 @@ type Credential struct {
 type PasswordHasher interface {
 	Hash(ctx context.Context, password string) (string, error)
 	Compare(ctx context.Context, hashed, password string) error
-	// CompareWithDummy 在账号不存在时消耗等量的时间，恒返回不匹配错误。
+	// CompareWithDummy 在账号不存在时消耗等量时间；正常完成返回不匹配，
+	// 取消、资源闸门或掩护哈希异常仍返回对应的基础设施错误。
 	CompareWithDummy(ctx context.Context, password string) error
 }
 
@@ -95,6 +96,6 @@ const (
 // 撤销失败，都是安全排查的起点。分级与 worker 的 Auditor 同理——
 // 失败与成功共用一个级别，告警规则就只能靠解析文本。
 type Auditor interface {
-	Auditf(format string, args ...any)
-	Failf(format string, args ...any)
+	Auditf(ctx context.Context, format string, args ...any)
+	Failf(ctx context.Context, format string, args ...any)
 }

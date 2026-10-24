@@ -60,7 +60,7 @@ OneShot 完成后。
 
 ### 注册
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:module-workers` 标记前追加构造，
+在 `internal/bootstrap/modules.go` 的 `scaffold:module-workers` 标记前追加构造，
 `buildWorkers` 的签名不需要改动。`WorkerManager` 的构造需要一个预算：
 
 ```go
@@ -95,6 +95,19 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 - 并发数必须有上限，不能按数据量无限开 goroutine。
 - required worker 运行期异常会触发全进程优雅关停并非零退出，不做静默重启。
   纯治理型任务若不希望拖垮进程，应在内部记日志后继续，向外返回 nil。
+
+## 执行指标
+
+默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；singleton 使用
+`singletonObserver` 的可选 `ExecutionObserver` 回调；队列消费者通过
+`tasks.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
+原 `tasks.NewConsumer` 与 `singleton.Observer` 接口继续可用，不强制自定义实现升级。
+
+实际任务每次结束记录 `worker.executions` 与 `worker.execution.duration`（秒），
+按装配期 worker 名、kind、有限 outcome 聚合。未获租约不计执行，续租/释放不计入耗时；
+队列重试各计一次。自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
+不要把进程存活时间当任务耗时。标签和旧 `worker.runs` 的口径见
+[Worker 单次执行](observability.md#worker-单次执行)。
 
 ## 单实例执行
 
@@ -149,7 +162,7 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 默认关闭，配 `tasks.scheduler.enabled` 启用（要求 `tasks.enabled` 也开着——
 调度器投递的任务需要有人消费）。
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:periodic-tasks` 标记处追加声明：
+在 `internal/bootstrap/modules.go` 的 `scaffold:periodic-tasks` 标记处追加声明：
 
 ```go
 tasks.PeriodicTask{
@@ -169,7 +182,7 @@ tasks.PeriodicTask{
 底层调度器**没有任何跨实例协调**——每个实例的触发点到了就各自投递一次，
 N 个副本就是每次触发投递 N 次。
 
-因此调度经 Redis 租约选主：只有持有租约的实例运行调度器，失去租约立即停止。
+因此调度经 Redis 租约选主：取得租约后才启动调度器，失去租约时请求停止并等待真实退出。
 这不是能靠「只在一个实例上启用」约束的事——那需要部署侧记住并正确执行，
 而它出错时没有任何症状，只表现为下游被执行了 N 次。
 
@@ -177,8 +190,10 @@ N 个副本就是每次触发投递 N 次。
 两个实例会同时认为自己是 leader。网络分区、进程长时间暂停（GC、宿主机挂起）
 都会拉长这个窗口。
 
-所以每条周期任务都**必须声明**重复投递时靠什么保证正确，零值在构造期被拒绝——
-与 `singleton.Runner` 同一约束、同一套 `Guarantee` 类型。
+每条周期任务都**必须声明 `GuaranteeIdempotent`**，由业务处理器保证重复投递安全。
+零值、`GuaranteeFenced` 与未知枚举在构造期拒绝。虽然复用 `singleton.Guarantee` 类型，
+周期任务当前不把 fence 放进消息，也没有消费者写入校验，不能承诺 fencing。
+一般 `singleton.Runner` 仍支持把 `Held.Fence` 交给执行函数，不受此限制影响。
 
 声明了 `GuaranteeIdempotent` 的任务会自动附加投递去重窗口（`tasks.scheduler.unique_ttl`）
 作为第二道防线。它同样不是保证：底层的唯一性锁在**任务成功完成时**就释放，
@@ -190,12 +205,22 @@ N 个副本就是每次触发投递 N 次。
 调度器是 `KindProducer` + `LifecycleLongRunning` + 非 required：
 
 - 关停时**最先**停——先停生产者再停消费者，在飞的任务才能被处理完；
-- 关停时主动释放租约，让接管的实例立即可用，而不是等一个完整的租期；
+- 底层真实退出且续租 goroutine 结束后，使用原 token 主动释放租约；
 - 非 required：调度器不可用时实例仍能提供同步接口，而周期任务本就允许迟到。
 
 `Prepare` 会实测租约能力（真跑一遍抢锁/续租/释放）并验证全部 cron spec 可解析。
 spec 写错如果留到运行期才发现，表现是这个任务**永远不触发**——
 而没有任何人在等一个不存在的信号。
+
+每一轮显式 `Start`，在停止请求后用 `tasks.shutdown_timeout` 等待 `Shutdown`。
+首次等待超时会立即发出一次 `RoundFailed`，并保留在本轮返回错误中；同一个 `Run`
+goroutine 随后继续等待同一实例真实退出，期间不创建下一代、不主动释放本轮租约。
+租约仍可能自然过期，跨实例重叠的风险由业务幂等承担。
+
+`Cleanup(ctx)` 同样等待当前代实例的幂等 `Shutdown`，超时不清除实例归属。
+整体退出预算仍由 `WorkerManager` 管理：底层未退出时，worker 保持未退出状态，
+`App` 跳过扩展及共享客户端的关闭并报告错误。晚退出后，supervisor 才执行 worker 清理；
+晚退出不消除首次排空超时记录。2026-10-24 已通过关停阻塞、失租后两代切换、重复 Cleanup 及 App 资源安全门的故障注入和 race 回归，另验证真实 UniqueTTL 入队选项；证据见[修复计划第 9.3 节](review-remediation-plan-2026-10-23.md#93-追加测试授权与最终执行记录)。
 
 ## 异步任务队列（`internal/pkg/tasks`）
 
@@ -218,7 +243,7 @@ if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil
 
 ### 注册处理器
 
-在 `internal/bootstrap/providers.go` 的 `scaffold:task-handlers` 标记处追加一个
+在 `internal/bootstrap/modules.go` 的 `scaffold:task-handlers` 标记处追加一个
 `tasks.Registrar`：
 
 ```go

@@ -45,14 +45,10 @@ func validate{{.ConfigTypeName}}(c {{.ConfigTypeName}}) error {
 `
 
 const modelTemplate = `package models
-
-import (
 {{- if .NeedsModelTime }}
-	"time"
 
+import "time"
 {{- end }}
-	"github.com/gtkit/json"
-)
 
 type {{.StructName}} struct {
 	BaseID
@@ -68,15 +64,6 @@ func (*{{.StructName}}) TableName() string {
 	return "{{.TableName}}"
 }
 
-// MarshalBinary 实现 encoding.BinaryMarshaler：go-redis 把 struct 作为命令参数时只接受该接口。
-func (m *{{.StructName}}) MarshalBinary() ([]byte, error) {
-	return json.Marshal(m)
-}
-
-// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
-func (m *{{.StructName}}) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, m)
-}
 `
 
 const repositoryTemplate = `package {{.PackageName}}
@@ -118,15 +105,9 @@ import (
 )
 
 // Get 按 ID 查询；未找到返回 found=false 且 err=nil，不把 gorm sentinel 泄漏给 application。
-func (r *Repository) Get(ctx context.Context, id int64, fields ...string) (*models.{{.StructName}}, bool, error) {
+func (r *Repository) Get(ctx context.Context, id int64) (*models.{{.StructName}}, bool, error) {
 	var entity models.{{.StructName}}
-
-	query := r.mdbCtx(ctx)
-	if len(fields) > 0 {
-		query = query.Select(fields)
-	}
-
-	err := query.Where("id = ?", id).First(&entity).Error
+	err := r.mdbCtx(ctx).Where("id = ?", id).First(&entity).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, nil
 	}
@@ -150,9 +131,7 @@ var listSortMapping = map[string]string{
 //
 // 执行器自动追加主键次级排序，等值排序键下翻页不重不漏；越界页码钳制到
 // 最后一页，返回的分页元信息是实际生效值（空结果 CurrentPage/TotalPage 为 0）。
-// fields 投影同时作用于总数统计（GORM Count 语义随 Select 变化，见 ormx 包文档），
-// 需要精确总数的自定义投影请另写专用查询。
-func (r *Repository) List(ctx context.Context, query paging.Query, fields ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+func (r *Repository) List(ctx context.Context, query paging.Query) ([]*models.{{.StructName}}, paging.Paging, error) {
 	// 防御钳制与 application 归一化同值：repo 也可能被 application 之外的
 	// 调用方直接使用，无界查询不能指望上游都归一化过。
 	if query.PageSize <= 0 {
@@ -163,9 +142,6 @@ func (r *Repository) List(ctx context.Context, query paging.Query, fields ...str
 	}
 
 	q := r.mdbCtx(ctx).Model(&models.{{.StructName}}{})
-	if len(fields) > 0 {
-		q = q.Select(fields)
-	}
 
 	page, err := paginator.Paginate[*models.{{.StructName}}](q, paginator.Params{
 		Page:     query.Page,
@@ -185,15 +161,6 @@ func (r *Repository) List(ctx context.Context, query paging.Query, fields ...str
 	}, nil
 }
 
-// ExistsByID 判断指定主键的 {{.StructName}} 是否存在。
-// 用强类型主键代替动态字段名，无需白名单即天然免于 SQL 注入。
-func (r *Repository) ExistsByID(ctx context.Context, id int64) (bool, error) {
-	var count int64
-	if err := r.mdbCtx(ctx).Model(models.{{.StructName}}{}).Where("id = ?", id).Count(&count).Error; err != nil {
-		return false, fmt.Errorf("check {{.PackageName}} exists by id %d: %w", id, err)
-	}
-	return count > 0, nil
-}
 `
 
 const applicationPortsTemplate = `package application
@@ -206,10 +173,10 @@ import (
 )
 
 type {{.StructName}}Repository interface {
-	Get(ctx context.Context, id int64, fields ...string) (*models.{{.StructName}}, bool, error)
+	Get(ctx context.Context, id int64) (*models.{{.StructName}}, bool, error)
 	// List 返回一页数据与实际生效的分页元信息。query.Sort 是外部排序键，
 	// 由实现方经白名单映射后才进入 SQL，未命中回退默认排序。
-	List(ctx context.Context, query paging.Query, fields ...string) ([]*models.{{.StructName}}, paging.Paging, error)
+	List(ctx context.Context, query paging.Query) ([]*models.{{.StructName}}, paging.Paging, error)
 }
 `
 
@@ -375,11 +342,11 @@ type fake{{.StructName}}Repository struct {
 	lastQuery paging.Query
 }
 
-func (f *fake{{.StructName}}Repository) Get(context.Context, int64, ...string) (*models.{{.StructName}}, bool, error) {
+func (f *fake{{.StructName}}Repository) Get(context.Context, int64) (*models.{{.StructName}}, bool, error) {
 	return f.entity, f.found, f.err
 }
 
-func (f *fake{{.StructName}}Repository) List(_ context.Context, query paging.Query, _ ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+func (f *fake{{.StructName}}Repository) List(_ context.Context, query paging.Query) ([]*models.{{.StructName}}, paging.Paging, error) {
 	f.lastQuery = query
 	return f.list, f.page, f.err
 }
@@ -594,6 +561,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 	g := r.Group("/{{.RoutePath}}")
 	g.Use(middleware.Timeout({{.ServiceVar}}Deadline, {{.ServiceVar}}WriteGrace))
+	g.Use(middleware.NoBody())
 
 	// 限流策略在 config 的 ratelimit.policies 里定义；引用解析不到时装配失败，
 	// 不存在静默不限流的通道。
@@ -725,11 +693,11 @@ type fake{{.StructName}}Repository struct {
 	listCalled bool
 }
 
-func (f *fake{{.StructName}}Repository) Get(context.Context, int64, ...string) (*models.{{.StructName}}, bool, error) {
+func (f *fake{{.StructName}}Repository) Get(context.Context, int64) (*models.{{.StructName}}, bool, error) {
 	return f.entity, f.found, f.err
 }
 
-func (f *fake{{.StructName}}Repository) List(context.Context, paging.Query, ...string) ([]*models.{{.StructName}}, paging.Paging, error) {
+func (f *fake{{.StructName}}Repository) List(context.Context, paging.Query) ([]*models.{{.StructName}}, paging.Paging, error) {
 	f.listCalled = true
 	return nil, paging.Paging{}, f.err
 }

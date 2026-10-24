@@ -65,6 +65,8 @@ func New(cfg config.OutboundConfig) (*Factory, error) {
 			httpc.WithMaxConnsPerHost(resolved.MaxConnsPerHost),
 			httpc.WithMaxIdleConnsPerHost(resolved.MaxIdleConnsPerHost),
 		)
+		client := factory.clients[name].HTTPClient()
+		client.Transport = &propagationTransport{base: client.Transport}
 	}
 
 	return factory, nil

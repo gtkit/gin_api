@@ -7,14 +7,18 @@
 用 `gonew` 复制并改名，再用 `project init` 收尾：
 
 ```bash
-export GOPRIVATE=github.com/gtkit/*
+export GOPRIVATE='github.com/gtkit/*'
 gonew github.com/gtkit/gin-api@latest example.com/yourorg/your-project ./your-project
 cd ./your-project
 make project-init NAME=your_project ARGS=--dry-run   # 预览
 make project-init NAME=your_project                  # 执行
 ```
 
-完整流程、护栏说明与「移除 Laravel 兼容层」手动清单见 [`SCAFFOLD.md`](SCAFFOLD.md)。
+私有模块的临时/持久配置、访问权限与内部代理说明见 [前提](SCAFFOLD.md#前提)；完整流程、护栏说明、CORS 请求头清理及可选依赖精简见 [`SCAFFOLD.md`](SCAFFOLD.md)。
+
+派生初始化精确移除母版部署入口及 `REVIEW.md`、`REVIEW-my.md`，保留 `pprof/` 和其他文档。
+`make build` 默认生成 linux/amd64 二进制并启用 `-trimpath`；保留 `Linux`、`BUILD_FLAGS` 覆写。
+UPX 已安装时执行压缩，未安装时保留未压缩产物；编译或压缩失败仍返回失败。
 
 ## 快速开始
 
@@ -55,6 +59,12 @@ make project-init NAME=your_project                  # 执行
 日志级别去除首尾空白后只接受 `debug/info/warn/error/dpanic/panic/fatal`；`database.maxlifeseconds` 必须非负，
 省略/0 仍使用默认 1800 秒。连接池和 Redis 的既有默认及消费方规则保持不变，详见 [配置说明](config/README.md#核心字段校验)。
 
+Redis认证、限流与响应缓存统一使用 `redis.prefix`；省略或空串时原样回落 `application.name`，不补分隔符。存量升级须保持旧实际namespace：旧版忽略的非空prefix若不同于旧应用名，须先改为原namespace再升级；直接改名会使撤销/刷新状态失联。本次不搬迁key、不扩展DB/Redis集群。
+
+Redis 各能力的启动、故障和恢复语义见 [Redis 故障与恢复](SCAFFOLD.md#redis-故障与恢复)。
+仅可降级能力启用时，首次不可达会在同一进程内重试恢复；已挂载的缓存与共享限流后端随之恢复。
+本地认证、fail-closed Redis 限流和任务队列仍要求 Redis 在启动时可用。
+
 ## 架构
 
 ```text
@@ -66,7 +76,7 @@ cmd
 ```
 
 - `cmd/`：Cobra 命令入口，只负责参数解析和启动。
-- `internal/bootstrap/`：进程级资源、HTTP Server、路由和 worker 生命周期编排。
+- `internal/bootstrap/`：`providers.go` 负责进程级资源与启动阶段编排，`modules.go` 集中装配模块服务、鉴权、路由和后台任务。
 - `internal/runtime/module/`：模块装配，将 DB、配置和外部客户端转换成 application port 实现。
 - `internal/module/`：业务模块，按 `application`、`dto`、`transport/http`、可选 `worker` 组织。
 - `internal/repository/`：GORM/Redis 数据访问实现。
@@ -100,27 +110,8 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
-`ai`（仅当 `modules.ai.providers` 里至少有一家填了 `api_key` 时注册；一家都没填时
-这些端点整个不存在，启动日志会提示一次——"端点不存在"比"端点存在但每次都 503"
-更容易被判断成配置问题）：
-
-- `POST /api/v1/ai/chat`：一次性返回完整回复与 token 用量。
-- `POST /api/v1/ai/chat/stream`：SSE 流式增量输出，事件为 `delta` / `done` / `error`。
-- `GET /api/v1/ai/providers`：已启用的厂商与其生效默认模型。
-- `GET /api/v1/ai/conversations`：会话分页列表。
-- `GET /api/v1/ai/conversations/:id`：会话详情 + 消息分页。
-- `PATCH /api/v1/ai/conversations/:id`：改标题。
-- `DELETE /api/v1/ai/conversations/:id`：软删会话。
-
-全部端点要求认证，会话按用户归属（归属条件写在 SQL 的 WHERE 里，不靠取回后比对）。
-底层是 [`github.com/gtkit/go-llm-provider/v2`](https://github.com/gtkit/go-llm-provider)，
-配置驱动多厂商：DeepSeek、通义千问、智谱 GLM、Moonshot、火山方舟、百度千帆、硅基流动。
-每家厂商各带独立的连接池、熔断器与重试。
-
-**SSE 的注意事项**：认证中间件禁止 SSE 请求用 query 传令牌（query 会进访问日志、
-Referer 与浏览器历史），因此前端不能用原生 `EventSource`，要用 `fetch` + `Authorization` 头
-读流。流式路由不挂路由级超时中间件（那会掐断正常生成中的长流），整体预算由
-`modules.ai.stream_total_timeout` 给出，保活由 `heartbeat_interval` 控制。
+当前不提供 AI 对话与会话管理模块，`/api/v1/ai/*` 接口不注册。
+历史 SQL 和现有数据保留，旧迁移在新库仍可能创建 AI 表，详见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
 
 基础探针：
 
@@ -153,6 +144,20 @@ make module NAME=staff ARGS="--field nickname:string --field status:uint8 --acce
 `go run -tags scaffold . module <name>`。
 
 模块生成器说明见 `cmd/MODULE_GENERATOR.md`。
+
+Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录> <目标>`。不指定目标时仍执行 `dev`。根 `Makefile` 通过固定顺序的 `include` 加载以下分类文件；各文件共享同一套变量和目标，不作为独立入口。
+
+| 文件 | 职责 |
+|------|------|
+| `Makefile` | 公共变量、默认与条件入口、`check` / `check-ci` 聚合目标、端口兼容规则 |
+| `make/build.mk` | 编译、镜像构建、受管产物清理 |
+| `make/dev.mk` | 开发依赖、应用 Compose 操作、钩子安装 |
+| `make/quality.mk` | lint、vet、modern、测试、覆盖率、架构及安全检查入口 |
+| `make/scaffold.mk` | 模块与项目生成、生成器验证、应用身份生成和检查 |
+| `make/migration.mk` | 迁移、环境与名称占位、迁移文件及数据库验证 |
+| `make/release.mk` | 发布门禁编排、tag 入口、发布接线验证 |
+
+现有命令、命令行及环境变量覆盖方式保持不变；公共变量和覆盖率门槛仍以根 `Makefile` 为准。子文件应随根文件一并保留，缺少任一必需文件时 Make 会报错。
 
 ## 质量门禁
 
@@ -255,15 +260,44 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 镜像内不含 `config/env/env.yml`、PEM 私钥与 `.git`（`.dockerignore` 保证）；运行配置挂载注入。
 
 产物名由 `--build-arg APP_NAME` 决定（`make image` 从 `project.mk` 取），构建阶段显式断言其非空；
-**容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**——`ENTRYPOINT` 必须是 exec form
-（shell form 会让 shell 成为 PID 1，破坏信号转发与优雅关停），而 exec form 不做变量展开。
+**容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**。镜像默认`ENTRYPOINT`为exec form，
+应用profile的入口先检查UID再exec原二进制，检查后的shell不常驻PID 1。
 宿主机侧的 `bin/$(APP_NAME)` 由冻结的部署脚本负责，与容器内路径互不牵连。
+
+### 本地 Compose 应用入口
+
+默认`make dev-up`仍只启动MySQL/Redis。显式`app` profile提供应用服务；服务器部署方式保持。
+先检查本机已有镜像和容器：同类依赖已启动时优先复用，不重复创建MySQL/Redis。
+复制`compose.env.example`准备本地私密env文件，并按模板填写应用挂载、UID/GID和本地连接。
+隔离配置中的JWT路径应指向`/app/config/pem`内的临时密钥，私钥0600、公钥0644；
+`redis.prefix`必须独占，测试库必须先应用本仓既有迁移。应用启动不自动执行DDL，`/ready`不替代迁移版本核对。
+
+```bash
+make check-compose-app # 合成环境解析和shell入口fixture；不创建容器，不读取真实.env
+make dev-app-up COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+# 已有本机依赖：按模板设置DEV_APP_DB_HOST/DEV_APP_REDIS_ADDR，再用此入口
+make dev-app-up-existing COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+make dev-app-down COMPOSE_ENV_FILE=/absolute/path/to/local-compose.env
+```
+
+容器内固定APP_ROOT=/app、HTTP 0.0.0.0:8008，宿主只映射127.0.0.1的DEV_APP_PORT。
+配置和密钥只读挂载，日志目录需预先存在且可由DEV_APP_UID写入；缺少挂载不自动创建。
+默认身份1000:1000，可填宿主`id -u`/`id -g`，入口拒绝UID 0，不能靠放宽私钥权限解决身份不匹配。
+Docker Desktop复用已有服务可用host.docker.internal；其他环境须提供已确认可达的本机地址。
+DEV_APP_DB_PASSWORD/DEV_APP_REDIS_PASSWORD未设置时继承依赖密码，显式空值则保留为空，仅用于确实无密码的本地测试服务。
+
+`dev-app-up`构建并启动应用及其健康依赖，`dev-app-up-existing`以--no-deps只启动应用；
+执行前须按AGENTS.md确认本地镜像/容器与授权，不隐式拉取缺失镜像。APP_NAME仍由project.mk注入，
+BUILD_COMMIT/BUILD_TIME可固定；COMPOSE_PROJECT默认APP_NAME，验收可指定独占项目名。
+`dev-app-down`只停止/移除app，保留依赖及数据卷；无其他服务的独占网络需确认无使用者后单独清理。
+容器以/ready作健康检查，SIGTERM宽限3分钟；它是本地默认，改变服务关停预算时须同步核对。
+解析和入口fixture通过不等于镜像、真实API、依赖故障或信号验收通过。
 
 ### 数据库集成测试（本地手动）
 
-`make test-integration` 用真实 MySQL 验证 repository 与 schema 一致性（配置取自
-`config/env/env.yml`，事务内强制回滚、零持久化；无 DB 时自动 SKIP）。
-当前不设 CI 强制 job；将来需要时设 `REQUIRE_DB_INTEGRATION=1` 可把 SKIP 变为失败。
+`make test-integration`使用项目根之外的显式隔离APP_ROOT，先验证配置元数据再连接真实依赖；
+包含命令装配套件和仓储事务回滚。Make强制PLUGIN_INTEGRATION=1，发布入口还设置
+REQUIRE_DB_INTEGRATION=1使缺依赖失败；日常check仍不依赖数据库。准备方法见`docs/testing.md`。
 
 ## 配置与性能
 
@@ -272,3 +306,9 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 - 模块生成器生成含 Up/Down 区段的 goose 单文件 SQL 草稿。执行走内置的 `migrate` CLI
   （`make migrate-up` / `migrate-status`，连库验证见 `make migrate-verify`），
   上线前须经 DBA 审阅。
+
+常用入口：`make run`（dev别名）、`make lint`（检查锁定工具版本并执行lint）、`make test`（scaffold标签、race完整测试）、`make clean`（只删除默认bin/<APP_NAME>与.cache/coverage.out）。`make migrate-status test`等迁移命令中的test仍是环境占位，不会启动测试或服务；自定义输出不由clean管理，越界、symlink或非普通文件会被拒绝。入口fixture自检已接入make check，实际Go回归另行执行。
+
+`go run . --version`或二进制`--version`无需配置、数据库或Redis，输出version/commit/build_time。版本常量仍只在version.go；普通go build缺少注入时commit/time显示unknown。make build/image注入当前HEAD及UTC构建时间，CI可显式提供BUILD_COMMIT/BUILD_TIME固定输入；Docker直接构建的同名ARG默认unknown。未提交工作区内容不能仅由HEAD证明，交付应同时保留diff和构建证据。
+
+JWT生成公钥0644可通过doctor；Unix上私钥不得开放group/other访问，公钥及previous公钥不得group/other可写。Windows权限位不代表ACL，未声称ACL已验。生成器只清理本次独占创建的文件，输出失败仍返回错误，已完成且可用的密钥不会因打印失败被删除。
