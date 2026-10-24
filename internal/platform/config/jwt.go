@@ -26,17 +26,6 @@ const (
 func validateJWTRotation(jwt JWTConfig, mode AuthMode, environment env.Env) error {
 	var errs []error
 
-	// 废弃键 fail-fast，并给出迁移方向。
-	//
-	// 静默忽略比报错危险得多：使用者会以为自己配置的密钥正在生效，
-	// 而实际用的是另一组（或根本没有）。
-	if strings.TrimSpace(jwt.PrivateKeyPath) != "" || strings.TrimSpace(jwt.PublicKeyPath) != "" {
-		errs = append(errs, errors.New(
-			"jwt.private_key_path / jwt.public_key_path are no longer supported: keys are now "+
-				"identified by a kid — move them under jwt.active (kid/private_key_path/public_key_path) "+
-				"and put retired public keys under jwt.previous"))
-	}
-
 	if strings.TrimSpace(jwt.Active.KID) == "" {
 		errs = append(errs, errors.New("jwt.active.kid is required"))
 	}

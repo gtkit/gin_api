@@ -110,8 +110,7 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
-AI 对话与会话管理模块已移除，原 `/api/v1/ai/*` 接口不再注册。升级时删除
-`modules.ai` 配置和 `APP_MODULES__AI__*` 环境变量；未知配置仍会导致启动失败。
+当前不提供 AI 对话与会话管理模块，`/api/v1/ai/*` 接口不注册。
 历史 SQL 和现有数据保留，旧迁移在新库仍可能创建 AI 表，详见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
 
 基础探针：

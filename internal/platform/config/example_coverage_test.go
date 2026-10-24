@@ -15,18 +15,6 @@ import (
 // shippedExamplePath is the schema coverage fixture, resolved from this package.
 const shippedExamplePath = "../../../config/env.yml.example"
 
-// exampleCoverageExemptions 是「结构体有、样例刻意不列」的豁免清单。
-// 每项必须给理由；测试同时钉住豁免本身不腐化：
-// 路径必须仍存在于结构体（防钉死无效豁免），且不得出现在样例里
-// （样例补了键就必须删掉豁免）。
-var exampleCoverageExemptions = map[string]string{
-	"application.readtimeout":   "废弃键：非零即启动失败并给迁移文案，样例不得引导使用",
-	"application.writertimeout": "废弃键：同上",
-	"jwt.private_key_path":      "废弃键：单密钥形态已被 kid 密钥集取代，保留只为可读的迁移错误",
-	"jwt.public_key_path":       "废弃键：同上",
-	"modules.user":              "墓碑字段：v0.4.0 移除的 user 模块，保留只为给残留配置一条可读的迁移错误",
-}
-
 // TestExampleCoversConfigStruct 是「结构体 → 样例」方向的对齐门禁。
 //
 // 反方向（样例 → 结构体）由严格解码覆盖：样例里多出的键会让加载失败。
@@ -56,25 +44,12 @@ func TestExampleCoversConfigStruct(t *testing.T) {
 		if examplePaths[path] {
 			continue
 		}
-		if _, exempt := exampleCoverageExemptions[path]; exempt {
-			continue
-		}
 		missing = append(missing, path)
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		t.Fatalf("config struct keys missing from %s (add them with comments, or add an exemption with a reason):\n  %s",
+		t.Fatalf("config struct keys missing from %s (add them with comments):\n  %s",
 			shippedExamplePath, strings.Join(missing, "\n  "))
-	}
-
-	// 豁免清单自检：防止豁免比现实活得久。
-	for path, reason := range exampleCoverageExemptions {
-		if !structPaths[path] {
-			t.Errorf("exemption %q (%s) no longer matches any struct key; delete it", path, reason)
-		}
-		if examplePaths[path] {
-			t.Errorf("exemption %q (%s) is now present in the example; delete the exemption", path, reason)
-		}
 	}
 }
 

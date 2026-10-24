@@ -18,6 +18,8 @@ cp config/env.yml.example config/env/env.yml
 
 `config/env/env.yml` 不进入 Git。配置缺失、YAML 无法解析或关键字段校验失败时，进程 fail-fast。
 
+配置只使用当前字段，不保留旧键别名或专门的迁移诊断。YAML 和 `APP_` 环境变量覆盖中的未知键统一在解码阶段拒绝。
+
 ## 目录
 
 ```text
@@ -40,14 +42,17 @@ config/
 - `redis`：地址、密码和初始化 DB 列表。
 - `log`：日志级别、路径和滚动策略。
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
-- `email`、`sms`、`aliyun`、`news`、`baidu`：外部服务配置。
-- `pay`：微信支付和支付宝配置；未启用时不要求密钥。
+- `auth`：本地认证或外部身份模式。
+- `email`、`sms`、`news`：通知渠道与告警配置。
+- `ratelimit`、`cache`、`outbound`：限流、响应缓存和出站请求。
+- `telemetry`、`tasks`：可观测性导出与异步任务，默认关闭。
+- `modules`：业务模块配置，按实际模块添加。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 
 字段结构以 `internal/platform/config/types.go` 和 `config/env.yml.example` 为准。
-AI 模块已移除，存量部署须删除 `modules.ai` 配置和 `APP_MODULES__AI__*` 环境变量；
-这些键不再被识别，保留它们会导致严格配置加载失败。
+请求读取超时使用 `application.read_header_timeout` 和 `application.read_timeout`；
+JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 
 ## 核心字段校验
 

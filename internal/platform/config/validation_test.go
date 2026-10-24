@@ -21,7 +21,7 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 			Host:                     "localhost",
 			Port:                     "not-a-port",
 			ReadHeaderTimeoutSeconds: -1,
-			WriteTimeoutSeconds:      -1,
+			ReadTimeoutFullSeconds:   -1,
 			Timezone:                 "Mars/Nowhere",
 		},
 		Database: DatabaseConfig{

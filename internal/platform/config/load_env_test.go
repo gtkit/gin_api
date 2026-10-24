@@ -9,6 +9,31 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 )
 
+func TestEnvOverrideRejectsLegacyConfigKeys(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("APP_ROOT", root)
+	writeJWTCommandConfig(t, root, minimalConfigYAML())
+
+	for _, tc := range []struct {
+		variable, value, key string
+	}{
+		{"APP_APPLICATION__READTIMEOUT", "0", "readtimeout"},
+		{"APP_APPLICATION__WRITERTIMEOUT", "1", "writertimeout"},
+		{"APP_JWT__PRIVATE_KEY_PATH", "", "private_key_path"},
+		{"APP_JWT__PUBLIC_KEY_PATH", "retired.public.pem", "public_key_path"},
+		{"APP_MODULES__USER__PAGE_SIZE", "20", "user"},
+	} {
+		t.Run(tc.variable, func(t *testing.T) {
+			t.Setenv(tc.variable, tc.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected unknown-key decode error for %s, got %v", tc.variable, err)
+			}
+		})
+	}
+}
+
 // minimalConfigYAML 返回一份能通过 Validate 的最小配置。
 //
 // 环境变量覆盖的用例都以它为基线：断言的是"某个键被env覆盖了"，

@@ -310,30 +310,10 @@ func validateAppConfig(app AppConfig) error {
 		mustNonEmpty("application.port", app.Port),
 		mustPortRange("application.port", app.Port),
 	}
-	if app.ReadTimeoutSeconds != 0 {
-		errs = append(errs, errors.New(
-			"application.readtimeout is no longer supported: it only bounded reading the request "+
-				"headers while the body still had a fixed 60s budget, so the configured value "+
-				"understated the exposure. Split it into application.read_header_timeout and "+
-				"application.read_timeout"))
-	}
 	errs = append(errs,
 		mustNonNegative("application.read_header_timeout", app.ReadHeaderTimeoutSeconds),
 		mustNonNegative("application.read_timeout", app.ReadTimeoutFullSeconds),
 	)
-	if app.WriteTimeoutSeconds != 0 {
-		// 该键已废弃且**不提供静默兼容**。
-		//
-		// 它曾经设置 http.Server.WriteTimeout —— 一个所有路由共享的绝对写上限。
-		// 现在写超时由每条路由的 TimeoutPolicy 在连接级设置，服务器层恒为 0。
-		// 保留这个键并静默忽略，会让人以为自己配置了保护而实际没有；
-		// 因此这里直接拒绝启动，并在错误里给出迁移方向。
-		errs = append(errs, errors.New(
-			"application.writertimeout is no longer supported: the server-level write timeout is now a "+
-				"conservative fallback set in code, and routes that need longer writes extend the "+
-				"connection-level deadline per response via the route timeout middleware; "+
-				"remove this key from your config"))
-	}
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))
 
 	return errors.Join(errs...)

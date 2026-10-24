@@ -139,38 +139,6 @@ func TestHasDuplicateInts(t *testing.T) {
 	}
 }
 
-// TestDeprecatedWriteTimeoutIsRejected 钉住旧配置键的 fail-fast。
-//
-// 该键曾经设置 http.Server.WriteTimeout——一个所有路由共享的绝对写上限。
-// 现在写超时由每条路由在连接级设置。若保留这个键并静默忽略，
-// 使用者会以为自己配置了保护而实际没有；因此必须拒绝启动，
-// 并且错误里要给出迁移方向（严格解码的"未知键"不会告诉任何人该往哪改）。
-func TestDeprecatedWriteTimeoutIsRejected(t *testing.T) {
-	t.Parallel()
-
-	app := AppConfig{Host: "127.0.0.1", Port: "8008", Name: "app"}
-
-	if err := validateAppConfig(app); err != nil {
-		t.Fatalf("validateAppConfig without the deprecated key: %v", err)
-	}
-
-	app.WriteTimeoutSeconds = 1
-	err := validateAppConfig(app)
-	if err == nil {
-		t.Fatal("validateAppConfig accepted the deprecated application.writertimeout key")
-	}
-	// 断言指向**实际存在**的机制。此前这里断言 "TimeoutPolicy"——那是随路由 DSL
-	// 一并移除的机制名，照它去找会一无所获，而这条文案出现在启动失败的那一刻，
-	// 是使用者最需要它准确的时候。
-	for _, want := range []string{
-		"application.writertimeout", "no longer supported", "conservative fallback", "route timeout middleware",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err, want)
-		}
-	}
-}
-
 func TestEffectiveRedisPrefixPreservesNamespaceBytes(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, prefix, want string }{

@@ -237,6 +237,40 @@ log:
 	}
 }
 
+func TestLoadFromReaderRejectsLegacyConfigKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, section, key, value string
+	}{
+		{"readtimeout", "application", "readtimeout", "2"},
+		{"zero readtimeout", "application", "readtimeout", "0"},
+		{"writertimeout", "application", "writertimeout", "2"},
+		{"zero writertimeout", "application", "writertimeout", "0"},
+		{"private key", "jwt", "private_key_path", "retired.private.pem"},
+		{"empty private key", "jwt", "private_key_path", `""`},
+		{"public key", "jwt", "public_key_path", "retired.public.pem"},
+		{"empty public key", "jwt", "public_key_path", `""`},
+		{"user module", "modules", "user", "{page_size: 20}"},
+		{"empty user module", "modules", "user", "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			section := tc.section + ":\n"
+			input := minimalConfigYAML()
+			if !strings.Contains(input, section) {
+				input += "\n" + section
+			}
+			input = strings.Replace(input, section, section+"  "+tc.key+": "+tc.value+"\n", 1)
+
+			_, err := loadFromReader(strings.NewReader(input))
+			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected unknown-key decode error for %s.%s, got %v", tc.section, tc.key, err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsRemovedAIEnvironmentOverride(t *testing.T) {
 	clearConfigEnv(t)
 	root := t.TempDir()

@@ -6,7 +6,7 @@ import (
 	"github.com/gtkit/gin-api/internal/shared/env"
 )
 
-// Config 是 v2 的 typed runtime config。
+// Config 是服务的强类型运行配置。
 type Config struct {
 	Env      env.Env        `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
@@ -46,25 +46,13 @@ type AppConfig struct {
 	EnableHTTPS bool   `mapstructure:"ishttps"`
 	Name        string `mapstructure:"name"`
 	Port        string `mapstructure:"port"`
-	// ReadTimeoutSeconds 是**已废弃**的合并键。
-	//
-	// 保留字段只为让旧配置得到一条可读的迁移错误，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	//
-	// 它此前被赋给 ReadHeaderTimeout，于是 `readtimeout: 2` 让人以为整个请求
-	// 的读取上限是 2 秒，而读 body 仍可占用固定的 60 秒。
-	ReadTimeoutSeconds int `mapstructure:"readtimeout"`
 	// ReadHeaderTimeoutSeconds 是读取请求头的上限；<=0 时用内置默认值。
 	ReadHeaderTimeoutSeconds int `mapstructure:"read_header_timeout"`
 	// ReadTimeoutFullSeconds 是读取**整个请求（头 + 体）**的上限；<=0 时用内置默认值。
 	//
 	// 与上一项分开：只限读头挡不住慢 body，而那正是 slowloris 的形态。
-	ReadTimeoutFullSeconds int `mapstructure:"read_timeout"`
-	// WriteTimeoutSeconds 已废弃：非零即启动失败，见 validateAppConfig 的说明。
-	// 字段保留是为了让旧配置得到**一条可读的迁移错误**，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	WriteTimeoutSeconds int    `mapstructure:"writertimeout"`
-	Timezone            string `mapstructure:"timezone"`
+	ReadTimeoutFullSeconds int    `mapstructure:"read_timeout"`
+	Timezone               string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 	// DrainWaitSeconds 是优雅关停时「/ready 翻成 503」与「关闭 HTTP 监听」之间的等待秒数。
@@ -133,7 +121,7 @@ type DatabaseConfig struct {
 	MinVersion string `mapstructure:"min_version"`
 }
 
-// 数据库连接的默认值。留空时使用，避免存量配置因新增必填键而无法启动。
+// 数据库连接的默认值，未配置时使用。
 //
 // 连接池默认值刻意都是正数：0 在底层的含义分别是"无限连接数"与"无限生命周期"，
 // 都不是安全的默认——前者让数据库被打满，后者让已被服务端单方面断开的连接一直留在池里。
@@ -315,12 +303,6 @@ type JWTConfig struct {
 	// 与上一条**分开**：两者是不同的兼容维度（缺 kid vs 不同算法族），
 	// 共用一个开关会让其中一条的删除被另一条阻塞。
 	LaravelAcceptUntil string `mapstructure:"laravel_accept_until"`
-	// PrivateKeyPath / PublicKeyPath 是**已废弃**的单密钥路径。
-	//
-	// 保留字段是为了让旧配置得到一条可读的迁移错误，而不是严格解码给出的
-	// "未知键"——后者不会告诉任何人该往哪改。
-	PrivateKeyPath string `mapstructure:"private_key_path"`
-	PublicKeyPath  string `mapstructure:"public_key_path"`
 	// TokenTTLHours 是签发 token 的有效期（小时）；正值覆盖，<=0 按认证模式回落：
 	// local 为 1 小时，external 为 720 小时（30 天），见 EffectiveTokenTTL。
 	//

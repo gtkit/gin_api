@@ -51,13 +51,6 @@ func TestValidateJWTRotation(t *testing.T) {
 	}{
 		{name: "minimal valid config", mutate: nil},
 		{
-			// 静默忽略废弃键比报错危险得多：使用者会以为自己配置的密钥
-			// 正在生效，而实际用的是另一组。
-			name:    "deprecated single-key paths rejected",
-			mutate:  func(c *JWTConfig) { c.PrivateKeyPath = "config/pem/jwtpri.pem" },
-			wantErr: true, wantHint: "no longer supported",
-		},
-		{
 			name:    "missing active kid",
 			mutate:  func(c *JWTConfig) { c.Active.KID = "" },
 			wantErr: true, wantHint: "jwt.active.kid",
