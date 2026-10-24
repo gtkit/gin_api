@@ -4,10 +4,6 @@
 # Windows 的默认值 true 会把 checkout 出来的文件转成 CRLF，而库内 blob 仍是 LF——
 # 于是同一份代码在不同机器上是不同的字节，按字节工作的东西随之失效：
 #
-#   * internal/scaffold 的标记常量以 "\n" 结尾（见 providersMarkers），
-#     CRLF 工作区下 strings.Contains 必然失配。后果不只是
-#     TestProvidersMarkersPresentInRealProvidersFile 变红——`make module`
-#     生成器本身就无法定位注入锚点，脚手架的核心能力在该平台上是坏的。
 #   * go fix -diff 输出整文件 diff（改写器按 LF 输出），实质改动被淹没，
 #     check-modern 的失败信息变得无法阅读。
 #

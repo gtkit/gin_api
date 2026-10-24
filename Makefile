@@ -1,4 +1,4 @@
-.PHONY: check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-generator check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -30,14 +30,10 @@ GO_TARGETS ?= ./...
 LINT_TARGETS ?= ./...
 # 验证口径的构建约束。
 #
-# `scaffold` 门控着模块生成器（internal/scaffold）与项目实例化器
-# （internal/projectinit）——它们是开发期工具，不进服务二进制：`module` 会重写
-# internal/bootstrap/modules.go，`project init` 带 --force-reinit-git 且会永久
-# 丢弃 git 历史，两者对派生项目都不存在正确用法。
+# `scaffold` 门控项目实例化器 internal/projectinit，不进入服务二进制。
+# project init 可重建 Git 仓库，只用于新项目初始化。
 #
-# 但**验证口径必须包含它们**：这些包的测试锁定着 module-scaffold-wiring 与
-# project-instantiation 两组需求。只加构建约束而不在这里带上 tag，那些测试就不再
-# 被编译，两组需求会静默失去保护而 `make check` 依然全绿——比不做隔离更危险。
+# 验证口径仍带该标签，以覆盖项目初始化的测试。
 #
 # 因此：vet / test / coverage / lint 带 tag；build 目标与 Dockerfile 不带。
 GO_BUILD_TAGS ?= scaffold
@@ -93,7 +89,7 @@ include make/migration.mk
 
 check: check-architecture check-capability-inventory check-scaffold-isolation check-tidy check-package-vars check-doc-refs check-image-digests check-security-eval check-release-wiring check-appmeta check-hooks check-build-context check-make-entries tool vet check-modern check-coverage ## Run all required pre-submit checks
 
-check-ci: check check-generator ## CI 质量门禁（含脚手架防腐冒烟）
+check-ci: check ## CI 质量门禁
 
 include make/release.mk
 

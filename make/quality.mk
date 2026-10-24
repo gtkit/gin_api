@@ -37,8 +37,8 @@ check-modern: ## 现代写法门禁：go fix 有改写建议即失败
 	## errors.As 迁移到 errors.AsType 的工作漏了一处，而全绿的 `make check`
 	## 不会提到它。
 	##
-	## -tags 必须与 vet / test 一致：不带 scaffold 的话 internal/scaffold 与
-	## internal/projectinit 会静默退出检查范围，而那正是母版最不该失去保护的两个包。
+	## -tags 必须与 vet / test 一致：不带 scaffold 的话 internal/projectinit
+	## 会静默退出检查范围。
 	##
 	## 判据是「有输出即失败」。go fix -diff 对合规代码输出为空，退出码恒为 0，
 	## 因此不能依赖退出码——必须看输出本身。

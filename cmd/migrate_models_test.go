@@ -12,14 +12,11 @@ import (
 // tableNameDecl 匹配 TableName 方法声明并取出类型名，**覆盖四种接收者形态**：
 //
 //	func (u *User) TableName() string    有名指针
-//	func (*User) TableName() string      匿名指针  ← 脚手架模板生成的正是这种
+//	func (*User) TableName() string      匿名指针
 //	func (u User) TableName() string     有名值
 //	func (User) TableName() string       匿名值
 //
-// 此前只匹配第一种，于是对**脚手架自己生成**的模型完全失明：
-// internal/scaffold/module_templates.go 产出的是 `func (*T) TableName()`。
-// 也就是说判据声称要防的"新增一张表时漏注册"，在 `make module` 这条最常见的
-// 路径上提供零保护——它当时看起来有效，只是因为仓内 5 个模型恰好都用有名指针。
+// 模型登记检查必须覆盖全部合法接收者写法，避免漏掉匿名接收者。
 var tableNameDecl = regexp.MustCompile(
 	`func \(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?([A-Za-z][A-Za-z0-9_]*)\s*\) TableName\(\) string`)
 

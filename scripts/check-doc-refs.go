@@ -255,6 +255,11 @@ func findDead(root string, docs []string) ([]ref, error) {
 	var dead []ref
 	for _, doc := range docs {
 		data, err := os.ReadFile(filepath.Join(root, doc))
+		// git ls-files still lists tracked documents deleted in the working tree.
+		// Skip those sources; references to them in remaining documents stay checked.
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", doc, err)
 		}
@@ -490,10 +495,15 @@ func selfTest() (err error) {
 		return err
 	}
 
-	docs := []string{"docs/probe.md", "docs/nested/n.md"}
+	// A deleted source document may still be listed by git before staging;
+	// references to that document must still be reported from surviving files.
+	docs := []string{"docs/probe.md", "docs/nested/n.md", "docs/missing.md"}
 	dead, err := findDead(dir, docs)
 	if err != nil {
 		return fmt.Errorf("FAIL: self-test: %w", err)
+	}
+	if _, err := findDead(dir, []string{"docs"}); err == nil {
+		return errors.New("FAIL: self-test: a non-file source must remain an error")
 	}
 
 	got := map[string]bool{}

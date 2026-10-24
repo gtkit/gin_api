@@ -4,6 +4,16 @@ import (
 	"testing"
 )
 
+func TestModuleCommandIsNotRegistered(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range NewRootCmd(nil).Commands() {
+		if command.Name() == "module" {
+			t.Fatal("module generator command must not be registered")
+		}
+	}
+}
+
 func TestNewRootCmdRegistersExpectedCommands(t *testing.T) {
 	t.Parallel()
 

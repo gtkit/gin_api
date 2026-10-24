@@ -213,7 +213,7 @@ log:
 		{
 			name:    "removed ai module rejected",
 			extra:   "modules:\n  ai:\n    default_provider: deepseek\n",
-			wantKey: "ai",
+			wantKey: "modules",
 		},
 	}
 
@@ -263,8 +263,12 @@ func TestLoadFromReaderRejectsLegacyConfigKeys(t *testing.T) {
 			}
 			input = strings.Replace(input, section, section+"  "+tc.key+": "+tc.value+"\n", 1)
 
+			wantKey := tc.key
+			if tc.section == "modules" {
+				wantKey = tc.section
+			}
 			_, err := loadFromReader(strings.NewReader(input))
-			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), tc.key) {
+			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), wantKey) {
 				t.Fatalf("expected unknown-key decode error for %s.%s, got %v", tc.section, tc.key, err)
 			}
 		})

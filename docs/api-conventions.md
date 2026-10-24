@@ -225,8 +225,8 @@ func Register(r *gin.RouterGroup, deps Deps) {
 写在 `g` 上就是所有已认证用户都能删——而编译、`go vet` 与全部测试都不会有任何异常。
 母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
-然后在 `internal/bootstrap/providers.go` 的 `scaffold:modules` 标记处加一行。
-`make module` 生成的模板已经是这个形状。
+然后在 `internal/bootstrap/modules.go` 的 `buildEngine` 中调用
+`xxxhttp.Register(v1, ...)`。
 
 **新增路由必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
 而编译、`go vet` 与全部测试都不会有任何异常。本项目没有中央路由描述符机制，
@@ -276,7 +276,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 
 ### 列表排序参数
 
-列表接口接受 `sort` / `order` query 参数（`make module` 生成的模板即此形状）：
+列表接口接受 `sort` / `order` query 参数：
 
 - `sort` 的合法取值在 dto 的 `oneof` 白名单里声明（默认 `id`、`created_at`），
   非法键在绑定层拒绝（422）；repository 侧另有 `listSortMapping` 白名单把外部键
