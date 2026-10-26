@@ -12,6 +12,7 @@ import (
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
+	"github.com/gtkit/logger/v2"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -87,6 +88,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 	if err := errors.Join(openErr, ctx.Err()); err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
+	logger.Info("\x1b[0;32mmysql connection established\x1b[0m")
 	return owner, nil
 }
 
@@ -102,6 +104,9 @@ func (p *Owner) Close(ctx context.Context) error {
 		p.mu.Unlock()
 		if client != nil {
 			p.closeErr = client.Close()
+			if p.closeErr == nil {
+				logger.Info("\x1b[0;31mmysql connection closed\x1b[0m")
+			}
 		}
 		p.closeErr = errors.Join(p.closeErr, ctx.Err())
 	})

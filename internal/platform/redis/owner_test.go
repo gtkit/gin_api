@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -339,6 +340,7 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 			type logRecord struct {
 				Message string `json:"msg"`
 				Level   string `json:"level"`
+				DBs     []int  `json:"dbs"`
 			}
 			var records []logRecord
 			for line := range strings.Lines(string(contents)) {
@@ -348,8 +350,15 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 				}
 				records = append(records, record)
 			}
-			if len(records) != 2 || records[0].Level != "WARN" {
-				t.Fatalf("want startup warning and one outcome, got %s", contents)
+			wantRecords := 2
+			if mode == "recovered" {
+				wantRecords = 3
+			}
+			if len(records) != wantRecords || records[0].Level != "WARN" {
+				t.Fatalf("want startup warning, one outcome and closure only after recovery, got %s", contents)
+			}
+			if mode == "recovered" && (records[2].Level != "INFO" || records[2].Message != "\x1b[0;31mredis connection closed\x1b[0m \x1b[0;96mdbs=[0 3]\x1b[0m" || !slices.Equal(records[2].DBs, []int{0, 3})) {
+				t.Fatalf("unexpected closure log: %s", contents)
 			}
 			wantLevel, wantMessage := "INFO", "redis recovery succeeded"
 			switch mode {
@@ -362,6 +371,103 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 			}
 			if records[1].Level != wantLevel || !strings.Contains(records[1].Message, wantMessage) {
 				t.Fatalf("unexpected outcome: %s", contents)
+			}
+		})
+	}
+}
+
+// clearingLogRedis checks that closure logs use the pre-close database snapshot.
+type clearingLogRedis struct{ *ownedRedis }
+
+func (c *clearingLogRedis) Close() error {
+	err := c.ownedRedis.Close()
+	clear(c.clients)
+	return err
+}
+
+func TestConnectionLogsUseActualDatabases(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		actual  []int
+		want    []int
+		display string
+	}{
+		{name: "single", actual: []int{0}, want: []int{0}, display: "dbs=[0]"},
+		{name: "multiple sorted", actual: []int{5, 0, 3}, want: []int{0, 3, 5}, display: "dbs=[0 3 5]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "connections.jsonl")
+			output, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := output.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			instance, err := func() (*logger.Logger, error) {
+				previous := os.Stdout
+				os.Stdout = output
+				defer func() { os.Stdout = previous }()
+				return logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithOutJSON(true), logger.WithLevel("info"), logger.WithReplaceGlobals(false))
+			}()
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := logger.Default()
+			logger.SetDefault(instance)
+			t.Cleanup(func() { logger.SetDefault(previous); instance.Sync() })
+
+			client := &clearingLogRedis{ownedRedis: &ownedRedis{clients: make(map[int]*goredis.Client)}}
+			for _, db := range tc.actual {
+				client.clients[db] = goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0", DB: db})
+			}
+			p, err := Open(t.Context(), Options{
+				Config: &config.Config{Redis: config.RedisConfig{Addr: "127.0.0.1:0", DBs: []int{9}}},
+				Open: func(context.Context, config.RedisConfig) (Client, error) {
+					return client, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := p.Close(context.WithoutCancel(t.Context())); err != nil {
+					t.Error(err)
+				}
+			})
+			for range 2 {
+				if err := p.Close(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			instance.Sync()
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var messages []string
+			for line := range strings.Lines(string(content)) {
+				var record struct {
+					Message string `json:"msg"`
+					Level   string `json:"level"`
+					DBs     []int  `json:"dbs"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Level != "INFO" || !slices.Equal(record.DBs, tc.want) {
+					t.Fatalf("unexpected connection log: %s", line)
+				}
+				messages = append(messages, record.Message)
+			}
+			wantMessages := []string{
+				"\x1b[0;32mredis connection established\x1b[0m \x1b[0;96m" + tc.display + "\x1b[0m",
+				"\x1b[0;31mredis connection closed\x1b[0m \x1b[0;96m" + tc.display + "\x1b[0m",
+			}
+			if !slices.Equal(messages, wantMessages) || client.closes.Load() != 1 || len(client.clients) != 0 {
+				t.Fatalf("messages=%q closes=%d remaining clients=%d", messages, client.closes.Load(), len(client.clients))
 			}
 		})
 	}

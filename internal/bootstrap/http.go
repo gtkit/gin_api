@@ -197,11 +197,11 @@ func serveHTTPServer(server httpServer, cfg HTTPConfig, listener net.Listener) e
 			return fmt.Errorf(
 				"tls enabled on %s but no certificate loaded: the validated certificate from prebind was not injected", addr)
 		}
-		logger.Infof("https server starting on %s", addr)
+		logger.Infof("\x1b[0;32mhttps server starting on %s\x1b[0m", addr)
 		return normalizeServeError(server.ServeTLS(listener, "", ""))
 	}
 
-	logger.Infof("http server starting on %s", addr)
+	logger.Infof("\x1b[0;32mhttp server starting on %s\x1b[0m", addr)
 	return normalizeServeError(server.Serve(listener))
 }
 

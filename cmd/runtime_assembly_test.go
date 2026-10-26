@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/bootstrap"
+	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
 func TestCommandHelpDoesNotLoadRuntimeConfiguration(t *testing.T) {
@@ -35,6 +36,8 @@ func TestCommandHelpDoesNotLoadRuntimeConfiguration(t *testing.T) {
 func TestServerUsesDefaultConfigurationLoader(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("APP_ROOT", root)
+	forceUnreachableTargets(t)
+	requireIsolatedConfigFailure(t, root, true)
 	command := newServerCmd(nil)
 	command.SetOut(io.Discard)
 	command.SetErr(io.Discard)
@@ -73,6 +76,8 @@ func TestCommandsRejectExplicitRootWithoutConfiguration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				forceUnreachableTargets(t)
+				requireIsolatedConfigFailure(t, root, mode == "missing")
 				command := NewRootCmd(nil)
 				command.SetOut(io.Discard)
 				command.SetErr(io.Discard)
@@ -91,6 +96,29 @@ func TestCommandsRejectExplicitRootWithoutConfiguration(t *testing.T) {
 			})
 		}
 	}
+}
+
+// requireIsolatedConfigFailure stops before command construction if the default
+// loader no longer rejects this root. Load can itself read a fallback file; this
+// check prevents subsequent command effects, not filesystem access by Load.
+func requireIsolatedConfigFailure(t *testing.T, root string, wantMissing bool) {
+	t.Helper()
+	cfg, err := config.Load()
+	pathErr, ok := errors.AsType[*os.PathError](err)
+	want := filepath.Join(root, "config", "env", "env.yml")
+	if cfg != nil || !ok || pathErr.Path != want || errors.Is(err, os.ErrNotExist) != wantMissing {
+		// Neither cfg nor err is printed: a regressed loader may have read secrets.
+		t.Fatal("explicit APP_ROOT did not isolate the configuration; refusing to run commands")
+	}
+}
+
+// forceUnreachableTargets is only a fallback precaution: a loopback port can
+// have a listener, so these overrides are not an isolation boundary.
+func forceUnreachableTargets(t *testing.T) {
+	t.Helper()
+	t.Setenv("APP_DATABASE__HOST", "127.0.0.1")
+	t.Setenv("APP_DATABASE__PORT", "1")
+	t.Setenv("APP_REDIS__ADDR", "127.0.0.1:1")
 }
 
 func TestDefaultRuntimesHonorCanceledStartup(t *testing.T) {
