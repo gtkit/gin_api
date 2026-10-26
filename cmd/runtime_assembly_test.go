@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,13 +33,22 @@ func TestCommandHelpDoesNotLoadRuntimeConfiguration(t *testing.T) {
 }
 
 func TestServerUsesDefaultConfigurationLoader(t *testing.T) {
-	t.Setenv("APP_ROOT", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("APP_ROOT", root)
 	command := newServerCmd(nil)
 	command.SetOut(io.Discard)
 	command.SetErr(io.Discard)
 	err := command.ExecuteContext(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "bootstrap app") || !strings.Contains(err.Error(), "config") {
+	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("default configuration error=%v", err)
+	}
+	pathErr, ok := errors.AsType[*os.PathError](err)
+	wantPath := filepath.Join(root, "config", "env", "env.yml")
+	if !ok || pathErr.Path != wantPath {
+		t.Fatalf("configuration error=%v, want missing path %s", err, wantPath)
+	}
+	if !strings.HasPrefix(err.Error(), "bootstrap app: ") {
+		t.Fatalf("missing command error context: %v", err)
 	}
 }
 

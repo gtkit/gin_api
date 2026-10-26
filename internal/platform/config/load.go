@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,7 +21,7 @@ import (
 )
 
 // configFile 是外置配置的固定相对路径。配置一律从磁盘读取，不进二进制、不进 git；
-// 路径解析见 resource.ResolvePath（可执行文件同级的 config/env/ 优先）。
+// 非空 APP_ROOT 只在指定根内查找；未指定根时沿用 resource.ResolvePath。
 const configFile = "config/env/env.yml"
 
 // envPrefix 是配置覆盖层的环境变量前缀。
@@ -32,8 +34,8 @@ const envPrefix = "APP_"
 
 // envReservedNames 是 `APP_` 前缀下已被本项目占用、不参与配置覆盖的变量名。
 //
-// `APP_ROOT` 指定项目根目录，`resource.ResolvePath`、`resource.WriteRoot` 与
-// `validateLogConfig` 都读它，生产的 supervisor 配置里就有这一条
+// `APP_ROOT` 指定项目根目录，主配置选择、`resource.ResolvePath`、
+// `resource.WriteRoot` 与 `validateLogConfig` 都读它，生产的 supervisor 配置里就有这一条
 // （见 SCAFFOLD.md 的部署段）。不排除的话它会被映射成配置键 `root`，
 // 撞上未知键 fail-fast——一个由本层引入、让所有既有部署直接起不来的回归。
 //
@@ -67,10 +69,14 @@ func envKeyToConfigPath(name string) string {
 	return strings.ReplaceAll(strings.ToLower(trimmed), "__", ".")
 }
 
-// Load 从磁盘固定路径 config/env/env.yml 读取 typed config。
-// 找不到文件直接报错（fail-fast）：部署须显式提供该文件（参照 config/env.yml.example）。
+// Load 从磁盘读取 typed config。非空 APP_ROOT 只允许依次选择根内的
+// config/env/env.yml、v2/config/env/env.yml；未设置或为空时沿用原资源查找规则。
+// 选中文件后读取、解析或校验失败均直接返回，不再尝试其他配置。
 func Load() (*Config, error) {
-	configPath := resource.ResolvePath(configFile)
+	configPath, err := resolveConfigFile(os.Getenv("APP_ROOT"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve config file: %w", err)
+	}
 	k := koanf.New(".")
 	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
@@ -88,6 +94,24 @@ func Load() (*Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// resolveConfigFile 只约束主配置，不改变密钥、证书和写目录的资源解析。
+func resolveConfigFile(appRoot string) (string, error) {
+	if appRoot == "" {
+		return resource.ResolvePath(configFile), nil
+	}
+
+	primary := filepath.Join(appRoot, configFile)
+	for _, candidate := range [...]string{primary, filepath.Join(appRoot, "v2", configFile)} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	// 让现有读取流程报告主路径缺失，并保留底层 PathError。
+	return primary, nil
 }
 
 // checkConfigFileSafety 校验生产配置文件的形态（config-validation spec）：

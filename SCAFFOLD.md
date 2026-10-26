@@ -115,6 +115,14 @@ make project-init NAME=your_project
 - `user` 模块保留作为认证/参考起点（它是 `sharedauth.UserVerifier` 提供者），按新项目需要改造或替换。
 - 提交前跑 `make check`；CI 使用相同的 `make check-ci` 入口。部署脚本与部署 CI 配置是外部冻结方案，其中不含质量 job。
 
+## 运行配置的根目录
+
+`server`、`migrate`、项目 CLI 的 `make` 和 `doctor` 进入共享配置加载器时，非空 `APP_ROOT` 只允许依次选择该根内的 `config/env/env.yml`、`v2/config/env/env.yml`。只有前者不存在才尝试后者；两者缺失、路径探测发生其他错误或选中文件无效时直接失败，不再从可执行文件上级、源码目录或工作目录补齐。升级前须将所属环境的配置准备在显式根内，否则依赖旧回退的服务启动、迁移、生成和诊断命令会失败。
+
+`APP_ROOT` 未设置或为空时沿用旧查找顺序；相对根按进程工作目录解释，空格不裁剪，部署建议使用绝对根。`v2` 候选保留兼容，实际部署使用情况未确认。这里的 `make` 是项目 CLI 命令；帮助、无参分支仍按原控制流处理，不承诺所有带 `--help` 的组合都跳过加载。
+
+JWT 命令单独读取配置，不识别上述 `v2` 候选。其他资源路径及生产文件安全规则沿用原约定，详见 [配置加载说明](config/README.md#app_root-与主配置路径)。
+
 ## JWT 密钥轮换操作手册
 
 母版的 JWT 使用**带 kid 的多密钥**体系。local 模式由 `gojwt` 签发；external 模式只加载 active/previous 公钥验签，不提供签发器、不读取私钥。Ed25519 私钥采用 PKCS#8 PEM（`PRIVATE KEY`），公钥采用 PKIX PEM（`PUBLIC KEY`），支持 Go `crypto/x509` 与 OpenSSL。

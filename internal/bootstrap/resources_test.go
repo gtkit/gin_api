@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,6 +29,56 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
+
+func TestAppAndMigrationConfigurationFailureOpenNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func(context.Context, *runtimeFactories) (bool, error)
+	}{
+		{"app", func(ctx context.Context, factories *runtimeFactories) (bool, error) {
+			app, err := NewApp(ctx, Options{factories: factories})
+			return app != nil, err
+		}},
+		{"migration", func(ctx context.Context, factories *runtimeFactories) (bool, error) {
+			runtime, err := NewMigrationRuntime(ctx, MigrationOptions{factories: factories})
+			return runtime != nil, err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configErr := errors.New("configuration unavailable")
+			var calls []string
+			unexpected := func(name string) error {
+				calls = append(calls, name)
+				return fmt.Errorf("unexpected resource initialization: %s", name)
+			}
+			factories := runtimeFactories{
+				loadConfig: func(context.Context) (*config.Config, error) {
+					calls = append(calls, "configuration")
+					return nil, configErr
+				},
+				logs: func(context.Context, *config.Config) (logOwner, error) {
+					return nil, unexpected("logging")
+				},
+				database: func(context.Context, *config.Config, bool) (databaseOwner, error) {
+					return nil, unexpected("database")
+				},
+				redis: func(context.Context, *config.Config) (redisOwner, error) {
+					return nil, unexpected("redis")
+				},
+				cache: func(context.Context, *config.Config, data.RedisClientProvider) (cacheOwner, error) {
+					return nil, unexpected("cache")
+				},
+			}
+			hasOwner, err := tc.start(t.Context(), &factories)
+			if hasOwner || !errors.Is(err, configErr) {
+				t.Fatalf("owner returned=%v, error=%v; want only configuration failure", hasOwner, err)
+			}
+			if !slices.Equal(calls, []string{"configuration"}) {
+				t.Fatalf("factory calls=%v, want only configuration", calls)
+			}
+		})
+	}
+}
 
 func TestRuntimeStartupSharesTotalAndPerResourceDeadlines(t *testing.T) {
 	for _, mode := range []string{"single", "total"} {
