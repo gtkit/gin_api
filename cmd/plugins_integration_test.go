@@ -36,10 +36,14 @@ import (
 )
 
 // TASKQUEUE: 启用可选队列并运行本集成测试时，取消下一行 import 声明和配置清空语句的注释。
+// wiring:begin plugins.taskqueue.import taskqueue line
 // import "github.com/gtkit/gin-api/internal/optional/taskqueue"
+// wiring:end plugins.taskqueue.import
 
 // OUTBOUND: 启用出站 HTTP 接线时恢复此 import 和 cfg.Outbound 清空语句。
+// wiring:begin plugins.outbound.import outbound line
 // import "github.com/gtkit/gin-api/internal/optional/outbound"
+// wiring:end plugins.outbound.import
 
 // Run by Make before any other integration package can connect.
 func TestPluginIntegrationPrerequisites(t *testing.T) {
@@ -91,6 +95,51 @@ func TestIsolatedPluginRoot(t *testing.T) {
 	}
 	if _, err := isolatedPluginRoot(root); err == nil || !strings.Contains(err.Error(), "escapes APP_ROOT") {
 		t.Fatalf("accepted config escape: %v", err)
+	}
+}
+
+func TestPluginRootRequiresMainConfig(t *testing.T) {
+	for _, mode := range []string{"missing main", "v2 only", "directory main"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			switch mode {
+			case "v2 only":
+				dir := filepath.Join(root, "v2", "config", "env")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "env.yml"), []byte("# metadata-only fixture\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory main":
+				if err := os.MkdirAll(filepath.Join(root, "config", "env", "env.yml"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := isolatedPluginRoot(root); err == nil {
+				t.Fatal("accepted a root without a regular main configuration file")
+			} else if mode != "directory main" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing main configuration cause lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalPluginConfigurationUsesSyntheticFile(t *testing.T) {
+	cfg := validConfigForDoctor()
+	cfg.Database.Name = "v11_owned_config"
+	cfg.Database.Username = "v11_fixture_user"
+	installPluginConfiguration(t, *cfg)
+	t.Setenv("APP_DATABASE__NAME", "inherited_value_must_not_win")
+	loaded := localPluginConfiguration(t)
+	if loaded.Database.Name != cfg.Database.Name || loaded.Database.Username != cfg.Database.Username {
+		t.Fatal("plugin configuration did not use the synthetic file")
+	}
+	if loaded.Database.Host != "127.0.0.1" || loaded.Database.Port != "3306" || loaded.Redis.Addr != "127.0.0.1:6379" {
+		t.Fatal("plugin configuration lost its loopback target restrictions")
+	}
+	if loaded.Auth.Mode != config.AuthModeExternal || loaded.JWT.Active.KID != "plugin-itest" {
+		t.Fatal("plugin configuration did not install its synthetic authentication settings")
 	}
 }
 
@@ -230,8 +279,12 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
 	cfg.RateLimit = config.RateLimitConfig{}
 	// OUTBOUND: 启用出站 HTTP 接线时取消注释，避免集成测试继承业务下游配置。
+	// wiring:begin plugins.outbound.reset outbound line
 	// cfg.Outbound = outbound.Config{}
+	// wiring:end plugins.outbound.reset
+	// wiring:begin plugins.taskqueue.reset taskqueue line
 	// cfg.Tasks = taskqueue.Config{}
+	// wiring:end plugins.taskqueue.reset
 	cfg.Telemetry = config.TelemetryConfig{}
 	cfg.Pprof = config.PprofConfig{}
 	cfg.News = config.NewsConfig{}

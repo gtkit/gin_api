@@ -203,7 +203,7 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
 1. **连接注册表**：`Hijack` 之后的连接**不受 `http.Server.Shutdown` 管理**——Shutdown 只等非 hijacked 的请求收尾。没有注册表的话，Shutdown 会正常返回，而 WS 连接还全都活着。
 2. **draining 阶段独立 drain**：向每个连接发 close frame，超时后强制 `Close()`。它排在分相关停的哪一步取决于该端点是生产者还是消费者语义，需在该 change 里明确。
 
-超时侧同样要注意：WS 走 `TimeoutStreaming`（可续期的写空闲超时），**不能**用 `TimeoutClientVisible`——那个 wrapper 会缓存响应且不透明，Hijack 拿不到底层连接。
+超时侧同样要注意：WebSocket升级前受普通HTTP预算约束；Hijack后由业务持有连接并管理读写期限及退出。`StreamTimeout`面向经`c.Writer`写出的HTTP流，不替代WebSocket连接管理。当前没有预置WebSocket业务路由。
 
 ## CORS 请求头清理清单
 
@@ -374,7 +374,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 文档引用存在性检查 | `scripts/check-doc-refs.go` | 跟踪的 `*.md` 里的链接与反引号裸路径必须解析到真实路径；解析不到要么修好、要么在登记表中认领，失效的登记同样失败 |
 | 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
-| 路由级超时 | `internal/middleware/routetimeout.go` | 三种 mode；两级预算（ctx + socket 写 deadline）；服务器层有保守写超时兜底，流式路由经 `ResponseController` 覆盖 |
+| 路由级超时 | `internal/middleware/routetimeout.go` | API默认30秒/写宽限2秒，auth仍10秒/2秒；按实际ctx期限保护完整响应；server的60秒仅是初始写期限 |
 | Panic 恢复 | `internal/middleware/recovery.go` | 全局第一道。普通 panic 返回统一 500；连接已断或响应已开始写出时只记日志不改写响应。**刻意不接告警**——请求级异常接告警会在一次流量异常里形成告警风暴，淹没进程级事件 |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
@@ -505,6 +505,12 @@ func Register(r *gin.RouterGroup, deps Deps) {
 换来的是任何会 gin 的人不用先学一套只在本仓成立的写法。
 
 可用的路由级中间件：
+
+`/api/v1`父组已在认证前挂30秒业务预算及2秒写出宽限，auth子组仍为10秒/2秒；更早的父期限保留。
+Timeout退出时不清零写期限，外层错误响应与最终flush仍受保护；HTTP/1请求结束由服务器清理，HTTP/2按流处理。
+`/health`与`/ready`在业务组外，readiness只将依赖结果缓存1秒，同一实例同时最多一个独立2秒探测批次，进程状态仍实时裁决。
+可选上传/下载恢复接线后也继承API父预算；StreamTimeout续期不能延长已存在的普通路由期限。
+超过30秒的未来流式路由须另行设计并验收其挂载位置和取消/写出契约。
 
 | 中间件 | 用途 |
 |--------|------|

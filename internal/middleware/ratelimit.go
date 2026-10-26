@@ -3,6 +3,8 @@ package middleware
 import (
 	"fmt"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
@@ -50,6 +52,7 @@ func RateLimit(
 	}
 
 	policy := limiter.Policy()
+	logs := rateLimitLogState{now: time.Now}
 
 	return func(c *gin.Context) {
 		subject, err := rateLimitSubject(c, policy)
@@ -66,13 +69,17 @@ func RateLimit(
 		key := keys.Build(policy, c.Request.Method, c.FullPath(), subject)
 
 		decision, checkErr := limiter.Check(c.Request.Context(), key)
-		if checkErr != nil {
-			// 后端故障已由执行体按 FailureMode 翻译成最终判定，
-			// 这里只负责留痕——不留的话，一次长时间的降级不会有任何记录。
+		action, suppressed := logs.observe(checkErr)
+		switch action {
+		case rateLimitLogFailure:
+			// 执行体保留 FailureMode 决策；日志只限制重复输出。
 			logger.Warn("rate limit backend error; the policy's failure mode decided the outcome",
 				zap.String("policy", policy.ID),
 				zap.String("outcome", decision.Outcome.String()),
-				zap.Error(checkErr))
+				zap.Error(checkErr), zap.Uint64("suppressed", suppressed))
+		case rateLimitLogRecovery:
+			logger.Info("rate limit backend recovered", zap.String("policy", policy.ID),
+				zap.Uint64("suppressed", suppressed))
 		}
 
 		// **每次判定都记**，不只记拒绝：没有分母就算不出拒绝率，
@@ -88,6 +95,50 @@ func RateLimit(
 		}
 		rejectRateLimited(c, decision)
 	}
+}
+
+const rateLimitLogInterval = 30 * time.Second
+
+type rateLimitLogAction uint8
+
+const (
+	rateLimitLogNone rateLimitLogAction = iota
+	rateLimitLogFailure
+	rateLimitLogRecovery
+)
+
+// rateLimitLogState stores a fixed amount of state per middleware instance.
+type rateLimitLogState struct {
+	mu         sync.Mutex
+	now        func() time.Time
+	failing    bool
+	lastLogged time.Time
+	suppressed uint64
+}
+
+func (s *rateLimitLogState) observe(err error) (rateLimitLogAction, uint64) {
+	if err != nil && IsClientGone(err) {
+		return rateLimitLogNone, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		if !s.failing {
+			return rateLimitLogNone, 0
+		}
+		suppressed := s.suppressed
+		s.failing, s.suppressed = false, 0
+		s.lastLogged = time.Time{}
+		return rateLimitLogRecovery, suppressed
+	}
+	now := s.now()
+	if s.failing && now.Sub(s.lastLogged) < rateLimitLogInterval {
+		s.suppressed++
+		return rateLimitLogNone, 0
+	}
+	suppressed := s.suppressed
+	s.failing, s.lastLogged, s.suppressed = true, now, 0
+	return rateLimitLogFailure, suppressed
 }
 
 // rateLimitSubject 取限流主体。

@@ -88,6 +88,27 @@ JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 服务连接和迁移连接都使用这组选项。当前 YAML **没有** `database.prepare_stmt` 等开关，
 不能通过增加一个未被读取的字段来关闭它。
 
+缓存通过同一 `buildOpenOptions` 给服务和迁移传入有限参数：
+
+| 配置键 | 用途 | 省略/0 | 合法显式值 |
+|---|---|---|---|
+| `database.prepare_stmt_max_size` | 每个 GORM 缓存驻留的 SQL 种类上限 | 128 | 1..4096 |
+| `database.prepare_stmt_ttl_seconds` | 每条缓存语句的存活秒数，独立于 SQL 执行超时 | 3600 | 1..86400 |
+
+负数或超上界在配置加载时拒绝，两项可分别设置；`APP_DATABASE__PREPARE_STMT_MAX_SIZE`
+和 `APP_DATABASE__PREPARE_STMT_TTL_SECONDS` 可覆盖 YAML。旧配置不加新键也使用有限默认值。
+淘汰和过期会异步关闭语句；TTL 不是空闲超时，不因命中缓存而续期。
+
+容量配置不是 MySQL 的全局 prepared statement 配额。部署估算可先用
+`缓存种类上限 × 实际参与连接数 × 同库副本数 + 其他客户端占用`；例如 128 × 25 = 3200
+只是单副本的粗略估算输入。实际占用还受连接轮换、异步关闭、SQL 种类及其他进程影响，
+必须用真实 MySQL/代理指标核对，不能据此承诺瞬时上限或生产容量充分。
+
+部署交接需确认实际配置来源、同库副本数、连接池上限、MySQL 配额和代理版本，再决定是否覆盖默认值。
+本次没有读取或修改含密钥的 `config/env/env.yml`，没有真实服务或多副本容量验证。
+若回滚到不认识新字段的旧二进制，**先从 YAML 和 APP_ 覆盖中移除这两个新键，再回滚二进制**，
+否则旧版本的严格配置解码会拒绝未知字段；回滚不涉及数据库 schema 或历史 SQL。
+
 ProxySQL 支持 MySQL 预编译语句，不能把启用 PrepareStmt 一概判定为不兼容。
 需要关注的是预编译语句生命周期与后端连接复用：按
 [ProxySQL 官方说明](https://proxysql.com/documentation/mysql-prepared-statements-pooling-and-caching)，
@@ -98,7 +119,7 @@ SQL 文本 `PREPARE` 与驱动使用的二进制预编译协议还有不同的�
 事务、连接回收/重连和后端切换，并观察实际后端连接占用及预编译语句统计。
 `database.maxopenconn` 是单个应用连接池上限，不能据此直接推断 ProxySQL 的总后端连接需求。
 本仓没有针对指定 ProxySQL 部署的联调结果，不承诺任意版本/配置兼容，也不因缺少说明而认定现有查询会失败。
-若部署验证表明需要关闭缓存，再单独实施配置与代码变更，并同步示例和验收；本文不改变当前默认行为。
+若部署验证表明需要关闭缓存，再单独实施开关与代码变更，并同步示例和验收；本次仍保持预编译开启。
 
 ## 通知通道与告警开关
 

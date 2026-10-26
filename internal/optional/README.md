@@ -1,5 +1,15 @@
 # 可选扩展
 
+## 独立接线编译
+
+`make check-optional-wiring`验证default、taskqueue、upload、outbound、auditlog、all、removed七种样例。
+唯一实现为`scripts/check-optional-wiring.go`，标准库Go工具按40处wiring标记恢复自有临时副本，
+默认不改主工作区、不启用可选业务、不启动服务；removed只在副本中排除可选目录。
+它不在check/check-ci/CI中，接入门禁须先记录冷/热成本并取得明确决定。
+命令、复制白名单、离线环境及证明范围见[脚本说明](../../scripts/README.md#check-optional-wiringgo)。
+
+## 能力与边界
+
 这里集中保存项目内部按需启用、可整体删除的能力。使用 `internal` 保持 Go 的包访问限制；
 `optional` 只表示默认未接线，不提供动态插件加载、注册表或统一扩展接口。
 

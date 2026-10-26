@@ -152,9 +152,11 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	// OUTBOUND: 恢复 Outbound 字段后，取消下面配置校验的注释。
+	// wiring:begin config.outbound.validate outbound line
 	// if err := c.Outbound.Validate(); err != nil {
 	// 	errs = append(errs, err)
 	// }
+	// wiring:end config.outbound.validate
 	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
@@ -162,9 +164,11 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	// TASKQUEUE: 恢复 Tasks 字段后，取消下面配置校验的注释。
+	// wiring:begin config.taskqueue.validate taskqueue line
 	// if err := c.Tasks.Validate(c.Redis.Addr, c.Redis.DBs); err != nil {
 	// 	errs = append(errs, err)
 	// }
+	// wiring:end config.taskqueue.validate
 	if err := validateNewsConfig(c.News); err != nil {
 		errs = append(errs, err)
 	}
@@ -350,6 +354,17 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 	}
 	errs = append(errs,
 		mustNonNegative("database.maxidletimeseconds", database.MaxIdleTimeSeconds))
+	if database.PrepareStmtMaxSize < 0 || database.PrepareStmtMaxSize > maxDBPrepareStmtMaxSize {
+		errs = append(errs, fmt.Errorf(
+			"database.prepare_stmt_max_size must be 0 (default %d) or between 1 and %d",
+			DefaultDBPrepareStmtMaxSize, maxDBPrepareStmtMaxSize))
+	}
+	// 在转换为 time.Duration 前限制整数秒，避免溢出或底层回退到无界默认值。
+	if database.PrepareStmtTTLSeconds < 0 || database.PrepareStmtTTLSeconds > maxDBPrepareStmtTTLSeconds {
+		errs = append(errs, fmt.Errorf(
+			"database.prepare_stmt_ttl_seconds must be 0 (default %d) or between 1 and %d",
+			DefaultDBPrepareStmtTTLSeconds, maxDBPrepareStmtTTLSeconds))
+	}
 	if err := validateMinVersion(database.EffectiveMinVersion()); err != nil {
 		errs = append(errs, err)
 	}
@@ -456,9 +471,11 @@ func validateRedisCapabilities(c Config) error {
 		consumers = append(consumers, "redis response cache")
 	}
 	// TASKQUEUE: 启用后取消注释，使队列必须配置 Redis 地址。
+	// wiring:begin config.taskqueue.redis taskqueue line
 	// if c.Tasks.Enabled {
 	// 	consumers = append(consumers, "task queue")
 	// }
+	// wiring:end config.taskqueue.redis
 	if len(consumers) == 0 {
 		return nil
 	}

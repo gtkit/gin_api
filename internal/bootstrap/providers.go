@@ -19,17 +19,25 @@ import (
 )
 
 // TASKQUEUE: 启用可选队列时取消下一行 import 声明和 infra.tasksProducer 字段的注释。
+// wiring:begin providers.taskqueue.import taskqueue line
 // import "github.com/gtkit/gin-api/internal/optional/taskqueue"
+// wiring:end providers.taskqueue.import
 
 // UPLOAD: 启用本地上传时取消下面两个 import 声明及 infra.uploader 字段的注释。
+// wiring:begin providers.upload.import upload line
 // import "github.com/gtkit/gin-api/internal/optional/upload"
 // import "github.com/gtkit/gouploader"
+// wiring:end providers.upload.import
 
 // OUTBOUND: 恢复出站 HTTP 接线时取消此 import 与 infra.outbound 字段的注释。
+// wiring:begin providers.outbound.import outbound line
 // import "github.com/gtkit/gin-api/internal/optional/outbound"
+// wiring:end providers.outbound.import
 
 // AUDITLOG: 恢复审计接线时取消此 import 与 infra.auditRecorder 字段的注释。
+// wiring:begin providers.auditlog.import auditlog line
 // import "github.com/gtkit/gin-api/internal/optional/auditlog"
+// wiring:end providers.auditlog.import
 
 type providerSet struct {
 	cleanup    *providerCleanup
@@ -51,17 +59,25 @@ type infra struct {
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
 	// OUTBOUND: 具名出站客户端、重试与熔断，供业务服务显式注入。
+	// wiring:begin providers.outbound.field outbound line
 	// outbound *outbound.Downstreams
+	// wiring:end providers.outbound.field
 	// AUDITLOG: 审计记录器，Run 由 consumer worker 管理。
+	// wiring:begin providers.auditlog.field auditlog line
 	// auditRecorder *auditlog.Recorder
+	// wiring:end providers.auditlog.field
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache httpcache.ResponseCache
 	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
 	telemetry *telemetry.Provider
 	// TASKQUEUE: 供业务 service 显式注入的入队端，启用时取消注释。
+	// wiring:begin providers.taskqueue.field taskqueue line
 	// tasksProducer *taskqueue.Producer
+	// wiring:end providers.taskqueue.field
 	// UPLOAD: 由业务服务共享的上传器，关闭由 providerCleanup 负责。
+	// wiring:begin providers.upload.field upload line
 	// uploader *gouploader.Uploader
+	// wiring:end providers.upload.field
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
@@ -83,10 +99,7 @@ func newProvidersWithBudget(
 		}
 	}()
 
-	// 0. 首次绑定前初始化翻译器，避免 validator 缓存未经翻译的字段元数据。
-	if err := initValidation(); err != nil {
-		return nil, err
-	}
+	// Runtime 已在任何 HTTP 绑定前通过 initProcessRuntime 完成校验器初始化。
 
 	// 1. 基础设施视图：从 Runtime 借用已初始化的配置、数据库与日志，
 	//    并据此派生 HTTP 配置。连接的关闭权仍属于 Runtime，
@@ -141,9 +154,11 @@ func newProvidersWithBudget(
 	cleanup.push("rate limits", cleanupExtensions, func(context.Context) error { return closeRateLimits(rateLimits) })
 
 	// OUTBOUND: 先恢复 outbound.go 及配置接线，再取消下面调用的注释。
+	// wiring:begin providers.outbound.call outbound line
 	// if err := buildOutbound(&inf, cleanup); err != nil {
 	// 	return nil, err
 	// }
+	// wiring:end providers.outbound.call
 
 	// 3c. 借用 Runtime 所有的响应缓存视图，不重复创建或关闭 Store。
 	//     Redis 恢复后既有中间件延迟接入 Store，Enabled 仅用于报告当前状态。
@@ -160,12 +175,15 @@ func newProvidersWithBudget(
 
 	// TASKQUEUE: 启用时先恢复 taskqueue.go 的实现，再取消下面调用的注释。
 	// 必须位于 buildServices 之前，业务 service 才能通过 inf.tasksProducer 接收依赖。
+	// wiring:begin providers.taskqueue.call taskqueue line
 	// if err := buildTaskQueueProducer(&inf, cleanup); err != nil {
 	// 	return nil, err
 	// }
+	// wiring:end providers.taskqueue.call
 
 	// UPLOAD: 先恢复 upload.go，再按实际部署填写目录、大小上限和类型白名单。
 	// 这组值仅为接线示例，两个存储目录均应由部署显式确定。
+	// wiring:begin providers.upload.call upload line
 	// uploadOptions := upload.LocalOptions{
 	// 	Dir:          "./storage/uploads",
 	// 	MaxFileSize:  16 << 20,
@@ -176,11 +194,14 @@ func newProvidersWithBudget(
 	// ); err != nil {
 	// 	return nil, err
 	// }
+	// wiring:end providers.upload.call
 
 	// AUDITLOG: 恢复 auditlog.go 后取消注释；记录器不在此启动 goroutine。
+	// wiring:begin providers.auditlog.call auditlog line
 	// if err := buildAuditLog(&inf); err != nil {
 	// 	return nil, err
 	// }
+	// wiring:end providers.auditlog.call
 
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)

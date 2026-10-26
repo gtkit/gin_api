@@ -103,6 +103,22 @@ func (c DatabaseConfig) EffectiveMaxIdleTimeSeconds() int {
 	return DefaultDBMaxIdleTimeSeconds
 }
 
+// EffectivePrepareStmtMaxSize 返回已校验配置的预编译缓存容量，0 使用 128。
+func (c DatabaseConfig) EffectivePrepareStmtMaxSize() int {
+	if c.PrepareStmtMaxSize > 0 {
+		return c.PrepareStmtMaxSize
+	}
+	return DefaultDBPrepareStmtMaxSize
+}
+
+// EffectivePrepareStmtTTLSeconds 返回已校验配置的缓存存活秒数，0 使用 3600。
+func (c DatabaseConfig) EffectivePrepareStmtTTLSeconds() int {
+	if c.PrepareStmtTTLSeconds > 0 {
+		return c.PrepareStmtTTLSeconds
+	}
+	return DefaultDBPrepareStmtTTLSeconds
+}
+
 // RuntimeCredentials 返回服务进程使用的凭据。
 // 服务永远只用这一套，不会因为配置了迁移凭据而改变自身连接身份。
 func (c DatabaseConfig) RuntimeCredentials() DBCredentials {

@@ -107,6 +107,93 @@ func coreValidationFields(err error) []string {
 	return []string{strings.Fields(err.Error())[0]}
 }
 
+func TestValidateDatabasePrepareStmtBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		size int
+		ttl  int
+		want []string
+	}{
+		{name: "omitted"},
+		{name: "minimum", size: 1, ttl: 1},
+		{name: "maximum", size: 4096, ttl: 86400},
+		{name: "negative size", size: -1, want: []string{"database.prepare_stmt_max_size"}},
+		{name: "size above maximum", size: 4097, want: []string{"database.prepare_stmt_max_size"}},
+		{name: "largest size", size: math.MaxInt, want: []string{"database.prepare_stmt_max_size"}},
+		{name: "smallest size", size: math.MinInt, want: []string{"database.prepare_stmt_max_size"}},
+		{name: "negative ttl", ttl: -1, want: []string{"database.prepare_stmt_ttl_seconds"}},
+		{name: "ttl above maximum", ttl: 86401, want: []string{"database.prepare_stmt_ttl_seconds"}},
+		{name: "largest ttl", ttl: math.MaxInt, want: []string{"database.prepare_stmt_ttl_seconds"}},
+		{name: "smallest ttl", ttl: math.MinInt, want: []string{"database.prepare_stmt_ttl_seconds"}},
+		{name: "both invalid", size: -1, ttl: 86401, want: []string{"database.prepare_stmt_max_size", "database.prepare_stmt_ttl_seconds"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validConfigForTest()
+			cfg.Database.PrepareStmtMaxSize = tt.size
+			cfg.Database.PrepareStmtTTLSeconds = tt.ttl
+			before := cfg.Database
+			err := cfg.Validate()
+			got := coreValidationFields(err)
+			slices.Sort(got)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("Validate fields = %v, want %v; error: %v", got, tt.want, err)
+			}
+			if cfg.Database != before {
+				t.Fatal("validation changed database configuration")
+			}
+		})
+	}
+}
+
+func TestLoadPrepareStmtCacheSettings(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		yaml      string
+		env       map[string]string
+		wantSize  int
+		wantTTL   int
+		wantField string
+	}{
+		{name: "omitted retains defaults", wantSize: 128, wantTTL: 3600},
+		{name: "explicit zero retains defaults", yaml: "  prepare_stmt_max_size: 0\n  prepare_stmt_ttl_seconds: 0\n", wantSize: 128, wantTTL: 3600},
+		{name: "minimum", yaml: "  prepare_stmt_max_size: 1\n  prepare_stmt_ttl_seconds: 1\n", wantSize: 1, wantTTL: 1},
+		{name: "maximum", yaml: "  prepare_stmt_max_size: 4096\n  prepare_stmt_ttl_seconds: 86400\n", wantSize: 4096, wantTTL: 86400},
+		{name: "environment overrides yaml", yaml: "  prepare_stmt_max_size: 256\n  prepare_stmt_ttl_seconds: 90\n",
+			env: map[string]string{"APP_DATABASE__PREPARE_STMT_MAX_SIZE": "64", "APP_DATABASE__PREPARE_STMT_TTL_SECONDS": "120"}, wantSize: 64, wantTTL: 120},
+		{name: "environment zero selects defaults", yaml: "  prepare_stmt_max_size: 256\n  prepare_stmt_ttl_seconds: 90\n",
+			env: map[string]string{"APP_DATABASE__PREPARE_STMT_MAX_SIZE": "0", "APP_DATABASE__PREPARE_STMT_TTL_SECONDS": "0"}, wantSize: 128, wantTTL: 3600},
+		{name: "yaml size rejected", yaml: "  prepare_stmt_max_size: -1\n", wantField: "database.prepare_stmt_max_size"},
+		{name: "environment ttl rejected", env: map[string]string{"APP_DATABASE__PREPARE_STMT_TTL_SECONDS": "86401"}, wantField: "database.prepare_stmt_ttl_seconds"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			yaml := strings.Replace(minimalConfigYAML(), "database:\n", "database:\n"+tt.yaml, 1)
+			cfg, err := loadFromReader(strings.NewReader(yaml))
+			if tt.wantField != "" {
+				if cfg != nil || !slices.Equal(coreValidationFields(err), []string{tt.wantField}) {
+					t.Fatalf("invalid cache configuration was not rejected for %s: %v", tt.wantField, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load cache configuration: %v", err)
+			}
+			if got := cfg.Database.EffectivePrepareStmtMaxSize(); got != tt.wantSize {
+				t.Errorf("cache size = %d, want %d", got, tt.wantSize)
+			}
+			if got := cfg.Database.EffectivePrepareStmtTTLSeconds(); got != tt.wantTTL {
+				t.Errorf("cache ttl = %d, want %d", got, tt.wantTTL)
+			}
+		})
+	}
+}
+
 func TestLogEnvironmentAndSlowThreshold(t *testing.T) {
 	t.Parallel()
 	for _, environment := range []env.Env{env.Dev, env.Test, env.Prod} {

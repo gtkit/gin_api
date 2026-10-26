@@ -166,6 +166,9 @@ func buildOpenOptions(
 		ormx.WithUser(creds.Username),
 		ormx.WithPassword(creds.Password),
 		ormx.WithPrepareStmt(true),
+		ormx.WithPrepareStmtCache(
+			dbCfg.EffectivePrepareStmtMaxSize(),
+			time.Duration(dbCfg.EffectivePrepareStmtTTLSeconds())*time.Second),
 		ormx.WithSkipDefaultTransaction(true),
 
 		// 把驱动错误翻译成 GORM 的统一错误类型（gorm.ErrDuplicatedKey 等）。

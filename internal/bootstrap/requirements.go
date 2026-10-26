@@ -35,9 +35,11 @@ func RedisRequired(cfg *config.Config) bool {
 	}
 
 	// TASKQUEUE: 启用队列时取消注释；队列的入队、消费和调度需要 Redis。
+	// wiring:begin requirements.taskqueue taskqueue line
 	// if cfg.Tasks.Enabled {
 	// 	return true
 	// }
+	// wiring:end requirements.taskqueue
 
 	// 新增其他依赖 Redis 的能力时在此追加，形如：
 	//   if cfg.Cron.Enabled { return true }

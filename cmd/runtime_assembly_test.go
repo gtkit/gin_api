@@ -52,6 +52,47 @@ func TestServerUsesDefaultConfigurationLoader(t *testing.T) {
 	}
 }
 
+func TestCommandsRejectExplicitRootWithoutConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		prefix string
+	}{
+		{"migrate", []string{"migrate", "up"}, "bootstrap runtime: "},
+		{"make", []string{"make", "migration", "create_v11_probe_table"}, "bootstrap runtime: "},
+		{"doctor", []string{"doctor"}, "validate runtime configuration: "},
+		{"doctor deep", []string{"doctor", "--deep", "--json"}, "validate runtime configuration: "},
+	} {
+		for _, mode := range []string{"missing", "directory"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				t.Setenv("APP_ROOT", root)
+				path := filepath.Join(root, "config", "env", "env.yml")
+				if mode == "directory" {
+					if err := os.MkdirAll(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				command := NewRootCmd(nil)
+				command.SetOut(io.Discard)
+				command.SetErr(io.Discard)
+				command.SetArgs(tc.args)
+				err := command.ExecuteContext(t.Context())
+				pathErr, ok := errors.AsType[*os.PathError](err)
+				if !ok || pathErr.Path != path {
+					t.Fatalf("command error=%v; want explicit-root file error for %s", err, path)
+				}
+				if mode == "missing" && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("missing configuration cause lost: %v", err)
+				}
+				if !strings.HasPrefix(err.Error(), tc.prefix) {
+					t.Fatalf("command error=%v; want prefix %q", err, tc.prefix)
+				}
+			})
+		}
+	}
+}
+
 func TestDefaultRuntimesHonorCanceledStartup(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

@@ -168,6 +168,24 @@ handler、worker、外部调用尽量透传 request ID；后台任务没有 requ
 请求级异常刻意不接告警——一次流量异常就会形成告警风暴，淹没真正的进程级事件。
 `internal/middleware/recovery.go` 因此只走日志与指标。
 
+### 重复故障日志与键预算告警
+
+每个RateLimit中间件实例首次后端失败立即WARN，持续失败每30秒最多一条，
+下一次输出带窗口内`suppressed`数量；恢复记录一次INFO。错误文字变化不重开窗口，
+纯客户端取消不触发故障或虚假恢复。每次请求仍记录`ratelimit.decisions`，日志限频不改变限流结果。
+每台HTTP server的精确`http: TLS handshake error from `前缀日志采用相同30秒WARN窗口；
+未知HTTP错误及`http: panic serving `仍逐条ERROR，不受TLS窗口抑制。
+
+键预算耗尽时拒绝新键，已有键继续按原桶判定；不得通过淘汰活跃桶使旧主体获得满桶。
+IP经常变化的流量可能让新访客先遇到拒绝，多副本的本地桶也不代表一个全局配额。
+告警以真实仪表名`ratelimit.decisions`及属性`ratelimit.policy`、`ratelimit.outcome=key_limit`为依据：
+建议连续两个1分钟采集窗口均有新增key_limit时告警，连续5分钟无新增时恢复。
+该阈值是初始运维建议；导出后的series名称、属性映射、采集周期、规则路由与接收人需部署方确认，
+当前未接入任何告警接收器，也未验证真实送达。
+
+处置顺序：核对受影响policy、独立主体规模、异常流量及应用副本数；先限制攻击来源或修正过细的键维度，
+在测量容量与资源余量后调整`max_keys`。保留拒绝新键的安全语义，不用清空/淘汰活跃桶掩盖耗尽。
+
 ### 告警通道有真实对外副作用
 
 默认入口把 `notification` 注入 logging 的 Messager。H 系列日志写入有界队列后，依次尝试机器人、邮件和各手机号短信；这是尽力通知，入队、排空返回与真实送达是不同结果。

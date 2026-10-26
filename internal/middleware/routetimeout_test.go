@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,191 @@ func newTimeoutEngine(t *testing.T, timeoutMW gin.HandlerFunc, handler gin.Handl
 
 func cooperativePolicy(deadline, grace time.Duration) gin.HandlerFunc {
 	return Timeout(deadline, grace)
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.deadlines = append(r.deadlines, deadline)
+	return nil
+}
+
+func TestNestedTimeoutKeepsEarliestWriteDeadline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(ErrorHandler())
+	engine.GET("/probe", Timeout(time.Second, time.Second), Timeout(100*time.Millisecond, 50*time.Millisecond),
+		func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/probe", nil))
+	if len(w.deadlines) != 2 || w.deadlines[0].IsZero() || w.deadlines[1].IsZero() || !w.deadlines[1].Before(w.deadlines[0]) {
+		t.Fatalf("nested deadlines must only tighten and never clear: %v", w.deadlines)
+	}
+}
+
+func TestNestedStreamRenewalRespectsRouteDeadline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, streamFirst := range []bool{false, true} {
+		engine := gin.New()
+		chain := []gin.HandlerFunc{Timeout(time.Second, time.Second), StreamTimeout(50 * time.Millisecond)}
+		if streamFirst {
+			chain[0], chain[1] = chain[1], chain[0]
+		}
+		chain = append(chain, func(c *gin.Context) {
+			if err := RenewStreamDeadline(c); err != nil {
+				t.Error(err)
+			}
+			c.Status(http.StatusNoContent)
+		})
+		engine.GET("/probe", chain...)
+		w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		start := time.Now()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/probe", nil))
+		for _, deadline := range w.deadlines {
+			if deadline.IsZero() || deadline.After(start.Add(2100*time.Millisecond)) {
+				t.Fatalf("stream/route deadline was extended or cleared: %v", w.deadlines)
+			}
+		}
+		if streamFirst && w.deadlines[1].After(w.deadlines[0]) {
+			t.Fatalf("inner route extended the existing idle deadline: %v", w.deadlines)
+		}
+	}
+}
+
+func TestResponseTailRetainsWriteDeadline(t *testing.T) {
+	testutil.RequireLoopback(t)
+	for _, serverTimeout := range []time.Duration{0, 60 * time.Second} {
+		t.Run(serverTimeout.String(), func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			type tailResult struct {
+				status int
+				err    error
+			}
+			finished := make(chan tailResult, 1)
+			engine := gin.New()
+			engine.Use(func(c *gin.Context) {
+				c.Next()
+				status := c.Writer.Status()
+				chunk := bytes.Repeat([]byte("x"), 64<<10)
+				var err error
+				for range 4096 {
+					if _, err = c.Writer.Write(chunk); err != nil {
+						break
+					}
+				}
+				finished <- tailResult{status, err}
+			})
+			engine.Use(ErrorHandler())
+			engine.GET("/probe", Timeout(20*time.Millisecond, 100*time.Millisecond), func(c *gin.Context) {
+				<-c.Request.Context().Done()
+				c.Error(c.Request.Context().Err()).Type = gin.ErrorTypePrivate
+			})
+			srv := httptest.NewUnstartedServer(engine)
+			srv.Config.WriteTimeout = serverTimeout
+			srv.Start()
+			t.Cleanup(srv.Close)
+			t.Cleanup(srv.CloseClientConnections)
+			conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			if _, err := fmt.Fprint(conn, "GET /probe HTTP/1.1\r\nHost: test\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			// 不读取响应，迫使外层中间件在 Timeout 已返回后遭遇背压。
+			select {
+			case result := <-finished:
+				if result.status != http.StatusGatewayTimeout {
+					t.Errorf("tail status = %d, want 504", result.status)
+				}
+				if networkErr, ok := errors.AsType[net.Error](result.err); !ok || !networkErr.Timeout() {
+					t.Fatalf("tail write = %v, want a deadline error", result.err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("tail write lost its route deadline after Timeout returned")
+			}
+		})
+	}
+}
+
+func TestHTTP2TimeoutStreamDoesNotBlockSibling(t *testing.T) {
+	testutil.RequireLoopback(t)
+	gin.SetMode(gin.TestMode)
+	written := make(chan error, 1)
+	engine := gin.New()
+	engine.GET("/slow", Timeout(20*time.Millisecond, 100*time.Millisecond), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		c.Writer.Flush()
+		chunk := bytes.Repeat([]byte("x"), 64<<10)
+		for range 4096 {
+			if _, err := c.Writer.Write(chunk); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- nil
+	})
+	engine.GET("/fast", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	var connections atomic.Int32
+	srv := httptest.NewUnstartedServer(engine)
+	srv.EnableHTTP2 = true
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	t.Cleanup(srv.CloseClientConnections)
+	client := srv.Client()
+	client.Timeout = 3 * time.Second
+	client.Transport.(*http.Transport).MaxConnsPerHost = 1
+	slow, err := client.Get(srv.URL + "/slow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := slow.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if slow.ProtoMajor != 2 {
+		t.Fatalf("slow protocol = %s, want HTTP/2", slow.Proto)
+	}
+	fast := func() {
+		t.Helper()
+		response, err := client.Get(srv.URL + "/fast")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Error(err)
+		}
+		if response.StatusCode != http.StatusNoContent || response.ProtoMajor != 2 {
+			t.Fatalf("sibling response = %s %d", response.Proto, response.StatusCode)
+		}
+	}
+	fast()
+	select {
+	case err := <-written:
+		if err == nil {
+			t.Fatal("unread stream did not hit its write deadline")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP/2 stream write deadline did not fire")
+	}
+	fast()
+	if connections.Load() != 1 {
+		t.Fatalf("used %d connections, want one HTTP/2 connection", connections.Load())
+	}
 }
 
 // TestCooperativeTimeoutMapsDeadlineExceededTo504 验证协作式链路的 504。
@@ -275,13 +462,9 @@ func TestWriteDeadlineSurvivesResponseBodyLogging(t *testing.T) {
 	}
 }
 
-// TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline 钉住 deadline 清理。
-//
-// SetWriteDeadline 作用于底层 keep-alive **连接**，不是只作用于当前请求。
-// 不清零的话，一条短预算路由会污染同一连接上的后续请求——
-// 一个 200ms 的探针接口之后紧跟一个 30s 的业务接口，后者会在 200ms 处写失败。
-//
-// 因此这条测试必须在**同一条连接**上连续发两个请求。
+// TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline 验证 net/http 的请求边界清理。
+// 中间件保留尾部写期限；服务器在响应完成后清理，下一条路由设置自己的期限。
+// 因此必须在同一条连接上连续发两个请求。
 func TestKeepAliveConnectionIsNotPollutedByAPreviousDeadline(t *testing.T) {
 	testutil.RequireLoopback(t)
 	gin.SetMode(gin.TestMode)

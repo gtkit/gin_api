@@ -48,12 +48,12 @@ type ResResult struct {
 模块的领域 error 集中映射，**不散落在各个 handler 分支里**：
 
 ```go
-// internal/module/ai/transport/http/errmap.go
+// internal/module/auth/transport/http/handler.go
 var errMapper = resp.NewErrMapper(
     resp.ErrMapping{
-        Target:  application.ErrConversationNotFound,
-        Status:  goerr.StatusRecordNotFound(),
-        Message: "会话不存在",
+        Target:  application.ErrInvalidCredentials,
+        Status:  goerr.StatusAuth(),
+        Message: "手机号或密码错误",
     },
 )
 
@@ -356,11 +356,17 @@ GinRecovery → RequestID → [otelgin] → GinLogger → Metrics
 
 ## 流式响应的写超时
 
-HTTP server 有一层保守的全局写超时兜底。普通路由受它保护——遗忘超时的代价从「无界挂起」
-降为「保守截断」。
+`/api/v1` 在模块和认证中间件之前施加30秒协作式业务预算及2秒写出宽限；
+auth模块仍用更短的10秒/2秒，已有更早的父context期限保留。`/health`、`/ready`不继承业务组预算；
+readiness依赖探测有独立2秒预算，实例内同一时间最多一批，完成后结果缓存1秒；进程draining/能力故障每请求实时读取。
 
-长连接必须**显式覆盖**它，手段是 `http.ResponseController.SetWriteDeadline`，
-封装在 `middleware.StreamTimeout(idleWrite)` 里：设空闲写 deadline，每次写出后续期。
+写期限按实际业务deadline加宽限设置，并保留到外层ErrorHandler和net/http最终刷新完成，
+普通Timeout退出时不提前清零，嵌套期限只能收紧。HTTP server的60秒是每请求初始写期限，
+路由设置会覆盖它，不是另一层独立计时器；该尾部保护不依赖服务器初始期限是否为0。
+
+`middleware.StreamTimeout(idleWrite)`设可续期的空闲写期限。它在已存在普通路由期限时仍受该期限约束，
+不能延长父组的30秒预算。恢复可选上传/下载接线时同样继承该预算；需要更长传输的未来路由须先单独设计和验收，
+不能靠更晚的子context或续期绕过父期限。
 
 **「我需要长写」因此是一次显式决策，而不是默认状态。**
 

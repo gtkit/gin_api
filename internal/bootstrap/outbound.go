@@ -3,6 +3,7 @@ package bootstrap
 // OUTBOUND: 出站 HTTP 的可选装配。默认整个实现为注释。
 // 启用时去掉下面一对 /* 和 */，并按 internal/optional/outbound/README.md 恢复接线。
 
+// wiring:begin outbound.impl outbound block
 /*
 import (
 	"context"
@@ -27,3 +28,4 @@ func buildOutbound(inf *infra, cleanup *providerCleanup) error {
 	return nil
 }
 */
+// wiring:end outbound.impl

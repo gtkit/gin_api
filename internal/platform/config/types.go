@@ -7,10 +7,14 @@ import (
 )
 
 // TASKQUEUE: 启用时取消下一行 import 声明及下面 Tasks 字段的注释，见 internal/optional/taskqueue/README.md。
+// wiring:begin config.taskqueue.import taskqueue line
 // import "github.com/gtkit/gin-api/internal/optional/taskqueue"
+// wiring:end config.taskqueue.import
 
 // OUTBOUND: 启用时取消下一行 import 和 Outbound 字段的注释，见 internal/optional/outbound/README.md。
+// wiring:begin config.outbound.import outbound line
 // import "github.com/gtkit/gin-api/internal/optional/outbound"
+// wiring:end config.outbound.import
 
 // Config 是服务的强类型运行配置。
 type Config struct {
@@ -34,14 +38,18 @@ type Config struct {
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
 	// OUTBOUND: 按需启用的具名出站 HTTP 客户端配置。
+	// wiring:begin config.outbound.field outbound line
 	// Outbound outbound.Config `mapstructure:"outbound"`
+	// wiring:end config.outbound.field
 	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
 	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
 	Cache CacheConfig `mapstructure:"cache"`
 	// Telemetry 是 OpenTelemetry 导出配置。默认关闭，此时埋点仍在但走 no-op。
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	// TASKQUEUE: 可选队列配置，启用时取消下一行注释。
+	// wiring:begin config.taskqueue.field taskqueue line
 	// Tasks taskqueue.Config `mapstructure:"tasks"`
+	// wiring:end config.taskqueue.field
 }
 
 type AppConfig struct {
@@ -115,6 +123,12 @@ type DatabaseConfig struct {
 	// 与 MaxLifeSeconds 一样必须为正：0 会被底层解释成"无限空闲"，等于无意关闭了
 	// 连接轮换——数据库侧单方面断开的连接会一直留在池里，直到某次请求才发现它已死。
 	MaxIdleTimeSeconds int `mapstructure:"maxidletimeseconds"`
+	// PrepareStmtMaxSize 限制服务与迁移各自 GORM 缓存驻留的 SQL 种类。
+	// 省略或 0 使用 128；显式值为 1..4096，不能用 0 关闭预编译。
+	PrepareStmtMaxSize int `mapstructure:"prepare_stmt_max_size"`
+	// PrepareStmtTTLSeconds 是预编译缓存项的存活时间（秒），不是 SQL 执行超时。
+	// 省略或 0 使用 3600；显式值为 1..86400，与 PrepareStmtMaxSize 共同限制缓存。
+	PrepareStmtTTLSeconds int `mapstructure:"prepare_stmt_ttl_seconds"`
 	// Charset / Collation 是连接与迁移**共用**的单一来源。
 	// 不依赖数据库环境默认值：同一份 SQL 在不同默认 collation 的实例上，
 	// 比较与排序结果会不同，而这种差异只在数据量上来后才暴露。
@@ -137,6 +151,14 @@ const (
 	DefaultDBMaxIdleConn        = 10
 	DefaultDBMaxLifeSeconds     = 1800
 	DefaultDBMaxIdleTimeSeconds = 300
+)
+
+// 预编译缓存必须传入有限的正值，避免底层把零值解释为近乎无限容量。
+const (
+	DefaultDBPrepareStmtMaxSize    = 128
+	DefaultDBPrepareStmtTTLSeconds = 3600
+	maxDBPrepareStmtMaxSize        = 4096
+	maxDBPrepareStmtTTLSeconds     = 86400
 )
 
 // DBCredentials 是一次数据库连接使用的凭据。

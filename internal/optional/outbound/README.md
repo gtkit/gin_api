@@ -1,5 +1,11 @@
 # 可选出站 HTTP
 
+接线编译入口：在项目根运行`GOWORK=off go run ./scripts/check-optional-wiring.go -case outbound`。
+工具按manifest中的wiring标记在自有临时副本恢复该能力，主工作区保持注释基线；
+只编译主程序和带integration标签的cmd/bootstrap/config测试，不启动业务或执行测试二进制。
+完整七例用`make check-optional-wiring`，它是独立目标，不在默认check/check-ci或CI中。
+编译通过不等于配置、外部依赖或业务接入通过；已自行修改接线的派生项目须同步维护manifest。
+
 本目录包含具名 HTTP 客户端、请求关联头、重试、熔断、配置与测试。
 默认主程序未导入本包，根配置也不接受 `outbound:` 或 `APP_OUTBOUND__...`。
 

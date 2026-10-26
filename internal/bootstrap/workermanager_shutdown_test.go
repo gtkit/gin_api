@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -18,6 +19,63 @@ func eventually(t *testing.T, timeout time.Duration, cond func() bool, msg strin
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal(msg)
+}
+
+func TestCleanupEntryJoinsForceObserver(t *testing.T) {
+	for _, mode := range []string{"none", "before", "during"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				mgr, err := NewWorkerManager(testWorkerBudget())
+				if err != nil {
+					t.Fatal(err)
+				}
+				force := make(chan struct{})
+				if mode != "none" {
+					mgr.forced = force
+				}
+				if mode == "before" {
+					close(force)
+				}
+				started := make(chan struct{})
+				worker := &funcWorker{name: "cleanup-probe", cleanup: func(ctx context.Context) error {
+					if _, ok := ctx.Deadline(); !ok {
+						t.Error("cleanup lost its independent budget")
+					}
+					if mode != "before" && ctx.Err() != nil {
+						t.Error("cleanup inherited caller cancellation")
+					}
+					close(started)
+					if mode != "none" {
+						<-ctx.Done()
+					}
+					return ctx.Err()
+				}}
+				entry := &preparedWorker{worker: worker}
+				parent, cancel := context.WithCancel(t.Context())
+				cancel()
+				result := make(chan error, 1)
+				go func() { result <- mgr.cleanupEntry(parent, entry) }()
+				<-started
+				if mode == "during" {
+					close(force)
+				}
+				err = <-result
+				if mode == "none" && err != nil {
+					t.Fatal(err)
+				}
+				if mode != "none" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("force error = %v", err)
+				}
+				if err := mgr.cleanupEntry(parent, entry); err != nil {
+					t.Fatal(err)
+				}
+				if worker.cleanupCalls.Load() != 1 {
+					t.Fatal("cleanup was repeated")
+				}
+				synctest.Wait()
+			})
+		})
+	}
 }
 
 // TestStopKindStuckWorkerReportsNotExited 钉住卡死任务的停止语义：

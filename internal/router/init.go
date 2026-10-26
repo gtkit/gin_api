@@ -4,6 +4,7 @@ package router
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/middleware"
@@ -93,7 +94,7 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 
 	registerSystemRoutes(engine, opt)
 
-	v1 := engine.Group("/api/v1")
+	v1 := engine.Group("/api/v1", middleware.Timeout(30*time.Second, 2*time.Second))
 	if opt.RegisterModules != nil {
 		opt.RegisterModules(v1)
 	}

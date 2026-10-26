@@ -167,7 +167,7 @@ func dumpRequestWithoutSensitiveHeaders(r *http.Request) (string, error) {
 		clonedRequest.Header.Set(headerName, "*")
 	}
 
-	// 脱敏请求行里的 query token（如 SSE 允许把 App-Token 放 query），
+	// 脱敏请求行里误传的 query token，避免凭据泄漏；query 不是受支持的认证载体。
 	// 复用访问日志同一套脱敏规则，避免 DumpRequest 把 query 凭证写进日志。
 	// 注意：DumpRequest 优先用 RequestURI 拼请求行，故清空它，强制回退到已脱敏的 URL。
 	if clonedRequest.URL != nil && clonedRequest.URL.RawQuery != "" {

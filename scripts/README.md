@@ -80,6 +80,28 @@ GOWORK=off go run ./scripts/check-doc-refs.go --self-test     # 只跑自检
 判定"是不是仓内路径"的规则刻意保守（须含内部 `/`，末段带已知扩展名或以 `/` 结尾，
 排除绝对路径 / `~` / `$` / 花括号 / glob），因此外部模块名与符号引用不参与判定。
 
+## check-optional-wiring.go
+
+独立验证注释中的可选接线；不属于默认`check`、`check-ci`或CI。工具仅用Go标准库：
+
+```bash
+make check-optional-wiring
+GOWORK=off go run ./scripts/check-optional-wiring.go -case taskqueue
+GOWORK=off go test -vet=off -count=1 -run '^TestOptionalWiring' ./scripts/check-optional-wiring.go ./scripts/check-optional-wiring_test.go
+```
+
+固定样例为default、taskqueue、upload、outbound、auditlog、all、removed。每例创建自有临时副本，
+只复制白名单源文件和示例配置，按manifest恢复40处wiring标记；主工作区不改接线。
+副本不包含实际运行配置、pem、go.work、.git或缓存；白名单内符号链接拒绝，清理核对目录身份。
+每例用`-trimpath`构建主程序，再用`go test -c -tags=integration -vet=off`编译cmd/bootstrap/config测试，
+不执行任何测试二进制、服务或迁移。子进程固定离线Go环境、清除APP_并设置自有APP_ROOT；
+单子进程120秒、单例300秒。结果以JSON记录命令、耗时和退出码；这只是编译证据。
+
+`-case all -negative`仅在副本中损坏一个已恢复的调用，预期构建失败并返回非零，用于检验错误接线不会被放过；不要将它作为正常构建成功入口。
+
+工具单元与真实七例矩阵是两类证据。成本评估要对同一源码做三组冷/热缓存配对，使用自有GOCACHE，
+不清用户缓存；没有成本结果和新决定前保持独立入口。当前实现面向本机/POSIX验证，Windows未验收。
+
 ## test-coverage.sh / check-coverage.sh
 
 `test-coverage.sh` 运行 race 测试并生成聚合 coverage profile，`check-coverage.sh` 校验最低覆盖率。统一入口：

@@ -2,7 +2,10 @@ package router
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +23,7 @@ const (
 	// 按序求值，串行执行、各 2s，最坏 4s），探针超时后编排器会误判实例不健康——
 	// 一个由探针自身造成的故障。
 	readyGlobalDeadline = 2 * time.Second
+	readyCacheTTL       = time.Second
 )
 
 // 状态标签的取值集合固定，不随错误种类变化。
@@ -119,7 +123,17 @@ func healthHandler(c *gin.Context) {
 //	required 故障    → 503 unavailable
 //	draining         → 503 unavailable（且不再执行依赖检查）
 func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired bool) gin.HandlerFunc {
-	limiter := newDepFailureLogLimiter()
+	var probe *readinessProbe
+	if checker != nil {
+		deps := []dependency{
+			{name: "database", required: true, ping: checker.PingDB},
+			{name: "redis", required: redisRequired, ping: checker.PingRedis},
+		}
+		if configured, ok := checker.(interface{ RedisConfigured() bool }); ok && !configured.RedisConfigured() && !redisRequired {
+			deps[1].ping = nil
+		}
+		probe = &readinessProbe{deps: deps, limiter: newDepFailureLogLimiter(), now: time.Now}
+	}
 
 	return func(c *gin.Context) {
 		// fail-closed：未配置 checker 属装配错误，报"未就绪"而非"就绪"，
@@ -127,6 +141,9 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		if checker == nil {
 			logger.Warn("readiness checker not configured; reporting not ready")
 			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{Status: statusUnavailable})
+			return
+		}
+		if c.Request.Context().Err() != nil {
 			return
 		}
 
@@ -139,27 +156,26 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 			return
 		}
 
-		deps := []dependency{
-			{name: "database", required: true, ping: checker.PingDB},
-			{name: "redis", required: redisRequired, ping: checker.PingRedis},
+		snapshot, err := probe.check(c.Request.Context())
+		if err != nil {
+			return
 		}
-		if configured, ok := checker.(interface{ RedisConfigured() bool }); ok && !configured.RedisConfigured() && !redisRequired {
-			deps[1].ping = nil
+		if status != nil && status.Draining() {
+			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{Status: statusUnavailable, Phase: "draining"})
+			return
 		}
-
-		results, anyRequiredFailed, anyOptionalFailed := runDependencyChecks(
-			c.Request.Context(), deps, limiter)
+		results, anyRequiredFailed, anyOptionalFailed := snapshot.checks, snapshot.requiredFailed, snapshot.optionalFailed
 
 		body := ReadinessResponse{Checks: results}
 
 		if status != nil {
 			if failed := status.FailedRequirements(); len(failed) > 0 {
 				anyRequiredFailed = true
-				body.Failed = failed
+				body.Failed = slices.Clone(failed)
 			}
 			if degraded := status.DegradedCapabilities(); len(degraded) > 0 {
 				anyOptionalFailed = true
-				body.Degraded = degraded
+				body.Degraded = slices.Clone(degraded)
 			}
 		}
 
@@ -177,6 +193,81 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 			c.JSON(http.StatusOK, body)
 		}
 	}
+}
+
+type readinessSnapshot struct {
+	checks         map[string]DependencyCheck
+	requiredFailed bool
+	optionalFailed bool
+	completed      time.Time
+}
+
+// readinessProbe owns one batch at a time; request cancellation only stops that waiter.
+type readinessProbe struct {
+	mu       sync.Mutex
+	deps     []dependency
+	limiter  *depFailureLogLimiter
+	now      func() time.Time
+	cached   *readinessSnapshot
+	inFlight chan struct{}
+}
+
+func (p *readinessProbe) check(ctx context.Context) (readinessSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return readinessSnapshot{}, err
+	}
+	p.mu.Lock()
+	if p.cached != nil && p.now().Before(p.cached.completed.Add(readyCacheTTL)) {
+		result := *p.cached
+		p.mu.Unlock()
+		result.checks = maps.Clone(result.checks)
+		return result, nil
+	}
+	done := p.inFlight
+	if done == nil {
+		done = make(chan struct{})
+		p.inFlight = done
+		batchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readyGlobalDeadline)
+		go p.run(batchCtx, cancel, done)
+	}
+	p.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return readinessSnapshot{}, ctx.Err()
+	case <-done:
+	}
+	if err := ctx.Err(); err != nil {
+		return readinessSnapshot{}, err
+	}
+	p.mu.Lock()
+	result := *p.cached
+	p.mu.Unlock()
+	result.checks = maps.Clone(result.checks)
+	return result, nil
+}
+
+func (p *readinessProbe) run(ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
+	var result readinessSnapshot
+	defer func() {
+		if recover() != nil {
+			result = readinessSnapshot{
+				checks: map[string]DependencyCheck{
+					"database": {Status: statusUnavailable, Error: dependencyFailureMessage},
+				},
+				requiredFailed: true,
+			}
+			logger.Error("readiness batch panicked", zap.Stack("stack"))
+		}
+		cancel()
+		result.completed = p.now()
+		p.mu.Lock()
+		p.cached = &result
+		p.inFlight = nil
+		p.mu.Unlock()
+		close(done)
+	}()
+	result.checks, result.requiredFailed, result.optionalFailed = runDependencyChecks(ctx, p.deps, p.limiter)
 }
 
 // depOutcome 是单个依赖的检查结论。
@@ -208,10 +299,22 @@ func runDependencyChecks(
 				outcomes[i] = depOutcome{name: dep.name, status: statusSkipped}
 				return
 			}
-			depCtx, cancelDep := boundedTimeout(ctx, readyDepTimeout)
+			depCtx, cancelDep := context.WithTimeout(ctx, readyDepTimeout)
 			defer cancelDep()
 
-			err := dep.ping(depCtx)
+			err := func() (err error) {
+				defer func() {
+					if recover() != nil {
+						err = errors.New("readiness dependency panicked")
+						logger.Error("readiness dependency panicked", zap.String("dependency", dep.name), zap.Stack("stack"))
+					}
+				}()
+				err = dep.ping(depCtx)
+				if err == nil {
+					err = depCtx.Err()
+				}
+				return err
+			}()
 			limiter.observe(dep.name, err)
 
 			switch {
@@ -250,19 +353,6 @@ func runDependencyChecks(
 	}
 
 	return results, anyRequiredFailed, anyOptionalFailed
-}
-
-// boundedTimeout 返回 min(limit, 父 ctx 剩余) 的子 ctx。
-func boundedTimeout(parent context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
-	if deadline, ok := parent.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < limit {
-			limit = remaining
-		}
-	}
-	if limit <= 0 {
-		return context.WithDeadline(parent, time.Now().Add(-time.Nanosecond))
-	}
-	return context.WithTimeout(parent, limit)
 }
 
 // depFailureLogLimiter 对重复的依赖失败日志限频。

@@ -12,13 +12,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/json/v2"
-	"github.com/gtkit/verify"
 )
 
 // 进程级设施的测试缝：单元测试以桩替换，避免真实初始化日志/JWT/校验器。
 var (
 	initJWTWithConfig = jwtauth.Assemble
-	initVerify        = verify.New
 	checkJSONRuntime  = func() { logger.Infof("JSON backend: %s", json.Package) }
 )
 
@@ -26,7 +24,7 @@ var (
 // configuration and logging are ready. Runtime owns failure rollback.
 func initProcessRuntime(cfg *config.Config) error {
 	installGinDiagnostics()
-	if err := initVerify(); err != nil {
+	if err := initValidation(); err != nil {
 		return fmt.Errorf("init validator: %w", err)
 	}
 	checkJSONRuntime()

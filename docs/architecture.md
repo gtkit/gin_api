@@ -135,7 +135,7 @@ HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留
 func NewService(db *gorm.DB) (*someapp.Service, error)
 
 // 多个产物或依赖较多：Deps 入参 + Assembly 出参
-// internal/runtime/module/auth/module.go、internal/runtime/module/ai/module.go 都是这一种
+// internal/runtime/module/auth/module.go、internal/runtime/module/account/module.go 都是这一种
 type Deps struct {
     DB     *gorm.DB
     Redis  *redis.Client

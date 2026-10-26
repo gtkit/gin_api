@@ -2,6 +2,7 @@ package bootstrap
 
 // TASKQUEUE: 可选接线的回归测试。启用 taskqueue.go 和配置接线后，
 // 删除下面包围测试代码的 /* 和 */，执行本包测试。
+// wiring:begin taskqueue.tests taskqueue block
 /*
 import (
 	"context"
@@ -214,3 +215,4 @@ func TestRedisRequiredForTaskQueue(t *testing.T) {
 }
 
 */
+// wiring:end taskqueue.tests

@@ -14,7 +14,9 @@ import (
 )
 
 // AUDITLOG: 需要审计表时恢复 import 和 WithDDLModels 中的模型，并按模块 README 接入迁移。
+// wiring:begin migrate.auditlog.import auditlog line
 // import "github.com/gtkit/gin-api/internal/optional/auditlog"
+// wiring:end migrate.auditlog.import
 
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
 //
@@ -54,7 +56,9 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 			&models.User{},
 			&models.UserRole{},
 			// AUDITLOG: &auditlog.Record{} 默认不参与模型登记。
+			// wiring:begin migrate.auditlog.model auditlog line
 			// &auditlog.Record{},
+			// wiring:end migrate.auditlog.model
 		),
 		migrate.WithTimeout(5*time.Minute),
 	)

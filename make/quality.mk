@@ -1,6 +1,9 @@
 check-make-entries: ## 隔离验证常用入口、迁移占位与清理边界
 	@ bash ./scripts/check-make-entries.sh
 
+check-optional-wiring: ## 独立编译七种可选接线；不接入默认 check/check-ci
+	@ GOWORK=off go run ./scripts/check-optional-wiring.go
+
 tool: ## Lint Go code with the installed golangci-lint
 	## 版本必须与 security/toolchain.mk 声明一致。
 	## 声明了却不执行等于没声明：工具版本漂移会让同一份代码在不同机器上得到

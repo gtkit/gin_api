@@ -163,6 +163,33 @@ func TestDatabaseStringDefaults(t *testing.T) {
 	}
 }
 
+func TestDatabasePrepareStmtDefaults(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		cfg      DatabaseConfig
+		wantSize int
+		wantTTL  int
+	}{
+		{name: "omitted", wantSize: 128, wantTTL: 3600},
+		{name: "minimum", cfg: DatabaseConfig{PrepareStmtMaxSize: 1, PrepareStmtTTLSeconds: 1}, wantSize: 1, wantTTL: 1},
+		{name: "maximum", cfg: DatabaseConfig{PrepareStmtMaxSize: 4096, PrepareStmtTTLSeconds: 86400}, wantSize: 4096, wantTTL: 86400},
+		{name: "only size", cfg: DatabaseConfig{PrepareStmtMaxSize: 64}, wantSize: 64, wantTTL: 3600},
+		{name: "only ttl", cfg: DatabaseConfig{PrepareStmtTTLSeconds: 120}, wantSize: 128, wantTTL: 120},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.cfg.EffectivePrepareStmtMaxSize(); got != tt.wantSize {
+				t.Errorf("cache size = %d, want %d", got, tt.wantSize)
+			}
+			if got := tt.cfg.EffectivePrepareStmtTTLSeconds(); got != tt.wantTTL {
+				t.Errorf("cache ttl = %d, want %d", got, tt.wantTTL)
+			}
+		})
+	}
+}
+
 // TestCredentialSeparation 钉住运行凭据与迁移凭据分离。
 //
 // 服务进程**永远只用运行凭据**：配了迁移凭据也不改变它的连接身份。

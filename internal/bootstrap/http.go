@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/logger/v2"
+	"go.uber.org/zap"
 )
 
 const (
@@ -135,13 +137,42 @@ func newHTTPServer(engine *gin.Engine, cfg HTTPConfig) httpServer {
 // 访问日志里没有它们的痕迹；不接管的话唯一的第一现场落在裸 stderr 上，
 // 采集、告警与脱敏对它全部失效。
 func httpServerErrorLog() *log.Logger {
-	return log.New(httpErrorWriter{}, "", 0)
+	return log.New(&httpErrorWriter{now: time.Now}, "", 0)
 }
 
-type httpErrorWriter struct{}
+const (
+	tlsHandshakeErrorPrefix = "http: TLS handshake error from "
+	tlsErrorLogInterval     = 30 * time.Second
+)
 
-func (httpErrorWriter) Write(message []byte) (int, error) {
-	logger.Error(strings.TrimSuffix(string(message), "\n"))
+type httpErrorWriter struct {
+	mu         sync.Mutex
+	now        func() time.Time
+	seenTLS    bool
+	lastTLS    time.Time
+	suppressed uint64
+}
+
+func (w *httpErrorWriter) Write(message []byte) (int, error) {
+	text := strings.TrimSuffix(string(message), "\n")
+	if !strings.HasPrefix(text, tlsHandshakeErrorPrefix) {
+		logger.Error(text)
+		return len(message), nil
+	}
+	w.mu.Lock()
+	now := time.Now()
+	if w.now != nil {
+		now = w.now()
+	}
+	if w.seenTLS && now.Sub(w.lastTLS) < tlsErrorLogInterval {
+		w.suppressed++
+		w.mu.Unlock()
+		return len(message), nil
+	}
+	suppressed := w.suppressed
+	w.seenTLS, w.lastTLS, w.suppressed = true, now, 0
+	w.mu.Unlock()
+	logger.Warn(text, zap.Uint64("suppressed", suppressed))
 	return len(message), nil
 }
 
