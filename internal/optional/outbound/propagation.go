@@ -3,11 +3,22 @@ package outbound
 import (
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+type retryMetadataKey struct{}
+type retryMetadata struct{ value atomic.Pointer[string] }
+
+func (m *retryMetadata) read() string {
+	if value := m.value.Load(); value != nil {
+		return *value
+	}
+	return ""
+}
 
 // propagationTransport adds request-local correlation headers without changing
 // the transport that owns connection pooling and cancellation.
@@ -29,7 +40,15 @@ func (t *propagationTransport) RoundTrip(req *http.Request) (*http.Response, err
 		deleteHeader(cloned.Header, "X-Request-ID")
 		cloned.Header.Set("X-Request-ID", id)
 	}
-	return t.base.RoundTrip(cloned)
+	response, err := t.base.RoundTrip(cloned)
+	if metadata, ok := req.Context().Value(retryMetadataKey{}).(*retryMetadata); ok {
+		after := ""
+		if response != nil {
+			after = response.Header.Get("Retry-After")
+		}
+		metadata.value.Store(new(after))
+	}
+	return response, err
 }
 
 // deleteHeader also handles keys inserted directly without Header.Set.

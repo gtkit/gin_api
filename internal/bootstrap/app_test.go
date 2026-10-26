@@ -177,7 +177,7 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	for _, step := range app.cleanup.steps {
 		names = append(names, step.name)
 	}
-	want := []string{"telemetry", "db pool metrics", "rate limits"}
+	want := []string{"telemetry", "db pool metrics", "runtime metrics", "Redis metrics", "rate limits"}
 	if _, wired := reflect.TypeFor[infra]().FieldByName("outbound"); wired {
 		want = append(want, "outbound http clients")
 	}

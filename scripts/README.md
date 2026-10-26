@@ -2,6 +2,20 @@
 
 项目质量检查脚本目录。
 
+## load-api.go
+
+独立 API 负载工具，使用 `//go:build ignore`，不进入产品 `./...` 或默认覆盖率。先将请求场景保存为 JSON 数组，例如 `[{"method":"GET","path":"/health","weight":1}]`，再显式运行：
+
+```bash
+GOTOOLCHAIN=local go run scripts/load-api.go -target http://127.0.0.1:8008 -scenario scenario.json -rate 20 -concurrency 4 -duration 10s -timeout 5s
+GOTOOLCHAIN=local go test -vet=off -count=1 scripts/load-api.go scripts/load-api_test.go
+GOTOOLCHAIN=local go build -o .cache/load-api scripts/load-api.go
+```
+
+默认只允许 loopback，localhost 固定拨号到 127.0.0.1；远程需显式 `-allow-remote`，且应取得目标所有者许可。工具不跟随重定向、不使用环境代理。支持场景 `method/path/weight/headers/body`，不打印正文、凭据或完整 URL。文件≤1 MiB、场景≤64、每正文≤64 KiB、头≤32；并发≤4096、到达率≤100000/s、时长≤24h、单请求超时≤1min，均须为正。超出 1 MiB 的响应按传输失败记录并关闭。
+
+输出包含 offered/sent/completed/generator_dropped、状态码和传输失败，以及从计划发送时刻计算的固定桶延迟 P95/P99 上界；越界分位明确标注 overflow。有限 worker 满载或发生器调度落后时，漏发请求计入 dropped，不建立无限等待队列。必须结合丢弃率读分位，不能把只完成请求的低延迟当作服务容量。场景权重按固定顺序轮转；超载丢弃可能改变实际发送比例，应以服务端观测核对。
+
 ## install-hooks.sh / check-hooks.sh / git-hooks/
 
 `git-hooks/` 下是随仓库分发的 git 钩子（当前只有 `pre-push`，执行 `make check-ci`）。

@@ -60,6 +60,16 @@ go test -race ./internal/platform/config -run 'Test(Outbound|ShippedExample|Exam
 重试总耗时还包括每次尝试和退避，需要调用方设置总 context 预算。
 完整用法、错误分类与请求关联说明见 [出站调用](../../../docs/outbound.md)。
 
+### 重试边界与未来客户端
+
+`Attempts` 是首次调用之后的**最多**重试次数（1..3），不保证全部执行；成功、错误分类、取消和等待预算会提前结束。`WaitTime`/`MaxWaitTime` 均须在 0..30s，且正的 MaxWaitTime 不小于 WaitTime。MaxWaitTime=0 使用 30s 上界；WaitTime=0 保留零本地等待。超过 30s 的旧策略现会在调用前校验失败。
+
+本地指数退避采用全抖动。重试循环的单次及累计等待上限均为 30s；这个预算不含实际 HTTP 请求耗时，调用方仍需设置整个操作的 context deadline。服务端 Retry-After 支持整数秒及 HTTP-date，等待取其与本地抖动的较大值。合法但太大、整数溢出、超剩余等待预算或无法放进父 deadline 时，直接返回最后状态与原错误；不截短后提前重试。无 deadline 时的 86400 秒头也会立即放弃。非法语法回落本地退避，等待中取消保留原错误与 context 错误。
+
+响应元信息经现有 transport 按每次尝试单独收集；请求头、响应体和连接池所有权不变。重试引擎保持私有，Do/DoIdempotent/Attempt 签名不变。
+
+未来可能接入 `github.com/gtkit/restyx`，本次没有引入或迁移它。接入时再评估公开适配入口，确定唯一重试所有者，并核对取消、超时、响应上限、连接池、追踪和日志；不得叠加 restyx 自有重试与本引擎后宣称次数上限仍然成立。
+
 ## 删除
 
 默认未接线，可直接删除本目录，再执行 `go mod tidy`。

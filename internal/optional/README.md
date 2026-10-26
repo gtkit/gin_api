@@ -42,3 +42,5 @@
 按目标目录 README 恢复对应注释接线，填写配置，注入实际业务并验证。
 只取消某个 enabled 字段或只改 YAML 不能恢复尚未接入的代码。
 派生项目修改 module 名后，注释里的 import 也要手动改成当前 module 名。
+
+使用前还须完成对应的故障、重试、取消、关闭、权限和资源预算验收。业务幂等、Outbox/Inbox、多副本调度、资源归属/租户和可靠审计只提供设计契约，没有默认接线或虚构业务实现，见 [可选能力契约](../../docs/optional-capability-contracts.md)。默认 API 的静态契约见 [OpenAPI](../../docs/openapi.json)。

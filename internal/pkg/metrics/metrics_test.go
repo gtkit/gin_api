@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,6 +12,79 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
+
+func TestCapacityMetricAttributesAndBalance(t *testing.T) {
+	r, reader := newTestRecorder(t)
+	finish := r.TrackRequest(t.Context(), "CLIENT_METHOD", "https")
+	m := collect(t, reader, "http.server.active_requests")
+	sum := mustMetricData[metricdata.Sum[int64]](t, m)
+	if sum.IsMonotonic || len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 1 {
+		t.Fatalf("active: %+v", sum)
+	}
+	assertMetricAttrs(t, sum.DataPoints[0].Attributes, map[string]any{"http.request.method": "_OTHER", "url.scheme": "https"})
+	finish()
+	if mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "http.server.active_requests")).DataPoints[0].Value != 0 {
+		t.Fatal("active request leaked")
+	}
+	r.RecordAdmissionRejection(t.Context(), "GET", "http", "/api/v1/items/:id")
+	r.RecordAdmissionRejection(t.Context(), "GET", "http", "")
+	rejections := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "admission.rejections"))
+	if len(rejections.DataPoints) != 1 || rejections.DataPoints[0].Value != 1 {
+		t.Fatalf("rejections: %+v", rejections)
+	}
+	assertMetricAttrs(t, rejections.DataPoints[0].Attributes, map[string]any{"http.request.method": "GET", "url.scheme": "http", "http.route": "/api/v1/items/:id", "reason": "saturated"})
+	for _, name := range []string{"auth.password.active", "auth.password.queued"} {
+		if name == "auth.password.active" {
+			r.AddPasswordActive(t.Context(), 1)
+			r.AddPasswordActive(t.Context(), -1)
+		} else {
+			r.AddPasswordQueued(t.Context(), 1)
+			r.AddPasswordQueued(t.Context(), -1)
+		}
+		d := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, name))
+		if d.IsMonotonic || d.DataPoints[0].Value != 0 || d.DataPoints[0].Attributes.Len() != 0 {
+			t.Fatalf("%s: %+v", name, d)
+		}
+	}
+	for _, outcome := range []string{"acquired", "timeout", "canceled"} {
+		r.RecordPasswordQueue(t.Context(), time.Millisecond, outcome)
+	}
+	r.RecordPasswordQueue(t.Context(), time.Second, "invalid")
+	for _, dp := range mustMetricData[metricdata.Histogram[float64]](t, collect(t, reader, "auth.password.queue.duration")).DataPoints {
+		v, _ := dp.Attributes.Value("outcome")
+		assertMetricAttrs(t, dp.Attributes, map[string]any{"outcome": v.AsString()})
+		if dp.Count != 1 {
+			t.Fatal("queue sample count")
+		}
+	}
+	for _, reason := range []string{"queue_full", "queue_timeout", "canceled"} {
+		r.RecordPasswordRejection(t.Context(), reason)
+	}
+	d := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "auth.password.rejections"))
+	if len(d.DataPoints) != 2 {
+		t.Fatalf("rejection reasons: %+v", d)
+	}
+}
+
+func assertMetricAttrs(t *testing.T, attrs attribute.Set, want map[string]any) {
+	t.Helper()
+	got := map[string]any{}
+	for _, kv := range attrs.ToSlice() {
+		got[string(kv.Key)] = kv.Value.AsInterface()
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("attributes=%v, want %v", got, want)
+	}
+}
+
+func mustMetricData[T any](t *testing.T, m metricdata.Metrics) T {
+	t.Helper()
+	data, ok := m.Data.(T)
+	if !ok {
+		t.Fatalf("metric %s has data %T", m.Name, m.Data)
+	}
+	return data
+}
 
 // newTestRecorder 装配一个可读回记录值的 Recorder。
 //

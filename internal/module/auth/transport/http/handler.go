@@ -24,6 +24,7 @@ import (
 // 名字读起来正合适，实际会让一次登录失败返回 200——而路由描述符声明的是 401。
 // 那种组合下契约在说谎，客户端按状态码写的分支全部失效。
 var errMapper = resp.NewErrMapper(
+	resp.ErrMapping{Target: application.ErrBusy, Status: goerr.StatusServiceUnavailable(), Message: "服务繁忙，请稍后重试"},
 	resp.ErrMapping{
 		Target: application.ErrInvalidCredentials,
 		Status: goerr.StatusAuth(), Message: "手机号或密码错误",

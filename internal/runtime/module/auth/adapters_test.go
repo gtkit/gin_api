@@ -4,19 +4,176 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"gorm.io/gorm"
 
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/credential"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
+
+func TestPasswordCapacityMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reader := sdkmetric.NewManualReader()
+		provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		defer func() {
+			if err := provider.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+				t.Error(err)
+			}
+		}()
+		recorder, err := metrics.New(provider.Meter("password-test"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 1}, recorder)
+		release, err := h.acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		release = sync.OnceFunc(release)
+		defer release()
+		done := make(chan error, 1)
+		go func() {
+			free, err := h.acquire(t.Context())
+			if free != nil {
+				free()
+			}
+			done <- err
+		}()
+		synctest.Wait()
+		if _, err := h.acquire(t.Context()); !errors.Is(err, authapp.ErrBusy) {
+			t.Fatalf("queue full: %v", err)
+		}
+		synctest.Sleep(time.Second)
+		if err := <-done; !errors.Is(err, authapp.ErrBusy) {
+			t.Fatalf("queue timeout: %v", err)
+		}
+		release()
+		var data metricdata.ResourceMetrics
+		if err := reader.Collect(t.Context(), &data); err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, scope := range data.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				switch m.Name {
+				case "auth.password.active", "auth.password.queued":
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					if !ok || len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 0 || sum.DataPoints[0].Attributes.Len() != 0 {
+						t.Fatalf("%s: %+v", m.Name, m.Data)
+					}
+					seen[m.Name] = true
+				case "auth.password.rejections":
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					if !ok || len(sum.DataPoints) != 2 {
+						t.Fatalf("rejections: %+v", m.Data)
+					}
+					for _, dp := range sum.DataPoints {
+						if dp.Value != 1 {
+							t.Fatalf("rejections=%d", dp.Value)
+						}
+					}
+					seen[m.Name] = true
+				case "auth.password.queue.duration":
+					hist, ok := m.Data.(metricdata.Histogram[float64])
+					if !ok || len(hist.DataPoints) != 1 {
+						t.Fatalf("waits: %+v", m.Data)
+					}
+					outcome, _ := hist.DataPoints[0].Attributes.Value("outcome")
+					if outcome.AsString() != "timeout" || hist.DataPoints[0].Count != 1 {
+						t.Fatalf("waits: %+v", hist)
+					}
+					seen[m.Name] = true
+				}
+			}
+		}
+		if len(seen) != 4 {
+			t.Fatalf("missing password instruments: %v", seen)
+		}
+	})
+}
+
+func TestPasswordWaitingIsBounded(t *testing.T) {
+	for _, outcome := range []string{"acquired", "timeout", "canceled", "zero"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				limit := 1
+				if outcome == "zero" {
+					limit = 0
+				}
+				h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 1, BcryptMaxWaiters: &limit, BcryptQueueTimeout: time.Second}, nil)
+				release, err := h.acquire(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if outcome == "zero" {
+					defer release()
+					if _, err := h.acquire(t.Context()); !errors.Is(err, authapp.ErrBusy) {
+						t.Fatalf("zero waiters: %v", err)
+					}
+					return
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					free, err := h.acquire(ctx)
+					if free != nil {
+						free()
+					}
+					done <- err
+				}()
+				synctest.Wait()
+				if len(h.waiters) != 1 {
+					t.Fatal("request did not enter bounded queue")
+				}
+				if _, err := h.acquire(t.Context()); !errors.Is(err, authapp.ErrBusy) {
+					t.Fatalf("full queue: %v", err)
+				}
+				switch outcome {
+				case "acquired":
+					release()
+				case "timeout":
+					synctest.Sleep(time.Second)
+				case "canceled":
+					cancel()
+				}
+				err = <-done
+				if outcome != "acquired" {
+					release()
+				}
+				if outcome == "timeout" && !errors.Is(err, authapp.ErrBusy) {
+					t.Fatalf("queue timeout: %v", err)
+				}
+				if outcome == "canceled" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel: %v", err)
+				}
+				if outcome == "acquired" && err != nil {
+					t.Fatal(err)
+				}
+				if len(h.waiters) != 0 {
+					t.Fatal("waiting slot leaked")
+				}
+				free, err := h.acquire(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				free()
+			})
+		})
+	}
+}
 
 // 适配器的全部职责是错误翻译，而翻译错了没有任何编译期迹象：
 // 一条漏翻的错误会让"手机号已注册"变成 500、让"令牌过期"变成"服务故障"。
@@ -30,7 +187,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 	t.Parallel()
 
 	// cost 用 bcrypt 的最低值：本测试关心翻译，不关心哈希强度。
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 2}, nil)
 
 	hashed, err := h.Hash(context.Background(), "correct")
 	if err != nil {
@@ -54,7 +211,7 @@ func TestPasswordHasherTranslatesMismatch(t *testing.T) {
 func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 	t.Parallel()
 
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 2}, nil)
 
 	long := make([]byte, 100)
 	for i := range long {
@@ -71,7 +228,7 @@ func TestPasswordHasherTranslatesTooLong(t *testing.T) {
 func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 	t.Parallel()
 
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 2)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 2}, nil)
 	if err := h.CompareWithDummy(context.Background(), "anything"); !errors.Is(err, authapp.ErrInvalidCredentials) {
 		t.Fatalf("CompareWithDummy = %v, want authapp.ErrInvalidCredentials "+
 			"(it must be indistinguishable from a wrong password)", err)
@@ -86,7 +243,7 @@ func TestCompareWithDummyTranslatesToInvalidCredentials(t *testing.T) {
 func TestSaturatedGateFailsBothComparePathsAlike(t *testing.T) {
 	t.Parallel()
 
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 1}, nil)
 
 	// 占满唯一的名额，模拟闸门饱和。
 	release, err := h.acquire(context.Background())
@@ -334,7 +491,7 @@ func mustCredentialHasher(t *testing.T, cost int) *credential.Hasher {
 func TestPasswordHasherGateIsCancellable(t *testing.T) {
 	t.Parallel()
 
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 1}, nil)
 
 	// 占满唯一名额。
 	release, err := h.acquire(context.Background())
@@ -365,7 +522,7 @@ func TestPasswordHasherGateIsCancellable(t *testing.T) {
 func TestPasswordHasherCancellationPropagatesThroughPorts(t *testing.T) {
 	t.Parallel()
 
-	h := newPasswordHasher(mustCredentialHasher(t, 4), 1)
+	h := newPasswordHasher(mustCredentialHasher(t, 4), config.AuthConfig{BcryptMaxConcurrent: 1}, nil)
 	release, err := h.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire: %v", err)

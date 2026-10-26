@@ -316,6 +316,7 @@ func validateAppConfig(app AppConfig) error {
 	errs = append(errs,
 		mustNonNegative("application.read_header_timeout", app.ReadHeaderTimeoutSeconds),
 		mustNonNegative("application.read_timeout", app.ReadTimeoutFullSeconds),
+		mustNonNegative("application.max_inflight_requests", app.MaxInflightRequests),
 	)
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))
 

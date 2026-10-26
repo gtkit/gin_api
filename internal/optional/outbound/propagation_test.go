@@ -10,10 +10,56 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gtkit/httpc"
 	"github.com/gtkit/logger/v2"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
+
+func TestRetryMetadataIsolatedPerAttempt(t *testing.T) {
+	var previous *retryMetadata
+	calls := 0
+	_, err := retryAttempts(t.Context(), RetryPolicy{Attempts: 2}, nil, func(ctx context.Context, _ *httpc.Client) (int, error) {
+		metadata, ok := ctx.Value(retryMetadataKey{}).(*retryMetadata)
+		if !ok || metadata == previous || metadata.read() != "" {
+			t.Fatal("attempt reused response metadata")
+		}
+		previous = metadata
+		calls++
+		metadata.value.Store(new("0"))
+		return 503, nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+}
+
+func TestConcurrentRetryMetadataDoesNotCrossRequests(t *testing.T) {
+	wrapper := &propagationTransport{base: &correlationTransport{roundTrip: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": []string{req.URL.Path[1:]}}, Body: http.NoBody}, nil
+	}}}
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Go(func() {
+			metadata := new(retryMetadata)
+			value := strconv.Itoa(i)
+			ctx := context.WithValue(t.Context(), retryMetadataKey{}, metadata)
+			req := httptest.NewRequestWithContext(ctx, "GET", "http://downstream.test/"+value, nil)
+			resp, err := wrapper.RoundTrip(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Error(err)
+			}
+			if metadata.read() != value {
+				t.Errorf("metadata crossed requests: %s want %s", metadata.read(), value)
+			}
+		})
+	}
+	wg.Wait()
+}
 
 type correlationTransport struct {
 	roundTrip func(*http.Request) (*http.Response, error)

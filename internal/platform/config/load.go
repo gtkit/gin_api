@@ -168,15 +168,17 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	var cfg Config
 	// This presence-aware field must not inherit mapstructure's float/bool-to-int
 	// coercions. Environment overrides are decimal integer strings.
-	if raw := k.Get("log.sql_slow_threshold_ms"); raw != nil {
-		switch value := raw.(type) {
-		case int, int64:
-		case string:
-			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer: %w", err)
+	for _, field := range []string{"log.sql_slow_threshold_ms", "auth.bcrypt_max_waiters"} {
+		if raw := k.Get(field); raw != nil {
+			switch value := raw.(type) {
+			case int, int64:
+			case string:
+				if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+					return nil, fmt.Errorf("%s must be an integer: %w", field, err)
+				}
+			default:
+				return nil, fmt.Errorf("%s must be an integer, got %T", field, raw)
 			}
-		default:
-			return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer, got %T", raw)
 		}
 	}
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。

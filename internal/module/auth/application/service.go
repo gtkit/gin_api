@@ -11,6 +11,8 @@ import (
 
 // 业务错误。transport 层按类型映射状态码，不解析文本。
 var (
+	// ErrBusy 表示密码运算的等待人数或排队时间已达到上限。
+	ErrBusy = errors.New("auth: password capacity exhausted")
 	// ErrInvalidCredentials 表示账号不存在或密码错误。
 	//
 	// **两种情况共用一个错误是刻意的**：区分它们等于提供一个不需要口令

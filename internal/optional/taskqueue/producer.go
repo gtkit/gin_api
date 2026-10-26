@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/gtkit/asynqx"
 	"github.com/redis/go-redis/v9"
@@ -27,8 +26,6 @@ import (
 type Producer struct {
 	inner   *asynqx.Producer
 	enabled bool
-
-	closeOnce sync.Once
 }
 
 // ErrDisabled 表示任务队列未启用。
@@ -92,7 +89,5 @@ func (p *Producer) Shutdown(ctx context.Context) error {
 	if p == nil || p.inner == nil {
 		return nil
 	}
-	var err error
-	p.closeOnce.Do(func() { err = p.inner.Shutdown(ctx) })
-	return err
+	return p.inner.Shutdown(ctx)
 }

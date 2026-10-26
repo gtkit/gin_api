@@ -43,6 +43,41 @@ func getStatus(path string) Attempt {
 	}
 }
 
+func TestDoIdempotentReadsRealRetryAfterHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name, header string
+		want         int32
+	}{
+		{"delta", "0", 2}, {"date", time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat), 2},
+		{"too long", "86400", 1}, {"overflow", "184467440737095516160000", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			// A real loopback server exercises the factory's production transport.
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == 1 {
+					w.Header().Set("Retry-After", tc.header)
+					w.WriteHeader(503)
+					return
+				}
+				w.WriteHeader(204)
+			}))
+			defer server.Close()
+			d := newTestDownstreams(t, server.URL, BreakerConfig{ConsecutiveFailures: 100})
+			status, err := d.DoIdempotent(t.Context(), "orders", RetryPolicy{Attempts: 1}, getStatus("/"))
+			if calls.Load() != tc.want {
+				t.Fatalf("calls=%d want=%d", calls.Load(), tc.want)
+			}
+			if tc.want == 1 && (status != 503 || !errors.Is(err, ErrDownstreamServerError)) {
+				t.Fatalf("last result lost: %d %v", status, err)
+			}
+			if tc.want == 2 && (status != 204 || err != nil) {
+				t.Fatalf("retry failed: %d %v", status, err)
+			}
+		})
+	}
+}
+
 // TestDoRejectsUnknownDownstream 钉住未登记的名字不执行、不放行。
 func TestDoRejectsUnknownDownstream(t *testing.T) {
 	t.Parallel()

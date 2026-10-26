@@ -38,6 +38,9 @@ const defaultMaxInflight = 64
 // Cache 是一个有界的、带加载合并的进程内缓存。
 //
 // 并发安全。零值不可用，必须经 New 构造。
+// 锁只保护缓存结构；T 中的 map、slice、指针仍与写入方及其他读取方共享。
+// 缓存存续期间这些对象必须只读，需修改时由调用方在相应边界复制。
+// maxItems 只限制条目数，不限制字节；单对象大小和总成本预算由使用方负责。
 type Cache[T any] struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element

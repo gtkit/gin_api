@@ -222,3 +222,11 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 新目录必须不存在，父目录须存在；固定输出 jwtpri.pem（0600）/jwtpub.pem（0644），原文件不改写。
 转换后只更新 active 的两条路径（或对应 previous 的公钥路径），保留原 kid、作用域和兼容截止值。
 重编码不使现有签名失效，但不延长过期或绕过吊销/截止规则；生成新密钥则须走上述轮换流程。
+
+### 请求和密码运算容量
+
+`application.max_inflight_requests` 控制每进程 `/api/v1` 的同时处理数：0/省略使用 128，正数显式指定，负数启动失败；不提供关闭值。满载直接返回 503，不排队，不附固定 Retry-After；`/health`、`/ready` 独立。长轮询、SSE 等将长期占用名额，接入时须另行分组和定限。
+
+`auth.bcrypt_max_concurrent` 的 0/省略仍取有效 CPU 并发数。`auth.bcrypt_max_waiters` 使用 `null` 表示默认额外等待一批同等人数，显式 0 才禁排队，正整数指定等待人数。`auth.bcrypt_queue_timeout` 的 0/省略使用 1s，实际不超过父请求预算；只约束等待，不中断已开始的 bcrypt。负值非法；队满或排队超时返回 503，调用方取消保留取消语义。四个本地认证 JSON 路由均额外限制为 8 KiB。
+
+这些初值未经生产容量校准，须结合吞吐、平均延迟、DB 等待和 503 调整；网关不要对过载 503 无条件重试。指标和内存预算见 [容量说明](../docs/capacity-and-memory.md)。

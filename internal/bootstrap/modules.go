@@ -227,13 +227,14 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	cfg := inf.cfg
 
 	opt := router.Options{
-		AccessLogger:    inf.accessLogger,
-		AllowedOrigins:  cfg.CORS.AllowedOrigins,
-		LogRequestBody:  cfg.Log.AccessRequestBody,
-		LogResponseBody: cfg.Log.AccessResponseBody,
-		MaxBodyBytes:    cfg.App.MaxBodyBytes,
-		TracingEnabled:  cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
-		ServiceName:     cfg.App.Name,
+		AccessLogger:        inf.accessLogger,
+		AllowedOrigins:      cfg.CORS.AllowedOrigins,
+		LogRequestBody:      cfg.Log.AccessRequestBody,
+		LogResponseBody:     cfg.Log.AccessResponseBody,
+		MaxBodyBytes:        cfg.App.MaxBodyBytes,
+		MaxInflightRequests: cfg.App.EffectiveMaxInflightRequests(),
+		TracingEnabled:      cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
+		ServiceName:         cfg.App.Name,
 		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,

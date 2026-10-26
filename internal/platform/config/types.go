@@ -67,6 +67,9 @@ type AppConfig struct {
 	Timezone               string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// MaxInflightRequests 限制 /api/v1 同时处理数；0/省略使用 128，负数非法。
+	// 满载返回 503；探针不占名额，不提供关闭准入的配置值。
+	MaxInflightRequests int `mapstructure:"max_inflight_requests"`
 	// DrainWaitSeconds 是优雅关停时「/ready 翻成 503」与「关闭 HTTP 监听」之间的等待秒数。
 	//
 	// 它等的是**负载均衡器的传播延迟**：本实例已经宣告自己不再就绪，但 LB 还需要
@@ -81,6 +84,14 @@ type AppConfig struct {
 //
 // 5s 覆盖常见 LB（Nginx upstream check / k8s readinessProbe）的默认探测间隔。
 const DefaultDrainWait = 5 * time.Second
+
+// EffectiveMaxInflightRequests 返回业务并发初值；实际部署应按延迟和吞吐校准。
+func (a AppConfig) EffectiveMaxInflightRequests() int {
+	if a.MaxInflightRequests > 0 {
+		return a.MaxInflightRequests
+	}
+	return 128
+}
 
 // ProxyConfig 描述本进程前面的反向代理拓扑。
 //

@@ -17,6 +17,7 @@ import (
 const (
 	authDeadline   = 10 * time.Second
 	authWriteGrace = 2 * time.Second
+	authBodyLimit  = 8 << 10
 )
 
 // Deps 是注册路由所需的依赖。
@@ -56,21 +57,21 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 用户维度——按身份限流对未登录的爆破者不起任何作用。
 	credential := g.Group("")
 	credential.Use(stageRateLimits(deps.RateLimit, "/auth", "auth.credential")...)
-	credential.POST("/register", middleware.JSONBody(0), handler.Register)
-	credential.POST("/login", middleware.JSONBody(0), handler.Login)
+	credential.POST("/register", middleware.JSONBody(authBodyLimit), handler.Register)
+	credential.POST("/login", middleware.JSONBody(authBodyLimit), handler.Login)
 
 	// 令牌端点的额度可以宽一些：它们要求持有一个已签发的有效令牌，
 	// 不构成口令猜测面。
 	token := g.Group("")
 	token.Use(stageRateLimits(deps.RateLimit, "/auth", "auth.token")...)
-	token.POST("/refresh", middleware.JSONBody(0), handler.Refresh)
+	token.POST("/refresh", middleware.JSONBody(authBodyLimit), handler.Refresh)
 	// 登出要求认证：要撤销的正是本次请求所用的令牌，
 	// 而它的标识只有认证中间件能提供。
 	//
 	// body 治理排在认证之前（http-request-contract spec）：内容类型不符的请求
 	// 不该先付掉一次令牌解析与撤销查询。两者都在路由级，因此换序即可，
 	// 认证的挂载点数量不变。
-	token.POST("/logout", middleware.JSONBody(0), deps.Auth, handler.Logout)
+	token.POST("/logout", middleware.JSONBody(authBodyLimit), deps.Auth, handler.Logout)
 }
 
 // stageRateLimits 容错地调用装配层注入的 pre-identity 取用函数。

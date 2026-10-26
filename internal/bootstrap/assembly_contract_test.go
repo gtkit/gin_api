@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/alicebob/miniredis/v2"
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
@@ -21,6 +24,67 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
 )
+
+func TestBuildEngineWiresNonDefaultAdmissionLimit(t *testing.T) {
+	cfg := jwtTestConfig(t)
+	cfg.Env = "test"
+	cfg.App.Name = "admission-assembly"
+	cfg.App.MaxInflightRequests = 2
+	cfg.RateLimit = config.RateLimitConfig{KeyHMACSecret: strings.Repeat("x", 32), Policies: []config.RateLimitPolicyConfig{
+		{ID: "auth.credential", Scope: "ip", Store: "local", Rate: 100, Burst: 100, MaxKeys: 100, FailureMode: "fail_open"},
+		{ID: "auth.token", Scope: "ip", Store: "local", Rate: 100, Burst: 100, MaxKeys: 100, FailureMode: "fail_open"},
+	}}
+	limits, err := buildRateLimits(t.Context(), cfg, &data.Resources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := closeRateLimits(limits); err != nil {
+			t.Error(err)
+		}
+	})
+	inf := infra{cfg: cfg, resources: &data.Resources{}, rateLimits: limits}
+	installMetricsFixture(t, &inf)
+	svc := services{}
+	svc.auth.Service = &authapp.Service{}
+	entered, release, done := make(chan struct{}, 2), make(chan struct{}), make(chan struct{}, 2)
+	mw := middlewares{auth: func(c *gin.Context) { entered <- struct{}{}; <-release; c.AbortWithStatus(204) }}
+	engine, err := buildEngine(inf, svc, mw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		close(release)
+		for range 2 {
+			<-done
+		}
+	})
+	for range 2 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			req := httptest.NewRequest("POST", "/api/v1/auth/logout", strings.NewReader(`{}`))
+			req.Header.Set("Content-Type", "application/json")
+			engine.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("configured second slot did not enter")
+		}
+	}
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{{"POST", "/api/v1/auth/logout", 503}, {"GET", "/health", 200}, {"GET", "/api/v1/missing", 404}, {"GET", "/api/v1/auth/logout", 405}} {
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != tc.status {
+			t.Errorf("%s %s: %d", tc.method, tc.path, w.Code)
+		}
+	}
+}
 
 func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	cfg := jwtTestConfig(t)

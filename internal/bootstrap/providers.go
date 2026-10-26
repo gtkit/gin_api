@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/gtkit/logger/v2"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 	"gorm.io/gorm"
 
@@ -141,6 +142,25 @@ func newProvidersWithBudget(
 	} else if unregister != nil {
 		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("db pool metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if unregister, runtimeErr := recorder.RegisterRuntimeStats(); runtimeErr != nil {
+		return nil, fmt.Errorf("register runtime metrics: %w", runtimeErr)
+	} else {
+		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
+		cleanup.push("runtime metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if unregister, redisErr := recorder.RegisterRedisPoolStats(inf.cfg.Redis.DBs, func(db int) metrics.RedisPoolStats {
+		client := inf.resources.Rdb(db)
+		if client == nil {
+			return metrics.RedisPoolStats{}
+		}
+		stats := client.PoolStats()
+		return metrics.RedisPoolStats{Client: client, Main: *stats, Pipeline: (*redis.PoolStats)(stats.PipelineStats)}
+	}); redisErr != nil {
+		return nil, fmt.Errorf("register Redis metrics: %w", redisErr)
+	} else {
+		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
+		cleanup.push("Redis metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
 
 	// 3. 限流。必须先于 service 与路由装配：认证模块的账号维度限流要从
@@ -324,11 +344,12 @@ func registerDBPoolMetrics(recorder *metrics.Recorder, resources *data.Resources
 	return recorder.RegisterDBPoolStats(func() metrics.DBPoolStats {
 		stats := sqlDB.Stats()
 		return metrics.DBPoolStats{
-			Open:    stats.OpenConnections,
-			InUse:   stats.InUse,
-			Idle:    stats.Idle,
-			Wait:    stats.WaitCount,
-			MaxOpen: stats.MaxOpenConnections,
+			Open:         stats.OpenConnections,
+			InUse:        stats.InUse,
+			Idle:         stats.Idle,
+			Wait:         stats.WaitCount,
+			MaxOpen:      stats.MaxOpenConnections,
+			WaitDuration: stats.WaitDuration,
 		}
 	})
 }

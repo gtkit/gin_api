@@ -26,6 +26,8 @@ type Options struct {
 	LogRequestBody, LogResponseBody bool
 	// MaxBodyBytes 是整个请求链共享的正文上限。
 	MaxBodyBytes int64
+	// MaxInflightRequests 是业务组同时处理上限；0 用 128，负数拒绝装配。
+	MaxInflightRequests int
 	// RequestIDFactory 可替换请求 ID 构造函数；nil 使用默认安全随机源。
 	RequestIDFactory func() (*middleware.RequestIDGenerator, error)
 	// TrustedProxies 是可信代理的 CIDR/IP 列表。**空 = 不信任任何代理**，
@@ -70,6 +72,12 @@ type Options struct {
 //
 // 装配顺序就是 gin 的惯例：先 engine 级 Use，再分组注册。
 func New(environment env.Env, opt Options) (*gin.Engine, error) {
+	if opt.MaxInflightRequests < 0 {
+		return nil, fmt.Errorf("max inflight requests must not be negative")
+	}
+	if opt.MaxInflightRequests == 0 {
+		opt.MaxInflightRequests = 128
+	}
 	// SetMode 必须在 gin.New() **之前**：gin.New() 的第一件事就是按当时的 mode
 	// 决定构造期调试输出，构造后再设置对那部分输出无效。
 	gin.SetMode(ginModeFromEnv(environment))
@@ -94,7 +102,7 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 
 	registerSystemRoutes(engine, opt)
 
-	v1 := engine.Group("/api/v1", middleware.Timeout(30*time.Second, 2*time.Second))
+	v1 := engine.Group("/api/v1", middleware.Admission(opt.MaxInflightRequests, opt.Metrics), middleware.Timeout(30*time.Second, 2*time.Second))
 	if opt.RegisterModules != nil {
 		opt.RegisterModules(v1)
 	}

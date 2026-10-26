@@ -17,17 +17,20 @@ import (
 // 重试放大流量：N 次重试意味着下游故障期间它承受的请求量变成 N+1 倍。
 // 一个已经在超时边缘的下游，正是被这份放大推过临界点的。
 const maxRetryAttempts = 3
+const maxRetryWait = 30 * time.Second
 
 // RetryPolicy 是重试节奏。
 //
 // 退避区间必须有上界：没有上界的指数退避会让最后一次重试等到调用方
 // 早已放弃之后才发出——那次请求对谁都没有意义，只是白白打了一次下游。
 type RetryPolicy struct {
-	// Attempts 是**首次失败之后**的重试次数，取值 1..maxRetryAttempts。
+	// Attempts 是首次失败之后的最多重试次数，取值 1..maxRetryAttempts。
+	// 成功、不可重试、取消或累计等待预算可使实际次数减少。
 	Attempts int
 	// WaitTime 是首次重试前的等待。
 	WaitTime time.Duration
-	// MaxWaitTime 是退避的上界。
+	// MaxWaitTime 是本地退避上界；0 使用 30s。服务端等待不被它截短，
+	// 但单次与累计等待均不能超过私有 30s 预算。
 	MaxWaitTime time.Duration
 }
 
@@ -37,6 +40,9 @@ func (p RetryPolicy) validate() error {
 		return fmt.Errorf(
 			"httpclient: retry attempts %d out of range 1..%d: more retries turn one downstream "+
 				"hiccup into an N-fold traffic amplification", p.Attempts, maxRetryAttempts)
+	}
+	if p.WaitTime < 0 || p.MaxWaitTime < 0 || p.WaitTime > maxRetryWait || p.MaxWaitTime > maxRetryWait {
+		return fmt.Errorf("httpclient: retry waits must be between zero and %s", maxRetryWait)
 	}
 	if p.MaxWaitTime > 0 && p.WaitTime > p.MaxWaitTime {
 		return fmt.Errorf(
@@ -89,39 +95,12 @@ func RetryableFailure(status int, err error) bool {
 // 真实的下游失败不能因为"调用方在退避期放弃了"而被抹掉（熔断的失败判据
 // 依赖它：errx.IsPureAbort 对聚合错误只在**全部**成员都是取消时才判真）。
 func retryAttempts(ctx context.Context, retry RetryPolicy, client *httpc.Client, attempt Attempt) (int, error) {
-	wait := retry.WaitTime
-	var status int
-	var err error
-	for try := 0; ; try++ {
-		// **每轮之前无条件检查取消**，不依赖退避是否为零：零退避时循环里
-		// 没有任何取消检查点，一个已被放弃的调用会把重试次数全部打完。
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			if try == 0 {
-				return 0, fmt.Errorf("httpclient: call abandoned before the first attempt: %w", ctxErr)
-			}
-			return status, retryAbandoned(err, ctxErr)
-		}
-
-		status, err = attempt(ctx, client)
-		if !RetryableFailure(status, err) || try >= retry.Attempts {
-			return status, err
-		}
-
-		if wait > 0 {
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return status, retryAbandoned(err, ctx.Err())
-			case <-timer.C:
-			}
-		}
-
-		wait *= 2
-		if retry.MaxWaitTime > 0 && wait > retry.MaxWaitTime {
-			wait = retry.MaxWaitTime
-		}
-	}
+	result := runRetries(ctx, retry, func(ctx context.Context) retryResult {
+		metadata := new(retryMetadata)
+		status, err := attempt(context.WithValue(ctx, retryMetadataKey{}, metadata), client)
+		return retryResult{status: status, err: err, retryAfter: metadata.read()}
+	}, defaultRetryTiming())
+	return result.status, result.err
 }
 
 // retryAbandoned 把"最后一次真实失败"与调用方取消聚合返回。

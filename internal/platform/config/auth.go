@@ -69,6 +69,12 @@ type AuthConfig struct {
 	// bcrypt 是刻意昂贵的计算：限流约束的是单来源/单账号的速率，约束不了
 	// **聚合并发**——一批分布式登录请求就能把全部 CPU 吃光。超限的校验排队。
 	BcryptMaxConcurrent int `mapstructure:"bcrypt_max_concurrent"`
+	// BcryptMaxWaiters 限制正在等候密码运算的请求数。
+	// 省略/null 使用有效执行并发数，0 禁止排队，正数显式指定；负数非法。
+	BcryptMaxWaiters *int `mapstructure:"bcrypt_max_waiters"`
+	// BcryptQueueTimeout 是排队上限；0/省略用 1s，负数非法。
+	// 仅等待者使用，且不超过调用方剩余预算；不会中断已开始的 bcrypt。
+	BcryptQueueTimeout time.Duration `mapstructure:"bcrypt_queue_timeout"`
 
 	// RefreshTTL 是刷新令牌寿命，留空按 defaultRefreshTTL。
 	//
@@ -115,6 +121,22 @@ func (c AuthConfig) EffectiveBcryptConcurrency() int {
 		return c.BcryptMaxConcurrent
 	}
 	return runtime.GOMAXPROCS(0)
+}
+
+// EffectiveBcryptMaxWaiters 保留显式 0 的快速拒绝语义。
+func (c AuthConfig) EffectiveBcryptMaxWaiters() int {
+	if c.BcryptMaxWaiters != nil {
+		return *c.BcryptMaxWaiters
+	}
+	return c.EffectiveBcryptConcurrency()
+}
+
+// EffectiveBcryptQueueTimeout 返回等待名额的最大时间。
+func (c AuthConfig) EffectiveBcryptQueueTimeout() time.Duration {
+	if c.BcryptQueueTimeout > 0 {
+		return c.BcryptQueueTimeout
+	}
+	return time.Second
 }
 
 // EffectiveRefreshTTL 返回生效的刷新令牌寿命。
@@ -173,6 +195,12 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 
 	if c.RefreshTTL < 0 {
 		errs = append(errs, errors.New("auth.refresh_ttl must not be negative"))
+	}
+	if c.BcryptMaxWaiters != nil && *c.BcryptMaxWaiters < 0 {
+		errs = append(errs, errors.New("auth.bcrypt_max_waiters must not be negative"))
+	}
+	if c.BcryptQueueTimeout < 0 {
+		errs = append(errs, errors.New("auth.bcrypt_queue_timeout must not be negative"))
 	}
 	// 刷新令牌比访问令牌还短就没有存在意义：它的整个作用是在访问令牌过期后
 	// 换取新的，寿命更短意味着它先死，用户被迫重新登录——那等于没有刷新机制。

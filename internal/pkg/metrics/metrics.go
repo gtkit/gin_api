@@ -69,7 +69,13 @@ type Recorder struct {
 	workerExecutions metric.Int64Counter
 	workerDuration   metric.Float64Histogram
 
-	authEvents metric.Int64Counter
+	authEvents            metric.Int64Counter
+	activeRequests        metric.Int64UpDownCounter
+	admissionRejections   metric.Int64Counter
+	passwordActive        metric.Int64UpDownCounter
+	passwordQueued        metric.Int64UpDownCounter
+	passwordQueueDuration metric.Float64Histogram
+	passwordRejections    metric.Int64Counter
 
 	// meter 留着供后续注册 DB 连接池的异步回调。
 	meter metric.Meter
@@ -95,6 +101,19 @@ func New(meter metric.Meter) (*Recorder, error) {
 		metric.WithDescription("Duration of inbound HTTP requests"),
 		metric.WithExplicitBucketBoundaries(requestDurationBuckets...),
 	)
+	instrument(err)
+
+	activeRequests, err := meter.Int64UpDownCounter("http.server.active_requests", metric.WithUnit("{request}"))
+	instrument(err)
+	admissionRejections, err := meter.Int64Counter("admission.rejections")
+	instrument(err)
+	passwordActive, err := meter.Int64UpDownCounter("auth.password.active")
+	instrument(err)
+	passwordQueued, err := meter.Int64UpDownCounter("auth.password.queued")
+	instrument(err)
+	passwordQueueDuration, err := meter.Float64Histogram("auth.password.queue.duration", metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(requestDurationBuckets...))
+	instrument(err)
+	passwordRejections, err := meter.Int64Counter("auth.password.rejections")
 	instrument(err)
 
 	requestsTotal, err := meter.Int64Counter(
@@ -129,14 +148,97 @@ func New(meter metric.Meter) (*Recorder, error) {
 	}
 
 	return &Recorder{
-		requestDuration:    requestDuration,
-		requestsTotal:      requestsTotal,
-		rateLimitDecisions: rateLimitDecisions,
-		workerExecutions:   workerExecutions,
-		workerDuration:     workerDuration,
-		authEvents:         authEvents,
-		meter:              meter,
+		requestDuration:       requestDuration,
+		requestsTotal:         requestsTotal,
+		rateLimitDecisions:    rateLimitDecisions,
+		workerExecutions:      workerExecutions,
+		workerDuration:        workerDuration,
+		authEvents:            authEvents,
+		activeRequests:        activeRequests,
+		admissionRejections:   admissionRejections,
+		passwordActive:        passwordActive,
+		passwordQueued:        passwordQueued,
+		passwordQueueDuration: passwordQueueDuration,
+		passwordRejections:    passwordRejections,
+		meter:                 meter,
 	}, nil
+}
+
+func requestMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace, http.MethodPatch, "QUERY":
+		return method
+	default:
+		return "_OTHER"
+	}
+}
+
+// TrackRequest records entry and returns the matching exit, including panic paths.
+// scheme is derived from the incoming transport, not untrusted forwarding headers.
+func (r *Recorder) TrackRequest(ctx context.Context, method, scheme string) func() {
+	if r == nil {
+		return func() {}
+	}
+	if scheme != "https" {
+		scheme = "http"
+	}
+	attrs := metric.WithAttributes(attribute.String("http.request.method", requestMethod(method)), attribute.String("url.scheme", scheme))
+	r.activeRequests.Add(ctx, 1, attrs)
+	return func() { r.activeRequests.Add(ctx, -1, attrs) }
+}
+
+// RecordAdmissionRejection accepts only a registered route template from Gin.
+func (r *Recorder) RecordAdmissionRejection(ctx context.Context, method, scheme, route string) {
+	if r == nil || route == "" {
+		return
+	}
+	if scheme != "https" {
+		scheme = "http"
+	}
+	r.admissionRejections.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("http.request.method", requestMethod(method)), attribute.String("url.scheme", scheme),
+		attribute.String("http.route", route), attribute.String("reason", "saturated")))
+}
+
+// AddPasswordActive adjusts the number of executing password operations.
+func (r *Recorder) AddPasswordActive(ctx context.Context, delta int64) {
+	if r != nil {
+		r.passwordActive.Add(ctx, delta)
+	}
+}
+
+// AddPasswordQueued adjusts the number of operations holding a waiting slot.
+func (r *Recorder) AddPasswordQueued(ctx context.Context, delta int64) {
+	if r != nil {
+		r.passwordQueued.Add(ctx, delta)
+	}
+}
+
+// RecordPasswordQueue records only actual waits; outcome is a closed set.
+func (r *Recorder) RecordPasswordQueue(ctx context.Context, elapsed time.Duration, outcome string) {
+	if r == nil {
+		return
+	}
+	switch outcome {
+	case "acquired", "timeout", "canceled":
+	default:
+		return
+	}
+	r.passwordQueueDuration.Record(ctx, max(elapsed.Seconds(), 0), metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// RecordPasswordRejection excludes caller cancellation from overload counts.
+func (r *Recorder) RecordPasswordRejection(ctx context.Context, reason string) {
+	if r == nil {
+		return
+	}
+	switch reason {
+	case "queue_full", "queue_timeout":
+	default:
+		return
+	}
+	r.passwordRejections.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 // RecordRequest 记录一次 HTTP 请求。
@@ -254,11 +356,12 @@ func (r *Recorder) RunWorker(ctx context.Context, kind WorkerKind, worker string
 
 // DBPoolStats 是连接池的当前用量，字段对应 database/sql.DBStats。
 type DBPoolStats struct {
-	Open    int
-	InUse   int
-	Idle    int
-	Wait    int64
-	MaxOpen int
+	Open         int
+	InUse        int
+	Idle         int
+	Wait         int64
+	MaxOpen      int
+	WaitDuration time.Duration
 }
 
 // RegisterDBPoolStats 以异步回调暴露数据库连接池用量。
@@ -292,6 +395,10 @@ func (r *Recorder) RegisterDBPoolStats(snapshot func() DBPoolStats) (func() erro
 	if err != nil {
 		return nil, fmt.Errorf("metrics: build db wait counter: %w", err)
 	}
+	waitDuration, err := r.meter.Float64ObservableCounter("pool.wait.duration", metric.WithUnit("s"), metric.WithDescription("Cumulative connection pool wait time"))
+	if err != nil {
+		return nil, fmt.Errorf("metrics: build pool wait duration: %w", err)
+	}
 
 	// 用 state 标签区分 in_use / idle，而不是拆成两个仪表：
 	// 这样"池子有多满"可以直接对同一指标按 state 求和后比 max，
@@ -306,9 +413,11 @@ func (r *Recorder) RegisterDBPoolStats(snapshot func() DBPoolStats) (func() erro
 			o.ObserveInt64(connections, int64(stats.Idle), idle)
 			o.ObserveInt64(maxOpen, int64(stats.MaxOpen))
 			o.ObserveInt64(waitCount, stats.Wait)
+			o.ObserveFloat64(waitDuration, max(stats.WaitDuration.Seconds(), 0), metric.WithAttributes(
+				attribute.String("pool.type", "mysql"), attribute.String("pool.role", "main"), attribute.String("db.client.connection.pool.name", "mysql/main")))
 			return nil
 		},
-		connections, maxOpen, waitCount,
+		connections, maxOpen, waitCount, waitDuration,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("metrics: register db pool callback: %w", err)

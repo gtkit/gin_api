@@ -3,6 +3,10 @@
 > 本目录为 `gin_api` 项目的性能剖析（profiling）与性能引导优化（PGO）操作手册与配套脚本。
 > 所有文档与脚本均针对本项目的真实结构（Gin + GORM + cobra 启动、`sonic` 构建标签）编写。
 
+API 基线工具在 [scripts/load-api.go](../scripts/load-api.go)，运行方式及有界统计语义见 [scripts/README.md](../scripts/README.md#load-apigo)。它是 build-ignore 独立 Go 工具，测试和编译须显式列文件，不运行 `go test ./pprof/scripts`。
+
+容量报告先固定服务/发生器机器规格、Go 与代码版本、配置、数据规模、请求比例和 SLO，再记录吞吐、P95/P99、503/错误率、发生器丢弃率，以及**服务进程** CPU、RSS、分配与 GC。至少覆盖正常读写、认证、缓存命中/未命中、慢下游、持续运行和滚动退出。工具自身 CPU/RSS 不是服务资源使用；本机合成 HTTP 演练只能证明发生器功能，不能证明真实业务容量。内存及指标边界见 [容量说明](../docs/capacity-and-memory.md)。
+
 ---
 
 ## 一、这个目录里有什么
