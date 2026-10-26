@@ -61,7 +61,7 @@ func TestCommandsRejectExplicitRootWithoutConfiguration(t *testing.T) {
 		args   []string
 		prefix string
 	}{
-		{"migrate", []string{"migrate", "up"}, "bootstrap runtime: "},
+		{"migrate", []string{"migrate", "status"}, "bootstrap runtime: "},
 		{"make", []string{"make", "migration", "create_v11_probe_table"}, "bootstrap runtime: "},
 		{"doctor", []string{"doctor"}, "validate runtime configuration: "},
 		{"doctor deep", []string{"doctor", "--deep", "--json"}, "validate runtime configuration: "},
@@ -122,6 +122,8 @@ func forceUnreachableTargets(t *testing.T) {
 }
 
 func TestDefaultRuntimesHonorCanceledStartup(t *testing.T) {
+	t.Setenv("APP_ROOT", t.TempDir())
+	forceUnreachableTargets(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if owner, err := bootstrap.NewRuntime(ctx, bootstrap.Options{}); owner != nil || !errors.Is(err, context.Canceled) {
