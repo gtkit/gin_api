@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,6 +90,167 @@ func loadDropCounts(t *testing.T, summary loadSummary) (uint64, uint64) {
 		t.Fatalf("lost work: %+v, classifications=%s", summary, raw)
 	}
 	return *fields.Scheduler, *fields.Worker
+}
+
+type loadContextBody struct{ ctx context.Context }
+
+func (b loadContextBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, context.Cause(b.ctx)
+}
+
+func (loadContextBody) Close() error { return nil }
+
+func assertLoadAccounting(t *testing.T, summary loadSummary) {
+	t.Helper()
+	loadDropCounts(t, summary)
+	var samples, statuses uint64
+	for _, count := range summary.Latency.Counts {
+		samples += count
+	}
+	for _, count := range summary.Status {
+		statuses += count
+	}
+	if summary.CanceledRequests > summary.Completed || samples != summary.Completed-summary.CanceledRequests || statuses > summary.Completed {
+		t.Fatalf("inconsistent cancellation/status/latency counts: %+v", summary)
+	}
+}
+
+func TestLoadCancellationAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		body                         bool
+		cancelAfter                  time.Duration
+		parentDeadline               bool
+		realIOError                  bool
+		independentCancel            bool
+		reason                       string
+		canceled, failures, statuses uint64
+	}{
+		{name: "cancel while generating", cancelAfter: 500 * time.Millisecond, reason: "canceled", canceled: 1},
+		{name: "cancel body while draining", body: true, cancelAfter: 1500 * time.Millisecond, reason: "canceled", canceled: 1, statuses: 1},
+		{name: "parent deadline while draining", body: true, parentDeadline: true, reason: "deadline_exceeded", failures: 1, statuses: 1},
+		{name: "request header timeout", reason: "completed", failures: 1},
+		{name: "request body timeout", body: true, reason: "completed", failures: 1, statuses: 1},
+		{name: "I/O failure before cancellation classification", realIOError: true, reason: "canceled", failures: 1},
+		{name: "unrelated canceled error", independentCancel: true, reason: "completed", failures: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var ctx context.Context
+				var cancel context.CancelFunc
+				if tc.parentDeadline {
+					ctx, cancel = context.WithTimeout(t.Context(), 1500*time.Millisecond)
+				} else {
+					ctx, cancel = context.WithCancel(t.Context())
+				}
+				defer cancel()
+				if tc.cancelAfter > 0 {
+					go func() { synctest.Sleep(tc.cancelAfter); cancel() }()
+				}
+				client := &http.Client{Transport: loadTransportFunc(func(req *http.Request) (*http.Response, error) {
+					if tc.realIOError {
+						cancel()
+						return nil, io.ErrUnexpectedEOF
+					}
+					if tc.independentCancel {
+						return nil, context.Canceled
+					}
+					if tc.body {
+						return &http.Response{StatusCode: http.StatusOK, Body: loadContextBody{req.Context()}}, nil
+					}
+					<-req.Context().Done()
+					return nil, fmt.Errorf("fixture: %w", context.Cause(req.Context()))
+				})}
+				base, err := url.Parse("http://127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := loadConfig{rate: 1, concurrency: 1, duration: time.Second, timeout: 2 * time.Second}
+				summary := runLoadWithClock(ctx, client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg, func() time.Time {
+					synctest.Wait()
+					return time.Now()
+				})
+				if summary.Sent != 1 || summary.TerminationReason != tc.reason || summary.CanceledRequests != tc.canceled || summary.TransportErrors != tc.failures || summary.Status[http.StatusOK] != tc.statuses {
+					t.Fatalf("wrong termination/accounting: %+v", summary)
+				}
+				assertLoadAccounting(t, summary)
+			})
+		})
+	}
+}
+
+type loadErrorWriter struct{ err error }
+
+func (w loadErrorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestLoadCLIInterruptedJSONAndError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "scenario.json")
+	if err := os.WriteFile(file, []byte(`[{"method":"GET","path":"/"}]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-target", "http://127.0.0.1:1", "-scenario", file}
+	for _, reason := range []string{"canceled", "deadline_exceeded"} {
+		t.Run(reason, func(t *testing.T) {
+			var ctx context.Context
+			var cancel context.CancelFunc
+			want := context.Canceled
+			if reason == "canceled" {
+				ctx, cancel = context.WithCancel(t.Context())
+				cancel()
+			} else {
+				ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+				want = context.DeadlineExceeded
+			}
+			defer cancel()
+			var out, errOut bytes.Buffer
+			err := loadCLI(ctx, args, &out, &errOut)
+			if !errors.Is(err, want) {
+				t.Errorf("CLI error = %v, want %v", err, want)
+			}
+			var summary loadSummary
+			if err := json.Unmarshal(out.Bytes(), &summary); err != nil {
+				t.Fatal(err)
+			}
+			if summary.TerminationReason != reason || summary.Sent != 0 {
+				t.Fatalf("missing interrupted result: %+v", summary)
+			}
+			assertLoadAccounting(t, summary)
+			if err := loadCLI(ctx, args, loadErrorWriter{io.ErrClosedPipe}, &errOut); !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("encoding error was hidden: %v", err)
+			}
+		})
+	}
+	var out, errOut bytes.Buffer
+	if err := loadCLI(t.Context(), []string{"-rate", "0"}, &out, &errOut); err == nil || out.Len() != 0 {
+		t.Fatalf("invalid arguments produced a result: %v %s", err, out.String())
+	}
+}
+
+func TestLoadClientTimeoutAfterResponseHeaders(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		<-req.Context().Done()
+	}))
+	server.Start()
+	t.Cleanup(server.Close)
+	cfg := loadConfig{rate: 100, concurrency: 1, duration: 100 * time.Millisecond, timeout: time.Second}
+	client, transport := loadHTTPClient(cfg)
+	client.Timeout = 200 * time.Millisecond // Force Client.Timeout before the request context expires.
+	t.Cleanup(transport.CloseIdleConnections)
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := runLoad(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg)
+	if summary.Sent == 0 || summary.TerminationReason != "completed" || summary.CanceledRequests != 0 || summary.TransportErrors != summary.Sent || summary.Status[http.StatusOK] != summary.Sent {
+		t.Fatalf("client timeout was misclassified: %+v", summary)
+	}
+	assertLoadAccounting(t, summary)
 }
 
 func TestLoadDrainsWithoutCancelingAtGenerationEnd(t *testing.T) {

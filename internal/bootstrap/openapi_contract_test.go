@@ -54,6 +54,12 @@ func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, e
 	}
 	expected := make(map[string]bool)
 	for path, methods := range spec.Paths {
+		if methods == nil {
+			return nil, fmt.Errorf("path %q must be an object, not null", path)
+		}
+		if _, exists := methods["$ref"]; exists {
+			return nil, fmt.Errorf("path %q: path-level $ref is not supported", path)
+		}
 		for method, rawOperation := range methods {
 			switch method {
 			case "get", "put", "post", "delete", "options", "head", "patch", "trace":
@@ -84,7 +90,7 @@ func TestOpenAPIPathMetadataAndOperations(t *testing.T) {
 			raw := []byte(`{"openapi":"3.1.0","paths":{"/items":{
 				"summary":"Items", "description":"Path-wide description",
 				"parameters":[{"name":"id","in":"query"}], "servers":[{"url":"/"}],
-				"$ref":"#/components/pathItems/Items", "x-metadata":{"note":"not an operation"},
+				"x-metadata":{"note":"not an operation"},
 				"get":{}, "put":{}, "post":{}, "delete":{}, "options":{}, "head":{}, "patch":{}, "trace":{}
 			},"/local":{"post":{"x-auth-mode":"local"}},"/external":{"post":{"x-auth-mode":"external"}}}}`)
 			got, err := openAPIExpectedRoutes(raw, mode)
@@ -112,6 +118,26 @@ func TestOpenAPIRejectsInvalidOperations(t *testing.T) {
 		if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
 			t.Errorf("accepted invalid contract %s", raw)
 		}
+	}
+}
+
+func TestOpenAPIRejectsUnsupportedPathValues(t *testing.T) {
+	for _, value := range []string{`null`, `{"$ref":"#/components/pathItems/Items"}`, `{"$ref":""}`, `{"$ref":null}`} {
+		raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{"/items":%s}}`, value)
+		if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
+			t.Errorf("silently accepted unsupported path value %s", value)
+		}
+	}
+}
+
+func TestOpenAPIAllowsEmptyPathsAndSchemaReferences(t *testing.T) {
+	raw := []byte(`{"openapi":"3.1.0","paths":{"/empty":{},"/items":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Item"}}}}}}}},"components":{"schemas":{"Item":{"type":"object"}}}}`)
+	got, err := openAPIExpectedRoutes(raw, config.AuthModeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got, map[string]bool{"GET /items": true}) {
+		t.Fatalf("wrong inline routes: %v", got)
 	}
 }
 

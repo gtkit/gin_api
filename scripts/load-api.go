@@ -42,16 +42,18 @@ type loadConfig struct {
 }
 
 type loadSummary struct {
-	Offered          uint64         `json:"offered"`
-	Sent             uint64         `json:"sent"`
-	Completed        uint64         `json:"completed"`
-	Dropped          uint64         `json:"generator_dropped"`
-	SchedulerDropped uint64         `json:"scheduler_dropped"`
-	WorkerDropped    uint64         `json:"worker_dropped"`
-	TransportErrors  uint64         `json:"transport_errors"`
-	Status           map[int]uint64 `json:"status"`
-	ElapsedSeconds   float64        `json:"elapsed_seconds"`
-	Latency          latencySummary `json:"scheduled_latency"`
+	Offered           uint64         `json:"offered"`
+	Sent              uint64         `json:"sent"`
+	Completed         uint64         `json:"completed"`
+	CanceledRequests  uint64         `json:"canceled_requests"`
+	TerminationReason string         `json:"termination_reason"`
+	Dropped           uint64         `json:"generator_dropped"`
+	SchedulerDropped  uint64         `json:"scheduler_dropped"`
+	WorkerDropped     uint64         `json:"worker_dropped"`
+	TransportErrors   uint64         `json:"transport_errors"`
+	Status            map[int]uint64 `json:"status"`
+	ElapsedSeconds    float64        `json:"elapsed_seconds"`
+	Latency           latencySummary `json:"scheduled_latency"`
 }
 
 type latencySummary struct {
@@ -121,7 +123,17 @@ func loadCLI(ctx context.Context, args []string, out, errOut io.Writer) error {
 	client, transport := loadHTTPClient(cfg)
 	defer transport.CloseIdleConnections()
 	summary := runLoad(ctx, client, base, scenarios, cfg)
-	return json.NewEncoder(out).Encode(summary)
+	if err := json.NewEncoder(out).Encode(summary); err != nil {
+		return err
+	}
+	switch summary.TerminationReason {
+	case "canceled":
+		return context.Canceled
+	case "deadline_exceeded":
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
 }
 
 func validateLoadConfig(target string, cfg loadConfig) (*url.URL, error) {
@@ -289,6 +301,14 @@ func runLoadWithClock(ctx context.Context, client *http.Client, base *url.URL, s
 	}
 	close(jobs)
 	workers.Wait()
+	switch err := ctx.Err(); {
+	case errors.Is(err, context.Canceled):
+		stats.summary.TerminationReason = "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		stats.summary.TerminationReason = "deadline_exceeded"
+	default:
+		stats.summary.TerminationReason = "completed"
+	}
 	stats.summary.Offered = uint64(offered)
 	stats.summary.Sent = uint64(sent)
 	stats.summary.SchedulerDropped = uint64(schedulerDropped)
@@ -325,14 +345,19 @@ func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.
 		}
 	}
 	elapsed := max(time.Since(job.scheduled), 0)
+	callerCanceled := err != nil && errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.summary.Completed++
-	if err != nil {
-		s.summary.TransportErrors++
-	}
 	if status != 0 {
 		s.summary.Status[status]++
+	}
+	if callerCanceled {
+		s.summary.CanceledRequests++
+		return
+	}
+	if err != nil {
+		s.summary.TransportErrors++
 	}
 	i, _ := slices.BinarySearch(latencyBounds, elapsed)
 	s.buckets[i]++
