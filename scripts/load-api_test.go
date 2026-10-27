@@ -257,12 +257,208 @@ func TestLoadClientTimeoutAfterResponseHeaders(t *testing.T) {
 	assertLoadAccounting(t, summary)
 }
 
+func newLoadBuildCommand(ctx context.Context, program string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, program, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+func assertLoadMainSummary(t *testing.T, summary loadSummary, reason string, status int) {
+	t.Helper()
+	if summary.TerminationReason != reason {
+		t.Fatalf("wrong subprocess result: %+v", summary)
+	}
+	assertLoadAccounting(t, summary)
+	if reason == "canceled" {
+		if summary.CanceledRequests != summary.Completed || summary.TransportErrors != 0 {
+			t.Fatalf("signal was misclassified: %+v", summary)
+		}
+	} else if summary.Status[status] != summary.Completed || summary.TransportErrors != 0 {
+		t.Fatalf("HTTP outcome changed exit semantics: %+v", summary)
+	}
+}
+
+func TestLoadMainZeroDispatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		calls := 0
+		cfg := loadConfig{rate: 10, concurrency: 1, duration: time.Second, timeout: time.Second}
+		client := &http.Client{Transport: loadTransportFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("zero-dispatch scenario made a request")
+			return nil, errors.New("unexpected request")
+		})}
+		base, err := url.Parse("http://127.0.0.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary := runLoadWithClock(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg, func() time.Time {
+			calls++
+			if calls == 1 {
+				return start
+			}
+			return start.Add(cfg.duration)
+		})
+		if summary.Sent != 0 || summary.Completed != 0 || summary.SchedulerDropped != 10 {
+			t.Fatalf("expected an expired generation window: %+v", summary)
+		}
+		assertLoadMainSummary(t, summary, "completed", http.StatusNoContent)
+	})
+}
+
+// The marker is passed only to the fixture subprocess, never set globally.
+func TestLoadBuildFixtureProcess(t *testing.T) {
+	if os.Getenv("GIN_API_LOAD_BUILD_FIXTURE") != "1" {
+		return
+	}
+	if _, err := os.Stdout.Write([]byte{1}); err != nil {
+		os.Exit(2)
+	}
+	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+type loadBuildTestProcess struct {
+	cmd     *exec.Cmd
+	done    chan struct{}
+	waitErr error
+}
+
+func startLoadBuildTestProcess(t *testing.T, cmd *exec.Cmd) *loadBuildTestProcess {
+	t.Helper()
+	cmd.Env = append(cmd.Environ(), "GIN_API_LOAD_BUILD_FIXTURE=1")
+	registerPipe := func(pipe *os.File) {
+		t.Cleanup(func() {
+			if err := pipe.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				t.Error(err)
+			}
+		})
+	}
+	input, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerPipe(input)
+	registerPipe(inputWriter)
+	output, outputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerPipe(output)
+	registerPipe(outputWriter)
+	cmd.Stdin, cmd.Stdout = input, outputWriter
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	process := &loadBuildTestProcess{cmd: cmd, done: make(chan struct{})}
+	var waiter sync.WaitGroup
+	waiter.Go(func() {
+		process.waitErr = cmd.Wait()
+		close(process.done)
+	})
+	t.Cleanup(func() {
+		// This independent fallback runs after any failed group-exit assertion.
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Error(err)
+		}
+		waiter.Wait()
+	})
+	// Drop the parent's copies of child descriptors so an early child exit
+	// produces EOF on the readiness pipe, including startup failures.
+	for _, pipe := range []*os.File{input, outputWriter} {
+		if err := pipe.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(output, ready[:]); err != nil {
+		t.Fatal(err)
+	}
+	if ready[0] != 1 {
+		t.Fatalf("unexpected fixture readiness: %v", ready)
+	}
+	return process
+}
+
+func TestLoadBuildTimeoutReapsProcessGroup(t *testing.T) {
+	guard, cancelGuard := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelGuard()
+	ctx, cancel := context.WithCancelCause(guard)
+	defer cancel(nil)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-test.run=^TestLoadBuildFixtureProcess$"}
+	leader := startLoadBuildTestProcess(t, newLoadBuildCommand(ctx, executable, args...))
+	group, err := syscall.Getpgid(leader.cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group != leader.cmd.Process.Pid || group == syscall.Getpgrp() {
+		t.Fatalf("build group is not isolated: %d", group)
+	}
+	memberCmd := exec.CommandContext(guard, executable, args...)
+	memberCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: group}
+	member := startLoadBuildTestProcess(t, memberCmd)
+	memberGroup, err := syscall.Getpgid(member.cmd.Process.Pid)
+	if err != nil || memberGroup != group {
+		t.Fatalf("member group=%d, want %d: %v", memberGroup, group, err)
+	}
+	// Start the deadline only after both processes are ready. Neither process
+	// receives the fallback guard cancellation during a successful assertion.
+	deadline, stopDeadline := context.WithTimeout(guard, 20*time.Millisecond)
+	defer stopDeadline()
+	propagated := make(chan struct{})
+	stopPropagation := context.AfterFunc(deadline, func() {
+		cancel(context.Cause(deadline))
+		close(propagated)
+	})
+	defer stopPropagation()
+	<-propagated
+	if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+		t.Fatalf("build was not canceled by the deadline: %v", context.Cause(ctx))
+	}
+	finish, cancelFinish := context.WithTimeout(guard, 2*time.Second)
+	defer cancelFinish()
+	for _, process := range []*loadBuildTestProcess{leader, member} {
+		select {
+		case <-process.done:
+			exitErr, ok := errors.AsType[*exec.ExitError](process.waitErr)
+			if !ok {
+				t.Fatalf("group member did not terminate by signal: %v", process.waitErr)
+			}
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("unexpected group termination: %v", exitErr)
+			}
+		case <-finish.Done():
+			t.Fatalf("group member %d survived the build deadline", process.cmd.Process.Pid)
+		}
+	}
+	if err := guard.Err(); err != nil {
+		t.Fatalf("fallback guard fired during group-exit assertion: %v", err)
+	}
+	if err := finish.Err(); err != nil {
+		t.Fatalf("group was not reaped within its cleanup budget: %v", err)
+	}
+}
+
 func TestLoadMainExitCodes(t *testing.T) {
 	// Execute the production entry point itself, not a test helper or go run.
 	binary := filepath.Join(t.TempDir(), "load-api")
 	buildCtx, cancelBuild := context.WithTimeout(t.Context(), time.Minute)
 	defer cancelBuild()
-	build := exec.CommandContext(buildCtx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "load-api.go")
+	build := newLoadBuildCommand(buildCtx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "load-api.go")
 	build.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build load-api: %v\n%s", err, output)
@@ -271,13 +467,14 @@ func TestLoadMainExitCodes(t *testing.T) {
 		name        string
 		signal      os.Signal
 		invalidArgs bool
+		needRequest bool
 		badOutput   string
 		status      int
 		wantCode    int
 		wantReason  string
 	}{
 		{name: "completed", status: http.StatusNoContent, wantReason: "completed"},
-		{name: "HTTP failure still completes", status: http.StatusServiceUnavailable, wantReason: "completed"},
+		{name: "HTTP failure still completes", needRequest: true, status: http.StatusServiceUnavailable, wantReason: "completed"},
 		{name: "invalid arguments", invalidArgs: true, wantCode: 1},
 		{name: "SIGINT", signal: os.Interrupt, wantCode: 1, wantReason: "canceled"},
 		{name: "SIGTERM", signal: syscall.SIGTERM, wantCode: 1, wantReason: "canceled"},
@@ -304,10 +501,14 @@ func TestLoadMainExitCodes(t *testing.T) {
 			if err := os.WriteFile(file, []byte(`[{"method":"GET","path":"/"}]`), 0600); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"-target", server.URL, "-scenario", file, "-duration", "200ms", "-rate", "100", "-concurrency", "1", "-timeout", "5s"}
-			if tc.signal != nil {
-				args = append(args, "-duration", "30s")
+			duration := "200ms"
+			if tc.needRequest {
+				duration = "2s"
 			}
+			if tc.signal != nil {
+				duration = "30s"
+			}
+			args := []string{"-target", server.URL, "-scenario", file, "-duration", duration, "-rate", "100", "-concurrency", "1", "-timeout", "5s"}
 			if tc.invalidArgs {
 				args = []string{"-rate", "0"}
 			}
@@ -344,16 +545,20 @@ func TestLoadMainExitCodes(t *testing.T) {
 				close(done)
 			})
 			t.Cleanup(func() { cancel(); waiter.Wait() })
-			if tc.signal != nil {
+			if tc.signal != nil || tc.needRequest {
 				select {
 				case <-started:
+				case <-done:
+					if tc.signal != nil || !first.Load() {
+						t.Fatalf("process exited before request: %v\n%s", waitErr, errOut.String())
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				if tc.signal != nil {
 					if err := cmd.Process.Signal(tc.signal); err != nil {
 						t.Fatal(err)
 					}
-				case <-done:
-					t.Fatalf("process exited before request: %v\n%s", waitErr, errOut.String())
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
 				}
 			}
 			<-done
@@ -380,17 +585,10 @@ func TestLoadMainExitCodes(t *testing.T) {
 				if err := json.Unmarshal(out.Bytes(), &summary); err != nil {
 					t.Fatal(err)
 				}
-				if summary.TerminationReason != tc.wantReason || summary.Sent == 0 {
-					t.Fatalf("wrong subprocess result: %+v", summary)
+				if (tc.signal != nil || tc.needRequest) && summary.Sent == 0 {
+					t.Fatalf("expected a real request: %+v", summary)
 				}
-				assertLoadAccounting(t, summary)
-				if tc.signal != nil {
-					if summary.CanceledRequests != summary.Completed || summary.TransportErrors != 0 {
-						t.Fatalf("signal was misclassified: %+v", summary)
-					}
-				} else if summary.Status[tc.status] != summary.Completed || summary.TransportErrors != 0 {
-					t.Fatalf("HTTP outcome changed exit semantics: %+v", summary)
-				}
+				assertLoadMainSummary(t, summary, tc.wantReason, tc.status)
 			}
 			if tc.wantCode == 0 && errOut.Len() != 0 || tc.wantCode != 0 && tc.badOutput != "stderr" && errOut.Len() == 0 {
 				t.Fatalf("unexpected stderr: %s", errOut.String())
