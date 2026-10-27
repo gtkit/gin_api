@@ -42,14 +42,16 @@ type loadConfig struct {
 }
 
 type loadSummary struct {
-	Offered         uint64         `json:"offered"`
-	Sent            uint64         `json:"sent"`
-	Completed       uint64         `json:"completed"`
-	Dropped         uint64         `json:"generator_dropped"`
-	TransportErrors uint64         `json:"transport_errors"`
-	Status          map[int]uint64 `json:"status"`
-	ElapsedSeconds  float64        `json:"elapsed_seconds"`
-	Latency         latencySummary `json:"scheduled_latency"`
+	Offered          uint64         `json:"offered"`
+	Sent             uint64         `json:"sent"`
+	Completed        uint64         `json:"completed"`
+	Dropped          uint64         `json:"generator_dropped"`
+	SchedulerDropped uint64         `json:"scheduler_dropped"`
+	WorkerDropped    uint64         `json:"worker_dropped"`
+	TransportErrors  uint64         `json:"transport_errors"`
+	Status           map[int]uint64 `json:"status"`
+	ElapsedSeconds   float64        `json:"elapsed_seconds"`
+	Latency          latencySummary `json:"scheduled_latency"`
 }
 
 type latencySummary struct {
@@ -91,7 +93,7 @@ func loadCLI(ctx context.Context, args []string, out, errOut io.Writer) error {
 	fs.StringVar(&scenarioFile, "scenario", "", "JSON file containing request scenarios")
 	fs.IntVar(&cfg.rate, "rate", 10, "offered arrivals per second, 1..100000")
 	fs.IntVar(&cfg.concurrency, "concurrency", 4, "workers, 1..4096")
-	fs.DurationVar(&cfg.duration, "duration", 10*time.Second, "run duration, positive and at most 24h")
+	fs.DurationVar(&cfg.duration, "duration", 10*time.Second, "generation duration, positive and at most 24h; in-flight requests drain afterward")
 	fs.DurationVar(&cfg.timeout, "timeout", 5*time.Second, "request timeout, positive and at most 1m")
 	fs.BoolVar(&cfg.allowRemote, "allow-remote", false, "explicitly permit non-loopback targets")
 	if err := fs.Parse(args); err != nil {
@@ -217,7 +219,11 @@ func scheduledCount(elapsed, duration time.Duration, rate int) int64 {
 }
 
 func runLoad(ctx context.Context, client *http.Client, base *url.URL, scenarios []loadScenario, cfg loadConfig) loadSummary {
-	start := time.Now()
+	return runLoadWithClock(ctx, client, base, scenarios, cfg, time.Now)
+}
+
+func runLoadWithClock(ctx context.Context, client *http.Client, base *url.URL, scenarios []loadScenario, cfg loadConfig, now func() time.Time) loadSummary {
+	start := now()
 	runCtx, cancel := context.WithTimeout(ctx, cfg.duration)
 	defer cancel()
 	stats := loadStats{summary: loadSummary{Status: make(map[int]uint64)}, buckets: make([]uint64, len(latencyBounds)+1)}
@@ -226,21 +232,27 @@ func runLoad(ctx context.Context, client *http.Client, base *url.URL, scenarios 
 	for range cfg.concurrency {
 		workers.Go(func() {
 			for job := range jobs {
-				stats.request(runCtx, client, base, job)
+				stats.request(ctx, client, base, job, cfg.timeout)
 			}
 		})
 	}
-	var offered, sent, dropped int64
+	var offered, sent, schedulerDropped, workerDropped int64
 	weight := 0
 	for _, s := range scenarios {
 		weight += s.Weight
 	}
+	end := start.Add(cfg.duration)
 	for runCtx.Err() == nil {
-		due := scheduledCount(time.Since(start), cfg.duration, cfg.rate)
+		current := now()
+		// Taking the next sample may resume after the generation deadline.
+		if !current.Before(end) || runCtx.Err() != nil {
+			break
+		}
+		due := scheduledCount(current.Sub(start), cfg.duration, cfg.rate)
 		if due > offered {
 			// Only the newest due arrival may be sent. Earlier overdue arrivals
 			// were never generated; preserve their offered and dropped counts.
-			dropped += due - offered - 1
+			schedulerDropped += due - offered - 1
 			offered = due
 			index := int((offered - 1) % int64(weight))
 			scenario := scenarios[0]
@@ -256,11 +268,10 @@ func runLoad(ctx context.Context, client *http.Client, base *url.URL, scenarios 
 			case jobs <- job:
 				sent++
 			default:
-				dropped++
+				workerDropped++
 			}
 		}
 		next := start.Add(time.Duration(offered) * time.Second / time.Duration(cfg.rate))
-		end := start.Add(cfg.duration)
 		if next.After(end) {
 			next = end
 		}
@@ -271,27 +282,31 @@ func runLoad(ctx context.Context, client *http.Client, base *url.URL, scenarios 
 			timer.Stop()
 		}
 	}
-	remaining := scheduledCount(min(time.Since(start), cfg.duration), cfg.duration, cfg.rate) - offered
+	remaining := scheduledCount(min(now().Sub(start), cfg.duration), cfg.duration, cfg.rate) - offered
 	if remaining > 0 {
 		offered += remaining
-		dropped += remaining
+		schedulerDropped += remaining
 	}
 	close(jobs)
 	workers.Wait()
 	stats.summary.Offered = uint64(offered)
 	stats.summary.Sent = uint64(sent)
-	stats.summary.Dropped = uint64(dropped)
-	stats.summary.ElapsedSeconds = time.Since(start).Seconds()
+	stats.summary.SchedulerDropped = uint64(schedulerDropped)
+	stats.summary.WorkerDropped = uint64(workerDropped)
+	stats.summary.Dropped = stats.summary.SchedulerDropped + stats.summary.WorkerDropped
+	stats.summary.ElapsedSeconds = now().Sub(start).Seconds()
 	stats.summary.Latency = latencyResult(stats.buckets)
 	return stats.summary
 }
 
-func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.URL, job loadJob) {
+func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.URL, job loadJob, timeout time.Duration) {
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	rel, err := url.Parse(job.scenario.Path)
 	var status int
 	if err == nil {
 		var req *http.Request
-		req, err = http.NewRequestWithContext(ctx, job.scenario.Method, base.ResolveReference(rel).String(), strings.NewReader(job.scenario.Body))
+		req, err = http.NewRequestWithContext(requestCtx, job.scenario.Method, base.ResolveReference(rel).String(), strings.NewReader(job.scenario.Body))
 		if err == nil {
 			for key, value := range job.scenario.Headers {
 				req.Header.Set(key, value)

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,175 @@ func TestScheduledArrivalsIncludeOverdueSlots(t *testing.T) {
 	}
 }
 
+func loadDropCounts(t *testing.T, summary loadSummary) (uint64, uint64) {
+	t.Helper()
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields struct {
+		Scheduler *uint64 `json:"scheduler_dropped"`
+		Worker    *uint64 `json:"worker_dropped"`
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields.Scheduler == nil || fields.Worker == nil {
+		t.Fatalf("missing drop classification: %s", raw)
+	}
+	if summary.Dropped != *fields.Scheduler+*fields.Worker || summary.Offered != summary.Sent+summary.Dropped || summary.Completed != summary.Sent {
+		t.Fatalf("lost work: %+v, classifications=%s", summary, raw)
+	}
+	return *fields.Scheduler, *fields.Worker
+}
+
+func TestLoadDrainsWithoutCancelingAtGenerationEnd(t *testing.T) {
+	for _, requestTimesOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("timeout=%t", requestTimesOut), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cfg := loadConfig{rate: 1, concurrency: 1, duration: time.Second, timeout: 2 * time.Second}
+				client := &http.Client{Transport: loadTransportFunc(func(req *http.Request) (*http.Response, error) {
+					if requestTimesOut {
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					}
+					select {
+					case <-time.After(1500 * time.Millisecond):
+						return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+					case <-req.Context().Done():
+						return nil, req.Context().Err()
+					}
+				})}
+				base, err := url.Parse("http://127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				summary := runLoadWithClock(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg, func() time.Time {
+					synctest.Wait() // Workers are waiting before the first planned arrival.
+					return time.Now()
+				})
+				if summary.Sent != 1 || summary.Completed != 1 {
+					t.Fatalf("missing in-flight request: %+v", summary)
+				}
+				if requestTimesOut {
+					if summary.TransportErrors != 1 || summary.ElapsedSeconds != 2 {
+						t.Fatalf("request timeout not preserved: %+v", summary)
+					}
+				} else if summary.TransportErrors != 0 || summary.Status[http.StatusOK] != 1 || summary.ElapsedSeconds != 1.5 {
+					t.Fatalf("generation expiry truncated request: %+v", summary)
+				}
+				if summary.Latency.P99 == nil || *summary.Latency.P99 != 2000 {
+					t.Fatalf("truncated latency: %+v", summary.Latency)
+				}
+			})
+		})
+	}
+}
+
+func TestLoadSeparatesSchedulerAndWorkerDrops(t *testing.T) {
+	for _, schedulerDelay := range []bool{true, false} {
+		t.Run(fmt.Sprintf("scheduler_delay=%t", schedulerDelay), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cfg := loadConfig{rate: 10, concurrency: 1, duration: time.Second, timeout: 3 * time.Second}
+				client := &http.Client{Transport: loadTransportFunc(func(req *http.Request) (*http.Response, error) {
+					if !schedulerDelay {
+						select {
+						case <-time.After(2 * time.Second):
+						case <-req.Context().Done():
+							return nil, req.Context().Err()
+						}
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+				})}
+				base, err := url.Parse("http://127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls := 0
+				summary := runLoadWithClock(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg, func() time.Time {
+					calls++
+					if calls == 2 && schedulerDelay {
+						synctest.Sleep(350 * time.Millisecond)
+					}
+					synctest.Wait()
+					return time.Now()
+				})
+				scheduler, worker := loadDropCounts(t, summary)
+				if summary.Offered != 10 {
+					t.Fatalf("offered=%d, want 10", summary.Offered)
+				}
+				if schedulerDelay {
+					if scheduler != 3 || worker != 0 || summary.Sent != 7 {
+						t.Fatalf("scheduler loss misclassified: %+v", summary)
+					}
+				} else if scheduler != 0 || worker != 9 || summary.Sent != 1 {
+					t.Fatalf("worker loss misclassified: %+v", summary)
+				}
+			})
+		})
+	}
+}
+
+func TestLoadDrainsRealHTTPResponseBody(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		timer := time.NewTimer(300 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if _, err := w.Write([]byte("complete")); err != nil {
+				return
+			}
+		case <-req.Context().Done():
+		}
+	}))
+	server.Start() // A real loopback URL exercises the tool's production transport.
+	t.Cleanup(server.Close)
+	cfg := loadConfig{rate: 50, concurrency: 2, duration: 200 * time.Millisecond, timeout: 2 * time.Second}
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, transport := loadHTTPClient(cfg)
+	t.Cleanup(transport.CloseIdleConnections)
+	summary := runLoad(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg)
+	if summary.Sent == 0 || summary.Completed != summary.Sent || summary.TransportErrors != 0 || summary.Status[http.StatusOK] != summary.Sent || summary.ElapsedSeconds < .3 {
+		t.Fatalf("HTTP body was cut off by generation expiry: %+v", summary)
+	}
+}
+
+func TestLoadDoesNotDispatchAfterWindowEnds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := loadConfig{rate: 10, concurrency: 1, duration: time.Second, timeout: time.Second}
+		var requests atomic.Int64
+		client := &http.Client{Transport: loadTransportFunc(func(*http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		})}
+		base, err := url.Parse("http://127.0.0.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		summary := runLoadWithClock(t.Context(), client, base, []loadScenario{{Method: http.MethodGet, Path: "/", Weight: 1}}, cfg, func() time.Time {
+			calls++
+			if calls == 2 {
+				synctest.Sleep(1100 * time.Millisecond)
+			}
+			synctest.Wait()
+			return time.Now()
+		})
+		scheduler, worker := loadDropCounts(t, summary)
+		if requests.Load() != 0 || summary.Sent != 0 || scheduler != 10 || worker != 0 {
+			t.Fatalf("dispatched after generation ended: %+v, requests=%d", summary, requests.Load())
+		}
+	})
+}
+
 func TestBoundedLoadAndCancellation(t *testing.T) {
 	for _, earlyCancel := range []bool{false, true} {
 		t.Run(map[bool]string{false: "duration", true: "caller cancel"}[earlyCancel], func(t *testing.T) {
@@ -120,7 +290,7 @@ func TestLatencyStartsAtScheduledTimeAndOverflowIsExplicit(t *testing.T) {
 			t.Fatal(err)
 		}
 		stats := loadStats{summary: loadSummary{Status: map[int]uint64{}}, buckets: make([]uint64, len(latencyBounds)+1)}
-		stats.request(t.Context(), client, base, loadJob{scheduled: time.Now().Add(-4 * time.Second), scenario: loadScenario{Method: "GET", Path: "/"}})
+		stats.request(t.Context(), client, base, loadJob{scheduled: time.Now().Add(-4 * time.Second), scenario: loadScenario{Method: "GET", Path: "/"}}, time.Second)
 		result := latencyResult(stats.buckets)
 		if result.P99 == nil || *result.P99 != 5000 {
 			t.Fatalf("scheduler latency omitted: %+v", result)

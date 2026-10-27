@@ -11,6 +11,100 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+func TestPoolWaitDurationSharesOneStream(t *testing.T) {
+	for _, first := range []string{"mysql", "redis"} {
+		t.Run(first+" first", func(t *testing.T) {
+			r, reader := newTestRecorder(t)
+			register := map[string]func() (func() error, error){
+				"mysql": func() (func() error, error) {
+					return r.RegisterDBPoolStats(func() DBPoolStats { return DBPoolStats{WaitDuration: 125 * time.Millisecond} })
+				},
+				"redis": func() (func() error, error) {
+					client := new(redis.Client)
+					return r.RegisterRedisPoolStats([]int{2}, func(int) RedisPoolStats {
+						return RedisPoolStats{Client: client, Main: redis.PoolStats{WaitDurationNs: int64(250 * time.Millisecond)}}
+					})
+				},
+			}
+			second := "redis"
+			if first == "redis" {
+				second = "mysql"
+			}
+			stops := make(map[string]func() error)
+			for _, name := range []string{first, second} {
+				stop, err := register[name]()
+				if err != nil {
+					t.Fatal(err)
+				}
+				stops[name] = stop
+			}
+			t.Cleanup(func() {
+				for _, stop := range stops {
+					if err := stop(); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			collectWait := func() metricdata.Metrics {
+				t.Helper()
+				var data metricdata.ResourceMetrics
+				if err := reader.Collect(t.Context(), &data); err != nil {
+					t.Fatal(err)
+				}
+				var matches []metricdata.Metrics
+				for _, scope := range data.ScopeMetrics {
+					for _, m := range scope.Metrics {
+						if m.Name == "pool.wait.duration" {
+							matches = append(matches, m)
+						}
+					}
+				}
+				if len(matches) != 1 {
+					t.Fatalf("wait-duration streams = %d, want 1", len(matches))
+				}
+				return matches[0]
+			}
+			m := collectWait()
+			if m.Description != "Cumulative connection pool wait time" || m.Unit != "s" {
+				t.Fatalf("inconsistent stream metadata: %+v", m)
+			}
+			sum := mustMetricData[metricdata.Sum[float64]](t, m)
+			if !sum.IsMonotonic || len(sum.DataPoints) != 2 {
+				t.Fatalf("joint wait values: %+v", sum)
+			}
+			for _, point := range sum.DataPoints {
+				kind, _ := point.Attributes.Value("pool.type")
+				switch kind.AsString() {
+				case "mysql":
+					if point.Value != .125 {
+						t.Fatalf("MySQL wait = %f", point.Value)
+					}
+					assertMetricAttrs(t, point.Attributes, map[string]any{"pool.type": "mysql", "pool.role": "main", "db.client.connection.pool.name": "mysql/main"})
+				case "redis":
+					if point.Value != .25 {
+						t.Fatalf("Redis wait = %f", point.Value)
+					}
+					assertMetricAttrs(t, point.Attributes, map[string]any{"pool.type": "redis", "pool.role": "main", "redis.db": int64(2), "db.client.connection.pool.name": "redis/2/main"})
+				default:
+					t.Fatalf("unexpected pool type: %v", kind)
+				}
+			}
+			if err := stops[first](); err != nil {
+				t.Fatal(err)
+			}
+			delete(stops, first)
+			sum = mustMetricData[metricdata.Sum[float64]](t, collectWait())
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("unregister removed the other pool: %+v", sum)
+			}
+			kind, _ := sum.DataPoints[0].Attributes.Value("pool.type")
+			if kind.AsString() != second {
+				t.Fatalf("remaining pool = %s, want %s", kind.AsString(), second)
+			}
+		})
+	}
+}
+
 func TestRedisPoolCountersWrapAndChangeClient(t *testing.T) {
 	r, reader := newTestRecorder(t)
 	client1, client2 := new(redis.Client), new(redis.Client)

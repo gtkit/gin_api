@@ -81,7 +81,7 @@ func (r *Recorder) RegisterRedisPoolStats(dbs []int, snapshot func(int) RedisPoo
 	pending, e2 := m.Int64ObservableUpDownCounter("db.client.connection.pending_requests", metric.WithUnit("{request}"))
 	timeouts, e3 := m.Int64ObservableCounter("db.client.connection.timeouts", metric.WithUnit("{timeout}"))
 	waits, e4 := m.Int64ObservableCounter("pool.wait.count")
-	duration, e5 := m.Float64ObservableCounter("pool.wait.duration", metric.WithUnit("s"))
+	duration, e5 := m.Float64ObservableCounter("pool.wait.duration", metric.WithUnit("s"), metric.WithDescription("Cumulative connection pool wait time"))
 	if err := errors.Join(e1, e2, e3, e4, e5); err != nil {
 		return nil, fmt.Errorf("metrics: Redis instruments: %w", err)
 	}

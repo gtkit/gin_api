@@ -14,6 +14,10 @@ import (
 // RegisterRuntimeStats samples only on collection, without a sampling goroutine.
 // GC quantiles describe lifetime bucket upper bounds, not a recent alert window.
 func (r *Recorder) RegisterRuntimeStats() (func() error, error) {
+	return r.registerRuntimeStats(runtimemetrics.Read)
+}
+
+func (r *Recorder) registerRuntimeStats(readSamples func([]runtimemetrics.Sample)) (func() error, error) {
 	if r == nil {
 		return func() error { return nil }, nil
 	}
@@ -32,19 +36,32 @@ func (r *Recorder) RegisterRuntimeStats() (func() error, error) {
 		samples := []runtimemetrics.Sample{
 			{Name: "/sched/goroutines:goroutines"}, {Name: "/memory/classes/total:bytes"},
 			{Name: "/memory/classes/heap/released:bytes"}, {Name: "/memory/classes/heap/objects:bytes"},
-			{Name: "/gc/heap/allocs:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/gc/pauses:seconds"},
+			{Name: "/gc/heap/allocs:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/sched/pauses/total/gc:seconds"},
 		}
-		runtimemetrics.Read(samples)
-		o.ObserveInt64(goroutines, runtimeCount(samples[0].Value.Uint64()))
-		total, released := samples[1].Value.Uint64(), samples[2].Value.Uint64()
-		used := uint64(0)
-		if total > released {
-			used = total - released
+		readSamples(samples)
+		if samples[0].Value.Kind() == runtimemetrics.KindUint64 {
+			o.ObserveInt64(goroutines, runtimeCount(samples[0].Value.Uint64()))
 		}
-		o.ObserveInt64(memory, runtimeCount(used))
-		o.ObserveInt64(heap, runtimeCount(samples[3].Value.Uint64()))
-		o.ObserveInt64(allocated, runtimeCount(samples[4].Value.Uint64()))
-		o.ObserveFloat64(cpu, samples[5].Value.Float64(), metric.WithAttributes(attribute.String("go.cpu.state", "gc")))
+		if samples[1].Value.Kind() == runtimemetrics.KindUint64 && samples[2].Value.Kind() == runtimemetrics.KindUint64 {
+			total, released := samples[1].Value.Uint64(), samples[2].Value.Uint64()
+			used := uint64(0)
+			if total > released {
+				used = total - released
+			}
+			o.ObserveInt64(memory, runtimeCount(used))
+		}
+		if samples[3].Value.Kind() == runtimemetrics.KindUint64 {
+			o.ObserveInt64(heap, runtimeCount(samples[3].Value.Uint64()))
+		}
+		if samples[4].Value.Kind() == runtimemetrics.KindUint64 {
+			o.ObserveInt64(allocated, runtimeCount(samples[4].Value.Uint64()))
+		}
+		if samples[5].Value.Kind() == runtimemetrics.KindFloat64 {
+			o.ObserveFloat64(cpu, samples[5].Value.Float64(), metric.WithAttributes(attribute.String("go.cpu.state", "gc")))
+		}
+		if samples[6].Value.Kind() != runtimemetrics.KindFloat64Histogram {
+			return nil
+		}
 		h := samples[6].Value.Float64Histogram()
 		var count uint64
 		for _, n := range h.Counts {
