@@ -99,7 +99,7 @@ func restoreBlock(body, mode string) (string, error) {
 	var out strings.Builder
 	for line := range strings.Lines(body) {
 		if strings.TrimSpace(line) == "" {
-			out.WriteString(line)
+			out.WriteString(line) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 			continue
 		}
 		content := strings.TrimLeft(line, " \t")
@@ -108,7 +108,7 @@ func restoreBlock(body, mode string) (string, error) {
 			return "", errors.New("line wiring contains an uncommented line")
 		}
 		content = strings.TrimPrefix(strings.TrimPrefix(content, prefix), " ")
-		out.WriteString(indent + content)
+		out.WriteString(indent + content) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 	}
 	return out.String(), nil
 }
@@ -141,21 +141,21 @@ func renderMarked(path, source, module string, enabled map[string]bool, expected
 			if err != nil {
 				return "", fmt.Errorf("%s: %w", current.id, err)
 			}
-			out.WriteString(opening)
+			out.WriteString(opening) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 			if enabled[current.feature] {
 				restored = strings.ReplaceAll(restored, "github.com/gtkit/gin-api/", module+"/")
-				out.WriteString(restored)
+				out.WriteString(restored) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 			} else {
-				out.WriteString(body.String())
+				out.WriteString(body.String()) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 			}
-			out.WriteString(line)
+			out.WriteString(line) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 			current = nil
 			continue
 		}
 		if current != nil {
-			body.WriteString(line)
+			body.WriteString(line) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 		} else {
-			out.WriteString(line)
+			out.WriteString(line) //nolint:errcheck // strings.Builder.WriteString always returns a nil error.
 		}
 	}
 	if current != nil {
@@ -398,8 +398,8 @@ func runWiringCase(parent context.Context, root, name string, negative bool) (re
 	hash := sha256.New()
 	for _, path := range keys {
 		// hash.Hash writes never return an error.
-		_, _ = fmt.Fprintf(hash, "%s\x00", path)
-		_, _ = hash.Write(files[path])
+		_, _ = fmt.Fprintf(hash, "%s\x00", path) //nolint:errcheck // The fixed string format writes only to SHA-256, whose Write never fails.
+		_, _ = hash.Write(files[path])           //nolint:errcheck // hash.Hash.Write never returns an error.
 	}
 	result.SourceSHA256 = hex.EncodeToString(hash.Sum(nil))
 	files, err = renderSources(files, enabled, wiringManifest)
@@ -448,16 +448,22 @@ func main() {
 	negative := flag.Bool("negative", false, "case all only: deliberately break one copied call; build must fail")
 	flag.Parse()
 	if flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
+		if _, writeErr := fmt.Fprintln(os.Stderr, "unexpected positional arguments"); writeErr != nil {
+			os.Exit(2)
+		}
 		os.Exit(2)
 	}
 	if *negative && *name != "all" {
-		fmt.Fprintln(os.Stderr, "negative probe requires -case all")
+		if _, writeErr := fmt.Fprintln(os.Stderr, "negative probe requires -case all"); writeErr != nil {
+			os.Exit(2)
+		}
 		os.Exit(2)
 	}
 	root, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if _, writeErr := fmt.Fprintln(os.Stderr, err); writeErr != nil {
+			os.Exit(1)
+		}
 		os.Exit(1)
 	}
 	names := wiringCases
@@ -469,7 +475,9 @@ func main() {
 	for _, item := range names {
 		result, err := runWiringCase(ctx, root, item, *negative)
 		if encodeErr := json.NewEncoder(os.Stdout).Encode(result); encodeErr != nil {
-			fmt.Fprintln(os.Stderr, encodeErr)
+			if _, writeErr := fmt.Fprintln(os.Stderr, encodeErr); writeErr != nil {
+				os.Exit(1)
+			}
 			os.Exit(1)
 		}
 		if err != nil {

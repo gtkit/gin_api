@@ -192,5 +192,4 @@ func TestKeyBuilderUsesFixedFallbackRouteKeys(t *testing.T) {
 	if !strings.Contains(key, notFoundRouteKey) {
 		t.Fatalf("key %q does not use the fixed not-found route token", key)
 	}
-
 }
