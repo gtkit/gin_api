@@ -141,9 +141,9 @@ Redis 侧不走 `config.Load()`，用环境变量，默认值即可直接跑：
 | `REDIS_ITEST_DB` | `15` | **专用 db**，不借业务库 |
 | `ALLOW_REDIS_SCRIPT_FLUSH` | 未设 | 见下 |
 
-两条不同于 MySQL 那批的理由：`pkg/ratelimit` 对外发布、禁止 import 本仓 internal，
-它取不到应用配置；而这批测试需要一个专用 db，应用配置的 `redis.dbs` 只声明业务用到的那几个。
-借业务 db 跑测试等于往真实数据里写测试键。
+Redis 集成测试需要一个专用 db，应用配置的 `redis.dbs` 只声明业务用到的那几个。
+因此采用独立环境变量，避免借业务 db 写测试键；`internal/pkg/ratelimit` 的测试也沿用这套约定。
+该限流包仅供本项目使用，目录迁移不改变已有测试连接与隔离方式。
 
 键都带本次运行独占前缀，结束只删自己的键——**不用 `FLUSHDB`**：一次误配的 db 序号
 会让它清掉别人的数据，而那不可逆。

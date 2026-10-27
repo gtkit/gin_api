@@ -18,9 +18,9 @@ import (
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/credential"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
 	"github.com/gtkit/gin-api/internal/platform/config"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 func TestPasswordCapacityMetrics(t *testing.T) {

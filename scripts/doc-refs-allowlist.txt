@@ -27,3 +27,9 @@ docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler.g
 docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
 docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_shutdown_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
 docs/review-remediation-plan-2026-10-23.md:internal/platform/config/tasks.go # taskqueue maintainers — 历史审查路径，配置已迁入 internal/optional/taskqueue/config.go
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/redis.go # ratelimit maintainers — 保留历史审查与执行证据，2026-10-27 已迁入 internal/pkg/ratelimit/redis.go
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/README.md # ratelimit maintainers — 保留历史文件清单，2026-10-27 已迁入 internal/pkg/ratelimit/README.md
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/health.go # ratelimit maintainers — 保留历史审查与执行证据，2026-10-27 已迁入 internal/pkg/ratelimit/health.go
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/redis_test.go # ratelimit maintainers — 保留历史测试清单，2026-10-27 已迁入 internal/pkg/ratelimit/redis_test.go
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/health_cancellation_test.go # ratelimit maintainers — 保留历史测试证据，2026-10-27 已迁入 internal/pkg/ratelimit/health_cancellation_test.go
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/retry_contract_test.go # ratelimit maintainers — 保留历史测试证据，2026-10-27 已迁入 internal/pkg/ratelimit/retry_contract_test.go

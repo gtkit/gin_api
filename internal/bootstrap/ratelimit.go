@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gtkit/logger/v2"
 	"github.com/redis/go-redis/v9"
@@ -258,8 +258,8 @@ func closeRateLimits(a rateLimitAssembly) error {
 
 // rateLimitObserver 把限流包的运行期事件接到项目日志栈。
 //
-// 限流包自己不写日志——它是对外发布的包，不该知道本项目用哪个日志库。
-// 事件在这里落地，因此将来换日志栈只影响这一个类型。
+// 限流执行层不直接依赖日志栈，项目日志由装配层接入。
+// 事件在这里落地，保留限流算法与日志适配的职责边界。
 type rateLimitObserver struct{}
 
 // BackendPhaseChanged 记录后端健康相位迁移。

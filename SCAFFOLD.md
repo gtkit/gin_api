@@ -325,7 +325,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | `gojwt` | `internal/pkg/jwtauth/` 的签发、验签、claims 与 PEM 工具；切换 `auth.mode` 不会自动替换验签器 |
 | `ormx` | `internal/platform/mysql/open.go` 的 MySQL 装配及仓储分页 |
 | `redisx` | `internal/platform/redis/open.go` 的 Redis 装配；Redis 是否必需由已启用能力决定 |
-| `golimit/v2` | `pkg/ratelimit/local.go` 的本地限流；选择 Redis 存储不表示本地能力可以直接删除 |
+| `golimit/v2` | `internal/pkg/ratelimit/local.go` 的本地限流；选择 Redis 存储不表示本地能力可以直接删除 |
 | `ginx` | auth HTTP handler 的绑定/响应辅助 |
 | `goerr` | 中间件、响应、事务及缓存的错误处理 |
 | `verify` | `internal/bootstrap/validation.go` 的校验注册与中文消息，以及响应校验 |
@@ -384,7 +384,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法取自 gin 在 405 路径上写好的 `Allow` 头（真实路由树匹配），不自建路由索引、也不硬编码——自建索引要在应用层重写一遍路由匹配，而两份匹配逻辑一旦在带参路由这类边界上不一致，表现就是「预检说路径不存在、实际请求却成功」。因此本中间件要求 engine 开启 `HandleMethodNotAllowed`；路径上自行注册了 OPTIONS 时，预检交给那个 handler |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
 | 认证与授权分离 | `internal/middleware/auth.go` + `internal/shared/auth` | 认证只判身份；授权依赖故障映射 503 而非 403。token **只经请求头承载**（`Authorization: Bearer` 为主，`App-Token` 为存量兼容）：query 会进访问日志、Referer 与浏览器历史，是长期泄漏面 |
-| 限流契约 | `pkg/ratelimit` | 策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
+| 限流契约 | `internal/pkg/ratelimit` | 仅供本项目使用；策略零值即拒绝；键基数达上限拒绝新建（不淘汰活跃桶） |
 | JWT 密钥轮换 | `internal/pkg/jwtauth` | 令牌带 kid；未知 kid 直接拒绝（无回退遍历）；退役公钥仍可验签 |
 | 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
 | 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |

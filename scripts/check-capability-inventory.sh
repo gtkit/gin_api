@@ -140,11 +140,10 @@ scope_match_kind() {
 # entry_registered 判断条目是否已登记进清单。
 #
 # path 型必须带边界，不能用 grep -F 直接找子串：`pkg/cache` 会命中清单里的
-# `internal/pkg/cache`。今天根 pkg/ 下只有 ratelimit，不与任何 internal/pkg 包
-# 重名，用 -F 也能通过——但那是巧合，不是正确性。将来根 pkg/ 下出现任何一个与
-# internal/pkg/ 同名的包（cache、log、metrics 都是现实候选），判据会静默误通过。
+# `internal/pkg/cache`。即便当前没有根 pkg/ 公共包，也必须保留完整路径边界，
+# 避免不同层级出现同名包时静默误通过。
 #
-# 后置边界同理排除前缀误命中：`pkg/ratelimit` 不应被清单里的 `pkg/ratelimiter` 满足。
+# 后置边界同理排除前缀误命中：`internal/pkg/ratelimit` 不应被清单里的 `internal/pkg/ratelimiter` 满足。
 entry_registered() {
   local entry="$1" kind="$2" inventory="$3"
   case "$kind" in

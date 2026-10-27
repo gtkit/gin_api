@@ -10,7 +10,7 @@ import (
 
 // minSecretLen 是配置里各专用密钥的最小字节数。
 //
-// 与 pkg/ratelimit 的键密钥下限同值：两者都是"泄漏即失效"的服务端密钥，
+// 与 internal/pkg/ratelimit 的键密钥下限同值：两者都是"泄漏即失效"的服务端密钥，
 // 对暴力枚举的抵抗力要求一致。
 const minSecretLen = 32
 

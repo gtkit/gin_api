@@ -14,11 +14,9 @@ import (
 
 // 真实 Redis 集成测试的连接来源与默认值。
 //
-// **刻意不走 config.Load()**，与 MySQL 那批集成测试不同，两条理由：
-//   - `pkg/ratelimit` 是对外发布的包，禁止 import 本仓 internal，它取不到应用配置；
-//     只有它一个例外的话，同一套集成测试里会出现两种取连接的方式。
-//   - 这批测试需要一个**专用 db 序号**，而应用配置的 redis.dbs 只声明业务用到的那几个。
-//     借业务 db 跑测试等于往真实数据里写测试键。
+// 刻意不走 config.Load()：这批测试需要一个专用 db 序号，
+// 而应用配置的 redis.dbs 只声明业务用到的那几个；借业务 db 跑测试会写入业务数据。
+// internal/pkg/ratelimit 保留的连接辅助函数采用同一套环境变量与专用库约定。
 const (
 	redisAddrEnv     = "REDIS_ITEST_ADDR"
 	redisPasswordEnv = "REDIS_ITEST_PASSWORD"

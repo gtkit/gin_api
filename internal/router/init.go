@@ -11,9 +11,9 @@ import (
 	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/shared/env"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 // Options 是装配 engine 所需的进程级配置与依赖。

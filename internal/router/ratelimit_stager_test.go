@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 )
 
 // newRateLimitTestOptions 构造带两条已注册策略（ip / user 作用域各一）的 Options。

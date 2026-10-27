@@ -6,6 +6,8 @@
 
 2026-10-25 更新：模块生成器已移除，新增模块通过显式代码装配；本 ADR 的模块边界决策继续适用。
 
+2026-10-26 更新：当前代码示例按auth/account装配修正，早期AI模块示例不再作为现状引用；下文规模统计保留为原日期的历史依据，不代表当前仓库行数。
+
 ## 背景
 
 有一类主张认为，Go 服务应当采用领域驱动设计（DDD）的经典四层目录——
@@ -32,11 +34,11 @@
 
 | 判据 | 当前状态 | 证据 |
 |---|---|---|
-| 模块之间无直接引用 | `auth` 与 `ai` 双向零 import | `grep -rn "internal/module/ai" internal/module/auth/` 与其反向皆无匹配 |
+| 业务与账号实现分离 | auth业务通过端口和共享身份契约使用账号能力，由组合根装配 | `internal/module/auth/application/ports.go`、`internal/runtime/module/account/module.go` |
 | 契约显式且属于消费方 | port 接口定义在 application 侧，实现由装配层注入 | `internal/module/auth/application/ports.go` |
 | 模型在边界处翻译 | `Credential` 在 application 层重新声明，不引用仓储包同名类型 | 同上文件内的类型注释 |
-| 数据不共享 | 仓储按模块独占：`internal/repository/authcredential/` 归 auth，`internal/repository/aiconversation/` 归 ai。`internal/repository/useraccount/` 不归任何模块，由装配层直接持有——它是鉴权链路的账号状态源，挂到业务模块上会让删那个模块连带打断鉴权 | `internal/runtime/module/` 各模块装配入口 |
-| 汇合点唯一 | 模块只被装配层引用，彼此不感知 | `internal/bootstrap/providers.go` |
+| 仓储在装配侧组合 | `internal/repository/authcredential/`服务本地认证；账号状态和角色由account装配提供，业务层不直接持有仓储 | `internal/runtime/module/auth/module.go`、`internal/runtime/module/account/module.go` |
+| 汇合点显式 | 模块产物通过组合根接入路由、鉴权和worker | `internal/bootstrap/modules.go`、`internal/bootstrap/providers.go` |
 
 模块内部的分层方向由传感器强制，不靠自觉：`application imports gin / gorm / repository`
 与 `worker imports gorm / repository` 挡住上层下钻，`repository imports gin / module`
@@ -51,7 +53,7 @@
 四层结构把所有上下文的实体放进 domain 层的同一个 model 包。单上下文时两者
 差别不大；到第二个上下文出现时性质就变了：
 
-- 当前结构下，`auth` 想引用 `ai` 的类型必须写一行 import，评审时看得见，
+- 当前结构下，一个业务模块想引用另一模块的类型必须写一行import，评审时看得见，
   且可以加一条传感器判据把它变成硬失败。
 - 四层结构下，两个上下文的实体在同一个包内，跨上下文引用连 import 都不需要，
   编译器与静态判据都没有着力点。
@@ -94,8 +96,8 @@
 
 ### 五、领域事件的引入前提
 
-领域事件用于解耦跨上下文通信。当前 `auth` 与 `ai` 双向零引用，
-模块间通信不经任何代码路径发生，事件机制没有消费者。
+领域事件用于解耦跨上下文通信。原决策时未发现需要域事件协调的消费者；
+当前仍按具体业务调用需求选择端口或队列，不因为保留可选扩展就默认引入事件机制。
 
 真正出现跨模块通知需求时，可启用 `internal/optional/taskqueue/` 中预留的
 asynq 队列（接线默认注释，操作见目录 README），其 worker 契约与关停顺序见
@@ -108,7 +110,7 @@ asynq 队列（接线默认注释，操作见目录 README），其 worker 契�
 新增模块按显式装配边界接入；传感器判据与目录结构同构。
 
 **付出的：** 与四层 DDD 结构的通用词汇不对齐，熟悉那套目录的人需要一次对照说明——
-本 ADR 与 `internal/module/ai/doc.go` 承担这个说明。
+本ADR与仓库内的架构说明承担这个对照。
 
 **当前由约定而非判据维持的部分：** 传感器的横向规则挡的是下层引用模块
 （`repository` / `internal/pkg` 不得 import `internal/module/`），
@@ -120,4 +122,4 @@ asynq 队列（接线默认注释，操作见目录 README），其 worker 契�
 
 - [architecture.md](../architecture.md)：分层、依赖方向、装配边界的单一来源
 - [quality-gates.md](../quality-gates.md)：判据入口与新规则准入
-- `internal/module/ai/doc.go`：模块内分层的具体落地样例
+- `internal/module/auth/application/ports.go`：业务端口与基础设施实现分离的当前样例

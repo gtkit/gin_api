@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 )
 
 // TestRateLimitOutcomeNeverDefaultsToAllowed 钉住指标翻译的兜底方向

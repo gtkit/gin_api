@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"

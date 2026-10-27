@@ -3,6 +3,9 @@
 本文约束根 `pkg/` 下的包——它们可被仓库外的项目 import。`internal/pkg/` 的分类与边界
 见 [`internal-pkg.md`](internal-pkg.md)。
 
+当前项目没有根 `pkg/` 公共包。下文引用的 `internal/pkg/ratelimit` 仅作为设计模式示例，
+它只供本项目使用，实际包归属遵循内部共享包约定。
+
 ## 两条硬约束（有可执行判据）
 
 ### 1. 不得 import 本仓 `internal/`
@@ -16,7 +19,7 @@ internal 可见性规则直接失败。违反这条的包只是**看起来**可�
 包内直接写日志会把使用者绑定到某个具体日志栈，而换一个库只是换一个绑定对象——问题不变。
 把事件交出去则彻底消除这个选择：调用方接入自己的栈，包本身对日志一无所知。
 
-`pkg/ratelimit` 的做法是 `Observer` 接口 + `ObserverFunc`：
+内部限流包 `internal/pkg/ratelimit` 使用 `Observer` 接口分离职责，由调用方提供实现：
 
 ```go
 type Observer interface {
@@ -24,15 +27,12 @@ type Observer interface {
     // ...
 }
 
-// ObserverFunc 让一组函数满足 Observer，省去为一次性用途定义类型。
-// 各字段可为 nil，此时对应事件被忽略。
-type ObserverFunc struct { ... }
 ```
 
 未注入回调时包正常工作且不产生任何输出。
 
 **回调必须在锁外发出。** 持锁回调把「Observer 只准写日志」变成了没有编译器背书的隐式契约，
-违反者的代价是全部判定被阻塞或进程死锁。`pkg/ratelimit` 的实现是先 `Unlock()`
+违反者的代价是全部判定被阻塞或进程死锁。`internal/pkg/ratelimit` 的实现是先 `Unlock()`
 再 `notify(events)`，因此 Observer 重入包的公开方法不会死锁、慢 Observer 不会阻塞判定路径，
 且通知顺序与状态迁移的发生顺序一致。
 
@@ -119,7 +119,7 @@ func (e *ValidationError) Error() string {
 
 策略类配置的零值要么有明确且安全的含义，要么在构造期就被拒绝。
 
-`pkg/ratelimit` 的选择是**零值即拒绝**：一个忘记配置的策略不会变成「不限流」。
+`internal/pkg/ratelimit` 的选择是**零值即拒绝**：一个忘记配置的策略不会变成「不限流」。
 默认放行是这类组件最危险的失效形态——它在正常情况下完全看不出来，
 只在被攻击时才表现为「限流没生效」。
 
