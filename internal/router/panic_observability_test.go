@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/logger/v2"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -127,52 +129,64 @@ func TestPanicRequestObservability(t *testing.T) {
 }
 
 func TestReadinessKeepsPrivateCauseInRateLimitedLogs(t *testing.T) {
-	dir := t.TempDir()
-	owner, err := logging.Open(t.Context(), logging.Options{Config: &config.Config{Log: config.LogConfig{
-		Path: filepath.Join(dir, "readiness"), Level: "info", FileStdout: 1,
-	}}})
+	path := filepath.Join(t.TempDir(), "readiness.log")
+	output, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
+		if err := output.Close(); err != nil {
 			t.Error(err)
 		}
+	})
+	// Capture the console sink: file rotation uses a worker outside the clock bubble.
+	previousOutput := os.Stdout
+	os.Stdout = output
+	instance, err := logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithLevel("info"), logger.WithReplaceGlobals(false))
+	os.Stdout = previousOutput
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := logger.Default()
+	logger.SetDefault(instance)
+	t.Cleanup(func() {
+		logger.SetDefault(previous)
+		instance.Sync()
 	})
 	const private = "private-readiness-user@10.0.3.12"
 	checker := &stubChecker{dbErr: errors.New(private)}
 	engine := newTestEngine(t, checker)
-	for range 2 {
+	synctest.Test(t, func(t *testing.T) {
+		assertUnavailable := func() {
+			t.Helper()
+			w := httptest.NewRecorder()
+			engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+			if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), private) {
+				t.Fatalf("unsafe readiness response: %d %s", w.Code, w.Body.String())
+			}
+		}
+		assertUnavailable()
+		// Repeat the dependency check after cache expiry, within the log rate limit.
+		synctest.Sleep(readyCacheTTL)
+		assertUnavailable()
+		checker.dbErr = nil
+		assertUnavailable()
+		synctest.Sleep(readyCacheTTL)
 		w := httptest.NewRecorder()
 		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
-		if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), private) {
-			t.Fatalf("unsafe readiness response: %d %s", w.Code, w.Body.String())
+		if w.Code != http.StatusOK {
+			t.Fatalf("recovered readiness = %d", w.Code)
 		}
-	}
-	checker.dbErr = nil
-	w := httptest.NewRecorder()
-	engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("recovered readiness = %d", w.Code)
-	}
-	if err := owner.Drain(t.Context()); err != nil {
+	})
+	if err := instance.Zap().Sync(); err != nil {
 		t.Fatal(err)
 	}
-	var logs strings.Builder
-	if err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		_, err = logs.Write(data)
-		return err
-	}); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(logs.String(), private) != 1 || strings.Count(logs.String(), "readiness dependency recovered") != 1 {
-		t.Fatalf("missing cause, rate limit or recovery log: %s", logs.String())
+	logs := string(data)
+	if strings.Count(logs, private) != 1 || strings.Count(logs, "readiness dependency recovered") != 1 {
+		t.Fatalf("missing cause, rate limit or recovery log: %s", logs)
 	}
 }

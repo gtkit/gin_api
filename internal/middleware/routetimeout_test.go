@@ -184,7 +184,11 @@ func TestHTTP2TimeoutStreamDoesNotBlockSibling(t *testing.T) {
 	t.Cleanup(srv.CloseClientConnections)
 	client := srv.Client()
 	client.Timeout = 3 * time.Second
-	client.Transport.(*http.Transport).MaxConnsPerHost = 1
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
+	}
+	transport.MaxConnsPerHost = 1
 	slow, err := client.Get(srv.URL + "/slow")
 	if err != nil {
 		t.Fatal(err)

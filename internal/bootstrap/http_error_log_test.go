@@ -23,7 +23,9 @@ func TestHTTPErrorLogClassificationAndWindow(t *testing.T) {
 	instance, err := logger.New(logger.WithConsole(true), logger.WithFile(false), logger.WithOutJSON(true), logger.WithLevel("info"), logger.WithReplaceGlobals(false))
 	os.Stdout = previousOutput
 	if err != nil {
-		output.Close()
+		if closeErr := output.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
 		t.Fatal(err)
 	}
 	previous := logger.Default()

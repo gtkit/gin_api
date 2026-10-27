@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -12,12 +11,6 @@ import (
 	"github.com/gtkit/goerr"
 	"github.com/gtkit/verify"
 )
-
-func newProviders(ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator) (*providerSet, error) {
-	budget := &rollbackBudget{force: shutdown.ForcedCh()}
-	defer budget.Close()
-	return newProvidersWithBudget(ctx, runtime, shutdown, budget)
-}
 
 // TestInitValidationFailureBlocksProcessRuntime verifies the single startup entry.
 func TestInitValidationFailureBlocksProcessRuntime(t *testing.T) {
