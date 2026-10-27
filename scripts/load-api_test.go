@@ -271,6 +271,16 @@ func newLoadBuildCommand(ctx context.Context, program string, args ...string) *e
 	return cmd
 }
 
+func waitLoadBuild(cmd *exec.Cmd) error {
+	waitErr := cmd.Wait()
+	// The context watcher ends when the leader exits. Always clean the owned
+	// group here as well, including early exits before the build deadline.
+	if err := cmd.Cancel(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return errors.Join(waitErr, fmt.Errorf("clean build process group: %w", err))
+	}
+	return waitErr
+}
+
 func assertLoadMainSummary(t *testing.T, summary loadSummary, reason string, status int) {
 	t.Helper()
 	if summary.TerminationReason != reason {
@@ -329,11 +339,12 @@ func TestLoadBuildFixtureProcess(t *testing.T) {
 
 type loadBuildTestProcess struct {
 	cmd     *exec.Cmd
+	stdin   *os.File
 	done    chan struct{}
 	waitErr error
 }
 
-func startLoadBuildTestProcess(t *testing.T, cmd *exec.Cmd) *loadBuildTestProcess {
+func startLoadBuildTestProcess(t *testing.T, cmd *exec.Cmd, wait func(*exec.Cmd) error) *loadBuildTestProcess {
 	t.Helper()
 	cmd.Env = append(cmd.Environ(), "GIN_API_LOAD_BUILD_FIXTURE=1")
 	registerPipe := func(pipe *os.File) {
@@ -359,10 +370,10 @@ func startLoadBuildTestProcess(t *testing.T, cmd *exec.Cmd) *loadBuildTestProces
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	process := &loadBuildTestProcess{cmd: cmd, done: make(chan struct{})}
+	process := &loadBuildTestProcess{cmd: cmd, stdin: inputWriter, done: make(chan struct{})}
 	var waiter sync.WaitGroup
 	waiter.Go(func() {
-		process.waitErr = cmd.Wait()
+		process.waitErr = wait(cmd)
 		close(process.done)
 	})
 	t.Cleanup(func() {
@@ -399,7 +410,7 @@ func TestLoadBuildTimeoutReapsProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"-test.run=^TestLoadBuildFixtureProcess$"}
-	leader := startLoadBuildTestProcess(t, newLoadBuildCommand(ctx, executable, args...))
+	leader := startLoadBuildTestProcess(t, newLoadBuildCommand(ctx, executable, args...), waitLoadBuild)
 	group, err := syscall.Getpgid(leader.cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
@@ -409,7 +420,7 @@ func TestLoadBuildTimeoutReapsProcessGroup(t *testing.T) {
 	}
 	memberCmd := exec.CommandContext(guard, executable, args...)
 	memberCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: group}
-	member := startLoadBuildTestProcess(t, memberCmd)
+	member := startLoadBuildTestProcess(t, memberCmd, (*exec.Cmd).Wait)
 	memberGroup, err := syscall.Getpgid(member.cmd.Process.Pid)
 	if err != nil || memberGroup != group {
 		t.Fatalf("member group=%d, want %d: %v", memberGroup, group, err)
@@ -453,6 +464,70 @@ func TestLoadBuildTimeoutReapsProcessGroup(t *testing.T) {
 	}
 }
 
+func TestLoadBuildLeaderExitCleansGroup(t *testing.T) {
+	for _, killed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("killed=%t", killed), func(t *testing.T) {
+			guard, cancelGuard := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancelGuard()
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-test.run=^TestLoadBuildFixtureProcess$"}
+			leader := startLoadBuildTestProcess(t, newLoadBuildCommand(guard, executable, args...), waitLoadBuild)
+			group, err := syscall.Getpgid(leader.cmd.Process.Pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if group != leader.cmd.Process.Pid || group == syscall.Getpgrp() {
+				t.Fatalf("build group is not isolated: %d", group)
+			}
+			memberCmd := exec.CommandContext(guard, executable, args...)
+			memberCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: group}
+			member := startLoadBuildTestProcess(t, memberCmd, (*exec.Cmd).Wait)
+			memberGroup, err := syscall.Getpgid(member.cmd.Process.Pid)
+			if err != nil || memberGroup != group {
+				t.Fatalf("member group=%d, want %d: %v", memberGroup, group, err)
+			}
+			finish, cancelFinish := context.WithTimeout(guard, 3*time.Second)
+			defer cancelFinish()
+			if killed {
+				if err := leader.cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := leader.stdin.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for _, process := range []*loadBuildTestProcess{leader, member} {
+				select {
+				case <-process.done:
+				case <-finish.Done():
+					t.Fatalf("group member %d survived leader exit", process.cmd.Process.Pid)
+				}
+			}
+			if killed {
+				exitErr, ok := errors.AsType[*exec.ExitError](leader.waitErr)
+				if !ok || exitErr.ExitCode() != -1 {
+					t.Fatalf("lost original leader error: %v", leader.waitErr)
+				}
+			} else if leader.waitErr != nil {
+				t.Fatalf("successful leader exit became an error: %v", leader.waitErr)
+			}
+			exitErr, ok := errors.AsType[*exec.ExitError](member.waitErr)
+			if !ok {
+				t.Fatalf("member was not terminated: %v", member.waitErr)
+			}
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("unexpected member termination: %v", member.waitErr)
+			}
+			if guard.Err() != nil || finish.Err() != nil {
+				t.Fatal("group cleanup depended on timeout or fallback")
+			}
+		})
+	}
+}
+
 func TestLoadMainExitCodes(t *testing.T) {
 	// Execute the production entry point itself, not a test helper or go run.
 	binary := filepath.Join(t.TempDir(), "load-api")
@@ -460,8 +535,13 @@ func TestLoadMainExitCodes(t *testing.T) {
 	defer cancelBuild()
 	build := newLoadBuildCommand(buildCtx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "load-api.go")
 	build.Env = append(os.Environ(), "GOTOOLCHAIN=local")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build load-api: %v\n%s", err, output)
+	var output bytes.Buffer
+	build.Stdout, build.Stderr = &output, &output
+	if err := build.Start(); err != nil {
+		t.Fatalf("start load-api build: %v", err)
+	}
+	if err := waitLoadBuild(build); err != nil {
+		t.Fatalf("build load-api: %v\n%s", err, output.Bytes())
 	}
 	for _, tc := range []struct {
 		name        string
