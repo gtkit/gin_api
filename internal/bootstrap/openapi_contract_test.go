@@ -43,8 +43,8 @@ func TestOpenAPIMatchesProductionRoutes(t *testing.T) {
 
 func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, error) {
 	var spec struct {
-		OpenAPI string                                `json:"openapi"`
-		Paths   map[string]map[string]json.RawMessage `json:"paths"`
+		OpenAPI string                     `json:"openapi"`
+		Paths   map[string]json.RawMessage `json:"paths"`
 	}
 	if err := json.Unmarshal(raw, &spec); err != nil {
 		return nil, err
@@ -53,7 +53,14 @@ func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, e
 		return nil, fmt.Errorf("unexpected OpenAPI dialect %q", spec.OpenAPI)
 	}
 	expected := make(map[string]bool)
-	for path, methods := range spec.Paths {
+	for path, rawPath := range spec.Paths {
+		if strings.HasPrefix(path, "x-") {
+			continue
+		}
+		var methods map[string]json.RawMessage
+		if err := json.Unmarshal(rawPath, &methods); err != nil {
+			return nil, fmt.Errorf("decode path %q: %w", path, err)
+		}
 		if methods == nil {
 			return nil, fmt.Errorf("path %q must be an object, not null", path)
 		}
@@ -122,11 +129,42 @@ func TestOpenAPIRejectsInvalidOperations(t *testing.T) {
 }
 
 func TestOpenAPIRejectsUnsupportedPathValues(t *testing.T) {
-	for _, value := range []string{`null`, `{"$ref":"#/components/pathItems/Items"}`, `{"$ref":""}`, `{"$ref":null}`} {
-		raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{"/items":%s}}`, value)
-		if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
-			t.Errorf("silently accepted unsupported path value %s", value)
+	for _, path := range []string{"/items", "/x-extra"} {
+		for _, value := range []string{`null`, `true`, `42`, `[]`, `"invalid"`, `{"$ref":"#/components/pathItems/Items"}`, `{"$ref":""}`, `{"$ref":null}`} {
+			raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{%q:%s}}`, path, value)
+			if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
+				t.Errorf("silently accepted unsupported path %s value %s", path, value)
+			}
 		}
+	}
+}
+
+func TestOpenAPIPathsExtensions(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"null", `null`},
+		{"string", `"metadata"`},
+		{"number", `42`},
+		{"boolean", `true`},
+		{"array", `[null,42,{"get":null}]`},
+		{"empty object", `{}`},
+		{"reference object", `{"$ref":null}`},
+		{"operation-like object", `{"get":null,"post":{"x-auth-mode":"local"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []config.AuthMode{config.AuthModeLocal, config.AuthModeExternal} {
+				t.Run(string(mode), func(t *testing.T) {
+					raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{"x-extra":%s,"/x-extra":{"get":{}},"/local":{"post":{"x-auth-mode":"local"}},"/external":{"post":{"x-auth-mode":"external"}}}}`, tc.value)
+					got, err := openAPIExpectedRoutes([]byte(raw), mode)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := map[string]bool{"GET /x-extra": true, "POST /" + string(mode): true}
+					if !maps.Equal(got, want) {
+						t.Fatalf("extension changed routes: got %v, want %v", got, want)
+					}
+				})
+			}
+		})
 	}
 }
 

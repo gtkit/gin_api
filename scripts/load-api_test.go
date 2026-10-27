@@ -13,9 +13,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -251,6 +255,148 @@ func TestLoadClientTimeoutAfterResponseHeaders(t *testing.T) {
 		t.Fatalf("client timeout was misclassified: %+v", summary)
 	}
 	assertLoadAccounting(t, summary)
+}
+
+func TestLoadMainExitCodes(t *testing.T) {
+	// Execute the production entry point itself, not a test helper or go run.
+	binary := filepath.Join(t.TempDir(), "load-api")
+	buildCtx, cancelBuild := context.WithTimeout(t.Context(), time.Minute)
+	defer cancelBuild()
+	build := exec.CommandContext(buildCtx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", binary, "load-api.go")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build load-api: %v\n%s", err, output)
+	}
+	for _, tc := range []struct {
+		name        string
+		signal      os.Signal
+		invalidArgs bool
+		badOutput   string
+		status      int
+		wantCode    int
+		wantReason  string
+	}{
+		{name: "completed", status: http.StatusNoContent, wantReason: "completed"},
+		{name: "HTTP failure still completes", status: http.StatusServiceUnavailable, wantReason: "completed"},
+		{name: "invalid arguments", invalidArgs: true, wantCode: 1},
+		{name: "SIGINT", signal: os.Interrupt, wantCode: 1, wantReason: "canceled"},
+		{name: "SIGTERM", signal: syscall.SIGTERM, wantCode: 1, wantReason: "canceled"},
+		{name: "stdout failure", badOutput: "stdout", status: http.StatusNoContent, wantCode: 1},
+		{name: "stderr failure", invalidArgs: true, badOutput: "stderr", wantCode: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{})
+			var first atomic.Bool
+			// A subprocess cannot reach an in-memory httptest server.
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if first.CompareAndSwap(false, true) {
+					close(started)
+				}
+				if tc.signal != nil {
+					<-req.Context().Done()
+					return
+				}
+				w.WriteHeader(tc.status)
+			}))
+			server.Start()
+			t.Cleanup(server.Close)
+			file := filepath.Join(t.TempDir(), "scenario.json")
+			if err := os.WriteFile(file, []byte(`[{"method":"GET","path":"/"}]`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-target", server.URL, "-scenario", file, "-duration", "200ms", "-rate", "100", "-concurrency", "1", "-timeout", "5s"}
+			if tc.signal != nil {
+				args = append(args, "-duration", "30s")
+			}
+			if tc.invalidArgs {
+				args = []string{"-rate", "0"}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary, args...)
+			var out, errOut bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &errOut
+			if tc.badOutput != "" {
+				// Read-only fd yields a write error without platform-specific /dev/full.
+				unwritable, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := unwritable.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				if tc.badOutput == "stdout" {
+					cmd.Stdout = unwritable
+				} else {
+					cmd.Stderr = unwritable
+				}
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			var waitErr error
+			var waiter sync.WaitGroup
+			waiter.Go(func() {
+				waitErr = cmd.Wait()
+				close(done)
+			})
+			t.Cleanup(func() { cancel(); waiter.Wait() })
+			if tc.signal != nil {
+				select {
+				case <-started:
+					if err := cmd.Process.Signal(tc.signal); err != nil {
+						t.Fatal(err)
+					}
+				case <-done:
+					t.Fatalf("process exited before request: %v\n%s", waitErr, errOut.String())
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			<-done
+			if ctx.Err() != nil {
+				t.Fatalf("subprocess timed out: %v", ctx.Err())
+			}
+			code := 0
+			if waitErr != nil {
+				exitErr, ok := errors.AsType[*exec.ExitError](waitErr)
+				if !ok {
+					t.Fatal(waitErr)
+				}
+				code = exitErr.ExitCode()
+			}
+			if code != tc.wantCode {
+				t.Fatalf("exit=%d, want %d; stdout=%s stderr=%s", code, tc.wantCode, out.String(), errOut.String())
+			}
+			if tc.wantReason == "" {
+				if out.Len() != 0 {
+					t.Fatalf("unexpected result JSON: %s", out.String())
+				}
+			} else {
+				var summary loadSummary
+				if err := json.Unmarshal(out.Bytes(), &summary); err != nil {
+					t.Fatal(err)
+				}
+				if summary.TerminationReason != tc.wantReason || summary.Sent == 0 {
+					t.Fatalf("wrong subprocess result: %+v", summary)
+				}
+				assertLoadAccounting(t, summary)
+				if tc.signal != nil {
+					if summary.CanceledRequests != summary.Completed || summary.TransportErrors != 0 {
+						t.Fatalf("signal was misclassified: %+v", summary)
+					}
+				} else if summary.Status[tc.status] != summary.Completed || summary.TransportErrors != 0 {
+					t.Fatalf("HTTP outcome changed exit semantics: %+v", summary)
+				}
+			}
+			if tc.wantCode == 0 && errOut.Len() != 0 || tc.wantCode != 0 && tc.badOutput != "stderr" && errOut.Len() == 0 {
+				t.Fatalf("unexpected stderr: %s", errOut.String())
+			}
+		})
+	}
 }
 
 func TestLoadDrainsWithoutCancelingAtGenerationEnd(t *testing.T) {
