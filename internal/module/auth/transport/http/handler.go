@@ -91,6 +91,10 @@ func (h *Handler) Register(c *gin.Context) {
 			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
 			return
 		}
+		if errors.Is(err, application.ErrBusy) {
+			resp.CapacityUnavailable(c)
+			return
+		}
 		resp.MapErr(c, err, errMapper)
 		return
 	}
@@ -112,6 +116,10 @@ func (h *Handler) Login(c *gin.Context) {
 		// "退避后重试"与"凭据错误"的处置完全不同。
 		if errors.Is(err, application.ErrAccountRateLimited) {
 			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
+			return
+		}
+		if errors.Is(err, application.ErrBusy) {
+			resp.CapacityUnavailable(c)
 			return
 		}
 		resp.MapErr(c, err, errMapper)

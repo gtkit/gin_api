@@ -24,7 +24,7 @@ package ratelimit
 // **键基数准入与令牌桶判定同脚本原子执行**：Policy.MaxKeys 承诺的是与
 // 存储无关的硬上限——达上限拒绝新建、绝不淘汰活跃桶（LRU 淘汰意味着
 // 攻击者轮换超过 MaxKeys 个主体就能反复把旧桶挤掉、回来即拿满 Burst）。
-// 注册表按最后活跃时间摊销清理：闲置超过桶 TTL 的成员出注册表，名额
+// 注册表按最后活跃时间分批清理，每次新主体最多回收128项：闲置超过桶 TTL 的成员出注册表，名额
 // 随之释放；注册表内存上界 = MaxKeys 个成员/策略。
 //
 // **时间基准取自 Redis 自己**（`redis.call('TIME')`），调用方不提供时间戳。
@@ -63,7 +63,11 @@ local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 -- 再检查名额——达上限拒绝新建，绝不淘汰活跃桶。
 local registry = KEYS[2]
 if redis.call('ZSCORE', registry, KEYS[1]) == false then
-  redis.call('ZREMRANGEBYSCORE', registry, '-inf', now_ms - ttl_ms)
+  -- 单次脚本不能替所有历史主体做清理，避免阻塞同实例其他请求。
+  local expired = redis.call('ZRANGEBYSCORE', registry, '-inf', now_ms - ttl_ms, 'LIMIT', 0, 128)
+  if #expired > 0 then
+    redis.call('ZREM', registry, unpack(expired))
+  end
   if redis.call('ZCARD', registry) >= max_keys then
     return {2, 0, 0}
   end

@@ -63,27 +63,33 @@ func (c *claimsCache) get(token string, now time.Time) (*claims.Claims, bool) {
 	key := sha256.Sum256([]byte(token))
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	elem, ok := c.items[key]
 	if !ok {
+		c.mu.Unlock()
 		return nil, false
 	}
 
 	entry, ok := elem.Value.(*cacheEntry)
 	if !ok {
 		c.removeLocked(elem)
+		c.mu.Unlock()
 		return nil, false
 	}
 
 	// 到期条目立即移除：缓存绝不能让一个过期令牌继续可用。
 	if !now.Before(entry.expiresAt) {
 		c.removeLocked(elem)
+		c.mu.Unlock()
 		return nil, false
 	}
 
 	c.order.MoveToFront(elem)
-	return cloneClaims(entry.value), true
+	// Published values are immutable: put replaces the pointer rather than
+	// mutating the old snapshot, so copying can proceed without the LRU lock.
+	snapshot := entry.value
+	c.mu.Unlock()
+	return cloneClaims(snapshot), true
 }
 
 // put 写入成功验签的结果。
@@ -93,6 +99,7 @@ func (c *claimsCache) put(token string, value *claims.Claims) {
 	}
 
 	key := sha256.Sum256([]byte(token))
+	snapshot := cloneClaims(value)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -100,13 +107,13 @@ func (c *claimsCache) put(token string, value *claims.Claims) {
 	if elem, ok := c.items[key]; ok {
 		c.order.MoveToFront(elem)
 		if entry, ok := elem.Value.(*cacheEntry); ok {
-			entry.value = cloneClaims(value)
-			entry.expiresAt = value.ExpiresAt.Time
+			entry.value = snapshot
+			entry.expiresAt = snapshot.ExpiresAt.Time
 		}
 		return
 	}
 
-	entry := &cacheEntry{key: key, value: cloneClaims(value), expiresAt: value.ExpiresAt.Time}
+	entry := &cacheEntry{key: key, value: snapshot, expiresAt: snapshot.ExpiresAt.Time}
 	c.items[key] = c.order.PushFront(entry)
 
 	// 达上限淘汰最久未用的条目。这里可以用 LRU：缓存是纯粹的性能优化，

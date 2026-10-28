@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
+	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/logger/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -32,6 +34,25 @@ type AccessLogOptions struct {
 // bodyLogCaptureLimit 是 body 日志捕获的内存上界：比 maxBodyLogSize 多 1 字节，
 // 使恰好超限的捕获仍能被 truncate() 打上 ...(truncated) 标记。
 const bodyLogCaptureLimit = maxBodyLogSize + 1
+
+const capacityLogInterval = 30 * time.Second
+
+// capacityLogLimiter keeps fixed-size state; concurrent rejections only contend
+// on atomics, never on a log sink. The next emitted entry reports suppression.
+type capacityLogLimiter struct {
+	next       atomic.Int64
+	suppressed atomic.Uint64
+}
+
+func (s *capacityLogLimiter) allow(now time.Time) (bool, uint64) {
+	stamp := now.UnixNano()
+	next := s.next.Load()
+	if stamp < next || !s.next.CompareAndSwap(next, stamp+int64(capacityLogInterval)) {
+		s.suppressed.Add(1)
+		return false, 0
+	}
+	return true, s.suppressed.Swap(0)
+}
 
 // responseBodyWriter 旁路捕获响应前缀用于访问日志。
 // 捕获有界（bodyLogCaptureLimit）：超出部分直通客户端、不再入缓冲，
@@ -63,7 +84,8 @@ func (r responseBodyWriter) Unwrap() http.ResponseWriter {
 }
 
 // GinLogger 记录 HTTP 访问日志，使用 BufferedWriteSyncer 的 access logger。
-// 按响应状态码分级：4xx→Warn, 5xx→Error, 其余→Info。
+// 按响应状态码分级：4xx→Warn, 5xx→Error, 其余→Info。明确的容量拒绝
+// 使用限频Warn；latency统计到业务完成，外层HTTP指标另包含日志写出耗时。
 //
 // body 记录由 opts 控制且默认关闭：只有显式开启对应开关时才读取请求体 /
 // 包装响应体，且落盘前一律经敏感字段脱敏。query string 无论开关如何都脱敏后记录。
@@ -71,6 +93,7 @@ func GinLogger(access *logger.Logger, opts AccessLogOptions) gin.HandlerFunc {
 	if access == nil {
 		panic("access logger is required")
 	}
+	var capacityLogs capacityLogLimiter
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
@@ -122,14 +145,25 @@ func GinLogger(access *logger.Logger, opts AccessLogOptions) gin.HandlerFunc {
 		}
 
 		status := c.Writer.Status()
+		capacity := resp.IsCapacityRejection(c)
 		level := zapcore.InfoLevel
-		if status >= 500 {
+		if capacity {
+			level = zapcore.WarnLevel
+		} else if status >= 500 {
 			level = zapcore.ErrorLevel
 		} else if status >= 400 {
 			level = zapcore.WarnLevel
 		}
 		if !access.Zap().Core().Enabled(level) {
 			return
+		}
+		var suppressed uint64
+		if capacity {
+			allowed, count := capacityLogs.allow(time.Now())
+			if !allowed {
+				return
+			}
+			suppressed = count
 		}
 		fields := []zap.Field{
 			zap.Int("status", status),
@@ -149,6 +183,10 @@ func GinLogger(access *logger.Logger, opts AccessLogOptions) gin.HandlerFunc {
 		if logRespBody {
 			fields = append(fields, zap.String("responseBody",
 				truncate(redactBody(w.Header().Get("Content-Type"), w.body.Bytes()), maxBodyLogSize)))
+		}
+		if capacity {
+			access.WarnCtx(c.Request.Context(), "HTTP capacity exhausted", append(fields, zap.Uint64("suppressed", suppressed))...)
+			return
 		}
 
 		switch level {

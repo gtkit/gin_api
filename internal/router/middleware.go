@@ -29,13 +29,14 @@ func newGlobalMiddleware(opt Options) ([]gin.HandlerFunc, error) {
 		return nil, errors.New("create HTTP request ID generator: nil generator")
 	}
 	chain := make([]gin.HandlerFunc, 0, 10)
-	chain = append(chain, middleware.GinRecovery(true), middleware.RequestID(generator))
+	// Measure the completed chain, including access-log writes and the final
+	// response produced by outer recovery. Both recovery layers remain inside.
+	chain = append(chain, middleware.Metrics(opt.Metrics), middleware.GinRecovery(true), middleware.RequestID(generator))
 	if opt.TracingEnabled {
 		chain = append(chain, otelgin.Middleware(opt.ServiceName))
 	}
 	chain = append(chain,
 		middleware.GinLogger(opt.AccessLogger, middleware.AccessLogOptions{LogRequestBody: opt.LogRequestBody, LogResponseBody: opt.LogResponseBody}),
-		middleware.Metrics(opt.Metrics),
 		middleware.GinRecovery(true),
 		middleware.SecurityHeaders(),
 		middleware.ErrorHandler(),

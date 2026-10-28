@@ -23,6 +23,9 @@ const (
 // Deps 是注册路由所需的依赖。
 type Deps struct {
 	Service *authapp.Service
+	// CredentialAdmission bounds register/login before database and hashing work.
+	// Production assembly supplies it; isolated handler tests may omit it.
+	CredentialAdmission gin.HandlerFunc
 	// Auth 是认证中间件，只有登出用得到。
 	Auth gin.HandlerFunc
 	// RateLimit 按策略标识取限流中间件（pre-identity 形态）。
@@ -56,6 +59,9 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 只按来源限、不按身份限：请求发生在拿到身份**之前**，此时没有可用的
 	// 用户维度——按身份限流对未登录的爆破者不起任何作用。
 	credential := g.Group("")
+	if deps.CredentialAdmission != nil {
+		credential.Use(deps.CredentialAdmission)
+	}
 	credential.Use(stageRateLimits(deps.RateLimit, "/auth", "auth.credential")...)
 	credential.POST("/register", middleware.JSONBody(authBodyLimit), handler.Register)
 	credential.POST("/login", middleware.JSONBody(authBodyLimit), handler.Login)

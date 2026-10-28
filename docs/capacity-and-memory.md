@@ -8,6 +8,15 @@
 
 128 是待校准初值。稳定窗口内用 `L ≈ λ × W` 估计平均在途量（吞吐单位为请求/秒，W 为平均端到端秒数，不使用 P99 替代平均值）。DB 并发可初估为吞吐 × 每请求 DB 次数 × 每次占用连接秒数，另计并行调用、事务和其他使用者。DB 默认上限 25 不表示 HTTP 上限也必须为 25；比较池等待、503、P95/P99、CPU 与 RSS 后校准。
 
+register/login 在查库和密码运算前另经一个共享凭据闸门，上限为
+`min(数据库最大连接数, max(1, HTTP并发上限-1))`。默认配置得到25，
+refresh/logout 不占该名额；HTTP总上限为1时不能另留一个名额。
+这限制凭据请求聚合数量，不是数据库连接的硬隔离；bcrypt仍有自己的执行和排队上限。
+无需新增配置项，现有HTTP/DB预算调整时一并生效。
+
+显式容量拒绝保持原503、业务码和request_id，全量记录拒绝指标；访问日志每30秒最多一条
+固定消息Warn并携带suppressed累计抑制数，不逐请求构造响应Error或堆栈。普通4xx/5xx日志不变。
+
 ## 请求与密码指标
 
 | 名称 | 类型 | 测量点属性 |
@@ -19,6 +28,10 @@
 | auth.password.rejections | Counter | reason=queue_full/queue_timeout |
 
 method 为标准方法集合（含 QUERY），其余统一 `_OTHER`；scheme 只按本服务实际 TLS 判断 http/https，不直接信任转发头。在途数没有 outcome 或路由属性；准入拒绝的 route 只取已注册模板。404/405 不进入业务组准入；原全局请求指标仍将未知路径归为 unmatched。只有真正排队的请求记录等待耗时，调用方取消不计为容量拒绝。
+
+HTTP Metrics位于整个处理链外层，`http.server.request.duration`和active_requests包含访问日志写出，
+状态取Recovery完成后的最终值。访问日志自身的`latency`在日志写出前计算，表示到业务完成的时间；
+它不代替客户端端到端延迟，也不用于衡量日志I/O。两种口径应分开比较。
 
 ## 运行时和连接池指标
 

@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,38 @@ import (
 
 // luaBase 是存储时钟的固定起点，使各用例的时间推进确定可复现。
 var luaBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestLuaRegistryCleanupHasPerCallBound(t *testing.T) {
+	backend, _ := newLuaBackend(t)
+	client, ok := backend.client.(*redis.Client)
+	if !ok {
+		t.Fatal("unexpected script client")
+	}
+	policy := luaTestPolicy()
+	policy.MaxKeys = 300
+	ctx := t.Context()
+	if _, err := backend.check(ctx, policy, "live"); err != nil {
+		t.Fatal(err)
+	}
+	registry := backend.registryKey(policy)
+	expired := make([]redis.Z, 257)
+	for i := range expired {
+		expired[i] = redis.Z{Score: float64(luaBase.Add(-bucketTTL(policy) - time.Second).UnixMilli()), Member: "expired-" + strconv.Itoa(i)}
+	}
+	if err := client.ZAdd(ctx, registry, expired...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := backend.check(ctx, policy, "new")
+	if err != nil || decision.Outcome != OutcomeAllowed {
+		t.Fatalf("new subject: %+v %v", decision, err)
+	}
+	if count, err := client.ZCard(ctx, registry).Result(); err != nil || count != 131 {
+		t.Fatalf("registry members = %d, error=%v; want 131 (exactly 128 removed)", count, err)
+	}
+	if _, err := client.ZScore(ctx, registry, backend.qualifiedKey("live")).Result(); err != nil {
+		t.Fatalf("active subject removed: %v", err)
+	}
+}
 
 // newLuaBackend 造一个跑真实 Lua 的 backend，并把存储时钟钉在 luaBase。
 func newLuaBackend(t *testing.T) (*RedisBackend, *miniredis.Miniredis) {

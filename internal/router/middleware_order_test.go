@@ -15,7 +15,8 @@ import (
 // wantMiddlewareOrder 是全局中间件的**精确**顺序契约。
 //
 // 顺序不是实现细节：
-//   - Recovery 不在最外层 → 它之前注册的中间件 panic 不被兜住，进程直接崩；
+//   - Metrics 包住 Recovery 和日志 → 记录完整链路及恢复后的最终状态；
+//   - Recovery 包住其余处理 → RequestID/日志等中间件的 panic 被兜住；
 //   - RequestID 不够靠前 → 它之前产生的日志与错误响应都没有关联 ID；
 //   - Logger/Metrics 排在 CORS/MaxBytes 之后 → 403/413 的响应没有访问记录
 //     也不进指标，而那正是最需要留痕与统计的两类；
@@ -25,10 +26,10 @@ import (
 //
 // 因此这里用精确序列断言，而不是"包含某几个"。
 var wantMiddlewareOrder = []string{
+	"Metrics",
 	"GinRecovery",
 	"RequestID",
 	"GinLogger",
-	"Metrics",
 	"GinRecovery",
 	"SecurityHeaders",
 	"ErrorHandler",
@@ -54,7 +55,7 @@ func TestGlobalMiddlewareOrderIsExact(t *testing.T) {
 				want = slices.Delete(want, 7, 8)
 			}
 			if tc.tracing {
-				want = slices.Insert(want, 2, "Middleware")
+				want = slices.Insert(want, 3, "Middleware")
 			}
 			engine, err := newRouterForTest(t, "test", opt)
 			if err != nil {

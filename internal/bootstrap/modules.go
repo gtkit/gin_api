@@ -274,9 +274,14 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
 		if svc.auth.Service != nil {
+			// Keep credential traffic below the shared HTTP budget, while also
+			// respecting the configured DB pool. A total budget of one cannot reserve
+			// an additional token-route slot.
+			credentialLimit := min(cfg.Database.EffectiveMaxOpenConn(), max(1, cfg.App.EffectiveMaxInflightRequests()-1))
 			authhttp.Register(v1, authhttp.Deps{
-				Service: svc.auth.Service,
-				Auth:    mw.auth,
+				Service:             svc.auth.Service,
+				Auth:                mw.auth,
+				CredentialAdmission: middleware.Admission(credentialLimit, inf.recorder),
 				// 认证端点不保证身份（请求发生在拿到身份之前），
 				// 注入 pre-identity 取用函数：身份作用域引用即装配错误。
 				RateLimit: preIdentityRateLimits,
