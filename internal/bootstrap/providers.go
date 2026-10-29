@@ -54,6 +54,7 @@ type providerSet struct {
 type infra struct {
 	accessLogger *logger.Logger
 	resources    *data.Resources
+	connections  *runtimeResources
 	cfg          *config.Config
 	mysqlDB      *gorm.DB
 	httpConfig   HTTPConfig
@@ -125,7 +126,7 @@ func newProvidersWithBudget(
 
 	// 2a'. telemetry.New 之后安装数据层追踪，失败即终止装配。
 	//      可恢复 Redis Owner 也在此获知 tracing 就绪；恢复候选须先完成埋点再发布。
-	if err := inf.resources.InstrumentTracing(inf.cfg.Database.Name); err != nil {
+	if err := runtime.instrumentConnections(); err != nil {
 		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
 	}
 
@@ -161,6 +162,9 @@ func newProvidersWithBudget(
 	} else {
 		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("Redis metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if err := registerNamedConnectionMetrics(&inf, cleanup); err != nil {
+		return nil, err
 	}
 
 	// 3. 限流。必须先于 service 与路由装配：认证模块的账号维度限流要从
@@ -291,9 +295,9 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	if resources == nil {
 		return infra{}, errors.New("runtime resources are not initialized")
 	}
-	mysqlDB := resources.Mdb()
-	if mysqlDB == nil {
-		return infra{}, errors.New("mysql connection is not available")
+	mysqlDB, err := runtime.Database(config.DefaultConnection)
+	if err != nil {
+		return infra{}, err
 	}
 
 	cfg := runtime.Config()
@@ -312,6 +316,7 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	return infra{
 		accessLogger: access,
 		resources:    resources,
+		connections:  runtime.owners,
 		cfg:          cfg,
 		mysqlDB:      mysqlDB,
 		httpConfig:   httpConfig,
@@ -332,7 +337,10 @@ func registerDBPoolMetrics(recorder *metrics.Recorder, resources *data.Resources
 	if resources == nil {
 		return nil, nil
 	}
-	gormDB := resources.Mdb()
+	return registerDatabaseMetrics(recorder, resources.Mdb(), "")
+}
+
+func registerDatabaseMetrics(recorder *metrics.Recorder, gormDB *gorm.DB, name string) (func() error, error) {
 	if gormDB == nil {
 		return nil, nil
 	}
@@ -344,12 +352,13 @@ func registerDBPoolMetrics(recorder *metrics.Recorder, resources *data.Resources
 	return recorder.RegisterDBPoolStats(func() metrics.DBPoolStats {
 		stats := sqlDB.Stats()
 		return metrics.DBPoolStats{
-			Open:         stats.OpenConnections,
-			InUse:        stats.InUse,
-			Idle:         stats.Idle,
-			Wait:         stats.WaitCount,
-			MaxOpen:      stats.MaxOpenConnections,
-			WaitDuration: stats.WaitDuration,
+			ConnectionName: name,
+			Open:           stats.OpenConnections,
+			InUse:          stats.InUse,
+			Idle:           stats.Idle,
+			Wait:           stats.WaitCount,
+			MaxOpen:        stats.MaxOpenConnections,
+			WaitDuration:   stats.WaitDuration,
 		}
 	})
 }

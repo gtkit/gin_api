@@ -132,6 +132,14 @@ func readyHandler(checker HealthChecker, status ProcessStatus, redisRequired boo
 		if configured, ok := checker.(interface{ RedisConfigured() bool }); ok && !configured.RedisConfigured() && !redisRequired {
 			deps[1].ping = nil
 		}
+		if named, ok := checker.(interface {
+			NamedConnectionChecks() map[string]func(context.Context) error
+		}); ok {
+			checks := named.NamedConnectionChecks()
+			for _, name := range slices.Sorted(maps.Keys(checks)) {
+				deps = append(deps, dependency{name: name, required: true, ping: checks[name]})
+			}
+		}
 		probe = &readinessProbe{deps: deps, limiter: newDepFailureLogLimiter(), now: time.Now}
 	}
 

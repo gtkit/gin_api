@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
@@ -356,12 +357,13 @@ func (r *Recorder) RunWorker(ctx context.Context, kind WorkerKind, worker string
 
 // DBPoolStats 是连接池的当前用量，字段对应 database/sql.DBStats。
 type DBPoolStats struct {
-	Open         int
-	InUse        int
-	Idle         int
-	Wait         int64
-	MaxOpen      int
-	WaitDuration time.Duration
+	ConnectionName string // Empty preserves the existing default-pool labels.
+	Open           int
+	InUse          int
+	Idle           int
+	Wait           int64
+	MaxOpen        int
+	WaitDuration   time.Duration
 }
 
 // RegisterDBPoolStats 以异步回调暴露数据库连接池用量。
@@ -403,18 +405,24 @@ func (r *Recorder) RegisterDBPoolStats(snapshot func() DBPoolStats) (func() erro
 	// 用 state 标签区分 in_use / idle，而不是拆成两个仪表：
 	// 这样"池子有多满"可以直接对同一指标按 state 求和后比 max，
 	// 拆成两个指标的话，那个查询要跨指标做算术。
-	inUse := metric.WithAttributes(attribute.String("db.connection.state", "used"))
-	idle := metric.WithAttributes(attribute.String("db.connection.state", "idle"))
-
 	reg, err := r.meter.RegisterCallback(
 		func(_ context.Context, o metric.Observer) error {
 			stats := snapshot()
+			var attrs []attribute.KeyValue
+			pool := "mysql/main"
+			if stats.ConnectionName != "" {
+				attrs = append(attrs, attribute.String("connection.name", stats.ConnectionName))
+				pool = "mysql/" + stats.ConnectionName + "/main"
+			}
+			base := metric.WithAttributes(attrs...)
+			inUse := metric.WithAttributes(append(slices.Clone(attrs), attribute.String("db.connection.state", "used"))...)
+			idle := metric.WithAttributes(append(slices.Clone(attrs), attribute.String("db.connection.state", "idle"))...)
 			o.ObserveInt64(connections, int64(stats.InUse), inUse)
 			o.ObserveInt64(connections, int64(stats.Idle), idle)
-			o.ObserveInt64(maxOpen, int64(stats.MaxOpen))
-			o.ObserveInt64(waitCount, stats.Wait)
-			o.ObserveFloat64(waitDuration, max(stats.WaitDuration.Seconds(), 0), metric.WithAttributes(
-				attribute.String("pool.type", "mysql"), attribute.String("pool.role", "main"), attribute.String("db.client.connection.pool.name", "mysql/main")))
+			o.ObserveInt64(maxOpen, int64(stats.MaxOpen), base)
+			o.ObserveInt64(waitCount, stats.Wait, base)
+			o.ObserveFloat64(waitDuration, max(stats.WaitDuration.Seconds(), 0), metric.WithAttributes(append(attrs,
+				attribute.String("pool.type", "mysql"), attribute.String("pool.role", "main"), attribute.String("db.client.connection.pool.name", pool))...))
 			return nil
 		},
 		connections, maxOpen, waitCount, waitDuration,

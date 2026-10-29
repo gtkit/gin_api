@@ -239,7 +239,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,
 		Metrics:         inf.recorder,
-		HealthChecker:   newHealthChecker(inf.resources),
+		HealthChecker:   newHealthChecker(inf.resources, inf.connections),
 		// readiness 用的 Redis 必需性与资源装配同源，避免两处口径漂移。
 		RedisRequired: RedisRequired(cfg),
 		RateLimits:    inf.rateLimits.registry,

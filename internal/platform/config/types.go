@@ -21,6 +21,12 @@ type Config struct {
 	Env      env.Env        `mapstructure:"env"`
 	App      AppConfig      `mapstructure:"application"`
 	Database DatabaseConfig `mapstructure:"database"`
+	// DatabaseConnections holds additional MySQL instances. Empty means only the
+	// legacy "default" connection; entries are independent and never inherit it.
+	DatabaseConnections map[string]DatabaseConfig `mapstructure:"database_connections"`
+	// RedisConnections holds additional required Redis instances. Each entry has
+	// its own address, DB set and pool settings; "default" is reserved for Redis.
+	RedisConnections map[string]RedisConfig `mapstructure:"redis_connections"`
 	// Email / SMS 是出站通知通道：host / provider 为空即不启用（不构造客户端），
 	// 启用时其余必填字段在 Validate fail-fast。告警多通道消费见 internal/pkg/news。
 	Email EmailConfig `mapstructure:"email"`

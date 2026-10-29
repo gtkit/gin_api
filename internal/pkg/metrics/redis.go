@@ -17,9 +17,10 @@ import (
 // RedisPoolStats carries one captured client's snapshots. Client is used only
 // as an identity, never as a metric attribute. Nil Pipeline means a shared pool.
 type RedisPoolStats struct {
-	Client   *redis.Client
-	Main     redis.PoolStats
-	Pipeline *redis.PoolStats
+	ConnectionName string // Empty preserves the existing default-pool labels.
+	Client         *redis.Client
+	Main           redis.PoolStats
+	Pipeline       *redis.PoolStats
 }
 
 type redisPoolCounter struct {
@@ -107,7 +108,14 @@ func (r *Recorder) RegisterRedisPoolStats(dbs []int, snapshot func(int) RedisPoo
 			}
 			observe := func(role string, stats redis.PoolStats, counter *redisPoolCounter) {
 				counter.add(stats)
-				attrs := []attribute.KeyValue{attribute.String("db.client.connection.pool.name", "redis/"+strconv.Itoa(db)+"/"+role), attribute.String("pool.type", "redis"), attribute.Int("redis.db", db), attribute.String("pool.role", role)}
+				pool := "redis/" + strconv.Itoa(db) + "/" + role
+				if s.ConnectionName != "" {
+					pool = "redis/" + s.ConnectionName + "/" + strconv.Itoa(db) + "/" + role
+				}
+				attrs := []attribute.KeyValue{attribute.String("db.client.connection.pool.name", pool), attribute.String("pool.type", "redis"), attribute.Int("redis.db", db), attribute.String("pool.role", role)}
+				if s.ConnectionName != "" {
+					attrs = append(attrs, attribute.String("connection.name", s.ConnectionName))
+				}
 				base := metric.WithAttributes(attrs...)
 				used := max(int64(stats.TotalConns)-int64(stats.IdleConns), 0)
 				o.ObserveInt64(connections, used, metric.WithAttributes(append(slices.Clone(attrs), attribute.String("db.client.connection.state", "used"))...))

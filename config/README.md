@@ -69,6 +69,7 @@ config/
 - `application`：监听地址、端口、域名、超时、时区。
 - `database`：MySQL 连接和连接池。
 - `redis`：地址、密码和初始化 DB 列表。
+- `database_connections`、`redis_connections`：额外具名实例，省略或空 map 仅使用原有默认连接；字段及默认值分别与 `database`、`redis` 相同，各实例独立填写凭据，不继承默认值以外的配置。名称须匹配 `[a-z][a-z0-9_]{0,63}`，`default` 保留给原有连接；额外 Redis 的 `addr`、`dbs` 必填。声明的额外实例建连失败会终止启动。使用与生命周期见 [具名连接](../docs/named-data-connections.md)。
 - `log`：日志级别、路径和滚动策略。
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
 - `auth`：本地认证或外部身份模式。

@@ -115,6 +115,9 @@ func (c *Config) Validate() error {
 	if err := validateRedisConfig(c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := c.validateNamedConnections(); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateRedisCapabilities(*c); err != nil {
 		errs = append(errs, err)
 	}

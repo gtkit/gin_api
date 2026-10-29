@@ -34,7 +34,7 @@ type Runtime struct {
 	drainCleanup onceCleanup
 }
 
-// NewRuntime initializes the fixed process resources. Failure cleanup
+// NewRuntime initializes the configured process resources. Failure cleanup
 // is independent of startup cancellation and has one shared 30 second budget.
 func NewRuntime(ctx context.Context, opts Options) (*Runtime, error) {
 	budget := &rollbackBudget{force: opts.forceSignal()}

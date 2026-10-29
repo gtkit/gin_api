@@ -229,7 +229,7 @@ func TestLocalIdentityAssemblyRetainsAllAccountPorts(t *testing.T) {
 func TestUnconfiguredHealthCheckerDoesNotConnect(t *testing.T) {
 	t.Parallel()
 	for _, resources := range []*data.Resources{nil, {}} {
-		checker := newHealthChecker(resources)
+		checker := newHealthChecker(resources, nil)
 		runtimeChecker, ok := checker.(*runtimeHealthChecker)
 		if !ok {
 			t.Fatalf("health checker type %T", checker)

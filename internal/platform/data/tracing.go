@@ -27,16 +27,31 @@ func (r *Resources) InstrumentTracing(dbName string) error {
 	if r == nil || r.Mdb() == nil {
 		return errors.New("instrument tracing: mysql connection is not initialized")
 	}
-	if err := instrumentGorm(r.Mdb(), dbName, nil); err != nil {
+	if err := InstrumentDatabaseTracing(r.Mdb(), dbName); err != nil {
+		return err
+	}
+	return InstrumentRedisTracing(r.redis)
+}
+
+// InstrumentDatabaseTracing attaches the existing safe GORM plugin during assembly.
+func InstrumentDatabaseTracing(db *gorm.DB, dbName string) error {
+	if db == nil {
+		return errors.New("instrument gorm tracing: database is not initialized")
+	}
+	if err := instrumentGorm(db, dbName, nil); err != nil {
 		return fmt.Errorf("instrument gorm tracing: %w", err)
 	}
+	return nil
+}
 
-	if r.redis == nil {
+// InstrumentRedisTracing instruments an owned Redis connection set once.
+func InstrumentRedisTracing(handle RedisHandle) error {
+	if handle == nil {
 		// Redis 未配置或没有可恢复的句柄：没有可挂载的客户端。
 		// 这不是错误——可降级能力的缺席不该阻断启动（resource-lifecycle spec）。
 		return nil
 	}
-	if owner, ok := r.redis.(interface{ ConfigureTracing() error }); ok {
+	if owner, ok := handle.(interface{ ConfigureTracing() error }); ok {
 		return owner.ConfigureTracing()
 	}
 
@@ -44,8 +59,8 @@ func (r *Resources) InstrumentTracing(dbName string) error {
 	// 不从配置的 DBs 推导——列表为空时 redisx 落到它自己的默认 DB，
 	// 在本层复制这条默认值会与上游漂移（与 buildRedisOptions 不复制
 	// 池默认值是同一条理由）。
-	for db := range r.redis.PoolStats() {
-		client, ok := r.redis.GetClient(db)
+	for db := range handle.PoolStats() {
+		client, ok := handle.GetClient(db)
 		if !ok {
 			return fmt.Errorf("instrument redis tracing: db %d reported by pool stats but has no client", db)
 		}

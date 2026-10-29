@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/core"
@@ -103,15 +105,17 @@ func defaultRuntimeFactories() runtimeFactories {
 	}
 }
 
-// runtimeResources owns a fixed set in acquisition order: logs, DB, Redis, cache.
-// No dependency discovery or lifecycle protocol runs on these resources.
+// runtimeResources owns default and configured named connections. Maps are
+// populated only during startup; Close retains them while closing their owners.
 type runtimeResources struct {
-	logs     logOwner
-	database databaseOwner
-	redis    redisOwner
-	cache    cacheOwner
-	force    <-chan struct{}
-	cleanup  onceCleanup
+	logs             logOwner
+	database         databaseOwner
+	redis            redisOwner
+	cache            cacheOwner
+	databases        map[string]databaseOwner
+	redisConnections map[string]redisOwner
+	force            <-chan struct{}
+	cleanup          onceCleanup
 }
 
 func openRuntimeResources(ctx context.Context, cfg *config.Config, f runtimeFactories, migration bool, budget *rollbackBudget) (_ *runtimeResources, err error) {
@@ -132,9 +136,41 @@ func openRuntimeResources(ctx context.Context, cfg *config.Config, f runtimeFact
 	if migration {
 		return r, nil
 	}
+	r.databases = make(map[string]databaseOwner, len(cfg.DatabaseConnections))
+	for _, name := range slices.Sorted(maps.Keys(cfg.DatabaseConnections)) {
+		connectionConfig := *cfg
+		connectionConfig.Database = cfg.DatabaseConnections[name]
+		owner, openErr := openResource(ctx, "database["+name+"]", func(ctx context.Context) (databaseOwner, error) {
+			return f.database(ctx, &connectionConfig, false)
+		})
+		r.databases[name] = owner
+		if openErr != nil {
+			return nil, openErr
+		}
+		if owner.DB() == nil {
+			return nil, fmt.Errorf("database[%s]: initialized handle is unavailable", name)
+		}
+	}
 	r.redis, err = openResource(ctx, "redis", func(ctx context.Context) (redisOwner, error) { return f.redis(ctx, cfg) })
 	if err != nil {
 		return nil, err
+	}
+	r.redisConnections = make(map[string]redisOwner, len(cfg.RedisConnections))
+	for _, name := range slices.Sorted(maps.Keys(cfg.RedisConnections)) {
+		connectionConfig := *cfg
+		connectionConfig.Redis = cfg.RedisConnections[name]
+		owner, openErr := openResource(ctx, "redis["+name+"]", func(ctx context.Context) (redisOwner, error) {
+			return f.redis(ctx, &connectionConfig)
+		})
+		r.redisConnections[name] = owner
+		if openErr != nil {
+			return nil, openErr
+		}
+		for _, db := range connectionConfig.Redis.DBs {
+			if client, ok := owner.GetClient(db); !ok || client == nil {
+				return nil, fmt.Errorf("redis[%s]: configured database %d is unavailable", name, db)
+			}
+		}
 	}
 	r.cache, err = openResource(ctx, "cache", func(ctx context.Context) (cacheOwner, error) { return f.cache(ctx, cfg, r.redis) })
 	if err != nil {
@@ -199,8 +235,18 @@ func (r *runtimeResources) Close(ctx context.Context) error {
 		if !nilResource(r.cache) {
 			errs = append(errs, closeResource(ctx, "cache", r.cache.Close))
 		}
+		for _, name := range slices.Backward(slices.Sorted(maps.Keys(r.redisConnections))) {
+			if owner := r.redisConnections[name]; !nilResource(owner) {
+				errs = append(errs, closeResource(ctx, "redis["+name+"]", owner.Close))
+			}
+		}
 		if !nilResource(r.redis) {
 			errs = append(errs, closeResource(ctx, "redis", r.redis.Close))
+		}
+		for _, name := range slices.Backward(slices.Sorted(maps.Keys(r.databases))) {
+			if owner := r.databases[name]; !nilResource(owner) {
+				errs = append(errs, closeResource(ctx, "database["+name+"]", owner.Close))
+			}
 		}
 		if !nilResource(r.database) {
 			errs = append(errs, closeResource(ctx, "database", r.database.Close))
