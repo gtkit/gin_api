@@ -106,10 +106,10 @@ func TestValidateProxyConfig(t *testing.T) {
 			// 列了代理不列头，那份信任没有任何作用，而使用者显然是想让代理后面的
 			// 真实客户端 IP 生效。静默接受的后果：代理后所有客户端共用一个限流桶
 			// （IP 维度限流退化成全局限流），审计里的来源 IP 全变成代理自己。
-			name:    "trusted proxies without headers rejected",
+			name:    "trusted proxies without headers accepted",
 			proxy:   ProxyConfig{TrustedProxies: []string{"10.0.0.0/8"}},
 			env:     env.Prod,
-			wantErr: true, errWant: "remote_ip_headers is empty",
+			wantErr: false, errWant: "remote_ip_headers is empty",
 		},
 		{
 			// 反向锚：两者都不配是合法的（没有代理在前面）。

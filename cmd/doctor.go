@@ -163,16 +163,28 @@ func printHumanReport(cmd *cobra.Command, cfg *config.Config, report diagnostics
 // buildRuntimeProbes 只绑定已加载配置，不做 I/O 或初始化完整 Runtime。
 // 各探针在 diagnostics 的独立预算内建连、校验和释放；一项失败不抹掉其他结果。
 func buildRuntimeProbes(_ context.Context, cfg *config.Config) (diagnostics.Probes, func() error, error) {
-	return diagnostics.Probes{
-		PingDB: func(ctx context.Context) error {
-			client, err := defaultmysql.OpenDB(ctx, cfg.Database, cfg.Database.RuntimeCredentials(), nil)
+	databaseProbe := func(dbCfg config.DatabaseConfig) func(context.Context) error {
+		return func(ctx context.Context) error {
+			client, err := defaultmysql.OpenDB(ctx, dbCfg, dbCfg.RuntimeCredentials(), nil)
 			if err != nil {
 				return err
 			}
 			return client.Close()
-		},
-		PingRedis: func(ctx context.Context) error { return defaultredis.ProbeRedis(ctx, cfg.Redis) },
-	}, func() error { return nil }, nil
+		}
+	}
+	probes := diagnostics.Probes{
+		PingDB:         databaseProbe(cfg.Database),
+		PingRedis:      func(ctx context.Context) error { return defaultredis.ProbeRedis(ctx, cfg.Redis) },
+		NamedDatabases: make(map[string]func(context.Context) error, len(cfg.DatabaseConnections)),
+		NamedRedis:     make(map[string]func(context.Context) error, len(cfg.RedisConnections)),
+	}
+	for name, dbCfg := range cfg.DatabaseConnections {
+		probes.NamedDatabases[name] = databaseProbe(dbCfg)
+	}
+	for name, redisCfg := range cfg.RedisConnections {
+		probes.NamedRedis[name] = func(ctx context.Context) error { return defaultredis.ProbeRedis(ctx, redisCfg) }
+	}
+	return probes, func() error { return nil }, nil
 }
 
 // enabledLabel 把布尔开关渲染为人类可读的 "enabled"/"disabled" 文案，用于自检输出。

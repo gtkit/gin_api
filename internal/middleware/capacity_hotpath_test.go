@@ -94,12 +94,14 @@ func TestCapacityLogWindowCountsConcurrentSuppression(t *testing.T) {
 	t.Parallel()
 	var limiter capacityLogLimiter
 	var logged atomic.Int64
+	var reported atomic.Uint64
 	var workers sync.WaitGroup
 	now := time.Unix(1_000_000_000, 0)
 	for range 64 {
 		workers.Go(func() {
-			if allowed, _ := limiter.allow(now); allowed {
+			if allowed, count := limiter.allow(now); allowed {
 				logged.Add(1)
+				reported.Add(count)
 			}
 		})
 	}
@@ -107,7 +109,7 @@ func TestCapacityLogWindowCountsConcurrentSuppression(t *testing.T) {
 	if logged.Load() != 1 {
 		t.Fatalf("logged = %d, want 1", logged.Load())
 	}
-	if allowed, count := limiter.allow(now.Add(capacityLogInterval)); !allowed || count != 63 {
-		t.Fatalf("next window = %v, suppressed = %d", allowed, count)
+	if allowed, count := limiter.allow(now.Add(capacityLogInterval)); !allowed || count+reported.Load() != 63 {
+		t.Fatalf("next window = %v, total suppressed = %d", allowed, count+reported.Load())
 	}
 }

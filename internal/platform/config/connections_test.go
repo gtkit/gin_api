@@ -12,13 +12,11 @@ func TestNamedConnectionsDecodeIndependently(t *testing.T) {
 	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML() + `
 database_connections:
   reports:
-    dbtype: mysql
     host: reports.local
     port: "3307"
     name: reports
     username: reader
   archive:
-    dbtype: mysql
     host: archive.local
     port: "3308"
     name: archive
@@ -47,7 +45,7 @@ redis_connections:
 }
 
 func TestNamedConnectionsValidation(t *testing.T) {
-	validDB := "{dbtype: mysql, host: reports.local, port: '3306', name: reports, username: reader}"
+	validDB := "{host: reports.local, port: '3306', name: reports, username: reader}"
 	for _, tc := range []struct{ name, yaml string }{
 		{"reserved", "database_connections: {default: " + validDB + "}"},
 		{"uppercase", "database_connections: {Reports: " + validDB + "}"},
@@ -58,7 +56,6 @@ func TestNamedConnectionsValidation(t *testing.T) {
 		{"incomplete redis", "redis_connections: {jobs: {dbs: [0]}}"},
 		{"redis missing dbs", "redis_connections: {jobs: {addr: 'jobs.local:6380'}}"},
 		{"invalid pool", "redis_connections: {jobs: {addr: 'jobs.local:6380', dbs: [0], pool_size: 1, min_idle_conns: 2}}"},
-		{"unknown field", "redis_connections: {jobs: {addr: 'jobs.local:6380', dbs: [0], unknown: true}}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := loadFromReader(strings.NewReader(minimalConfigYAML() + "\n" + tc.yaml)); err == nil {

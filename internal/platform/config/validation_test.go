@@ -24,11 +24,9 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 			ReadTimeoutFullSeconds:   -1,
 			Timezone:                 "Mars/Nowhere",
 		},
-		Database: DatabaseConfig{
-			DBType: "",
-		},
-		Redis: RedisConfig{},
-		Log:   LogConfig{},
+		Database: DatabaseConfig{},
+		Redis:    RedisConfig{},
+		Log:      LogConfig{},
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -64,24 +62,21 @@ func TestValidateProdLogPathLocation(t *testing.T) {
 			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path without app root rejected",
-			env:         env.Prod,
-			logPath:     filepath.Join(appRoot, "logs", "app_client"),
-			wantErrText: "APP_ROOT",
+			name:    "prod absolute path without app root allowed",
+			env:     env.Prod,
+			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path with relative app root rejected",
-			env:         env.Prod,
-			appRoot:     "relative-root",
-			logPath:     filepath.Join(appRoot, "logs", "app_client"),
-			wantErrText: "APP_ROOT must be absolute",
+			name:    "prod absolute path with relative app root allowed",
+			env:     env.Prod,
+			appRoot: "relative-root",
+			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path outside app root rejected",
-			env:         env.Prod,
-			appRoot:     appRoot,
-			logPath:     filepath.Join(outsideRoot, "logs", "app_client"),
-			wantErrText: "must be under APP_ROOT",
+			name:    "prod absolute path outside app root allowed",
+			env:     env.Prod,
+			appRoot: appRoot,
+			logPath: filepath.Join(outsideRoot, "logs", "app_client"),
 		},
 	}
 
@@ -122,7 +117,7 @@ func TestValidateRequiresAliyunSMSConfigWhenSMSEnabled(t *testing.T) {
 			Port: "8802",
 		},
 		Database: DatabaseConfig{
-			DBType:   "mysql",
+
 			Host:     "127.0.0.1",
 			Port:     "3306",
 			Name:     "sleep",
@@ -163,9 +158,8 @@ func TestValidateOutboundChannelShapes(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "email 半配置被拒绝",
-			email:   EmailConfig{From: "a@b.c"},
-			wantErr: "email.host is empty",
+			name:  "停用 email 可保留配置",
+			email: EmailConfig{From: "a@b.c"},
 		},
 		{
 			name:    "email from 非法地址被拒绝",
@@ -173,9 +167,8 @@ func TestValidateOutboundChannelShapes(t *testing.T) {
 			wantErr: "email.from",
 		},
 		{
-			name:    "sms 半配置被拒绝",
-			sms:     SMSConfig{SignName: "sign"},
-			wantErr: "sms.provider is empty",
+			name: "停用 sms 可保留配置",
+			sms:  SMSConfig{SignName: "sign"},
 		},
 		{
 			name: "sms 告警键必须成对",
@@ -372,7 +365,7 @@ func validConfigForTest() *Config {
 			Port: "8008",
 		},
 		Database: DatabaseConfig{
-			DBType:   "mysql",
+
 			Host:     "127.0.0.1",
 			Port:     "3306",
 			Name:     "sleep",

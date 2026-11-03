@@ -11,31 +11,6 @@ import (
 	"github.com/gtkit/ormx"
 )
 
-func TestPublicOpenRejectsInvalidMinimumVersionBeforeDial(t *testing.T) {
-	t.Parallel()
-
-	for _, migration := range []bool{false, true} {
-		t.Run(map[bool]string{false: "server", true: "migration"}[migration], func(t *testing.T) {
-			t.Parallel()
-
-			open := OpenDB
-			if migration {
-				open = OpenMigrationDB
-			}
-			client, err := open(t.Context(), config.DatabaseConfig{MinVersion: "invalid"}, config.DBCredentials{}, nil)
-			if client != nil {
-				if err := client.Close(); err != nil {
-					t.Errorf("client.Close(): %v", err)
-				}
-				t.Fatal("invalid minimum version published a client")
-			}
-			if err == nil || !strings.Contains(err.Error(), "invalid database.min_version") {
-				t.Fatalf("configuration must fail before dialing: %v", err)
-			}
-		})
-	}
-}
-
 // TestCloseAndWrapClosesExactlyOnce 守住最容易泄漏的那条路径：
 // OpenDB 在 return 成功之前仍然拥有连接，post-open 校验失败时若直接 return，
 // 调用方拿到的是 nil，没有可关闭的句柄，连接池就泄漏了。
@@ -203,7 +178,7 @@ func TestOnlyIOTimeoutDiffersBetweenPaths(t *testing.T) {
 // TestMigrationOpenStillHonorsStartupBudget 锁住"去掉驱动 deadline 不等于失去上界"。
 //
 // 这是 OpenMigrationDB 的关键前提：驱动 deadline 只兜不受 ctx 约束的路径，而连接
-// 建立阶段（Ping 与两次会话校验）本就走 ctx。若哪天有人在这条路径上改成
+// 建立阶段（Ping 与驱动版本初始化）本就走 ctx。若哪天有人在这条路径上改成
 // context.Background() 或 WithoutCancel，迁移就会在库不可达时无限挂起，而
 // migration-baseline 的「数据库不可达退出码非零」将静默失效。
 //

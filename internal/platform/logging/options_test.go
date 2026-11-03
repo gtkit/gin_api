@@ -98,8 +98,7 @@ func TestOpenWithConfigWritesDrainsAndPreservesAlertTargets(t *testing.T) {
 	logger.Infof("bridge main %d", 7)
 	p.AccessLogger().InfoCtx(t.Context(), "bridge access")
 	logger.HError(fmt.Sprintf("default alert %d", 1))
-	adapter := &News{notifier: sink}
-	adapter.SendTo("explicit", "explicit alert 2")
+	p.main.HErrorTo("explicit", "explicit alert 2")
 	if err := p.Close(t.Context()); err != nil {
 		t.Fatal(err)
 	}

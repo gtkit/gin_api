@@ -26,7 +26,7 @@ func mainOptions(cfg *config.Config, notifier news.AlertSink) []logger.Option {
 	}
 	opts = append(opts, fileOptions(cfg.Log)...)
 	if notifier != nil {
-		opts = append(opts, logger.WithMessager(&News{notifier: notifier}), logger.WithMessagerQueueSize(alertQueueLimit))
+		opts = append(opts, logger.WithMessager(notifier), logger.WithMessagerQueueSize(alertQueueLimit))
 	}
 	return opts
 }
@@ -72,11 +72,3 @@ func resolvePath(path, fallback string) string {
 
 	return path
 }
-
-// News forwards SDK callbacks to a borrowed alert sink, including explicit URLs.
-type News struct {
-	notifier news.AlertSink
-}
-
-func (n *News) Send(msg string)        { n.notifier.Warn("", msg) }
-func (n *News) SendTo(url, msg string) { n.notifier.Warn(url, msg) }

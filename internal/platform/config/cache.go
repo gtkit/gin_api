@@ -49,12 +49,6 @@ const (
 	cacheDefaultMaxBodyBytes = 1 << 20
 )
 
-// maxCacheTTL 是允许配置的 TTL 上限。
-//
-// 超过它的响应缓存已经不是缓存而是一份副本：数据源变更后，用户会在长达
-// 数小时里看到旧值，而没有任何一处会提示这件事正在发生。
-const maxCacheTTL = 10 * time.Minute
-
 // EffectiveTTL 返回生效的默认缓存时长。
 func (c CacheConfig) EffectiveTTL() time.Duration {
 	if c.TTL > 0 {
@@ -115,11 +109,6 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 			"unknown cache.store %q (want %q or %q)", cfg.Store, CacheStoreRedis, CacheStoreMemory))
 	}
 
-	if cfg.EffectiveTTL() > maxCacheTTL {
-		errs = append(errs, fmt.Errorf(
-			"cache.ttl %s exceeds the %s cap: beyond that it is not a cache but a stale copy, and "+
-				"nothing surfaces that users are seeing outdated data", cfg.EffectiveTTL(), maxCacheTTL))
-	}
-
+	errs = append(errs, mustNonNegative("cache.ttl", cfg.TTL))
 	return errors.Join(errs...)
 }

@@ -26,21 +26,12 @@ const configFile = "config/env/env.yml"
 
 // envPrefix 是配置覆盖层的环境变量前缀。
 //
-// 该前缀是本服务**独占**的命名空间：以它开头却映射不到任何配置键的变量会让启动
-// 失败（decode 的 ErrorUnused）。这是刻意的——这类变量最常见的成因是密钥变量名
-// 拼错，忽略它会让服务带着 YAML 里的空密码正常起来，直到第一次连库才报"认证失败"，
-// 而那条错误与真正的原因之间隔着一整条排查路径。
+// 已知配置键参与覆盖；未知或历史键被忽略，值不写入诊断。
 const envPrefix = "APP_"
 
 // envReservedNames 是 `APP_` 前缀下已被本项目占用、不参与配置覆盖的变量名。
 //
-// `APP_ROOT` 指定项目根目录，主配置选择、`resource.ResolvePath`、
-// `resource.WriteRoot` 与 `validateLogConfig` 都读它，生产的 supervisor 配置里就有这一条
-// （见 SCAFFOLD.md 的部署段）。不排除的话它会被映射成配置键 `root`，
-// 撞上未知键 fail-fast——一个由本层引入、让所有既有部署直接起不来的回归。
-//
-// 新增 `APP_` 开头的进程级变量时必须同步登记到这里，否则它会以同样的方式
-// 让启动失败，而错误信息指向的是"未知配置项"，与真正的原因隔着一层。
+// APP_ROOT 选择配置根目录，不作为业务配置键解码。
 var envReservedNames = map[string]struct{}{
 	"APP_ROOT": {},
 }
@@ -184,9 +175,7 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。
 	//
-	// DecoderConfig 复刻 koanf 缺省行为（WeaklyTypedInput + duration/text hooks，
-	// 见 koanf v2 UnmarshalWithConf 源码），仅追加 ErrorUnused：yaml 中存在而
-	// 结构体不认识的键（拼写错误、遗留死配置）直接启动失败，不再静默用默认值。
+	// 保留已知字段的类型转换；未知或历史字段不作为启动准入条件。
 	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{
 		Tag: "mapstructure",
 		DecoderConfig: &mapstructure.DecoderConfig{
@@ -195,10 +184,10 @@ func decode(k *koanf.Koanf) (*Config, error) {
 				mapstructure.TextUnmarshallerHookFunc(),
 			),
 			WeaklyTypedInput: true,
-			ErrorUnused:      true,
+			ErrorUnused:      false,
 		},
 	}); err != nil {
-		return nil, fmt.Errorf("decode config (存在未知配置项，检查拼写或删除): %w", err)
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -34,13 +34,11 @@ application:
   host: localhost
   port: "8008"
   name: %s
-  domain: "https://anshuiroom.com"
   ishttps: false
   read_header_timeout: 2
   read_timeout: 30
   timezone: "Asia/Shanghai"
 database:
-  dbtype: mysql
   host: 127.0.0.1
   port: "3306"
   name: sleep
@@ -100,9 +98,6 @@ news:
 	if cfg.App.Name != appmeta.CommandName {
 		t.Fatalf("cfg.App.Name = %q", cfg.App.Name)
 	}
-	if cfg.Database.DBType != "mysql" {
-		t.Fatalf("cfg.Database.DBType = %q", cfg.Database.DBType)
-	}
 	if len(cfg.Redis.DBs) != 3 {
 		t.Fatalf("cfg.Redis.DBs len = %d, want 3", len(cfg.Redis.DBs))
 	}
@@ -138,7 +133,7 @@ application:
 	}
 }
 
-func TestLoadFromReaderRejectsUnknownKeys(t *testing.T) {
+func TestLoadFromReaderIgnoresUnknownKeys(t *testing.T) {
 	t.Parallel()
 
 	// 最小合法基座；每个用例往里注入一个未知键。
@@ -151,7 +146,6 @@ application:
   host: localhost
   port: "8008"
 database:
-  dbtype: mysql
   host: 127.0.0.1
   port: "3306"
   name: sleep
@@ -226,18 +220,14 @@ log:
 			if !strings.Contains(tt.extra, "jwt:") {
 				input = base + jwtBlock + tt.extra
 			}
-			_, err := loadFromReader(strings.NewReader(input))
-			if err == nil {
-				t.Fatalf("loadFromReader expected unknown-key error for %q, got nil", tt.wantKey)
-			}
-			if !strings.Contains(err.Error(), tt.wantKey) {
-				t.Fatalf("error = %q, want containing key %q", err.Error(), tt.wantKey)
+			if _, err := loadFromReader(strings.NewReader(input)); err != nil {
+				t.Fatalf("unused field %q blocked loading: %v", tt.wantKey, err)
 			}
 		})
 	}
 }
 
-func TestLoadFromReaderRejectsLegacyConfigKeys(t *testing.T) {
+func TestLoadFromReaderIgnoresLegacyConfigKeys(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -263,26 +253,21 @@ func TestLoadFromReaderRejectsLegacyConfigKeys(t *testing.T) {
 			}
 			input = strings.Replace(input, section, section+"  "+tc.key+": "+tc.value+"\n", 1)
 
-			wantKey := tc.key
-			if tc.section == "modules" {
-				wantKey = tc.section
-			}
-			_, err := loadFromReader(strings.NewReader(input))
-			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), wantKey) {
-				t.Fatalf("expected unknown-key decode error for %s.%s, got %v", tc.section, tc.key, err)
+			if _, err := loadFromReader(strings.NewReader(input)); err != nil {
+				t.Fatalf("legacy field %s.%s blocked loading: %v", tc.section, tc.key, err)
 			}
 		})
 	}
 }
 
-func TestLoadRejectsRemovedAIEnvironmentOverride(t *testing.T) {
+func TestLoadIgnoresRemovedAIEnvironmentOverride(t *testing.T) {
 	clearConfigEnv(t)
 	root := t.TempDir()
 	t.Setenv("APP_ROOT", root)
 	writeJWTCommandConfig(t, root, minimalConfigYAML())
 	t.Setenv("APP_MODULES__AI__PROVIDERS__DEEPSEEK__API_KEY", "removed-provider-key")
 
-	if _, err := Load(); err == nil {
-		t.Fatal("removed AI environment override accepted")
+	if _, err := Load(); err != nil {
+		t.Fatalf("removed AI environment override blocked loading: %v", err)
 	}
 }

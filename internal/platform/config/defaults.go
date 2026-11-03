@@ -87,14 +87,6 @@ func (c DatabaseConfig) EffectiveCollation() string {
 	return DefaultDBCollation
 }
 
-// EffectiveMinVersion 返回受支持的最低 MySQL 版本。
-func (c DatabaseConfig) EffectiveMinVersion() string {
-	if s := strings.TrimSpace(c.MinVersion); s != "" {
-		return s
-	}
-	return DefaultDBMinVersion
-}
-
 // EffectiveMaxIdleTimeSeconds 返回生效的空闲连接最长存活时间（秒）。
 func (c DatabaseConfig) EffectiveMaxIdleTimeSeconds() int {
 	if c.MaxIdleTimeSeconds > 0 {

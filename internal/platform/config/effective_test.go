@@ -126,23 +126,23 @@ func TestDatabaseStringDefaults(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                           string
-		cfg                            DatabaseConfig
-		wantCharset, wantColl, wantVer string
+		name                  string
+		cfg                   DatabaseConfig
+		wantCharset, wantColl string
 	}{
 		{
 			name: "empty takes defaults", cfg: DatabaseConfig{},
-			wantCharset: DefaultDBCharset, wantColl: DefaultDBCollation, wantVer: DefaultDBMinVersion,
+			wantCharset: DefaultDBCharset, wantColl: DefaultDBCollation,
 		},
 		{
 			name:        "blank takes defaults",
-			cfg:         DatabaseConfig{Charset: "   ", Collation: "\t", MinVersion: " "},
-			wantCharset: DefaultDBCharset, wantColl: DefaultDBCollation, wantVer: DefaultDBMinVersion,
+			cfg:         DatabaseConfig{Charset: "   ", Collation: "\t"},
+			wantCharset: DefaultDBCharset, wantColl: DefaultDBCollation,
 		},
 		{
 			name:        "explicit values win",
-			cfg:         DatabaseConfig{Charset: "utf8", Collation: "utf8_bin", MinVersion: "5.7.0"},
-			wantCharset: "utf8", wantColl: "utf8_bin", wantVer: "5.7.0",
+			cfg:         DatabaseConfig{Charset: "utf8", Collation: "utf8_bin"},
+			wantCharset: "utf8", wantColl: "utf8_bin",
 		},
 	}
 
@@ -155,9 +155,6 @@ func TestDatabaseStringDefaults(t *testing.T) {
 			}
 			if got := tt.cfg.EffectiveCollation(); got != tt.wantColl {
 				t.Errorf("collation = %q, want %q", got, tt.wantColl)
-			}
-			if got := tt.cfg.EffectiveMinVersion(); got != tt.wantVer {
-				t.Errorf("min version = %q, want %q", got, tt.wantVer)
 			}
 		})
 	}

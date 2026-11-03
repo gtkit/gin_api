@@ -14,10 +14,11 @@ import (
 type blockedProducerPayload struct {
 	entered chan struct{}
 	release chan struct{}
+	once    sync.Once
 }
 
-func (p blockedProducerPayload) MarshalJSON() ([]byte, error) {
-	close(p.entered)
+func (p *blockedProducerPayload) MarshalJSON() ([]byte, error) {
+	p.once.Do(func() { close(p.entered) })
 	<-p.release
 	return nil, errors.New("serialization stopped by test")
 }
@@ -29,7 +30,7 @@ func TestProducerShutdownResumesWaiting(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		payload := blockedProducerPayload{make(chan struct{}), make(chan struct{})}
+		payload := &blockedProducerPayload{entered: make(chan struct{}), release: make(chan struct{})}
 		var enqueue sync.WaitGroup
 		enqueue.Go(func() {
 			if err := p.Enqueue(t.Context(), "test:blocked", payload); err == nil {

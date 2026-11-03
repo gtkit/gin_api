@@ -13,7 +13,15 @@ import (
 
 type injectedWebhook func(context.Context, string, string) error
 
-func (f injectedWebhook) Send(ctx context.Context, target, text string) error {
+func (f injectedWebhook) Send(text string) { f.SendTo("", text) }
+
+func (f injectedWebhook) SendTo(target, text string) {
+	if err := f(context.Background(), target, text); err != nil {
+		panic(err) // Unexpected failures in the direct SDK test entry point must surface.
+	}
+}
+
+func (f injectedWebhook) SendContext(ctx context.Context, target, text string) error {
 	return f(ctx, target, text)
 }
 
@@ -33,21 +41,21 @@ func TestInjectedNotifierMessagesAndSnapshots(t *testing.T) {
 	var messages []MailMessage
 	var paramsSeen []string
 	stamp := time.Date(2026, time.October, 22, 12, 0, 0, 0, time.UTC)
-	n, err := New(Options{
-		DefaultURL: "default", Environment: "test", MailTo: mailTo, SMSPhones: phones, SMSTemplate: "alert", Now: func() time.Time { return stamp },
-		Webhook: injectedWebhook(func(_ context.Context, target, text string) error {
+	n, err := New(
+		WithDefaultURL("default"), WithEnvironment("test"), WithClock(func() time.Time { return stamp }),
+		WithWebhook(injectedWebhook(func(_ context.Context, target, text string) error {
 			order = append(order, "webhook")
 			targets = append(targets, target)
 			texts = append(texts, text)
 			return nil
-		}),
-		Mail: injectedMail(func(_ context.Context, m MailMessage) error {
+		})),
+		WithMail(injectedMail(func(_ context.Context, m MailMessage) error {
 			order = append(order, "mail")
 			messages = append(messages, MailMessage{To: slices.Clone(m.To), Subject: m.Subject, Text: m.Text})
 			m.To[0] = "mutated"
 			return nil
-		}),
-		SMS: injectedSMS(func(_ context.Context, phone, template string, params map[string]string) error {
+		}), mailTo...),
+		WithSMS(injectedSMS(func(_ context.Context, phone, template string, params map[string]string) error {
 			order = append(order, phone)
 			if template != "alert" {
 				t.Errorf("template=%q", template)
@@ -55,8 +63,8 @@ func TestInjectedNotifierMessagesAndSnapshots(t *testing.T) {
 			paramsSeen = append(paramsSeen, params["env"])
 			params["env"] = "mutated"
 			return nil
-		}),
-	})
+		}), "alert", phones...),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +96,7 @@ func TestInjectedNotifierMessagesAndSnapshots(t *testing.T) {
 
 func TestInjectedNotifierEmptyTargetAndMissingCapability(t *testing.T) {
 	var webhookCalls, mailCalls int
-	n, err := New(Options{Webhook: injectedWebhook(func(context.Context, string, string) error { webhookCalls++; return nil }), MailTo: []string{"recipient"}, Mail: injectedMail(func(context.Context, MailMessage) error { mailCalls++; return nil })})
+	n, err := New(WithWebhook(injectedWebhook(func(context.Context, string, string) error { webhookCalls++; return nil })), WithMail(injectedMail(func(context.Context, MailMessage) error { mailCalls++; return nil }), "recipient"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +113,7 @@ func TestInjectedNotifierEmptyTargetAndMissingCapability(t *testing.T) {
 		t.Fatalf("calls webhook=%d mail=%d", webhookCalls, mailCalls)
 	}
 	var events []Delivery
-	missing, err := New(Options{Report: func(d Delivery) { events = append(events, d) }})
+	missing, err := New(WithReport(func(d Delivery) { events = append(events, d) }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +124,7 @@ func TestInjectedNotifierEmptyTargetAndMissingCapability(t *testing.T) {
 		t.Fatalf("events=%v", events)
 	}
 	var nilWebhook injectedWebhook
-	if _, err := New(Options{Webhook: nilWebhook}); !errors.Is(err, ErrSenderMissing) {
+	if _, err := New(WithWebhook(nilWebhook)); !errors.Is(err, ErrSenderMissing) {
 		t.Fatalf("typed nil=%v", err)
 	}
 }
@@ -127,24 +135,24 @@ func TestInjectedNotifierFailureAndPanicIsolation(t *testing.T) {
 			var order []string
 			var events []Delivery
 			failure := errors.New("https://secret.invalid/token phone password")
-			n, err := New(Options{DefaultURL: "target", MailTo: []string{"recipient"}, SMSPhones: []string{"one", "two"}, SMSTemplate: "alert",
-				Webhook: injectedWebhook(func(context.Context, string, string) error {
+			n, err := New(WithDefaultURL("target"),
+				WithWebhook(injectedWebhook(func(context.Context, string, string) error {
 					order = append(order, "webhook")
 					if panicSender {
 						panic("secret token")
 					}
 					return failure
-				}),
-				Mail: injectedMail(func(context.Context, MailMessage) error { order = append(order, "mail"); return failure }),
-				SMS: injectedSMS(func(_ context.Context, phone, _ string, _ map[string]string) error {
+				})),
+				WithMail(injectedMail(func(context.Context, MailMessage) error { order = append(order, "mail"); return failure }), "recipient"),
+				WithSMS(injectedSMS(func(_ context.Context, phone, _ string, _ map[string]string) error {
 					order = append(order, phone)
 					if phone == "one" {
 						panic("private phone")
 					}
 					return nil
-				}),
-				Report: func(d Delivery) { events = append(events, d) },
-			})
+				}), "alert", "one", "two"),
+				WithReport(func(d Delivery) { events = append(events, d) }),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,10 +185,11 @@ func TestInjectedNotifierIndependentTenSecondBudgets(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		n, err := New(Options{DefaultURL: "target", MailTo: []string{"recipient"}, SMSPhones: []string{"one", "two"}, SMSTemplate: "alert",
-			Webhook: injectedWebhook(func(ctx context.Context, _, _ string) error { return wait(ctx) }), Mail: injectedMail(func(ctx context.Context, _ MailMessage) error { return wait(ctx) }),
-			SMS: injectedSMS(func(ctx context.Context, _, _ string, _ map[string]string) error { return wait(ctx) }), Report: func(Delivery) {},
-		})
+		n, err := New(WithDefaultURL("target"),
+			WithWebhook(injectedWebhook(func(ctx context.Context, _, _ string) error { return wait(ctx) })),
+			WithMail(injectedMail(func(ctx context.Context, _ MailMessage) error { return wait(ctx) }), "recipient"),
+			WithSMS(injectedSMS(func(ctx context.Context, _, _ string, _ map[string]string) error { return wait(ctx) }), "alert", "one", "two"), WithReport(func(Delivery) {}),
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +205,7 @@ func TestInjectedNotifierIndependentTenSecondBudgets(t *testing.T) {
 
 func TestInjectedNotifierCancellationDoesNotInvokeSenders(t *testing.T) {
 	var calls int
-	n, err := New(Options{DefaultURL: "target", Webhook: injectedWebhook(func(context.Context, string, string) error { calls++; return nil }), Report: func(Delivery) {}})
+	n, err := New(WithDefaultURL("target"), WithWebhook(injectedWebhook(func(context.Context, string, string) error { calls++; return nil })), WithReport(func(Delivery) {}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,7 +59,6 @@ type Config struct {
 }
 
 type AppConfig struct {
-	Domain      string `mapstructure:"domain"`
 	Host        string `mapstructure:"host"`
 	EnableHTTPS bool   `mapstructure:"ishttps"`
 	Name        string `mapstructure:"name"`
@@ -118,7 +117,6 @@ type ProxyConfig struct {
 }
 
 type DatabaseConfig struct {
-	DBType   string `mapstructure:"dbtype"`
 	Host     string `mapstructure:"host"`
 	Port     string `mapstructure:"port"`
 	Name     string `mapstructure:"name"`
@@ -141,19 +139,16 @@ type DatabaseConfig struct {
 	// 连接轮换——数据库侧单方面断开的连接会一直留在池里，直到某次请求才发现它已死。
 	MaxIdleTimeSeconds int `mapstructure:"maxidletimeseconds"`
 	// PrepareStmtMaxSize 限制服务与迁移各自 GORM 缓存驻留的 SQL 种类。
-	// 省略或 0 使用 128；显式值为 1..4096，不能用 0 关闭预编译。
+	// 省略或 0 使用 128；显式值必须为正，不能用 0 关闭预编译。
 	PrepareStmtMaxSize int `mapstructure:"prepare_stmt_max_size"`
 	// PrepareStmtTTLSeconds 是预编译缓存项的存活时间（秒），不是 SQL 执行超时。
-	// 省略或 0 使用 3600；显式值为 1..86400，与 PrepareStmtMaxSize 共同限制缓存。
+	// 省略或 0 使用 3600；显式值必须为正且秒数转换不溢出 time.Duration，与 PrepareStmtMaxSize 共同限制缓存。
 	PrepareStmtTTLSeconds int `mapstructure:"prepare_stmt_ttl_seconds"`
 	// Charset / Collation 是连接与迁移**共用**的单一来源。
 	// 不依赖数据库环境默认值：同一份 SQL 在不同默认 collation 的实例上，
 	// 比较与排序结果会不同，而这种差异只在数据量上来后才暴露。
 	Charset   string `mapstructure:"charset"`
 	Collation string `mapstructure:"collation"`
-	// MinVersion 是受支持的最低 MySQL 版本（形如 "8.0"）。
-	// 它同时用于跳过 GORM 的版本探测（WithServerVersion）与启动期的实测校验。
-	MinVersion string `mapstructure:"min_version"`
 }
 
 // 数据库连接的默认值，未配置时使用。
@@ -163,7 +158,6 @@ type DatabaseConfig struct {
 const (
 	DefaultDBCharset            = "utf8mb4"
 	DefaultDBCollation          = "utf8mb4_unicode_ci"
-	DefaultDBMinVersion         = "8.0"
 	DefaultDBMaxOpenConn        = 25
 	DefaultDBMaxIdleConn        = 10
 	DefaultDBMaxLifeSeconds     = 1800
@@ -174,8 +168,6 @@ const (
 const (
 	DefaultDBPrepareStmtMaxSize    = 128
 	DefaultDBPrepareStmtTTLSeconds = 3600
-	maxDBPrepareStmtMaxSize        = 4096
-	maxDBPrepareStmtTTLSeconds     = 86400
 )
 
 // DBCredentials 是一次数据库连接使用的凭据。
@@ -191,7 +183,7 @@ type DBCredentials struct {
 // notification.mail.Init; AlertTo independently opts it into alert fan-out.
 // Configuration validates values even when a composition selects pure logging.
 type EmailConfig struct {
-	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client and requires other email fields empty.
+	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client; unused fields are ignored.
 	Port        int      `mapstructure:"port"`         // SMTP port, 0 uses 25; allowed 0..65535; 465 normally requires ImplicitSSL.
 	User        string   `mapstructure:"user"`         // SMTP authentication user; empty uses no authentication (trusted relay only).
 	Pass        string   `mapstructure:"pass"`         // SMTP authentication secret used with User; empty sends no password.
@@ -261,7 +253,7 @@ type RedisConfig struct {
 	Prefix string `mapstructure:"prefix"`
 
 	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，
-	// 不在本层复制一份可能与上游漂移的默认值。填了就必须自洽（见 validateRedisConfig）。
+	// 不在本层复制默认值。显式小池会将继承的空闲目标钳制到池容量；显式空闲数仍须自洽。
 	//
 	// 单位统一用毫秒而不是秒：Redis 的合理超时普遍在百毫秒量级，
 	// 用秒做单位会让"最小可表达值"就已经过大。
@@ -382,15 +374,13 @@ const (
 // newsPlatforms 是启动校验用的平台白名单。
 var newsPlatforms = []string{NewsPlatformFeishu, NewsPlatformDingTalk, NewsPlatformWeCom}
 
-// NewsConfig configures the default robot and the separate image-message app.
+// NewsConfig configures the default robot.
 // Text alerts use only FSURL, Platform and Secret. The registered robot remains
 // available for explicit targets even when FSURL is empty.
 type NewsConfig struct {
-	FSURL     string `mapstructure:"fsurl"`     // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
-	Platform  string `mapstructure:"platform"`  // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
-	Secret    string `mapstructure:"secret"`    // Optional platform signing secret; required operationally when platform-side signing is enabled.
-	AppID     string `mapstructure:"appid"`     // Image-message application ID; empty means not supplied, unused by text alert plugins.
-	AppSecret string `mapstructure:"appsecret"` // Image-message application secret; empty means not supplied, unused by text alert plugins.
+	FSURL    string `mapstructure:"fsurl"`    // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
+	Platform string `mapstructure:"platform"` // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
+	Secret   string `mapstructure:"secret"`   // Optional platform signing secret; required operationally when platform-side signing is enabled.
 }
 
 type CORSConfig struct {

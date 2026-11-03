@@ -75,8 +75,7 @@ func TestLoadExplicitRootRejectsInvalidPrimary(t *testing.T) {
 		prefix    string
 	}{
 		{name: "invalid YAML", contents: "application: [\n", prefix: "read config file "},
-		{name: "unknown field", contents: minimalConfigYAML() + "\nunknown_setting: true\n", prefix: "decode config "},
-		{name: "invalid value", contents: strings.Replace(minimalConfigYAML(), "dbtype: mysql", "dbtype: unsupported", 1), prefix: "validate config: "},
+		{name: "invalid value", contents: strings.Replace(minimalConfigYAML(), `port: "3306"`, `port: "invalid"`, 1), prefix: "validate config: "},
 		{name: "directory", directory: true, prefix: "read config file "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

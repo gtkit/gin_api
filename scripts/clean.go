@@ -34,7 +34,7 @@ func cleanOutputs(binDir, appName, coverage string, out io.Writer) (err error) {
 	if filepath.Clean(binDir) != "bin" || filepath.Clean(coverage) != filepath.Join(".cache", "coverage.out") {
 		return errors.New("only default bin/ and .cache/coverage.out are managed; custom outputs must be removed by their owner")
 	}
-	if !regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`).MatchString(appName) {
+	if !regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`).MatchString(appName) {
 		return errors.New("invalid app name")
 	}
 	root, err := os.Getwd()

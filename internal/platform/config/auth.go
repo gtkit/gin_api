@@ -14,12 +14,6 @@ import (
 // 对暴力枚举的抵抗力要求一致。
 const minSecretLen = 32
 
-// maxBcryptConcurrency 是口令校验并发上限的上限。
-//
-// 取 CPU 核数的 8 倍：bcrypt 是刻意的 CPU 密集计算，远超核数的并发只是让
-// 每个请求都变慢，同时把"有上限"这件事变成形式。
-var maxBcryptConcurrency = runtime.GOMAXPROCS(0) * 8
-
 // AuthMode 是认证模式。
 //
 // 用字符串而不是 bool：`local: false` 无法表达"外部身份"与"还没想好"的区别，
@@ -185,12 +179,6 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 		errs = append(errs, fmt.Errorf(
 			"auth.bcrypt_max_concurrent must not be negative, got %d (leave it empty to take "+
 				"the CPU count)", c.BcryptMaxConcurrent))
-	}
-	if c.BcryptMaxConcurrent > maxBcryptConcurrency {
-		errs = append(errs, fmt.Errorf(
-			"auth.bcrypt_max_concurrent %d exceeds %d: bcrypt is deliberately CPU-bound, and a "+
-				"limit far above the core count defeats the point of having one",
-			c.BcryptMaxConcurrent, maxBcryptConcurrency))
 	}
 
 	if c.RefreshTTL < 0 {

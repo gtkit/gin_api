@@ -78,6 +78,36 @@ func TestRuntimeProbesAreLazyAndIgnoreJWT(t *testing.T) {
 	}
 }
 
+func TestNamedRuntimeProbesAreWiredAndHonorCancellation(t *testing.T) {
+	cfg := validConfigForDoctor()
+	cfg.DatabaseConnections = map[string]config.DatabaseConfig{"reports": cfg.Database, "archive": cfg.Database}
+	cfg.RedisConnections = map[string]config.RedisConfig{"jobs": cfg.Redis}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	probes, release, err := buildRuntimeProbes(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := release(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if len(probes.NamedDatabases) != 2 || len(probes.NamedRedis) != 1 {
+		t.Fatal("named probes were not wired")
+	}
+	for name, probe := range probes.NamedDatabases {
+		if err := probe(ctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("database[%s] lost cancellation: %v", name, err)
+		}
+	}
+	for name, probe := range probes.NamedRedis {
+		if err := probe(ctx); !errors.Is(err, context.Canceled) {
+			t.Errorf("redis[%s] lost cancellation: %v", name, err)
+		}
+	}
+}
+
 func TestDeepDoctorSkipsUnconfiguredRedis(t *testing.T) {
 	cfg := configWithRealKeysForDoctor(t)
 	cfg.Redis = config.RedisConfig{}

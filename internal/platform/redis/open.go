@@ -72,6 +72,12 @@ func buildRedisOptions(cfg config.RedisConfig) []redisx.Option {
 
 	if cfg.PoolSize > 0 {
 		opts = append(opts, redisx.WithPoolSize(cfg.PoolSize))
+		// 沿用 SDK 的默认空闲目标，只在显式小池装不下它时钳制。
+		if cfg.MinIdleConns == 0 {
+			opts = append(opts, func(c *redisx.Config) {
+				c.MinIdleConns = min(c.MinIdleConns, c.PoolSize)
+			})
+		}
 	}
 	if cfg.MinIdleConns > 0 {
 		opts = append(opts, redisx.WithMinIdleConns(cfg.MinIdleConns))
