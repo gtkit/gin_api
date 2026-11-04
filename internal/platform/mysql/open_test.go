@@ -78,6 +78,26 @@ func resolvedIOTimeouts(opts []ormx.Option) (read, write time.Duration) {
 	return cfg.MySQL.ReadTimeout, cfg.MySQL.WriteTimeout
 }
 
+func TestConnectionOptionsEnableStrictWrites(t *testing.T) {
+	t.Parallel()
+
+	for name, options := range map[string][]ormx.Option{
+		"server":    serverOpenOptions(testDBConfig(3600), config.DBCredentials{}),
+		"migration": migrationOpenOptions(testDBConfig(3600), config.DBCredentials{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := ormx.NewConfig(options...)
+			if cfg.MySQL.SystemVariables["sql_mode"] != "CONCAT_WS(',',NULLIF(@@SESSION.sql_mode,''),'STRICT_TRANS_TABLES')" {
+				t.Fatal("new connections must preserve existing SQL modes and enable strict writes")
+			}
+			if cfg.Dialect.SkipInitializeWithVersion || cfg.Dialect.ServerVersion != "" {
+				t.Fatal("strict writes must not replace actual driver version initialization")
+			}
+		})
+	}
+}
+
 // TestServerIOTimeoutTakesTheSmallerOfLifetimeAndCap 锁住服务路径的两条分支。
 //
 // 两条都必须有用例：`min(maxLife, 30s)` 里"较小值"那条只在 maxLifeSeconds < 30s

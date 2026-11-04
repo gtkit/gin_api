@@ -44,7 +44,7 @@ func (w *asynqConsumerWorker) Kind() WorkerKind { return KindConsumer }
 // 有重试与积压，那正是它用来吸收这类抖动的。
 func (w *asynqConsumerWorker) Required() bool { return false }
 
-func (w *asynqConsumerWorker) Lifecycle() Lifecycle { return LifecycleLongRunning }
+func (w *asynqConsumerWorker) Lifecycle() Lifecycle { return w.Kind().Lifecycle() }
 
 func (w *asynqConsumerWorker) Prepare(ctx context.Context) error {
 	return w.consumer.Prepare(ctx)
@@ -94,7 +94,7 @@ func (w *asynqSchedulerWorker) Required() bool { return false }
 // 在此之前返回（包括返回 nil）会被管理器视为未预期退出并上报——
 // 那正是需要的：一个悄悄退出的调度器意味着所有周期任务都停了，
 // 而进程看起来完全正常。
-func (w *asynqSchedulerWorker) Lifecycle() Lifecycle { return LifecycleLongRunning }
+func (w *asynqSchedulerWorker) Lifecycle() Lifecycle { return w.Kind().Lifecycle() }
 
 func (w *asynqSchedulerWorker) Prepare(ctx context.Context) error {
 	return w.scheduler.Prepare(ctx)

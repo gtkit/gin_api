@@ -48,7 +48,7 @@ func TestBuildEngineWiresNonDefaultAdmissionLimit(t *testing.T) {
 	svc := services{}
 	svc.auth.Service = &authapp.Service{}
 	entered, release, done := make(chan struct{}, 2), make(chan struct{}), make(chan struct{}, 2)
-	mw := middlewares{auth: func(c *gin.Context) { entered <- struct{}{}; <-release; c.AbortWithStatus(204) }}
+	mw := func(c *gin.Context) { entered <- struct{}{}; <-release; c.AbortWithStatus(204) }
 	engine, err := buildEngine(inf, svc, mw, nil)
 	if err != nil {
 		t.Fatal(err)

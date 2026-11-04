@@ -30,7 +30,7 @@ type auditLogWorker struct {
 func (w *auditLogWorker) Name() string { return "audit-log" }
 func (w *auditLogWorker) Kind() WorkerKind { return KindConsumer }
 func (w *auditLogWorker) Required() bool { return false }
-func (w *auditLogWorker) Lifecycle() Lifecycle { return LifecycleLongRunning }
+func (w *auditLogWorker) Lifecycle() Lifecycle { return w.Kind().Lifecycle() }
 func (w *auditLogWorker) Prepare(context.Context) error { return nil }
 func (w *auditLogWorker) Run(ctx context.Context) error { return w.recorder.Run(ctx) }
 func (w *auditLogWorker) Cleanup(context.Context) error { return nil }

@@ -90,7 +90,6 @@ func registerNamedConnectionMetrics(inf *infra, cleanup *providerCleanup) error 
 		if stop == nil {
 			return fmt.Errorf("database[%s] pool metrics: SQL handle is unavailable", name)
 		}
-		inf.metricsCleanup = append(inf.metricsCleanup, stop)
 		cleanup.push("database["+name+"] metrics", cleanupMetrics, func(context.Context) error { return stop() })
 	}
 	for _, name := range slices.Sorted(maps.Keys(inf.connections.redisConnections)) {
@@ -106,7 +105,6 @@ func registerNamedConnectionMetrics(inf *infra, cleanup *providerCleanup) error 
 		if err != nil {
 			return fmt.Errorf("redis[%s] pool metrics: %w", name, err)
 		}
-		inf.metricsCleanup = append(inf.metricsCleanup, stop)
 		cleanup.push("redis["+name+"] metrics", cleanupMetrics, func(context.Context) error { return stop() })
 	}
 	return nil

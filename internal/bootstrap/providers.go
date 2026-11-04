@@ -40,16 +40,6 @@ import (
 // import "github.com/gtkit/gin-api/internal/optional/auditlog"
 // wiring:end providers.auditlog.import
 
-type providerSet struct {
-	cleanup    *providerCleanup
-	httpConfig HTTPConfig
-	httpServer httpServer
-	workers    *WorkerManager
-	shutdown   *ShutdownCoordinator
-	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
-	status *processStatus
-}
-
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
 type infra struct {
 	accessLogger *logger.Logger
@@ -70,8 +60,6 @@ type infra struct {
 	// wiring:end providers.auditlog.field
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache httpcache.ResponseCache
-	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
-	telemetry *telemetry.Provider
 	// TASKQUEUE: 供业务 service 显式注入的入队端，启用时取消注释。
 	// wiring:begin providers.taskqueue.field taskqueue line
 	// tasksProducer *taskqueue.Producer
@@ -83,16 +71,11 @@ type infra struct {
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
-	// metricsCleanup 注销异步回调，进程关停时调用。
-	//
-	// 不注销的话，回调会继续持有已经停掉的 worker 与已关闭的连接池，
-	// 采集到的是一份永远不再变化的陈旧状态。
-	metricsCleanup []func() error
 }
 
 func newProvidersWithBudget(
 	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator, budget *rollbackBudget,
-) (_ *providerSet, err error) {
+) (_ *App, err error) {
 	// 失败时逆序撤销已登记的副作用；成功时把同一份清理所有权交给 App。
 	cleanup := &providerCleanup{}
 	defer func() {
@@ -117,7 +100,6 @@ func newProvidersWithBudget(
 	if err != nil {
 		return nil, fmt.Errorf("build telemetry: %w", err)
 	}
-	inf.telemetry = telemetryProvider
 	cleanup.push("telemetry", cleanupTelemetry, telemetryProvider.Shutdown)
 	if telemetryProvider.Enabled() {
 		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
@@ -141,13 +123,11 @@ func newProvidersWithBudget(
 	if unregister, dbErr := registerDBPoolMetrics(recorder, inf.resources); dbErr != nil {
 		return nil, fmt.Errorf("register db pool metrics: %w", dbErr)
 	} else if unregister != nil {
-		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("db pool metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
 	if unregister, runtimeErr := recorder.RegisterRuntimeStats(); runtimeErr != nil {
 		return nil, fmt.Errorf("register runtime metrics: %w", runtimeErr)
 	} else {
-		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("runtime metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
 	if unregister, redisErr := recorder.RegisterRedisPoolStats(inf.cfg.Redis.DBs, func(db int) metrics.RedisPoolStats {
@@ -160,7 +140,6 @@ func newProvidersWithBudget(
 	}); redisErr != nil {
 		return nil, fmt.Errorf("register Redis metrics: %w", redisErr)
 	} else {
-		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("Redis metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
 	if err := registerNamedConnectionMetrics(&inf, cleanup); err != nil {
@@ -246,17 +225,9 @@ func newProvidersWithBudget(
 
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
-	//    worker 健康指标的注销回调由 buildWorkers 追加进 inf.metricsCleanup，
-	//    只在构造成功后按长度差把增量纳入清理登记。
-	cleanupsBefore := len(inf.metricsCleanup)
 	workers, err := buildWorkers(&inf)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
-	}
-	for _, unregister := range inf.metricsCleanup[cleanupsBefore:] {
-		if unregister != nil {
-			cleanup.push("worker metrics", cleanupMetrics, func(context.Context) error { return unregister() })
-		}
 	}
 	// 协调器优先用注入的那个：信号在 NewApp 之前就可能到达，唯一的信号监督者
 	// （cmd 层）因此比装配更早构造它。未注入时自建，行为不变。
@@ -279,12 +250,14 @@ func newProvidersWithBudget(
 	}
 
 	// 装配成功：副作用的释放所有权移交 App 的关停序列。
-	return &providerSet{
+	return &App{
 		cleanup:    cleanup,
+		runtime:    runtime,
 		httpConfig: inf.httpConfig,
 		httpServer: newHTTPServer(engine, inf.httpConfig),
 		workers:    workers,
 		shutdown:   coordinator,
+		drainWait:  drainWaitFrom(inf.cfg),
 		status:     status,
 	}, nil
 }

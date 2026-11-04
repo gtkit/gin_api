@@ -4,9 +4,7 @@ package bootstrap
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -63,17 +61,6 @@ type services struct {
 	// wiring:end modules.upload.fields
 }
 
-// middlewares 聚合路由装配所需的 Gin 中间件与授权取用函数。
-type middlewares struct {
-	auth         gin.HandlerFunc
-	optionalAuth gin.HandlerFunc
-	// authorizeByID 按授权者标识取中间件，供引用了具名授权的模块路由使用。
-	//
-	// 装配期就绑定注册表：让模块路由拿一个只需传标识的函数，模块因此不必
-	// 认识注册表，也不可能拿到一个未绑定注册表的授权中间件。
-	authorizeByID func(string) gin.HandlerFunc
-}
-
 // buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。
 func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, error) {
 	var svc services
@@ -127,10 +114,10 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 
 // buildMiddlewares 构建路由所需的鉴权中间件。
 // Laravel 存量 token 兼容开启时，token parser 注入回退组合校验（只验不签，过渡期兼容）。
-func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
+func buildMiddlewares(svc services, runtime *Runtime) (gin.HandlerFunc, error) {
 	tokenParser, err := newTokenParser(runtime.Config(), runtime.TokenParser())
 	if err != nil {
-		return middlewares{}, err
+		return nil, err
 	}
 
 	// 撤销检查只在本地认证模式下存在：外部身份模式的令牌由外部签发，
@@ -144,86 +131,16 @@ func buildMiddlewares(svc services, runtime *Runtime) (middlewares, error) {
 		revocation = svc.auth.Revocation
 	}
 
-	authOpts := middleware.AuthOptions{
+	return middleware.Auth(middleware.AuthOptions{
 		Verifier:   svc.accounts.Users,
 		Parser:     tokenParser,
 		Revocation: revocation,
-	}
-	auth := middleware.Auth(authOpts)
-	optionalAuth := middleware.OptionalAuth(authOpts)
-
-	authorizers, err := buildAuthorizers(svc)
-	if err != nil {
-		return middlewares{}, err
-	}
-
-	return middlewares{
-		auth:          auth,
-		optionalAuth:  optionalAuth,
-		authorizeByID: newAuthorizeByID(authorizers),
-	}, nil
-}
-
-// buildAuthorizers 登记进程内全部具名授权实现。
-//
-// 这里是唯一的注册点：模块路由经 authorizeByID 取用，
-// 未登记的 ID 在装配时记录错误并绑定恒拒绝中间件。
-func buildAuthorizers(svc services) (*sharedauth.AuthorizerRegistry, error) {
-	reg := sharedauth.NewAuthorizerRegistry()
-
-	// role.admin 查 user_roles 表这一权威角色源。**这是示例实现，可按需删除**
-	// （删除清单见 SCAFFOLD.md）。
-	//
-	// 它刻意不采信 JWT 的 role claim：令牌寿命可达数十天，其中的角色是签发那一刻
-	// 的事实。仅凭它放行 admin 等于把"一次签发"当成"持续有效的高权限"——
-	// 一个被撤销权限的账号在令牌过期前仍然畅通无阻。
-	//
-	// 未接入角色数据时（表空或未建），判定一律拒绝，因此**替换恒拒绝占位没有放宽默认行为**。
-	if err := reg.Register("role.admin",
-		newRoleAuthorizer(svc.accounts.Roles, adminRoleName)); err != nil {
-		return nil, err
-	}
-
-	// entitlement.vip 是共享的会员资格判定，供多个模块路由按 ID 引用，
-	// 不复制进任何模板——复制会让"会员判定"出现多份可能不一致的实现。
-	if err := reg.Register("entitlement.vip", newVIPAuthorizer(svc.accounts.VIP)); err != nil {
-		return nil, err
-	}
-
-	// 把恒拒绝的占位在启动时说清楚：否则"某个接口一直 403"会变成一桩悬案，
-	// 而最坏的排查结果是有人把它改成凭 JWT role claim 放行。
-	for _, id := range reg.IDs() {
-		if a, ok := reg.Lookup(id); ok {
-			if deny, isDeny := a.(sharedauth.DenyAllAuthorizer); isDeny {
-				logger.Warnf("authorizer %q denies every request: %s", id, deny.Reason)
-			}
-		}
-	}
-
-	return reg, nil
-}
-
-// newAuthorizeByID 返回按授权者标识取中间件的函数，供业务模块路由使用。
-//
-// 未登记的标识返回**恒拒绝**中间件并记一条错误日志，既不 panic 也不放行：
-// middleware.Authorize 对 nil authorizer 是 panic，而那会把一个装配问题变成
-// 运行期崩溃；返回 nil 更糟——nil handler 挂进链同样在首个请求上崩。
-// 恒拒绝是唯一安全的兜底，配合日志使"某接口一直 403"不至于变成悬案。
-func newAuthorizeByID(reg *sharedauth.AuthorizerRegistry) func(string) gin.HandlerFunc {
-	return func(id string) gin.HandlerFunc {
-		authorizer, ok := reg.Lookup(id)
-		if !ok {
-			logger.Errorf("authorizer %q is not registered; denying every request to the routes "+
-				"that reference it (register it in buildAuthorizers)", id)
-			authorizer = sharedauth.DenyAll(fmt.Sprintf("authorizer %q is not registered", id))
-		}
-		return middleware.Authorize(authorizer, id)
-	}
+	}), nil
 }
 
 // buildEngine 通过统一路由入口挂载各模块，并初始化 Gin engine。
 // 新增模块在 RegisterModules 中追加 Register 调用。
-func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessStatus) (*gin.Engine, error) {
+func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
 
 	opt := router.Options{
@@ -257,17 +174,17 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
 		// AUDITLOG: 在 audited 上注册需要审计的业务写路由；此处不自动审计全部接口。
 		// wiring:begin modules.auditlog.routes auditlog line
-		// audited := v1.Group("", mw.auth, auditlog.Middleware(inf.auditRecorder.Enqueue))
+		// audited := v1.Group("", auth, auditlog.Middleware(inf.auditRecorder.Enqueue))
 		// _ = audited // 用实际业务路由注册替换这一行。
 		// wiring:end modules.auditlog.routes
 		// UPLOAD: 恢复 services 字段和 import 后，按业务路由约定取消下面注释。
 		// 处理器负责文件记录、权限与响应；未提供处理器时不注册路由。
 		// wiring:begin modules.upload.routes upload line
 		// if svc.uploadFile != nil {
-		// 	v1.POST("/files", middleware.MultipartBody(0), mw.auth, svc.uploadFile)
+		// 	v1.POST("/files", middleware.MultipartBody(0), auth, svc.uploadFile)
 		// }
 		// if svc.downloadFile != nil {
-		// 	v1.GET("/files/:id", mw.auth, upload.FileHeaders(upload.DefaultPolicy()), svc.downloadFile)
+		// 	v1.GET("/files/:id", auth, upload.FileHeaders(upload.DefaultPolicy()), svc.downloadFile)
 		// }
 		// wiring:end modules.upload.routes
 
@@ -280,7 +197,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 			credentialLimit := min(cfg.Database.EffectiveMaxOpenConn(), max(1, cfg.App.EffectiveMaxInflightRequests()-1))
 			authhttp.Register(v1, authhttp.Deps{
 				Service:             svc.auth.Service,
-				Auth:                mw.auth,
+				Auth:                auth,
 				CredentialAdmission: middleware.Admission(credentialLimit, inf.recorder),
 				// 认证端点不保证身份（请求发生在拿到身份之前），
 				// 注入 pre-identity 取用函数：身份作用域引用即装配错误。
@@ -313,15 +230,7 @@ func buildEngine(inf infra, svc services, mw middlewares, status router.ProcessS
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
-	// 本函数对自身的进程级副作用（下方注册的指标回调）承担失败回滚责任：
-	// 新增任务构造或指标注册时，中途返回也必须回收此前注册的回调。
-	cleanupsBefore := len(inf.metricsCleanup)
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, rollbackWorkerMetricCleanups(inf, cleanupsBefore))
-		}
-	}()
+func buildWorkers(inf *infra) (*WorkerManager, error) {
 	var workers []Worker
 
 	// TASKQUEUE: 启用时恢复 taskqueue.go 的实现，并取消下面接线的注释。
@@ -346,25 +255,6 @@ func buildWorkers(inf *infra) (_ *WorkerManager, err error) {
 	}
 	manager.recorder = inf.recorder
 	return manager, nil
-}
-
-// rollbackWorkerMetricCleanups 逆序执行 cleanupsBefore 之后追加的指标注销
-// 回调并截断切片，让失败后的 infra 状态与进入 buildWorkers 之前一致。
-//
-// 副作用产生点与错误返回点之间的窗口只有构造者自己看得见：调用方按
-// "成功后登记回滚"的模式工作，凡在 buildWorkers 内部注册、又在同函数内
-// 失败的回调必然逃逸调用方的回滚栈——那是机制上的系统性缺口，
-// 不是某一处的偶然遗漏（bootstrap-module-assembly spec）。
-func rollbackWorkerMetricCleanups(inf *infra, cleanupsBefore int) error {
-	added := inf.metricsCleanup[cleanupsBefore:]
-	var errs []error
-	for _, a := range slices.Backward(added) {
-		if cerr := a(); cerr != nil {
-			errs = append(errs, fmt.Errorf("unregister worker metrics during rollback: %w", cerr))
-		}
-	}
-	inf.metricsCleanup = inf.metricsCleanup[:cleanupsBefore]
-	return errors.Join(errs...)
 }
 
 // newTokenParser 为 Ed25519 parser 按需附加有截止时间的 Laravel 回退验签。

@@ -137,6 +137,8 @@ func buildOpenOptions(
 		ormx.WithCharset(dbCfg.EffectiveCharset()),
 		ormx.WithCollation(dbCfg.EffectiveCollation()),
 		ormx.WithSystemVariable("time_zone", "'"+sessionTimeZone+"'"),
+		// 每条新连接追加严格写入模式，保留服务器其他模式，避免非法值被调整后写入。
+		ormx.WithSystemVariable("sql_mode", "CONCAT_WS(',',NULLIF(@@SESSION.sql_mode,''),'STRICT_TRANS_TABLES')"),
 
 		ormx.WithMaxOpenConns(dbCfg.EffectiveMaxOpenConn()),
 		ormx.WithMaxIdleConns(dbCfg.EffectiveMaxIdleConn()),

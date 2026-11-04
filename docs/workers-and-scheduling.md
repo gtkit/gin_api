@@ -12,8 +12,8 @@ worker 遵守模块化边界：`module/<m>/worker` 只依赖 application，不�
 
 ## Worker 契约
 
-`internal/bootstrap` 的 `Worker` 接口有七个方法，其中三个是**声明**——它们必须由 worker
-自己给出，管理器不做推断：
+`internal/bootstrap` 的 `Worker` 接口保留七个方法。`Kind` 和 `Required` 由 worker 声明；
+`Lifecycle` 可通过 `Kind().Lifecycle()` 返回固定映射，管理器不根据运行结果猜测：
 
 ```go
 type Worker interface {
@@ -39,12 +39,16 @@ type Worker interface {
 就会静默落进那一类**，而错的方向恰恰最难发现——一个本该最先停的 producer 被当成 consumer，
 会在 HTTP 关停期间继续生产新任务。
 
-### `Lifecycle`：必须自己声明，不能推断
+### `Lifecycle`：由 Kind 显式映射，保留现有接口
 
 `LifecycleLongRunning` 表示 `Run` 应阻塞直到 ctx 取消；**在此之前返回（包括返回 `nil`）
 一律视为 `ErrUnexpectedExit`**。`LifecycleOneShot` 表示执行一次后正常返回 `nil`。
 
-这个声明不能由管理器推断：管理器唯一能观察到的信号是「Run 返回了」，
+合法组合只有 `KindBootstrap → LifecycleOneShot`、`KindProducer/KindConsumer → LifecycleLongRunning`。
+适配器的 `Lifecycle()` 返回 `w.Kind().Lifecycle()` 即可；未声明或未知 Kind 返回 `LifecycleUnspecified`，
+注册期仍拒绝未知值及不匹配的既有声明，原有 Worker 实现可继续使用。
+
+不能根据运行结果推断形态：管理器观察到的「Run 返回了」，
 而「长期任务意外退出」与「一次性任务正常完成」在这个信号上完全一样。
 推断的结果必然是二者之一被静默误判——误判长期 worker 的代价是进程继续对外服务、
 功能却已经丢了。
@@ -71,9 +75,9 @@ NewWorkerManager(budget WorkerBudget, workers ...Worker) (*WorkerManager, error)
 与全部 required OneShot 的 Run）、`Cleanup`（单个 Cleanup 上限）。默认值取
 `DefaultWorkerBudget()`。
 
-`buildWorkers` 对自身的进程级副作用承担回滚责任：它注册的指标回调在**任何**错误出口
-都必须被撤销，因此回滚写在 `defer` 里而不是末尾——扩展段加入多个「构造 + 注册指标」块之后，
-任何中途 return 都不得让此前已注册的回调逃逸。
+当前 `buildWorkers` 只构造 worker 与管理器，不注册异步指标回调，因此没有额外的指标回滚栈。
+指标回调在实际注册成功处加入 `providerCleanup`，失败逆序撤销、正常退出按既有阶段注销。
+未来新增会取得资源或注册回调的构造函数时，仍须负责自身中途失败的清理，不能只在成功返回后登记。
 
 ## 生命周期与关停顺序
 

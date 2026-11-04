@@ -259,14 +259,13 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
    - `internal/platform/config/telemetry.go`、`internal/platform/config/telemetry_test.go`
 2. `internal/platform/config`：删 `types.go` 的 `Telemetry` 字段，以及 `validate.go` 中
    `validateTelemetryConfig` 的调用行。
-3. `internal/bootstrap/providers.go`：删 2a 步（`telemetry.New` 装配块，含 `rb.push` 与
-   启用日志）和 2a' 步（`InstrumentTracing` 调用）；删 `providerSet` 与 `infra` 两个
-   结构体的 `telemetry` 字段及构造处的赋值；在 `internal/bootstrap/modules.go`
-   删 `buildEngine` 里 `TracingEnabled` /
+3. `internal/bootstrap/providers.go`：删 2a 步（`telemetry.New` 装配块，含
+   `cleanup.push("telemetry", ...)` 与启用日志）和 2a' 步（`instrumentConnections` 调用）；
+   在 `internal/bootstrap/modules.go` 删 `buildEngine` 里 `TracingEnabled` /
    `ServiceName` 两行接线。2b 步 `metrics.New(otel.GetMeterProvider().Meter(metricsScope))`
    保留原样——`otel` 的 API import 随之保留。
-4. `internal/bootstrap/app.go`：删 `App` 的 `telemetry` 字段、构造处赋值与关停序列里的
-   `a.telemetry.Shutdown(ctx)`。
+4. 遥测的关闭已在 provider 构造成功处登记到统一清理器，随步骤 3 一并移除；
+   `App` 不持有单独的遥测字段，无需修改通用关停逻辑。
 5. `internal/router/init.go`：删 otelgin import、`Options` 的 `TracingEnabled` 与
    `ServiceName` 字段（后者仅供 otelgin 使用），以及 `engine.Use(otelgin.Middleware(...))`
    所在的条件块。
@@ -519,8 +518,8 @@ Timeout退出时不清零写期限，外层错误响应与最终flush仍受保�
 | `middleware.JSONBody(maxBytes)` | 要求 JSON 并限大小；0 表示沿用全局上限 |
 | `middleware.NoBody()` | 拒绝携带请求体 |
 | `middleware.NoStore()` | `Cache-Control: no-store`（`internal/middleware/nostore.go`）。挂在携带令牌/凭据的响应上——这类响应一旦进浏览器缓存、共享代理或 CDN，令牌的寿命就不再由服务端控制。头在 handler 之前设置，流式/提前写出的响应同样带上。母版已挂在四个认证端点上 |
-| `deps.Auth` / `deps.OptionalAuth` | 认证，由装配层注入（`internal/middleware/auth.go`） |
-| `deps.Authorize(id)` | 具名授权 |
+| `middleware.Auth(opts)` / `middleware.OptionalAuth(opts)` | 默认装配返回认证函数；可选认证在模块实际需要时用同一账号源、parser 和撤销检查显式构造并注入 |
+| `middleware.Authorize(authorizer, id)` | 在实际模块路由上显式挂载授权；未知 ID 必须拒绝，不能略过中间件 |
 | `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` | 路由级限流（`internal/middleware/ratelimit.go`），返回 `(preAuth, postAuth)` 两组，**分别挂在认证前后**。响应头用 `X-RateLimit-*` 而非 RFC 9331 的 `RateLimit-*`——前者是当前生态里客户端与网关实际在读的那一组 |
 
 全局中间件（Recovery / RequestID / 日志 / 指标 / 安全头 / 统一错误响应 / CORS / 体积上限）
@@ -569,7 +568,7 @@ telemetry:
 | 能力 | 如何启用 |
 |------|---------|
 | 后台任务 | 在 `modules.go` 的 `buildWorkers` 中追加 `Worker` 构造 |
-| 具名授权实现 | 在 `buildAuthorizers` 中注册；ID 与 `deps.Authorize(id)` 的实参对齐 |
+| 具名授权实现 | 在 `buildEngine` 中按实际路由显式构造并注入；可直接使用 `newRoleAuthorizer` / `newVIPAuthorizer`，需要按 ID 共享时使用 `shared/auth.AuthorizerRegistry`，未知 ID 绑定 `DenyAll` |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
 | 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |

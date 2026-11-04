@@ -77,21 +77,12 @@ func NewApp(ctx context.Context, options Options) (*App, error) {
 	//
 	// （此处曾用 context.Background() 并注释成"装配阶段不做任何 I/O"。
 	//   那句话对 buildMiddlewares 成立，对限流不成立。）
-	providers, err := newProvidersWithBudget(ctx, runtime, options.Shutdown, budget)
+	app, err := newProvidersWithBudget(ctx, runtime, options.Shutdown, budget)
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close(budget.Context(ctx)))
 	}
 
-	return &App{
-		cleanup:    providers.cleanup,
-		runtime:    runtime,
-		httpConfig: providers.httpConfig,
-		httpServer: providers.httpServer,
-		workers:    providers.workers,
-		shutdown:   providers.shutdown,
-		drainWait:  drainWaitFrom(runtime.Config()),
-		status:     providers.status,
-	}, nil
+	return app, nil
 }
 
 // drainWaitFrom 解析 LB 传播等待时长。

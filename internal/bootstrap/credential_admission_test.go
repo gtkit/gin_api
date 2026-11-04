@@ -54,7 +54,7 @@ func TestBuildEngineCredentialBudgetUsesExistingLimits(t *testing.T) {
 			installMetricsFixture(t, &inf)
 			svc := services{}
 			svc.auth.Service = &authapp.Service{}
-			engine, err := buildEngine(inf, svc, middlewares{auth: func(c *gin.Context) { c.AbortWithStatus(204) }}, nil)
+			engine, err := buildEngine(inf, svc, func(c *gin.Context) { c.AbortWithStatus(204) }, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
