@@ -18,7 +18,7 @@ API 基线工具在 [scripts/load-api.go](../scripts/load-api.go)，运行方式
 | `02-PGO优化指南.md` | **PGO 文档**：是否需要 PGO 的判断、完整接入流程、CI 集成、注意事项 |
 | `scripts/collect.sh` | 一键采集各类 profile（CPU / heap / goroutine / goroutineleak / allocs / block / mutex / trace） |
 | `scripts/analyze.sh` | 启动 pprof Web UI（火焰图）分析指定 profile 文件或在线端点 |
-| `scripts/bench-profile.sh` | 用 Go benchmark 生成 CPU / 内存 profile，供离线分析或 PGO 使用（本仓暂无 benchmark，需先为热点包补 `func BenchmarkXxx`） |
+| `scripts/bench-profile.sh` | 用已有 JWT、日志、GORM 日志与容量拒绝 Benchmark 生成 profile；它们只代表对应热点，不代表业务吞吐 |
 | `scripts/pgo-merge.sh` | 采集 / 合并多份 CPU profile 生成 `default.pgo`，并校验构建是否启用 PGO |
 | `scripts/doctor.sh` | 自检脚本：命令依赖、脚本语法、端点连通性、PGO、`.gitignore` 状态 |
 | `04-落地状态与后续建议.md` | 当前目录是否满足需求、源码接入状态、下一步建议 |

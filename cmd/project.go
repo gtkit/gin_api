@@ -5,6 +5,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/gtkit/gin-api/internal/appmeta"
@@ -19,8 +20,52 @@ func addProjectCommand(root *cobra.Command) {
 		Use:   "project",
 		Short: "Scaffold-mother project tooling",
 	}
-	cmd.AddCommand(newProjectInitCmd())
+	cmd.AddCommand(newProjectInitCmd(), newProjectModuleCmd(), newProjectClientCmd())
 	root.AddCommand(cmd)
+}
+
+func newProjectClientCmd() *cobra.Command {
+	var check bool
+	cmd := &cobra.Command{Use: "client", Short: "Generate or verify the OpenAPI Go client", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			root, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			path, err := projectinit.GenerateClient(root, check)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), path)
+			return err
+		}}
+	cmd.Flags().BoolVar(&check, "check", false, "compare generated source without writing")
+	return cmd
+}
+
+func newProjectModuleCmd() *cobra.Command {
+	var name string
+	var preview bool
+	cmd := &cobra.Command{Use: "module", Short: "Generate an unregistered owner-scoped CRUD module", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			root, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			paths, err := projectinit.GenerateModule(root, name, preview)
+			if err != nil {
+				return err
+			}
+			for _, path := range paths {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), path); err != nil {
+					return err
+				}
+			}
+			return nil
+		}}
+	cmd.Flags().StringVar(&name, "name", "", "lowercase Go module name")
+	cmd.Flags().BoolVar(&preview, "dry-run", false, "validate and list targets without writing")
+	return cmd
 }
 
 // newProjectInitCmd 构造 project init 子命令：把由脚手架母版（经 gonew 复制）实例化出的

@@ -1,13 +1,11 @@
 # 可选出站 HTTP
 
-接线编译入口：在项目根运行`GOWORK=off go run ./scripts/check-optional-wiring.go -case outbound`。
-工具按manifest中的wiring标记在自有临时副本恢复该能力，主工作区保持注释基线；
-只编译主程序和带integration标签的cmd/bootstrap/config测试，不启动业务或执行测试二进制。
-完整七例用`make check-optional-wiring`，它是独立目标，不在默认check/check-ci或CI中。
-编译通过不等于配置、外部依赖或业务接入通过；已自行修改接线的派生项目须同步维护manifest。
+统一通过 `-tags optional` 编译接线，按各能力配置启用；默认构建不导入可选包。
+验证入口为 `GOWORK=off go run -trimpath scripts/check-optional-wiring.go`，直接在原项目检查
+默认/optional 的依赖图和构建，不复制源码、不启动服务。完整说明见 [可选能力接入](../../../docs/optional-capabilities.md)。
 
 本目录包含具名 HTTP 客户端、请求关联头、重试、熔断、配置与测试。
-默认主程序未导入本包，根配置也不接受 `outbound:` 或 `APP_OUTBOUND__...`。
+默认主程序不导入本包；optional 构建读取 outbound 配置，普通构建将这些键作为未使用键诊断。
 
 | 文件 | 职责 |
 |---|---|
@@ -20,32 +18,9 @@
 
 ## 启用接线
 
-从项目根目录定位：
-
-```powershell
-rg -n OUTBOUND internal/bootstrap internal/platform/config cmd config/env.yml.example
-```
-
-1. 在 `internal/platform/config/types.go` 恢复 outbound import 和 `Outbound outbound.Config` 字段。
-2. 在 `internal/platform/config/validate.go` 恢复 `c.Outbound.Validate()` 的错误处理块。
-3. 去掉 `internal/bootstrap/outbound.go` 中包围实现的那一对 `/*`、`*/`。
-4. 在 `internal/bootstrap/providers.go` 恢复 outbound import、`infra.outbound` 字段和 `buildOutbound` 调用。
-   客户端在 service 之前构造，关闭与启动失败回收已登记。
-5. 在 `config/env.yml.example` 的 OUTBOUND-BEGIN/END 之间去掉每行最前面的 `# `，
-   将实际下游配置写入运行环境。客户端为空时不构造连接池。
-6. 在业务装配中把 `inf.outbound` 注入需要调用下游的服务并复用。
-   若启用 Linux integration 测试，恢复 `cmd/plugins_integration_test.go` 的 OUTBOUND import 和配置清空行。
-
-派生项目修改了 module 名时，注释内 import 也要手动更新。
-如果不走根配置而直接构造，请先调用 `cfg.Validate()` 并处理错误。
-
-```powershell
-gofmt -w internal/bootstrap internal/platform/config
-go build ./...
-go vet ./...
-go test -race ./internal/optional/outbound/...
-go test -race ./internal/platform/config -run 'Test(Outbound|ShippedExample|ExampleCoversConfigStruct)'
-```
+使用 `-tags optional` 构建，把 `config/optional.yml.example` 的 outbound 段合并到运行配置。
+clients 为空时不创建客户端；配置真实具名下游后，在模块装配中将 inf.outbound 注入服务复用。
+配置校验、连接池创建与关闭已接入。直接使用包构造函数时仍需处理构造错误。
 
 ## 调用
 
@@ -70,12 +45,7 @@ go test -race ./internal/platform/config -run 'Test(Outbound|ShippedExample|Exam
 
 未来可能接入 `github.com/gtkit/restyx`，本次没有引入或迁移它。接入时再评估公开适配入口，确定唯一重试所有者，并核对取消、超时、响应上限、连接池、追踪和日志；不得叠加 restyx 自有重试与本引擎后宣称次数上限仍然成立。
 
-## 删除
+## 停用与删除
 
-默认未接线，可直接删除本目录，再执行 `go mod tidy`。
-`make build` 构建主程序时不会编译本包；`go build ./...` 仍会编译本目录。
-
-需要清理模板时删除 `internal/bootstrap/outbound.go`，
-以及根配置、providers、集成测试和 YAML 中的 OUTBOUND 注释。
-`internal/platform/config/outbound_optional_test.go` 不导入本模块，删目录后仍可运行，
-也可随模板一起删除。最后移除 SCAFFOLD 和 docs 中的相关说明。
+清空 clients 后重启可停用出站客户端；默认构建不包含本包。
+物理删除包须同时清理 optional 装配、配置字段、相关测试和文档引用，不能只删目录后继续 optional 构建。

@@ -91,7 +91,7 @@ func printBanner(w io.Writer) error {
 	for i, ln := range lines {
 		parts = append(parts, bannerPalette[i%len(bannerPalette)], ln, bannerReset, "\n")
 	}
-	parts = append(parts, bannerRule, strings.Repeat("─", width), bannerReset, "\n\n")
+	parts = append(parts, gopherBlue, strings.Repeat("─", width), bannerReset, "\n\n")
 	_, err := io.WriteString(w, strings.Join(parts, ""))
 	return err
 }

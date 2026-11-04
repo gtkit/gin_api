@@ -9,6 +9,23 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 )
 
+func TestIgnoredKeysExposeNamesWithoutValues(t *testing.T) {
+	clearConfigEnv(t)
+	const secret = "private-value-that-must-not-appear"
+	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML() + "\nunrecognized_password: " + secret + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := cfg.IgnoredKeys()
+	if !slices.Contains(keys, "unrecognized_password") || strings.Contains(strings.Join(keys, ","), secret) {
+		t.Fatalf("unsafe or incomplete key diagnostic: %v", keys)
+	}
+	keys[0] = "changed"
+	if slices.Contains(cfg.IgnoredKeys(), "changed") {
+		t.Fatal("caller changed configuration diagnostics")
+	}
+}
+
 func TestLoadFromDisk(t *testing.T) {
 	clearConfigEnv(t)
 	root := t.TempDir()

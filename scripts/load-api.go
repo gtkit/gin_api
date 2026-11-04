@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -42,18 +43,28 @@ type loadConfig struct {
 }
 
 type loadSummary struct {
-	Offered           uint64         `json:"offered"`
-	Sent              uint64         `json:"sent"`
-	Completed         uint64         `json:"completed"`
-	CanceledRequests  uint64         `json:"canceled_requests"`
-	TerminationReason string         `json:"termination_reason"`
-	Dropped           uint64         `json:"generator_dropped"`
-	SchedulerDropped  uint64         `json:"scheduler_dropped"`
-	WorkerDropped     uint64         `json:"worker_dropped"`
-	TransportErrors   uint64         `json:"transport_errors"`
-	Status            map[int]uint64 `json:"status"`
-	ElapsedSeconds    float64        `json:"elapsed_seconds"`
-	Latency           latencySummary `json:"scheduled_latency"`
+	Parameters         loadParameters `json:"parameters"`
+	GeneratorGoVersion string         `json:"generator_go_version"`
+	ServiceResources   string         `json:"service_resource_evidence"`
+	Offered            uint64         `json:"offered"`
+	Sent               uint64         `json:"sent"`
+	Completed          uint64         `json:"completed"`
+	CanceledRequests   uint64         `json:"canceled_requests"`
+	TerminationReason  string         `json:"termination_reason"`
+	Dropped            uint64         `json:"generator_dropped"`
+	SchedulerDropped   uint64         `json:"scheduler_dropped"`
+	WorkerDropped      uint64         `json:"worker_dropped"`
+	TransportErrors    uint64         `json:"transport_errors"`
+	Status             map[int]uint64 `json:"status"`
+	ElapsedSeconds     float64        `json:"elapsed_seconds"`
+	Latency            latencySummary `json:"scheduled_latency"`
+}
+
+type loadParameters struct {
+	Rate            int     `json:"offered_per_second"`
+	Concurrency     int     `json:"concurrency"`
+	DurationSeconds float64 `json:"generation_seconds"`
+	TimeoutSeconds  float64 `json:"request_timeout_seconds"`
 }
 
 type latencySummary struct {
@@ -123,6 +134,9 @@ func loadCLI(ctx context.Context, args []string, out, errOut io.Writer) error {
 	client, transport := loadHTTPClient(cfg)
 	defer transport.CloseIdleConnections()
 	summary := runLoad(ctx, client, base, scenarios, cfg)
+	summary.Parameters = loadParameters{cfg.rate, cfg.concurrency, cfg.duration.Seconds(), cfg.timeout.Seconds()}
+	summary.GeneratorGoVersion = runtime.Version()
+	summary.ServiceResources = "not_collected"
 	if err := json.NewEncoder(out).Encode(summary); err != nil {
 		return err
 	}

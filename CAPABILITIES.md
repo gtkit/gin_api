@@ -99,6 +99,8 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
 
 ## 限流的两条使用约束
 
+本地登录的账号限流使用既有凭据查询返回的 `user:<ID>`，数据库判为同一账号的大小写或 Unicode 别名共享限额；注册和不存在账号使用 `input:<标识>`。所有主体继续经 HMAC 入键。登录查询前仍有 IP 限流及凭据并发准入。升级会重建账号维度桶，原桶计数不迁移。
+
 **1. `store: local` 的多副本语义**：有效限额 = 配置值 × 副本数。它适合"高位防护上限"（挡住明显异常的调用量），不适合精确业务限额——"每账号每分钟 5 次登录"在 3 个副本上实际是 15 次，而那正是攻击者需要的余量。精确限额必须用 `store: redis`。
 
 **2. `failure_mode: local_fallback` 只保证算法模型一致，不保证状态连续**：切换时 Redis 里的令牌计数不会迁移，本地影子桶从满桶起算，瞬时会多放行至多一个 Burst。不要据此做容量规划。
@@ -236,18 +238,18 @@ AI 对话模块及其专用 SDK 已移除；升级时清理 `modules.ai` 和 `AP
 
 ### 可按业务需求评估的能力
 
-`taskqueue`、`upload`、`outbound`、`auditlog` 统一放在 `internal/optional/`，默认未接线。
+`taskqueue`、`upload`、`outbound`、`auditlog` 统一放在 `internal/optional/`，默认构建不接线；使用 `optional` 构建标签与能力配置显式启用。
 每个目录自带启用和删除说明；设计约定见 [可选扩展目录](internal/optional/README.md)。
 `internal` 限制跨项目导入，`optional` 区分可裁剪能力；包名仍直接使用功能名。
 
 | 能力与 gtkit 模块 | 当前源码入口 | 保留条件与移除关联 |
 |---|---|---|
-| 上传：`gouploader` | `internal/optional/upload/` | 默认未接入；构造、关闭和路由接线均为 UPLOAD 注释。启用或删除按 [上传模块说明](internal/optional/upload/README.md) 操作，目录、限制与存储策略由业务显式提供。 |
+| 上传：`gouploader` | `internal/optional/upload/` | 默认未接入；构造与关闭由 optional 装配管理，业务路由显式注册。启用或删除按 [上传模块说明](internal/optional/upload/README.md) 操作，目录、限制与存储策略由业务显式提供。 |
 | 机器人通知：`msgbot` | `internal/platform/notification/robot/` | 需要 webhook 或显式机器人目标时保留。`news.fsurl` 为空只会跳过默认目标，不代表不存在显式调用。移除需处理 `internal/bootstrap/resources.go` 的构造/关闭、dispatch 的 Robot 依赖与校验、`news` 配置和对应测试。 |
 | 邮件：`tools/mailx` | `internal/pkg/mail/`、`internal/platform/notification/mail/` | 需要 SMTP 或邮件告警时保留。移除需处理通知装配/关闭、dispatch 的 Mail 依赖、`email` 配置校验和业务发信调用及测试。仅清空 `email.host` 不会移除模块依赖。 |
 | 短信：`smsx`、`smsx/providers/aliyun` | `internal/pkg/sms/`、`internal/platform/notification/sms/` | 需要阿里云短信或短信告警时保留。移除需处理通知装配/关闭、dispatch 的 SMS 依赖、`sms` 配置校验和业务短信调用及测试。仅清空 `sms.provider` 不会移除模块依赖。 |
 | 异步队列与调度：`asynqx` | `internal/optional/taskqueue/` | 默认未接入主程序；目录外接线均为 TASKQUEUE 注释。启用或删除按 [taskqueue 说明](internal/optional/taskqueue/README.md) 操作。普通主程序构建不编译它，`go build ./...` 仍会编译该可选包。 |
-| 出站 HTTP、重试与熔断：`httpc`、`gobreaker` | `internal/optional/outbound/` | 默认未接入，配置和初始化均为 OUTBOUND 注释，见 [启用说明](internal/optional/outbound/README.md)。 |
+| 出站 HTTP、重试与熔断：`httpc`、`gobreaker` | `internal/optional/outbound/` | 默认未接入，使用 optional 构建与具名下游配置，见 [启用说明](internal/optional/outbound/README.md)。 |
 | 写操作审计 | `internal/optional/auditlog/` | 记录器、仓储、模型、中间件及 SQL 都在目录内；默认不注册审计表，见 [启用说明](internal/optional/auditlog/README.md)。 |
 | HTTP 响应缓存：`gincache`、`gincache/persist/ristrettoadapter` | `internal/pkg/httpcache/`、`internal/platform/responsecache/` | 需要显式挂载的响应缓存时保留。移除需核对 bootstrap/runtime 缓存能力、路由挂载、`cache` 配置与测试。`internal/pkg/cache/` 是另一项本地缓存封装，不能按名字一起删。 |
 | 内置迁移 CLI：`migratex` | `cmd/migrate.go` | 使用内置 migrate 命令时保留。移除前须有替代迁移流程，并核对命令注册、`internal/bootstrap/migrateruntime.go` 与迁移测试；迁移文件和数据库历史仍须保留、审阅。 |
@@ -330,8 +332,8 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
 | 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
-| 配置严格解码 | `internal/platform/config` | 未知键即启动失败 |
-| 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；密钥可不落 YAML。`APP_` 是独占命名空间，对应不上配置键的变量即启动失败 |
+| 配置解码与诊断 | `internal/platform/config` | 已知字段按类型和业务约束校验；未知键忽略，doctor 仅报告键名并返回降级状态，不输出值 |
+| 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；未知键按相同诊断规则处理，APP_ROOT 保留给资源定位 |
 | 数据库连接校验 | `internal/platform/mysql/open.go` 的 OpenDB | 实测 vendor/版本、会话时区/字符集/sql_mode |
 | 迁移体系 | `database/` + `make migrate-*` | 含基线迁移与 `make migrate-verify` |
 | 就绪探针明细 | `internal/router/health.go` | `/ready` 按依赖分列状态，失败时使用固定安全文案；原始原因进入服务端限频日志，该端点仍需限制访问（见下节） |
@@ -520,15 +522,15 @@ telemetry:
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
 | 告警扇出（`internal/pkg/news`） | **有对外副作用，配置即生效，见下节**。配 `news.fsurl`（飞书/钉钉/企微 webhook）、`email.alert_to`、`sms.alert_phones`+`sms.alert_template`；三者各自独立，配哪个通哪个，全不配则无通道 |
-| 写操作审计（`internal/optional/auditlog`） | 默认未接入；按 [审计模块说明](internal/optional/auditlog/README.md) 恢复 AUDITLOG 注释接线、选择业务写路由并接入审计表迁移。记录器按 consumer 顺序排空，队列满载或写入失败时丢弃并告警，不记录请求体、响应体或 query。不需要时可直接删除目录。 |
+| 写操作审计（`internal/optional/auditlog`） | 默认未接入；按 [审计模块说明](internal/optional/auditlog/README.md) 启用 optional 构建和 auditlog.enabled、选择业务写路由并接入审计表迁移。记录器按 consumer 顺序排空，队列满载或写入失败时丢弃并告警，不记录请求体、响应体或 query。不使用时保持关闭；物理删除同时清理 optional 装配引用。 |
 | 文件上传（`internal/optional/upload` + `gtkit/gouploader`，版本由本项目钉住） | 本地磁盘一行构造：`upload.NewLocalUploader(upload.LocalOptions{Dir, MaxFileSize, AllowedTypes})`——三项**必填无默认**（gouploader 自身默认 10GB 上限、空白名单全放行，本项目纪律是安全决策必须显式）。返回的 Uploader 持有后台清理 goroutine，关停时 Close。库的后台错误（清理失败、钩子 panic、降级放行、启动期安全建议）默认已接进 `logger/v2`，可经 extra 传 `WithOnBackgroundError` 取代。对象存储/分片/STS 直传用 gouploader 原生 API，见下方「接入文件上传 / 对象存储」 |
 | 上传文件回源安全（`internal/optional/upload` + `internal/optional/upload/headers.go`） | 在上传文件的静态服务/下载路由组上挂 `upload.FileHeaders(upload.DefaultPolicy())`：恒定 `nosniff`，内联白名单之外强制 `Content-Disposition: attachment`（浏览器只能下载不能渲染，挡存储型 XSS）。**零值 Policy 全部强制下载**；默认白名单刻意排除 `text/html` 与 `image/svg+xml`（可携带脚本），放宽是显式安全决策 |
 | 验证码（`internal/pkg/verifycode`） | 本项目不构造实例。装配处 `verifycode.New(ctx, redis客户端, sender, Options{})` 按渠道各建一个实例（短信/邮件用不同 `KeyPrefix`），sender 用闭包适配 `internal/pkg/sms`/`mail`。包内兑现：Lua 原子签发与重置计数、原子校验（命中即毁、尝试超限销毁）、SetNX 发送节流、Redis 键经 SHA-256 不落明文手机号/邮箱。状态变更脚本禁止不确定结果的自动重试，仅在 NOSCRIPT 时重载；超时后由调用方处理未知结果，不自动重发验证码。**⚠ `Options.Debug` 是显式后门（固定码 + 只存不发），仅限本地/自动化测试装配，生产环境不得注入**——包内不做环境判断，责任在装配处 |
 | 图形验证码（`internal/pkg/captcha`） | 本项目不构造实例。装配处 `captcha.New(redis客户端, Options{})`，`Generate` 返回 ID + base64 图片（答案只落 Redis），`Verify` 一次性消费：无论对错同一 ID 只有一次校验机会，猜错必须换新图 |
-| 出站 HTTP 客户端（`internal/optional/outbound`） | 默认未接入；按 [出站模块说明](internal/optional/outbound/README.md) 恢复 OUTBOUND 接线，再配置具名下游。超时、响应体上限、连接池与重试均由同一共享入口控制。 |
+| 出站 HTTP 客户端（`internal/optional/outbound`） | 默认未接入；按 [出站模块说明](internal/optional/outbound/README.md) 启用 optional 构建，再配置具名下游。超时、响应体上限、连接池与重试均由同一共享入口控制。 |
 | 熔断（`internal/optional/outbound/breaker`） | 属于可选出站模块，随其启用。按下游名隔离故障，阈值配 `outbound.breaker`；业务调用和失败分类见 [出站调用](docs/outbound.md)。 |
 | GET 响应缓存（`internal/pkg/httpcache`） | 配 `cache.enabled` + `cache.store`（redis/memory），并在只读路由上显式挂 `deps.Cache(0)`。**默认关闭且不提供全局开启路径**——响应缓存把一次响应的字节原样发给后续请求，挂到带身份的路由上就是把 A 的数据发给 B。开启后仍有四道防线：只对显式挂了中间件的路由生效、请求侧身份判据绕过、响应侧准入、命中回放前复检 |
-| 任务队列（`internal/optional/taskqueue`，asynq） | 默认接线已注释，先按目录 README 启用。配置 `tasks.enabled`、队列权重与 `tasks.redis_db`；库号必须出现在 `redis.dbs` 中。通过 bootstrap 适配器接入既有启停顺序。 |
+| 任务队列（`internal/optional/taskqueue`，asynq） | 默认关闭，先按目录 README 使用 optional 构建并启用配置。配置 `tasks.enabled`、队列权重与 `tasks.redis_db`；库号必须出现在 `redis.dbs` 中。通过 bootstrap 适配器接入既有启停顺序。 |
 | 周期任务调度（`internal/optional/taskqueue`，cron） | 启用接线后设置 `tasks.scheduler.enabled`，在 `internal/bootstrap/taskqueue.go` 中追加 `taskqueue.PeriodicTask`。调度限于当前进程，队列处理器仍需业务幂等。 |
 
 ### 告警扇出的对外副作用
@@ -561,6 +563,7 @@ telemetry:
 |---|---|
 | `internal/middleware/redact.go` | 日志脱敏的判定与替换，无导出构造函数，由访问日志与 panic 恢复在内部调用。敏感键分精确匹配与子串匹配两组——`code` 这类短名走精确匹配，否则会误伤 `zipcode`/`areacode` |
 | `internal/pkg/errx` | 错误树判定谓词（`IsPureCancellation` / `IsPureAbort`）。逐成员判定聚合错误，避免"取消 + 回滚失败"被整体当成正常退出 |
+| `internal/pkg/apiclient` | 由 OpenAPI 生成的 Go HTTP 客户端；context、响应上限及 HTTP/业务错误处理见 [客户端说明](docs/api-client.md) |
 | `internal/pkg/response` | 统一 JSON 响应信封与错误码到 HTTP 状态码的映射，被中间件与各模块 handler 使用 |
 | `internal/pkg/ginc` | gin context helper（客户端 IP 唯一 accessor、请求上下文取值） |
 | `internal/pkg/paging` | 纯分页类型（查询入参 `Query` 与结果元信息 `Paging`），不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import）；`Query.Sort` 须经数据访问层白名单映射后才进 SQL |
@@ -577,7 +580,7 @@ telemetry:
 ### 接入文件上传 / 对象存储
 
 上传能力集中在 `internal/optional/upload/`，使用 go.mod 锁定的 `github.com/gtkit/gouploader`。
-默认不注册上传或下载路由，目录外的构造、关闭和路由接线均以 UPLOAD 注释保留。
+默认不注册上传或下载路由；optional 构建按 upload 配置创建和关闭上传器，业务显式注册路由。
 普通主程序和 `make build` 不引入上传包及 SDK；`go build ./...` 仍会编译该可选包。
 
 本地磁盘使用 `upload.NewLocalUploader`，目录、大小上限和类型白名单三项必须显式设置。
@@ -604,11 +607,11 @@ make dev-reset                 # 删除数据卷（需二次确认）
 ### 供应链门禁
 
 ```bash
-make security-source     # 日常：发布候选快照的漏洞与密钥扫描
+make security-source     # 日常：原项目源码漏洞与密钥扫描
 make security-release    # 发版前：追加全历史密钥扫描，禁止跳过漏洞扫描
 ```
 
-刻意**不并入 `make check`**：安全扫描依赖网络与 Docker，并入会让 `make check` 在离线环境失败，
+刻意**不并入 `make check`**：源码扫描依赖网络和本机 Gitleaks；发版扫描另需 Docker。并入会让 `make check` 在离线环境失败，
 最终逼人绕过整个门禁。`make tag` 会强制执行 `security-release`。
 
 发布流程在 `scripts/release.sh`，**不写在 Makefile 配方里**：GNU make 的 `-n`（dry-run）

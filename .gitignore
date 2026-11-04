@@ -26,4 +26,9 @@ examples
 # 本地开发依赖的密码，绝不入库
 .env
 *.out
-docs/
+docs/*
+!docs/module-example.md
+!docs/api-client.md
+!docs/ci-security.md
+!docs/optional-capabilities.md
+!docs/production-scaffold-acceptance.md

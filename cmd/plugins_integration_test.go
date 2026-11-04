@@ -35,16 +35,6 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-// TASKQUEUE: 启用可选队列并运行本集成测试时，取消下一行 import 声明和配置清空语句的注释。
-// wiring:begin plugins.taskqueue.import taskqueue line
-// import "github.com/gtkit/gin-api/internal/optional/taskqueue"
-// wiring:end plugins.taskqueue.import
-
-// OUTBOUND: 启用出站 HTTP 接线时恢复此 import 和 cfg.Outbound 清空语句。
-// wiring:begin plugins.outbound.import outbound line
-// import "github.com/gtkit/gin-api/internal/optional/outbound"
-// wiring:end plugins.outbound.import
-
 // Run by Make before any other integration package can connect.
 func TestPluginIntegrationPrerequisites(t *testing.T) {
 	if os.Getenv("PLUGIN_INTEGRATION") != "1" {
@@ -278,13 +268,7 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Redis.DialTimeoutMS, cfg.Redis.ReadTimeoutMS, cfg.Redis.WriteTimeoutMS = 500, 500, 500
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
 	cfg.RateLimit = config.RateLimitConfig{}
-	// OUTBOUND: 启用出站 HTTP 接线时取消注释，避免集成测试继承业务下游配置。
-	// wiring:begin plugins.outbound.reset outbound line
-	// cfg.Outbound = outbound.Config{}
-	// wiring:end plugins.outbound.reset
-	// wiring:begin plugins.taskqueue.reset taskqueue line
-	// cfg.Tasks = taskqueue.Config{}
-	// wiring:end plugins.taskqueue.reset
+	cfg.OptionalConfig = config.OptionalConfig{}
 	cfg.Telemetry = config.TelemetryConfig{}
 	cfg.Pprof = config.PprofConfig{}
 	cfg.News = config.NewsConfig{}

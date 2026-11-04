@@ -1,11 +1,7 @@
+//go:build optional
+
 package bootstrap
 
-// TASKQUEUE: 可选任务队列的全部适配与装配代码。
-// 默认保留为注释，主程序不会导入 internal/optional/taskqueue。
-// 启用时删除下面包围代码的 /* 和 */，并完成 internal/optional/taskqueue/README.md 的接线清单。
-
-// wiring:begin taskqueue.impl taskqueue block
-/*
 import (
 	"context"
 	"fmt"
@@ -141,5 +137,3 @@ func buildTaskQueueWorkers(inf *infra) ([]Worker, error) {
 	}
 	return workers, nil
 }
-*/
-// wiring:end taskqueue.impl

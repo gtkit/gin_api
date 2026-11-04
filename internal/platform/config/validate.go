@@ -153,24 +153,15 @@ func (c *Config) Validate() error {
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
-	// OUTBOUND: 恢复 Outbound 字段后，取消下面配置校验的注释。
-	// wiring:begin config.outbound.validate outbound line
-	// if err := c.Outbound.Validate(); err != nil {
-	// 	errs = append(errs, err)
-	// }
-	// wiring:end config.outbound.validate
+	if err := c.validateOptional(); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateTelemetryConfig(c.Telemetry); err != nil {
 		errs = append(errs, err)
 	}
-	// TASKQUEUE: 恢复 Tasks 字段后，取消下面配置校验的注释。
-	// wiring:begin config.taskqueue.validate taskqueue line
-	// if err := c.Tasks.Validate(c.Redis.Addr, c.Redis.DBs); err != nil {
-	// 	errs = append(errs, err)
-	// }
-	// wiring:end config.taskqueue.validate
 	if err := validateNewsConfig(c.News); err != nil {
 		errs = append(errs, err)
 	}
@@ -452,12 +443,9 @@ func validateRedisCapabilities(c Config) error {
 	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis {
 		consumers = append(consumers, "redis response cache")
 	}
-	// TASKQUEUE: 启用后取消注释，使队列必须配置 Redis 地址。
-	// wiring:begin config.taskqueue.redis taskqueue line
-	// if c.Tasks.Enabled {
-	// 	consumers = append(consumers, "task queue")
-	// }
-	// wiring:end config.taskqueue.redis
+	if c.TaskQueueEnabled() {
+		consumers = append(consumers, "task queue")
+	}
 	if len(consumers) == 0 {
 		return nil
 	}

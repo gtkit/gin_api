@@ -179,7 +179,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TokenEnvelope"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/TokenEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorEnvelope"
+                    }
+                  ]
                 }
               }
             }
@@ -594,10 +601,10 @@
             "BearerAuth": []
           },
           {
-            "LegacyAppToken": []
+            "AppToken": []
           }
         ],
-        "description": "A valid access token is required. Authorization: Bearer is primary; App-Token is legacy. If both are present they must match. Body refresh_token may be omitted."
+        "description": "A valid access token is required. Authorization: Bearer is primary; App-Token is also accepted. If both are present they must match. Body refresh_token may be omitted."
       }
     }
   },
@@ -802,6 +809,27 @@
             }
           }
         ]
+      },
+      "ErrorEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "not": {
+                  "const": 0
+                }
+              },
+              "data": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        ]
       }
     },
     "securitySchemes": {
@@ -810,7 +838,7 @@
         "scheme": "bearer",
         "bearerFormat": "JWT"
       },
-      "LegacyAppToken": {
+      "AppToken": {
         "type": "apiKey",
         "in": "header",
         "name": "App-Token"

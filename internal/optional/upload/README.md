@@ -1,14 +1,12 @@
 # 可选文件上传
 
-接线编译入口：在项目根运行`GOWORK=off go run ./scripts/check-optional-wiring.go -case upload`。
-工具按manifest中的wiring标记在自有临时副本恢复该能力，主工作区保持注释基线；
-只编译主程序和带integration标签的cmd/bootstrap/config测试，不启动业务或执行测试二进制。
-完整七例用`make check-optional-wiring`，它是独立目标，不在默认check/check-ci或CI中。
-编译通过不等于配置、外部依赖或业务接入通过；已自行修改接线的派生项目须同步维护manifest。
+统一通过 `-tags optional` 编译接线，按各能力配置启用；默认构建不导入可选包。
+验证入口为 `GOWORK=off go run -trimpath scripts/check-optional-wiring.go`，直接在原项目检查
+默认/optional 的依赖图和构建，不复制源码、不启动服务。完整说明见 [可选能力接入](../../../docs/optional-capabilities.md)。
 
 本目录包含本地上传器构造、文件展示策略、专用响应头和测试。
 普通上传、分片、对象存储等能力使用已锁定版本的 gouploader。
-当前没有业务上传路由，目录外的 UPLOAD 接线默认全部注释。
+当前没有业务上传路由；optional 构建可按 upload 配置创建共享上传器。
 
 | 文件 | 作用 |
 |---|---|
@@ -36,33 +34,10 @@ if err != nil {
 
 ## 启用接线
 
-从项目根目录定位示例：
-
-```powershell
-rg -n UPLOAD internal/bootstrap
-```
-
-1. **构造与关停。**
-   - `internal/bootstrap/upload.go`：去掉包围 import 和实现的那一对 `/*`、`*/`。
-   - `internal/bootstrap/providers.go`：恢复两个 import 声明、`infra.uploader` 字段、`uploadOptions` 和 `buildLocalUploader` 调用块。
-   - 按部署填写上传根目录、分片暂存目录、单文件大小和扩展名白名单。示例值不是强制默认值；测试应使用临时目录。
-   - 创建发生在 `buildServices` 之前。共享实例经 `inf.uploader` 注入业务服务，`Close` 已登记到 provider 的关闭与启动回滚流程。
-2. **业务处理器与路由。**
-   - `internal/bootstrap/modules.go`：恢复 upload import、`services.uploadFile/downloadFile` 两个字段和路由注册块。
-   - 在 `buildServices` 中由业务模块构造处理器并赋值。没有处理器时不会注册对应路由。
-   - 上传路由先执行 `middleware.MultipartBody(0)` 再认证，沿用全局请求体上限；单文件还受 `MaxFileSize` 限制。
-   - 下载处理器按文件记录检查归属和权限，并按记录中的安全文件名设置 Content-Type。示例路由的 `:id` 不是文件扩展名，默认会强制附件下载；路径、文件名由业务明确控制后才考虑放宽内联策略。
-3. **验证。**
-
-```powershell
-gofmt -w internal/optional/upload internal/bootstrap
-go build ./...
-go vet ./...
-go test -race ./internal/optional/upload
-```
-
-若派生项目已修改 go.mod 的 module 名，恢复注释时将示例 import 中的
-`github.com/gtkit/gin-api` 替换为当前 module 名。注释中的 import 不会被 Go 导入重写工具自动更新。
+使用 `-tags optional` 构建，按 `config/optional.yml.example` 设置 upload.enabled、dir、chunk_dir、max_file_size 和 allowed_types。
+目录、单文件上限和白名单没有安全默认，启用时必须明确配置；上传器由进程共享并在启动失败或关停时关闭。
+业务仍须自行注入 inf.uploader、实现文件记录与归属授权、注册上传/下载路由。
+上传路由使用 MultipartBody 和鉴权，下载路由使用 FileHeaders；不得将存储键直接视为公开授权。
 
 ## 保留的安全边界
 
@@ -75,15 +50,7 @@ go test -race ./internal/optional/upload
 本地上传器关闭使用 SDK 的 `Close()`，SDK 不提供 context 或 error 返回；
 后台错误仍由上面的回调记录。对象存储、分片和 STS 直传按 SDK 原生 API 接入，不另建 Provider 体系。
 
-## 默认构建与删除
+## 默认构建与停用
 
-- 默认主程序不导入本目录，`make build` 构建主程序 `.` 时不包含 upload/gouploader。
-- `go build ./...` 和 `go test ./...` 仍会包含本包。
-- 本目录还在时，`go mod tidy` 会保留它需要的 SDK 依赖。
-
-当前默认状态下，可直接删除本目录，再执行 `go mod tidy`。
-需要清理模板时，删除 `internal/bootstrap/upload.go` 以及 providers/modules 中的 UPLOAD 注释。
-文档里的相关入口位于 `SCAFFOLD.md`，删除目录时同步移除其上传说明和链接。
-已经接入业务的项目，还需处理业务服务依赖、上传/下载路由及历史文件的保留策略。
-
-通用 `MultipartBody`、请求体大小限制、认证和授权中间件继续保留。
+默认主程序不导入本包，显式全仓测试仍编译本包。upload.enabled=false 不创建上传器，但不自动清理历史文件。
+物理删除须同步清理 optional 装配和配置、业务调用及测试；历史文件保留由业务决定。

@@ -67,3 +67,11 @@
 
 需要说明某项职责归属别处时用正向表述（「鉴权由业务注入，方式如下」），
 不写否定式（「本包不内置鉴权」）。
+
+## 脚手架开发与运维
+
+- [业务模块示例与生成](module-example.md)
+- [OpenAPI 与 Go 客户端](api-client.md)
+- [源码安全与私有依赖 CI](ci-security.md)
+- [监控模板与负载基线](../monitoring/README.md)
+- [可选能力装配](optional-capabilities.md)

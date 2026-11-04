@@ -779,8 +779,7 @@ type denyAllAccounts struct{}
 func (denyAllAccounts) Allow(context.Context, string) bool { return false }
 
 // TestAccountRateLimitGatesCredentialAttempts 钉住账号维度限流（rate-limiting spec）：
-// 换源攻击仍被账号维度拦截；拦截发生在凭据查找与 bcrypt 计算**之前**——
-// 被限的尝试不该再消耗昂贵资源，也不该获得时间信道信息。
+// 换源攻击仍被账号维度拦截；登录先查询稳定用户，限流在密码计算之前。
 func TestAccountRateLimitGatesCredentialAttempts(t *testing.T) {
 	t.Parallel()
 
@@ -801,8 +800,8 @@ func TestAccountRateLimitGatesCredentialAttempts(t *testing.T) {
 
 	// 毒化下游：门禁一旦泄漏，错误会是毒化值而不是限流哨兵，
 	// errors.Is 断言自身就能指认泄漏点。
-	h.creds.findErr = errors.New("credential lookup must not be reached behind the gate")
 	h.hasher.hashErr = errors.New("bcrypt must not be reached behind the gate")
+	h.hasher.compareErr = errors.New("password comparison must not be reached behind the gate")
 
 	if _, err := svc.Login(context.Background(), "13800000000", "pw"); !errors.Is(err, ErrAccountRateLimited) {
 		t.Fatalf("Login = %v, want ErrAccountRateLimited", err)
@@ -926,10 +925,9 @@ func TestAccountNormalizationClosesTheRateLimitBypass(t *testing.T) {
 		}
 	}
 
-	for _, account := range seen.accounts {
-		if account != "13800000000" {
-			t.Fatalf("限流看到未规范化的账号 %q：等价文本落进了不同的限流桶", account)
-		}
+	if len(seen.accounts) != 3 || seen.accounts[0] != "input:13800000000" ||
+		seen.accounts[1] != "user:1" || seen.accounts[2] != "user:1" {
+		t.Fatalf("unexpected account subjects: %v", seen.accounts)
 	}
 	// 写入路径同样用规范化后的值，否则同一个账号会有两种存在形式。
 	if _, ok := h.creds.byPhone["13800000000"]; !ok {
@@ -972,4 +970,39 @@ type recordingLimiter struct{ accounts []string }
 func (l *recordingLimiter) Allow(_ context.Context, account string) bool {
 	l.accounts = append(l.accounts, account)
 	return true
+}
+
+func TestLoginAliasesShareStableAccountLimit(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	identity := Credential{UserID: 42, PasswordHash: "hashed:pw", Active: true}
+	for _, alias := range []string{"Alice", "alice", "Ａlice"} {
+		h.creds.byPhone[alias] = identity
+	}
+	limit := &subjectLimiter{remaining: 2}
+	h.svc.accounts = limit
+	for _, alias := range []string{"Alice", "alice"} {
+		if _, err := h.svc.Login(t.Context(), alias, "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login(%q): %v", alias, err)
+		}
+	}
+	if _, err := h.svc.Login(t.Context(), "Ａlice", "pw"); !errors.Is(err, ErrAccountRateLimited) {
+		t.Fatalf("alias escaped account limit: %v", err)
+	}
+	if len(limit.subjects) != 1 || limit.subjects["user:42"] != 3 {
+		t.Fatalf("aliases used different subjects: %v", limit.subjects)
+	}
+}
+
+type subjectLimiter struct {
+	remaining int
+	subjects  map[string]int
+}
+
+func (l *subjectLimiter) Allow(_ context.Context, subject string) bool {
+	if l.subjects == nil {
+		l.subjects = make(map[string]int)
+	}
+	l.subjects[subject]++
+	return l.subjects[subject] <= l.remaining
 }

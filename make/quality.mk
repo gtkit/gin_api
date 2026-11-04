@@ -1,8 +1,8 @@
 check-make-entries: ## 隔离验证常用入口、迁移占位与清理边界
 	@ bash ./scripts/check-make-entries.sh
 
-check-optional-wiring: ## 独立编译七种可选接线；不接入默认 check/check-ci
-	@ GOWORK=off go run ./scripts/check-optional-wiring.go
+check-optional-wiring: ## 原项目验证 default/optional 构建；不接入默认 check/check-ci
+	@ GOWORK=off go run -trimpath ./scripts/check-optional-wiring.go
 
 tool: ## Lint Go code with the installed golangci-lint
 	## 版本必须与 security/toolchain.mk 声明一致。
@@ -103,8 +103,8 @@ check-build-context: ## 校验主二进制依赖的源码目录都被 .dockerign
 	## 等于让每次发版都变成一次排雷（pkg/ 就这么潜伏到了发版当天）。
 	@ bash ./scripts/check-build-context.sh
 
-security-source: ## 供应链门禁（日常）：发布候选快照的漏洞与密钥扫描
-	@ bash ./scripts/security-gate.sh source
+security-source: ## 供应链门禁（日常）：原项目源码漏洞与密钥扫描
+	@ GOWORK=off go run -trimpath ./scripts/security-source.go
 
 security-release: ## 供应链门禁（发版前）：追加全历史密钥扫描；禁止 SKIP_VULNCHECK
 	@ bash ./scripts/security-gate.sh release

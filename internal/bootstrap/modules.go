@@ -1,5 +1,5 @@
 // 模块装配集中入口：业务服务、鉴权、路由及后台任务。
-// providers.go 决定装配阶段顺序；本文件维护模块依赖与脚手架接线标记。
+// providers.go 决定装配阶段顺序；本文件维护模块依赖与注册。
 package bootstrap
 
 import (
@@ -21,16 +21,6 @@ import (
 	authruntime "github.com/gtkit/gin-api/internal/runtime/module/auth"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
-
-// UPLOAD: 启用上传/下载路由示例时取消下一行 import 声明的注释。
-// wiring:begin modules.upload.import upload line
-// import "github.com/gtkit/gin-api/internal/optional/upload"
-// wiring:end modules.upload.import
-
-// AUDITLOG: 恢复审计路由示例时取消下一行 import 的注释。
-// wiring:begin modules.auditlog.import auditlog line
-// import "github.com/gtkit/gin-api/internal/optional/auditlog"
-// wiring:end modules.auditlog.import
 
 // services 保存启动时装配好的业务模块产物，供中间件、路由和 worker 装配阶段复用。
 // 每个字段代表需要在这些阶段之间传递的服务或共享能力，不是模块目录的登记清单。
@@ -54,11 +44,6 @@ type services struct {
 	auth authruntime.Assembly
 	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
 	accounts account.Assembly
-	// UPLOAD: 在 buildServices 中用 inf.uploader 构造业务处理器并赋值。
-	// wiring:begin modules.upload.fields upload line
-	// uploadFile   gin.HandlerFunc
-	// downloadFile gin.HandlerFunc
-	// wiring:end modules.upload.fields
 }
 
 // buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。
@@ -172,22 +157,6 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
 	opt.RegisterModules = func(v1 *gin.RouterGroup) {
-		// AUDITLOG: 在 audited 上注册需要审计的业务写路由；此处不自动审计全部接口。
-		// wiring:begin modules.auditlog.routes auditlog line
-		// audited := v1.Group("", auth, auditlog.Middleware(inf.auditRecorder.Enqueue))
-		// _ = audited // 用实际业务路由注册替换这一行。
-		// wiring:end modules.auditlog.routes
-		// UPLOAD: 恢复 services 字段和 import 后，按业务路由约定取消下面注释。
-		// 处理器负责文件记录、权限与响应；未提供处理器时不注册路由。
-		// wiring:begin modules.upload.routes upload line
-		// if svc.uploadFile != nil {
-		// 	v1.POST("/files", middleware.MultipartBody(0), auth, svc.uploadFile)
-		// }
-		// if svc.downloadFile != nil {
-		// 	v1.GET("/files/:id", auth, upload.FileHeaders(upload.DefaultPolicy()), svc.downloadFile)
-		// }
-		// wiring:end modules.upload.routes
-
 		// 认证模块只在本地认证模式下注册。外部身份模式下这些端点不存在，
 		// 而不是注册一组永远报错的路由。
 		if svc.auth.Service != nil {
@@ -231,23 +200,10 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
 func buildWorkers(inf *infra) (*WorkerManager, error) {
-	var workers []Worker
-
-	// TASKQUEUE: 启用时恢复 taskqueue.go 的实现，并取消下面接线的注释。
-	// wiring:begin modules.taskqueue.workers taskqueue line
-	// queueWorkers, err := buildTaskQueueWorkers(inf)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// workers = append(workers, queueWorkers...)
-	// wiring:end modules.taskqueue.workers
-
-	// AUDITLOG: 恢复 auditlog.go 后取消注释；HTTP 停止后再排空审计记录。
-	// wiring:begin modules.auditlog.workers auditlog line
-	// if inf.auditRecorder != nil {
-	// 	workers = append(workers, &auditLogWorker{recorder: inf.auditRecorder})
-	// }
-	// wiring:end modules.auditlog.workers
+	workers, err := optionalWorkers(inf)
+	if err != nil {
+		return nil, err
+	}
 
 	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
 	if err != nil {

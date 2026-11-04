@@ -1,0 +1,125 @@
+package application
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+type stored struct {
+	owner int64
+	value Record
+}
+type memory struct {
+	records map[string]stored
+	txCalls int
+	fail    error
+}
+
+func (m *memory) Do(ctx context.Context, fn func(context.Context) error) error {
+	m.txCalls++
+	snapshot := make(map[string]stored, len(m.records))
+	for k, v := range m.records {
+		snapshot[k] = v
+	}
+	err := fn(ctx)
+	if err != nil {
+		m.records = snapshot
+	}
+	return err
+}
+func (m *memory) Find(_ context.Context, owner int64, id string) (Record, bool, error) {
+	v, ok := m.records[id]
+	return v.value, ok && v.owner == owner, nil
+}
+func (m *memory) List(_ context.Context, owner int64, _, _ int) ([]Record, int64, error) {
+	out := []Record{}
+	for _, v := range m.records {
+		if v.owner == owner {
+			out = append(out, v.value)
+		}
+	}
+	return out, int64(len(out)), nil
+}
+func (m *memory) Create(_ context.Context, owner int64, value Record) error {
+	m.records[value.ID] = stored{owner, value}
+	return m.fail
+}
+func (m *memory) Update(ctx context.Context, owner int64, value Record) (bool, error) {
+	_, ok, _ := m.Find(ctx, owner, value.ID)
+	if ok {
+		m.records[value.ID] = stored{owner, value}
+	}
+	return ok, m.fail
+}
+func (m *memory) Delete(ctx context.Context, owner int64, id string) (bool, error) {
+	_, ok, _ := m.Find(ctx, owner, id)
+	if ok {
+		delete(m.records, id)
+	}
+	return ok, m.fail
+}
+
+func TestOwnerScopedRecordLifecycle(t *testing.T) {
+	store := &memory{records: map[string]stored{}}
+	service, err := New(store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := service.Create(t.Context(), 7, " first ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Title != "first" || !validID(record.ID) {
+		t.Fatalf("invalid created record: %+v", record)
+	}
+	if _, err := service.Get(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner get: %v", err)
+	}
+	if _, err := service.Update(t.Context(), 8, record.ID, "stolen"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner update: %v", err)
+	}
+	if err := service.Delete(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner delete: %v", err)
+	}
+	page, err := service.List(t.Context(), 8, 1, 20)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("cross-owner list: %+v %v", page, err)
+	}
+	updated, err := service.Update(t.Context(), 7, record.ID, "second")
+	if err != nil || updated.Title != "second" {
+		t.Fatalf("update: %+v %v", updated, err)
+	}
+	if err := service.Delete(t.Context(), 7, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Get(t.Context(), 7, record.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted record: %v", err)
+	}
+}
+
+func TestValidationAndTransactionRollback(t *testing.T) {
+	failure := errors.New("storage unavailable")
+	store := &memory{records: map[string]stored{}, fail: failure}
+	service, err := New(store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(t.Context(), 0, "title"); !errors.Is(err, ErrForbidden) {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(t.Context(), 7, " "); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := service.List(t.Context(), 7, 1, 101); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(t.Context(), 7, "title"); !errors.Is(err, failure) || len(store.records) != 0 {
+		t.Fatalf("failed write was not rolled back: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := service.Create(ctx, 7, "title"); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}

@@ -175,6 +175,12 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) Report {
 	}
 
 	checks := buildChecks(cfg, opts)
+	if keys := cfg.IgnoredKeys(); len(keys) != 0 {
+		checks = append(checks, check{name: "ignored_config_keys", run: func(context.Context) CheckResult {
+			return CheckResult{Status: StatusDegraded, ErrorCode: CodeInconsistent,
+				Detail: "unrecognized configuration keys: " + strings.Join(keys, ", ")}
+		}})
+	}
 	results := make([]CheckResult, len(checks))
 
 	var group sync.WaitGroup

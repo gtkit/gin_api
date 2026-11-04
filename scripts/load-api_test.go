@@ -920,4 +920,7 @@ func TestCLIUsesRealLoopbackAndDoesNotLeakScenario(t *testing.T) {
 	if summary.Status[302] == 0 || summary.TransportErrors != 0 || summary.Offered != 10 || summary.Sent+summary.Dropped != 10 {
 		t.Fatalf("summary: %+v", summary)
 	}
+	if summary.Parameters.Rate != 100 || summary.Parameters.Concurrency != 2 || summary.Parameters.DurationSeconds != 0.1 || summary.GeneratorGoVersion == "" || summary.ServiceResources != "not_collected" {
+		t.Fatalf("baseline evidence omitted its measurement boundary: %+v", summary)
+	}
 }

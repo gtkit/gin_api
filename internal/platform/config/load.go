@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -157,6 +158,7 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	}
 
 	var cfg Config
+	var metadata mapstructure.Metadata
 	// This presence-aware field must not inherit mapstructure's float/bool-to-int
 	// coercions. Environment overrides are decimal integer strings.
 	for _, field := range []string{"log.sql_slow_threshold_ms", "auth.bcrypt_max_waiters"} {
@@ -179,6 +181,7 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{
 		Tag: "mapstructure",
 		DecoderConfig: &mapstructure.DecoderConfig{
+			Metadata: &metadata,
 			DecodeHook: mapstructure.ComposeDecodeHookFunc(
 				mapstructure.StringToTimeDurationHookFunc(),
 				mapstructure.TextUnmarshallerHookFunc(),
@@ -193,6 +196,17 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
+	cfg.ignoredKeys = slices.Clone(metadata.Unused)
+	slices.Sort(cfg.ignoredKeys)
 
 	return &cfg, nil
+}
+
+// IgnoredKeys reports unrecognized configuration keys, never their values.
+// The returned slice is independent of the loaded configuration.
+func (c *Config) IgnoredKeys() []string {
+	if c == nil {
+		return nil
+	}
+	return slices.Clone(c.ignoredKeys)
 }

@@ -13,11 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// AUDITLOG: 需要审计表时恢复 import 和 WithDDLModels 中的模型，并按模块 README 接入迁移。
-// wiring:begin migrate.auditlog.import auditlog line
-// import "github.com/gtkit/gin-api/internal/optional/auditlog"
-// wiring:end migrate.auditlog.import
-
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
 //
 // ctx 由调用方（cobra 命令）传入而不是用背景上下文：中断信号因此能覆盖数据库
@@ -52,14 +47,7 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 		migrate.WithProjectName(modulePath),
 		migrate.WithMigrationDir("database/migrations"),
 		// 新增持久化模型时同步登记，供 --from-model 和 DDL 差异检查使用。
-		migrate.WithDDLModels(
-			&models.User{},
-			&models.UserRole{},
-			// AUDITLOG: &auditlog.Record{} 默认不参与模型登记。
-			// wiring:begin migrate.auditlog.model auditlog line
-			// &auditlog.Record{},
-			// wiring:end migrate.auditlog.model
-		),
+		migrate.WithDDLModels(append([]any{&models.User{}, &models.UserRole{}}, optionalDDLModels(rt.Config())...)...),
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {

@@ -1,0 +1,51 @@
+package example
+
+import (
+	"errors"
+	"github.com/DATA-DOG/go-sqlmock"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"testing"
+)
+
+func TestAssemblyScopesSQLAndRollsBack(t *testing.T) {
+	conn, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: conn, SkipInitializeWithVersion: true}), &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO `example_records`").WithArgs(sqlmock.AnyArg(), int64(7), "record", sqlmock.AnyArg(), sqlmock.AnyArg(), nil).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	record, err := service.Create(t.Context(), 7, "record")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT .* FROM `example_records` WHERE .*owner_id = \\? AND id = \\?.*deleted_at.*IS NULL").WithArgs(int64(8), record.ID, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	if _, err := service.Get(t.Context(), 8, record.ID); err == nil {
+		t.Fatal("cross-owner lookup returned data")
+	}
+	failure := errors.New("write rejected")
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO `example_records`").WillReturnError(failure)
+	mock.ExpectRollback()
+	if _, err := service.Create(t.Context(), 7, "other"); !errors.Is(err, failure) {
+		t.Fatalf("write error lost: %v", err)
+	}
+}

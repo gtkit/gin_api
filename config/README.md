@@ -47,7 +47,7 @@ cp config/env.yml.example config/env/env.yml
 
 JWT 命令有独立的配置读取规则，不支持这里的 `v2` 候选；密钥、TLS 文件和写目录仍使用各自现有的资源路径规则。主配置的逻辑根约束不等同于文件系统或符号链接隔离。
 
-配置只使用当前字段，不保留旧键别名或专门的迁移诊断。YAML 和 `APP_` 环境变量覆盖中的未知键统一在解码阶段拒绝。
+配置只使用当前字段，不保留旧键别名。YAML 和 `APP_` 覆盖中的未知键忽略；`doctor` 以 `ignored_config_keys` 报告键名，返回降级状态，不输出对应值。已知字段的类型和业务校验仍生效。
 
 ## 目录
 
@@ -245,3 +245,9 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 `auth.bcrypt_max_concurrent` 的 0/省略仍取有效 CPU 并发数。`auth.bcrypt_max_waiters` 使用 `null` 表示默认额外等待一批同等人数，显式 0 才禁排队，正整数指定等待人数。`auth.bcrypt_queue_timeout` 的 0/省略使用 1s，实际不超过父请求预算；只约束等待，不中断已开始的 bcrypt。负值非法；队满或排队超时返回 503，调用方取消保留取消语义。四个本地认证 JSON 路由均额外限制为 8 KiB。
 
 这些初值未经生产容量校准，须结合吞吐、平均延迟、DB 等待和 503 调整；网关不要对过载 503 无条件重试。指标和内存预算见 [容量说明](../docs/capacity-and-memory.md)。
+
+### 可选能力配置
+
+默认构建不装配 taskqueue、outbound、upload、auditlog。`-tags optional` 构建读取根级配置，完整字段、默认值及约束见 [optional.yml.example](optional.yml.example)。将需要的段合并到实际 `config/env/env.yml`；仅设置配置不能让默认构建启用可选包，未使用键由 doctor 报告。全部开关默认关闭，outbound 以 clients 为空表示关闭。
+
+上传启用时，完成目录、分片临时目录、单文件字节上限和扩展名白名单均须显式填写；没有默认路径或任意类型兜底。审计开关不自动执行迁移或给全部路由挂中间件。接线和运行边界见 [可选能力](../docs/optional-capabilities.md)。

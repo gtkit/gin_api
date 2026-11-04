@@ -1,10 +1,7 @@
+//go:build optional
+
 package bootstrap
 
-// AUDITLOG: 审计的可选装配及 worker 适配。默认整个实现为注释。
-// 启用时去掉下面一对 /* 和 */，并按 internal/optional/auditlog/README.md 恢复接线。
-
-// wiring:begin auditlog.impl auditlog block
-/*
 import (
 	"context"
 	"fmt"
@@ -27,12 +24,10 @@ type auditLogWorker struct {
 	recorder *auditlog.Recorder
 }
 
-func (w *auditLogWorker) Name() string { return "audit-log" }
-func (w *auditLogWorker) Kind() WorkerKind { return KindConsumer }
-func (w *auditLogWorker) Required() bool { return false }
-func (w *auditLogWorker) Lifecycle() Lifecycle { return w.Kind().Lifecycle() }
+func (w *auditLogWorker) Name() string                  { return "audit-log" }
+func (w *auditLogWorker) Kind() WorkerKind              { return KindConsumer }
+func (w *auditLogWorker) Required() bool                { return false }
+func (w *auditLogWorker) Lifecycle() Lifecycle          { return w.Kind().Lifecycle() }
 func (w *auditLogWorker) Prepare(context.Context) error { return nil }
 func (w *auditLogWorker) Run(ctx context.Context) error { return w.recorder.Run(ctx) }
 func (w *auditLogWorker) Cleanup(context.Context) error { return nil }
-*/
-// wiring:end auditlog.impl
