@@ -1,6 +1,12 @@
 // Package dto 是认证模块的对外数据契约。
 package dto
 
+// ChangePasswordRequest cannot select a target user or session version.
+type ChangePasswordRequest struct {
+	OldPassword string `json:"old_password" binding:"required,max=72"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=72"`
+}
+
 // RegisterRequest 是注册请求。
 type RegisterRequest struct {
 	// Phone 是登录标识。

@@ -89,12 +89,15 @@ func GenerateModule(start, name string, dryRun bool) ([]string, error) {
 
 // WriteGenerated validates every target before writing and rolls back owned files on failure.
 // Paths are project-relative; os.Root prevents escaping through parent symlinks.
+// A root-close error is reported after writing; it does not undo completed files.
 func WriteGenerated(root string, files map[string][]byte, dryRun bool) (paths []string, err error) {
 	fs, err := os.OpenRoot(root)
 	if err != nil {
 		return nil, err
 	}
-	defer fs.Close()
+	defer func() {
+		err = errors.Join(err, fs.Close())
+	}()
 	for path := range files {
 		if !filepath.IsLocal(path) || filepath.Clean(path) != path || path == "." {
 			return nil, fmt.Errorf("target must be project-relative: %q", path)

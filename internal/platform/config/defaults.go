@@ -26,6 +26,14 @@ func (c LogConfig) EffectiveSQLSlowThreshold() time.Duration {
 	return time.Duration(*c.SQLSlowThresholdMS) * time.Millisecond
 }
 
+// EffectiveAccessFlushInterval 返回访问文件日志刷新间隔，零值使用 1s。
+func (c LogConfig) EffectiveAccessFlushInterval() time.Duration {
+	if c.AccessFlushInterval == 0 {
+		return time.Second
+	}
+	return c.AccessFlushInterval
+}
+
 // EffectiveDrainWait 返回生效的 LB 传播等待时长。
 func (a AppConfig) EffectiveDrainWait() time.Duration {
 	if a.DrainWaitSeconds <= 0 {

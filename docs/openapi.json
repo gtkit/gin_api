@@ -3,7 +3,7 @@
   "info": {
     "title": "Default API contract",
     "version": "2026-10-26",
-    "description": "Routes from bootstrap.buildEngine. Local authentication operations are absent in external mode. Business responses use code/msg/data/request_id; probes have separate schemas. See optional-capability-contracts.md for compatibility and integration contracts."
+    "description": "Routes from bootstrap.buildEngine. Local authentication operations are absent in external mode. Business responses use code/msg/data/request_id; probes have separate schemas. See optional-capability-contracts.md for compatibility and integration contracts. Password change and logout-all require auth.session_lifecycle=true and the auth_version migration."
   },
   "servers": [
     {
@@ -606,6 +606,256 @@
         ],
         "description": "A valid access token is required. Authorization: Bearer is primary; App-Token is also accepted. If both are present they must match. Body refresh_token may be omitted."
       }
+    },
+    "/api/v1/auth/password/change": {
+      "post": {
+        "operationId": "changePassword",
+        "summary": "Change password",
+        "x-auth-mode": "local",
+        "x-max-body-bytes": 8192,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Account or permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds 8192 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "DTO validation failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Admission/password capacity or dependency unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Request deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "All previous sessions invalidated; login again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "AppToken": []
+          }
+        ],
+        "description": "Verify the current password, update it atomically, and invalidate all sessions. Login again after success. The caller cannot choose a user or version. Passwords are limited to 72 UTF-8 bytes.",
+        "x-session-lifecycle": true
+      }
+    },
+    "/api/v1/auth/logout-all": {
+      "post": {
+        "operationId": "logoutAll",
+        "summary": "Log out all devices",
+        "x-auth-mode": "local",
+        "x-max-body-bytes": 0,
+        "responses": {
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials or expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Account or permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds 8192 bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Admission/password capacity or dependency unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Request deadline exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "All previous sessions invalidated; login again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "AppToken": []
+          }
+        ],
+        "description": "Invalidate every session for the authenticated account. Accepts no request body. Already authenticated in-flight requests are not canceled.",
+        "x-session-lifecycle": true
+      }
     }
   },
   "components": {
@@ -829,6 +1079,29 @@
               }
             }
           }
+        ]
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "properties": {
+          "old_password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 72,
+            "writeOnly": true,
+            "description": "Current password; at most 72 UTF-8 bytes."
+          },
+          "new_password": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 72,
+            "writeOnly": true,
+            "description": "New password, 8 or more characters and at most 72 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "old_password",
+          "new_password"
         ]
       }
     },

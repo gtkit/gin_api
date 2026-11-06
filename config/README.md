@@ -70,7 +70,7 @@ config/
 - `database`：MySQL 连接和连接池。
 - `redis`：地址、密码和初始化 DB 列表。
 - `database_connections`、`redis_connections`：额外具名实例，省略或空 map 仅使用原有默认连接；字段及默认值分别与 `database`、`redis` 相同，各实例独立填写凭据，不继承默认值以外的配置。名称须匹配 `[a-z][a-z0-9_]{0,63}`，`default` 保留给原有连接；额外 Redis 的 `addr`、`dbs` 必填。声明的额外实例建连失败会终止启动。使用与生命周期见 [具名连接](../docs/named-data-connections.md)。
-- `log`：日志级别、路径和滚动策略。
+- `log`：日志级别、路径、滚动策略和访问日志缓冲刷新间隔。
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
 - `auth`：本地认证或外部身份模式。
 - `email`、`sms`、`news`：通知渠道与告警配置。
@@ -96,6 +96,21 @@ JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 校验只检查配置，不修改原值；多项错误仍一次聚合返回。连接池与 Redis 规则保持原样：
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
+
+## 访问日志刷新间隔
+
+```yaml
+log:
+  access_flush_interval: 1s
+```
+
+`log.access_flush_interval` 控制访问文件日志缓冲的自动刷新间隔，默认 **1 秒**。
+使用 Go duration 格式，例如 `500ms`、`1s`、`2s`；省略、`null` 或 `0s` 回落到 1 秒，
+负值、非法时长或溢出值会在配置加载时被拒绝。可用环境变量
+`APP_LOG__ACCESS_FLUSH_INTERVAL=500ms` 覆盖，修改后重启服务生效。
+
+仅在 `log.filestdout` 开启时生效，不影响主日志或控制台输出。
+缓冲区写满时也会刷出；缩短间隔可能增加文件刷新次数，进程异常退出仍可能丢失尚未刷出的日志。
 
 ## MySQL 预编译语句与 ProxySQL
 

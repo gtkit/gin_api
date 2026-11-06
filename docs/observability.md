@@ -13,6 +13,11 @@
 main 直接调用 SDK 包级函数，结构化字段使用 `zap.Field`；access 由 bootstrap 经 router
 装配参数传入 `GinLogger`，中间件直接调用原生 `*logger.Logger`，不另设日志门面。
 
+访问文件日志通过 `log.access_flush_interval` 设置自动刷新间隔，默认 `1s`；
+省略、`null` 或 `0s` 使用默认值，正时长（如 `500ms`、`2s`）按配置生效，负值拒绝。
+可用 `APP_LOG__ACCESS_FLUSH_INTERVAL` 覆盖，重启后生效。该选项仅作用于开启文件输出的
+access 缓冲，不影响 main 或控制台；缓冲写满也会刷出，异常退出仍可能丢失尚未刷出的日志。
+
 main 和 access 共用按日期及文件大小轮转的策略（`division: both`），均使用
 `log.maxsize`、`maxage`、`maxbackups` 和 `compress`。`maxsize` 的单位是 MiB；
 `maxage`、`maxbackups` 为 0 时保留 SDK 默认值，不表示无限保留。

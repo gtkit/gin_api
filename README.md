@@ -109,6 +109,11 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
+需要已登录改密和全部设备退出时，先执行 `auth_version` 增量迁移，再开启
+`auth.session_lifecycle`（默认 false，仅 local 模式）。新增 `POST /api/v1/auth/password/change`
+与 `POST /api/v1/auth/logout-all`，成功后所有会话需重新登录；不包含密码重置。
+部署与回滚要求见 [会话管理](docs/auth-session-lifecycle.md)，业务权限边界见 [授权约定](docs/authorization.md)。
+
 当前不提供 AI 对话与会话管理模块，`/api/v1/ai/*` 接口不注册。
 历史 SQL 和现有数据保留，旧迁移在新库仍可能创建 AI 表，详见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
 

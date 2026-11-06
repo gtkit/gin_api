@@ -3,6 +3,8 @@ package {{.Name}}
 import (
     "errors"
     "testing"
+    "uuid"
+
     "github.com/DATA-DOG/go-sqlmock"
     "gorm.io/driver/mysql"
     "gorm.io/gorm"
@@ -20,6 +22,10 @@ func TestAssemblyScopesSQLAndRollsBack(t *testing.T) {
     record,err:=service.Create(t.Context(),7,"record");if err!=nil {t.Fatal(err)}
     mock.ExpectQuery("SELECT .* FROM `{{.Name}}_records` WHERE .*owner_id = \\? AND id = \\?.*deleted_at.*IS NULL").WithArgs(int64(8),record.ID,1).WillReturnRows(sqlmock.NewRows([]string{"id"}))
     if _,err:=service.Get(t.Context(),8,record.ID);err==nil {t.Fatal("cross-owner lookup returned data")}
+    mock.ExpectBegin()
+    mock.ExpectExec("UPDATE `{{.Name}}_records` SET `deleted_at`=.*owner_id = \\? AND id IN").WithArgs(sqlmock.AnyArg(),int64(7),record.ID,sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0,1))
+    mock.ExpectRollback()
+    if err:=service.DeleteMany(t.Context(),7,[]string{record.ID,uuid.NewV7().String()});err==nil {t.Fatal("partial batch was committed")}
     failure:=errors.New("write rejected")
     mock.ExpectBegin()
     mock.ExpectExec("INSERT INTO `{{.Name}}_records`").WillReturnError(failure)

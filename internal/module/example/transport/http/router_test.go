@@ -3,14 +3,16 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"github.com/gin-gonic/gin"
-	"github.com/gtkit/gin-api/internal/middleware"
-	"github.com/gtkit/gin-api/internal/module/example/application"
-	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/module/example/application"
+	"github.com/gtkit/gin-api/internal/pkg/ginc"
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
 type recordStore struct {
@@ -46,6 +48,39 @@ func (s *recordStore) Delete(_ context.Context, owner int64, _ string) (bool, er
 	s.record = application.Record{}
 	return true, nil
 }
+func (s *recordStore) DeleteMany(ctx context.Context, owner int64, ids []string) (int64, error) {
+	if len(ids) == 1 && ids[0] == s.record.ID {
+		ok, err := s.Delete(ctx, owner, ids[0])
+		if ok {
+			return 1, err
+		}
+		return 0, err
+	}
+	return 0, nil
+}
+
+func TestRecordRejectsMissingPermission(t *testing.T) {
+	store := &recordStore{}
+	service, err := application.New(store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	Register(engine.Group("/api/v1", middleware.ErrorHandler()), Deps{
+		Service: service,
+		Auth:    func(c *gin.Context) { ginc.SetUserID(c, 7); ginc.SetPrincipal(c, sharedauth.Principal{UserID: 7}) },
+		Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
+			return false, nil
+		}),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/example", strings.NewReader(`{"title":"denied"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || store.record.ID != "" {
+		t.Fatalf("denied operation reached repository: status=%d", response.Code)
+	}
+}
 
 func TestRecordHTTPContract(t *testing.T) {
 	store := &recordStore{}
@@ -55,12 +90,15 @@ func TestRecordHTTPContract(t *testing.T) {
 	}
 	engine := gin.New()
 	group := engine.Group("/api/v1", middleware.ErrorHandler())
-	Register(group, Deps{Service: service, Auth: func(c *gin.Context) {
+	Register(group, Deps{Service: service, Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
+		return true, nil
+	}), Auth: func(c *gin.Context) {
+		owner := int64(7)
 		if c.GetHeader("X-Test-Owner") == "other" {
-			ginc.SetUserID(c, 8)
-		} else {
-			ginc.SetUserID(c, 7)
+			owner = 8
 		}
+		ginc.SetUserID(c, owner)
+		ginc.SetPrincipal(c, sharedauth.Principal{UserID: owner})
 	}})
 	call := func(method, path, body, owner string) (int, map[string]json.RawMessage) {
 		t.Helper()

@@ -42,7 +42,19 @@ func (r credentialRepo) FindByPhone(ctx context.Context, phone string) (authapp.
 		UserID:       cred.UserID,
 		PasswordHash: cred.PasswordHash,
 		Active:       cred.Active,
+		AuthVersion:  cred.AuthVersion,
 	}, true, nil
+}
+
+func (r credentialRepo) FindByID(ctx context.Context, uid int64) (authapp.Credential, bool, error) {
+	cred, found, err := r.repo.FindByID(ctx, uid)
+	return authapp.Credential{UserID: cred.UserID, PasswordHash: cred.PasswordHash, Active: cred.Active, AuthVersion: cred.AuthVersion}, found, err
+}
+func (r credentialRepo) ChangePassword(ctx context.Context, uid, version int64, oldHash, newHash string) (bool, error) {
+	return r.repo.ChangePassword(ctx, uid, version, oldHash, newHash)
+}
+func (r credentialRepo) RevokeSessions(ctx context.Context, uid, version int64) (bool, error) {
+	return r.repo.RevokeSessions(ctx, uid, version)
 }
 
 func (r credentialRepo) Create(ctx context.Context, phone, passwordHash, nickname string) (int64, error) {
@@ -224,6 +236,28 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 	return err
 }
 
+func (s refreshStore) IssueForSession(ctx context.Context, uid, version int64) (string, error) {
+	return s.store.IssueForSession(ctx, uid, version)
+}
+func (s refreshStore) PeekSession(ctx context.Context, token string) (int64, int64, error) {
+	uid, version, err := s.store.PeekSession(ctx, token)
+	return uid, version, sessionRefreshError(err)
+}
+func (s refreshStore) ConsumeSession(ctx context.Context, token string) (int64, int64, string, error) {
+	uid, version, next, err := s.store.ConsumeSession(ctx, token)
+	return uid, version, next, sessionRefreshError(err)
+}
+func sessionRefreshError(err error) error {
+	switch {
+	case errors.Is(err, tokenstore.ErrRefreshReused):
+		return authapp.ErrRefreshReused
+	case errors.Is(err, tokenstore.ErrRefreshNotFound), errors.Is(err, tokenstore.ErrFamilyRevoked), errors.Is(err, tokenstore.ErrMalformedToken):
+		return authapp.ErrRefreshRejected
+	default:
+		return err
+	}
+}
+
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
@@ -255,6 +289,8 @@ func (e eventRecorder) RecordAuthEvent(ctx context.Context, event string) {
 // 报错，错误信息会指向装配函数而不是真正需要修改的适配器。
 var (
 	_ authapp.CredentialRepository = credentialRepo{}
+	_ authapp.SessionRepository    = credentialRepo{}
+	_ authapp.SessionRefreshStore  = refreshStore{}
 	_ authapp.PasswordHasher       = passwordHasher{}
 	_ authapp.RefreshStore         = refreshStore{}
 	_ authapp.RevocationList       = (*tokenstore.RevocationList)(nil)

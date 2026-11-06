@@ -43,7 +43,7 @@ func collectSource(ctx context.Context) ([]byte, []sourcePart, error) {
 	names := strings.Split(strings.TrimSuffix(string(files), "\x00"), "\x00")
 	slices.Sort(names)
 	names = slices.Compact(names)
-	var stream bytes.Buffer
+	var stream []byte
 	var parts []sourcePart
 	line := 1
 	for _, name := range names {
@@ -63,7 +63,7 @@ func collectSource(ctx context.Context) ([]byte, []sourcePart, error) {
 		if !info.Mode().IsRegular() {
 			return nil, nil, fmt.Errorf("source %s is not a regular file", name)
 		}
-		remaining := int64(sourceLimit - stream.Len() - 1)
+		remaining := int64(sourceLimit - len(stream) - 1)
 		if remaining < 0 || info.Size() > remaining {
 			return nil, nil, errors.New("source scan exceeds 128 MiB; split the reviewed scope explicitly")
 		}
@@ -78,13 +78,13 @@ func collectSource(ctx context.Context) ([]byte, []sourcePart, error) {
 		if int64(len(data)) > remaining {
 			return nil, nil, errors.New("source changed beyond the scan byte limit")
 		}
-		stream.Write(data)
-		stream.WriteByte('\n')
+		stream = append(stream, data...)
+		stream = append(stream, '\n')
 		count := bytes.Count(data, []byte{'\n'}) + 1
 		parts = append(parts, sourcePart{File: filepath.ToSlash(name), First: line, Last: line + count - 1})
 		line += count
 	}
-	return stream.Bytes(), parts, nil
+	return stream, parts, nil
 }
 
 func mapFindings(data []byte, parts []sourcePart) ([]secretFinding, error) {

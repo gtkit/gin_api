@@ -102,8 +102,15 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: build password hasher: %w", err)
 	}
 
+	credentials := authcredential.New(deps.DB)
+	var sessions authapp.SessionRepository
+	if deps.Config.SessionLifecycle {
+		credentials = authcredential.NewWithSessionVersion(deps.DB)
+		sessions = credentialRepo{repo: credentials}
+	}
 	service, err := authapp.NewService(authapp.Options{
-		Credentials:    credentialRepo{repo: authcredential.New(deps.DB)},
+		Credentials:    credentialRepo{repo: credentials},
+		Sessions:       sessions,
 		Hasher:         newPasswordHasher(hasher, deps.Config, deps.Metrics),
 		AccessIssuer:   deps.Issuer,
 		RefreshStore:   refreshStore{store: refresh},

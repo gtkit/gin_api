@@ -16,7 +16,9 @@ func TestClientRequestAndBusinessFailure(t *testing.T) {
 			t.Error("incorrect client request")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":19,"msg":"login required","data":[],"request_id":"request-1"}`)
+		if _, err := io.WriteString(w, `{"code":19,"msg":"login required","data":[],"request_id":"request-1"}`); err != nil {
+			t.Errorf("write test response: %v", err)
+		}
 	}))
 	client, err := New(server.URL, server.Client())
 	if err != nil {

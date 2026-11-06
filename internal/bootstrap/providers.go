@@ -21,13 +21,13 @@ import (
 
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
 type infra struct {
-	optionalInfra
-	accessLogger *logger.Logger
-	resources    *data.Resources
-	connections  *runtimeResources
-	cfg          *config.Config
-	mysqlDB      *gorm.DB
-	httpConfig   HTTPConfig
+	optionalInfra //nolint:unused,nolintlint // Default needs the empty carrier; optional uses its fields, so the unused directive is conditional too.
+	accessLogger  *logger.Logger
+	resources     *data.Resources
+	connections   *runtimeResources
+	cfg           *config.Config
+	mysqlDB       *gorm.DB
+	httpConfig    HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。

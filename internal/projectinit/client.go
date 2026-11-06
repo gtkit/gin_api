@@ -35,8 +35,7 @@ func RenderClient(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
-	out.Write(runtime)
+	out := bytes.Clone(runtime)
 	names := make([]string, 0, len(spec.Components.Schemas))
 	for name := range spec.Components.Schemas {
 		names = append(names, name)
@@ -59,7 +58,7 @@ func RenderClient(raw []byte) ([]byte, error) {
 		if schema.Type != "object" || schema.Properties == nil {
 			return nil, fmt.Errorf("schema %s: only named objects supported", name)
 		}
-		fmt.Fprintf(&out, "\ntype %s struct {\n", name)
+		out = fmt.Appendf(out, "\ntype %s struct {\n", name)
 		fields := make([]string, 0, len(schema.Properties))
 		for field := range schema.Properties {
 			fields = append(fields, field)
@@ -78,9 +77,9 @@ func RenderClient(raw []byte) ([]byte, error) {
 			if !slices.Contains(schema.Required, field) {
 				tag += ",omitempty"
 			}
-			fmt.Fprintf(&out, "%s %s `json:%s`\n", goName, typ, strconv.Quote(tag))
+			out = fmt.Appendf(out, "%s %s `json:%s`\n", goName, typ, strconv.Quote(tag))
 		}
-		out.WriteString("}\n")
+		out = append(out, "}\n"...)
 	}
 	paths := make([]string, 0, len(spec.Paths))
 	for path := range spec.Paths {
@@ -151,10 +150,10 @@ func RenderClient(raw []byte) ([]byte, error) {
 				params += ", request " + input
 				body = "request"
 			}
-			fmt.Fprintf(&out, "\nfunc (c *Client) %s(%s) (%s, error) {\nvar result %s\nerr := c.do(ctx, %q, %q, %s, %s, &result, %t)\nreturn result, err\n}\n", name, params, resultType, resultType, strings.ToUpper(method), path, body, auth, wrapped)
+			out = fmt.Appendf(out, "\nfunc (c *Client) %s(%s) (%s, error) {\nvar result %s\nerr := c.do(ctx, %q, %q, %s, %s, &result, %t)\nreturn result, err\n}\n", name, params, resultType, resultType, strings.ToUpper(method), path, body, auth, wrapped)
 		}
 	}
-	return format.Source(out.Bytes())
+	return format.Source(out)
 }
 
 func validateClientSchema(raw json.RawMessage) error {

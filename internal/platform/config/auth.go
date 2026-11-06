@@ -39,6 +39,9 @@ type AuthConfig struct {
 	// 无人看管的凭据端点；默认到 external，使用者会以为认证已就绪，
 	// 而实际上没有任何签发入口——两种默认都会静默地给出错误的系统。
 	Mode AuthMode `mapstructure:"mode"`
+	// SessionLifecycle enables password change/logout-all and durable session checks.
+	// False by default; local mode only. Apply the auth_version migration before enabling.
+	SessionLifecycle bool `mapstructure:"session_lifecycle"`
 
 	// BcryptCost 是密码哈希代价，留空按 defaultBcryptCost。
 	//
@@ -147,6 +150,9 @@ func (c AuthConfig) EffectiveRefreshTTL() time.Duration {
 // 就拦下——见下方 fail-closed 的理由。
 func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration) error {
 	var errs []error
+	if c.SessionLifecycle && !c.LocalEnabled() {
+		errs = append(errs, errors.New("auth.session_lifecycle requires local authentication"))
+	}
 
 	switch c.Mode {
 	case AuthModeLocal, AuthModeExternal:

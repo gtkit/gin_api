@@ -23,14 +23,22 @@ func TestOpenAPIMatchesProductionRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []config.AuthMode{config.AuthModeLocal, config.AuthModeExternal} {
-		t.Run(string(mode), func(t *testing.T) {
-			engine := openAPIEngine(t, mode)
+	for _, tc := range []struct {
+		name      string
+		mode      config.AuthMode
+		lifecycle bool
+	}{
+		{"local", config.AuthModeLocal, false},
+		{"local with sessions", config.AuthModeLocal, true},
+		{"external", config.AuthModeExternal, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := openAPIEngineWithDB(t, tc.mode, tc.lifecycle, &gorm.DB{})
 			actual := make(map[string]bool)
 			for _, route := range engine.Routes() {
 				actual[route.Method+" "+openAPIPath(route.Path)] = true
 			}
-			expected, err := openAPIExpectedRoutes(raw, mode)
+			expected, err := openAPIExpectedRoutes(raw, tc.mode, tc.lifecycle)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,7 +49,7 @@ func TestOpenAPIMatchesProductionRoutes(t *testing.T) {
 	}
 }
 
-func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, error) {
+func openAPIExpectedRoutes(raw []byte, mode config.AuthMode, lifecycle bool) (map[string]bool, error) {
 	var spec struct {
 		OpenAPI string                     `json:"openapi"`
 		Paths   map[string]json.RawMessage `json:"paths"`
@@ -74,7 +82,8 @@ func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, e
 				continue
 			}
 			var operation *struct {
-				Mode string `json:"x-auth-mode"`
+				Mode             string `json:"x-auth-mode"`
+				SessionLifecycle bool   `json:"x-session-lifecycle"`
 			}
 			if err := json.Unmarshal(rawOperation, &operation); err != nil {
 				return nil, fmt.Errorf("decode %s %s: %w", method, path, err)
@@ -83,6 +92,9 @@ func openAPIExpectedRoutes(raw []byte, mode config.AuthMode) (map[string]bool, e
 				return nil, fmt.Errorf("operation %s %s must be an object", method, path)
 			}
 			if operation.Mode != "" && operation.Mode != string(mode) {
+				continue
+			}
+			if operation.SessionLifecycle && !lifecycle {
 				continue
 			}
 			expected[strings.ToUpper(method)+" "+path] = true
@@ -100,7 +112,7 @@ func TestOpenAPIPathMetadataAndOperations(t *testing.T) {
 				"x-metadata":{"note":"not an operation"},
 				"get":{}, "put":{}, "post":{}, "delete":{}, "options":{}, "head":{}, "patch":{}, "trace":{}
 			},"/local":{"post":{"x-auth-mode":"local"}},"/external":{"post":{"x-auth-mode":"external"}}}}`)
-			got, err := openAPIExpectedRoutes(raw, mode)
+			got, err := openAPIExpectedRoutes(raw, mode, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +134,7 @@ func TestOpenAPIRejectsInvalidOperations(t *testing.T) {
 		`{"openapi":"3.1.0","paths":{"/items":{"get":[]}}}`,
 		`{"openapi":"3.1.0","paths":{"/items":{"get":null}}}`,
 	} {
-		if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
+		if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal, false); err == nil {
 			t.Errorf("accepted invalid contract %s", raw)
 		}
 	}
@@ -132,7 +144,7 @@ func TestOpenAPIRejectsUnsupportedPathValues(t *testing.T) {
 	for _, path := range []string{"/items", "/x-extra"} {
 		for _, value := range []string{`null`, `true`, `42`, `[]`, `"invalid"`, `{"$ref":"#/components/pathItems/Items"}`, `{"$ref":""}`, `{"$ref":null}`} {
 			raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{%q:%s}}`, path, value)
-			if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal); err == nil {
+			if _, err := openAPIExpectedRoutes([]byte(raw), config.AuthModeLocal, false); err == nil {
 				t.Errorf("silently accepted unsupported path %s value %s", path, value)
 			}
 		}
@@ -154,7 +166,7 @@ func TestOpenAPIPathsExtensions(t *testing.T) {
 			for _, mode := range []config.AuthMode{config.AuthModeLocal, config.AuthModeExternal} {
 				t.Run(string(mode), func(t *testing.T) {
 					raw := fmt.Sprintf(`{"openapi":"3.1.0","paths":{"x-extra":%s,"/x-extra":{"get":{}},"/local":{"post":{"x-auth-mode":"local"}},"/external":{"post":{"x-auth-mode":"external"}}}}`, tc.value)
-					got, err := openAPIExpectedRoutes([]byte(raw), mode)
+					got, err := openAPIExpectedRoutes([]byte(raw), mode, false)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -170,7 +182,7 @@ func TestOpenAPIPathsExtensions(t *testing.T) {
 
 func TestOpenAPIAllowsEmptyPathsAndSchemaReferences(t *testing.T) {
 	raw := []byte(`{"openapi":"3.1.0","paths":{"/empty":{},"/items":{"get":{"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Item"}}}}}}}},"components":{"schemas":{"Item":{"type":"object"}}}}`)
-	got, err := openAPIExpectedRoutes(raw, config.AuthModeLocal)
+	got, err := openAPIExpectedRoutes(raw, config.AuthModeLocal, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +194,17 @@ func TestOpenAPIAllowsEmptyPathsAndSchemaReferences(t *testing.T) {
 // Construct services through the actual runtime assembly as well as buildEngine;
 // the route set is not duplicated in this test.
 func openAPIEngine(t *testing.T, mode config.AuthMode) *gin.Engine {
+	return openAPIEngineWithDB(t, mode, false, &gorm.DB{})
+}
+
+func openAPIEngineWithDB(t *testing.T, mode config.AuthMode, lifecycle bool, db *gorm.DB) *gin.Engine {
 	t.Helper()
 	cfg := jwtTestConfig(t)
 	cfg.Env = "test"
 	cfg.App.Name = "openapi-contract"
 	cfg.Auth = config.AuthConfig{Mode: mode, BcryptCost: 10, RefreshReplaySecret: strings.Repeat("r", 32)}
+	cfg.Auth.SessionLifecycle = lifecycle
+	cfg.JWT.CacheMaxEntries = 8
 	resources := &data.Resources{}
 	if mode == config.AuthModeLocal {
 		server := miniredis.RunT(t)
@@ -200,7 +218,7 @@ func openAPIEngine(t *testing.T, mode config.AuthMode) *gin.Engine {
 				t.Error(err)
 			}
 		})
-		resources, err = data.ResourcesFromClients(&lifecycleComponent{db: &gorm.DB{}}, client, true)
+		resources, err = data.ResourcesFromClients(&lifecycleComponent{db: db}, client, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +240,7 @@ func openAPIEngine(t *testing.T, mode config.AuthMode) *gin.Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inf := infra{cfg: cfg, resources: resources, mysqlDB: &gorm.DB{}, rateLimits: limits}
+	inf := infra{cfg: cfg, resources: resources, mysqlDB: db, rateLimits: limits}
 	installMetricsFixture(t, &inf)
 	runtime := &Runtime{config: cfg, resources: resources, jwt: jwt}
 	svc, err := buildServices(t.Context(), inf, runtime)

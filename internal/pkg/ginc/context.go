@@ -63,6 +63,8 @@ type TokenIdentity struct {
 	TokenID string
 	// ExpiresAt 是令牌的过期时刻，决定撤销记录该活多久。
 	ExpiresAt time.Time
+	// SessionVersion is populated only after successful current-version verification.
+	SessionVersion int64
 }
 
 // SetTokenIdentity 记录本次请求所用的令牌标识（由鉴权中间件调用）。

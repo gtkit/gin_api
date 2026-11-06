@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/logger/v2"
@@ -136,6 +137,49 @@ func TestResolvePath(t *testing.T) {
 			t.Parallel()
 			if got := resolvePath(tt.path, tt.fallback); got != tt.want {
 				t.Errorf("resolvePath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAccessLoggerFlushInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{name: "default", want: time.Second},
+		{name: "subsecond", interval: 250 * time.Millisecond, want: 250 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			owner := mustOpen(t, Options{Config: &config.Config{Log: config.LogConfig{
+				Path:                filepath.Join(dir, "flush"),
+				FileStdout:          1,
+				AccessFlushInterval: tc.interval,
+			}}})
+			defer func() {
+				if err := owner.Close(context.WithoutCancel(t.Context())); err != nil {
+					t.Error(err)
+				}
+			}()
+			owner.main.Info("main-before-flush")
+			owner.AccessLogger().Info("access-before-flush")
+			logs := readLogs(t, dir)
+			if !strings.Contains(logs, "main-before-flush") || strings.Contains(logs, "access-before-flush") {
+				t.Fatal("main must write immediately while access remains buffered")
+			}
+			// logrotate 的包级后台任务跨越测试，不能放入 synctest 气泡。
+			deadline := time.NewTimer(tc.want + 500*time.Millisecond)
+			defer deadline.Stop()
+			poll := time.NewTicker(10 * time.Millisecond)
+			defer poll.Stop()
+			for !strings.Contains(readLogs(t, dir), "access-before-flush") {
+				select {
+				case <-poll.C:
+				case <-deadline.C:
+					t.Fatalf("access log did not flush within %s plus scheduling allowance", tc.want)
+				}
 			}
 		})
 	}

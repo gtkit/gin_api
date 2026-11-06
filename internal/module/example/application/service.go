@@ -4,11 +4,12 @@ package application
 import (
 	"context"
 	"errors"
-	"github.com/gtkit/gin-api/internal/pkg/paging"
 	"strings"
 	"time"
 	"unicode/utf8"
 	"uuid"
+
+	"github.com/gtkit/gin-api/internal/pkg/paging"
 )
 
 var (
@@ -36,6 +37,7 @@ type Repository interface {
 	Create(context.Context, int64, Record) error
 	Update(context.Context, int64, Record) (bool, error)
 	Delete(context.Context, int64, string) (bool, error)
+	DeleteMany(context.Context, int64, []string) (int64, error)
 }
 
 type TxManager interface {
@@ -182,5 +184,35 @@ func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
 			return ErrNotFound
 		}
 		return err
+	})
+}
+
+// DeleteMany is all-or-nothing, including when any requested record belongs to another owner.
+func (s *Service) DeleteMany(ctx context.Context, owner int64, ids []string) error {
+	if err := validOwner(ctx, owner); err != nil {
+		return err
+	}
+	if len(ids) == 0 || len(ids) > 100 {
+		return ErrInvalid
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if !validID(id) {
+			return ErrInvalid
+		}
+		if _, exists := seen[id]; exists {
+			return ErrInvalid
+		}
+		seen[id] = struct{}{}
+	}
+	return s.tx.Do(ctx, func(ctx context.Context) error {
+		deleted, err := s.repo.DeleteMany(ctx, owner, ids)
+		if err != nil {
+			return err
+		}
+		if deleted != int64(len(ids)) {
+			return ErrNotFound
+		}
+		return nil
 	})
 }

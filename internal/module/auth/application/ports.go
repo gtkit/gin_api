@@ -26,6 +26,7 @@ type Credential struct {
 	UserID       int64
 	PasswordHash string
 	Active       bool
+	AuthVersion  int64
 }
 
 // PasswordHasher 生成与校验密码哈希。
@@ -44,6 +45,25 @@ type PasswordHasher interface {
 // AccessIssuer 签发访问令牌。
 type AccessIssuer interface {
 	Issue(ctx context.Context, uid int64, roles ...string) (string, error)
+}
+
+// SessionRepository keeps credential mutation and session invalidation in one atomic DB write.
+type SessionRepository interface {
+	FindByID(context.Context, int64) (Credential, bool, error)
+	ChangePassword(context.Context, int64, int64, string, string) (bool, error)
+	RevokeSessions(context.Context, int64, int64) (bool, error)
+}
+
+// SessionAccessIssuer signs the same version whose credential was verified.
+type SessionAccessIssuer interface {
+	IssueForSession(context.Context, int64, int64, ...string) (string, error)
+}
+
+// SessionRefreshStore preserves the original version through rotation and replay.
+type SessionRefreshStore interface {
+	IssueForSession(context.Context, int64, int64) (string, error)
+	PeekSession(context.Context, string) (int64, int64, error)
+	ConsumeSession(context.Context, string) (int64, int64, string, error)
 }
 
 // AccountLimiter 按账号维度限流凭据尝试（rate-limiting spec）。

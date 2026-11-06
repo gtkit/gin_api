@@ -216,6 +216,9 @@ type LogConfig struct {
 	MaxBackups         int    `mapstructure:"maxbackups"`
 	MaxSize            int    `mapstructure:"maxsize"`
 	Path               string `mapstructure:"path"`
+	// AccessFlushInterval 控制访问文件日志缓冲的自动刷新间隔。
+	// 省略或零值使用 1s；正时长原样生效，负值拒绝；仅 filestdout 开启时生效。
+	AccessFlushInterval time.Duration `mapstructure:"access_flush_interval"`
 	// AccessRequestBody 控制是否在 HTTP 访问日志中记录请求体。默认 false（不记录）。
 	// 开启后请求体仍会经敏感字段脱敏；非结构化 body 只记录 content-type 与大小占位。
 	AccessRequestBody bool `mapstructure:"access_request_body"`

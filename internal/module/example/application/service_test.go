@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 )
 
@@ -19,9 +20,7 @@ type memory struct {
 func (m *memory) Do(ctx context.Context, fn func(context.Context) error) error {
 	m.txCalls++
 	snapshot := make(map[string]stored, len(m.records))
-	for k, v := range m.records {
-		snapshot[k] = v
-	}
+	maps.Copy(snapshot, m.records)
 	err := fn(ctx)
 	if err != nil {
 		m.records = snapshot
@@ -46,18 +45,71 @@ func (m *memory) Create(_ context.Context, owner int64, value Record) error {
 	return m.fail
 }
 func (m *memory) Update(ctx context.Context, owner int64, value Record) (bool, error) {
-	_, ok, _ := m.Find(ctx, owner, value.ID)
+	_, ok, err := m.Find(ctx, owner, value.ID)
+	if err != nil {
+		return false, err
+	}
 	if ok {
 		m.records[value.ID] = stored{owner, value}
 	}
 	return ok, m.fail
 }
 func (m *memory) Delete(ctx context.Context, owner int64, id string) (bool, error) {
-	_, ok, _ := m.Find(ctx, owner, id)
+	_, ok, err := m.Find(ctx, owner, id)
+	if err != nil {
+		return false, err
+	}
 	if ok {
 		delete(m.records, id)
 	}
 	return ok, m.fail
+}
+func (m *memory) DeleteMany(ctx context.Context, owner int64, ids []string) (int64, error) {
+	var count int64
+	for _, id := range ids {
+		_, ok, err := m.Find(ctx, owner, id)
+		if err != nil {
+			return count, err
+		}
+		if ok {
+			delete(m.records, id)
+			count++
+		}
+	}
+	return count, m.fail
+}
+
+func TestMixedOwnerBatchRollsBack(t *testing.T) {
+	store := &memory{records: map[string]stored{}}
+	service, err := New(store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := service.Create(t.Context(), 7, "own")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := service.Create(t.Context(), 8, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteMany(t.Context(), 7, []string{own.ID, other.ID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mixed batch: %v", err)
+	}
+	if len(store.records) != 2 {
+		t.Fatal("rejected batch partially deleted records")
+	}
+	for _, ids := range [][]string{nil, {own.ID, own.ID}, {"bad"}} {
+		if err := service.DeleteMany(t.Context(), 7, ids); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid batch accepted: %v", err)
+		}
+	}
+	if err := service.DeleteMany(t.Context(), 7, []string{own.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.records) != 1 {
+		t.Fatal("own batch did not delete exactly its owner record")
+	}
 }
 
 func TestOwnerScopedRecordLifecycle(t *testing.T) {

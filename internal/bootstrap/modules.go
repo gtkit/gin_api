@@ -116,7 +116,15 @@ func buildMiddlewares(svc services, runtime *Runtime) (gin.HandlerFunc, error) {
 		revocation = svc.auth.Revocation
 	}
 
+	var sessions sharedauth.SessionVerifier
+	if runtime.Config().Auth.SessionLifecycle {
+		sessions = svc.accounts.Sessions
+		if sessions == nil {
+			return nil, fmt.Errorf("auth: session verification source is required")
+		}
+	}
 	return middleware.Auth(middleware.AuthOptions{
+		Sessions:   sessions,
 		Verifier:   svc.accounts.Users,
 		Parser:     tokenParser,
 		Revocation: revocation,

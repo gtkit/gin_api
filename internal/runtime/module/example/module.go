@@ -3,6 +3,7 @@ package example
 import (
 	"context"
 	"errors"
+
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/module/example/application"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
@@ -45,6 +46,9 @@ func (a adapter) Update(ctx context.Context, owner int64, record application.Rec
 }
 func (a adapter) Delete(ctx context.Context, owner int64, id string) (bool, error) {
 	return a.repo.Delete(ctx, owner, id)
+}
+func (a adapter) DeleteMany(ctx context.Context, owner int64, ids []string) (int64, error) {
+	return a.repo.DeleteMany(ctx, owner, ids)
 }
 
 var _ application.Repository = adapter{}

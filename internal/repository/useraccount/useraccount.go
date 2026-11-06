@@ -84,6 +84,19 @@ func (r *Repository) ValidateUser(ctx context.Context, userID int64) (bool, erro
 	return exists > 0, nil
 }
 
+// ValidateSession uses the same primary database as credential updates.
+func (r *Repository) ValidateSession(ctx context.Context, userID, version int64) (bool, error) {
+	if userID <= 0 || version < 0 {
+		return false, nil
+	}
+	var exists int64
+	err := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).Limit(1).Count(&exists).Error
+	if err != nil {
+		return false, fmt.Errorf("validate authentication session: %w", err)
+	}
+	return exists > 0, nil
+}
+
 // ValidateVIP 报告用户具备有效会员资格：账号可用、vip_status 为 active，
 // 且 vip_expire_at 为空或**晚于**当前时刻。
 //

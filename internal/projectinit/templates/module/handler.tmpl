@@ -3,6 +3,7 @@ package http
 import (
     "errors"
     "time"
+
     "github.com/gin-gonic/gin"
     "github.com/gtkit/ginx"
     "github.com/gtkit/goerr"
@@ -11,14 +12,15 @@ import (
     "{{.Module}}/internal/module/{{.Name}}/dto"
     "{{.Module}}/internal/pkg/ginc"
     resp "{{.Module}}/internal/pkg/response"
+    sharedauth "{{.Module}}/internal/shared/auth"
 )
 
-type Deps struct { Service *application.Service; Auth gin.HandlerFunc }
+type Deps struct { Service *application.Service; Auth gin.HandlerFunc; Authorizer sharedauth.Authorizer }
 
 // Register mounts authenticated CRUD. The caller supplies its existing auth middleware.
 func Register(parent *gin.RouterGroup, deps Deps) {
-    if deps.Service == nil || deps.Auth == nil { panic("record service and authentication required") }
-    group := parent.Group("/{{.Name}}", deps.Auth, middleware.NoStore(), middleware.Timeout(5*time.Second, time.Second))
+    if deps.Service == nil || deps.Auth == nil || deps.Authorizer == nil { panic("record service, authentication and authorization required") }
+    group := parent.Group("/{{.Name}}", middleware.NoStore(), middleware.Timeout(5*time.Second, time.Second), deps.Auth, middleware.Authorize(deps.Authorizer,"{{.Name}}.access"))
     handleError := func(c *gin.Context, err error) {
         switch {
         case errors.Is(err, application.ErrNotFound): resp.NotFoundError(c, "record not found")
@@ -48,6 +50,12 @@ func Register(parent *gin.RouterGroup, deps Deps) {
         if err := ginx.BindBody(c, &request); err != nil { resp.BindStructErr(c, err); return }
         result, err := deps.Service.Update(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id"), request.Title)
         if err != nil { handleError(c, err); return }; resp.Ok(c, result)
+    })
+    group.DELETE("/batch", middleware.JSONBody(8192), func(c *gin.Context) {
+        var request dto.DeleteManyRequest
+        if err:=ginx.BindBody(c,&request);err!=nil {resp.BindStructErr(c,err);return}
+        if err:=deps.Service.DeleteMany(c.Request.Context(),ginc.UserIDFromContext(c),request.IDs);err!=nil {handleError(c,err);return}
+        resp.Ok(c,nil)
     })
     group.DELETE("/:id", middleware.NoBody(), func(c *gin.Context) {
         if err := deps.Service.Delete(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id")); err != nil { handleError(c, err); return }

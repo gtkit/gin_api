@@ -23,17 +23,16 @@ const (
 // Deps 是注册路由所需的依赖。
 type Deps struct {
 	Service *authapp.Service
-	// CredentialAdmission bounds register/login before database and hashing work.
+	// CredentialAdmission bounds register/login/password changes before database and hashing work.
 	// Production assembly supplies it; isolated handler tests may omit it.
 	CredentialAdmission gin.HandlerFunc
-	// Auth 是认证中间件，只有登出用得到。
+	// Auth 验证登出和已登录会话管理端点。
 	Auth gin.HandlerFunc
 	// RateLimit 按策略标识取限流中间件（pre-identity 形态）。
 	// 首参是引用发生处的路由标识，装配失败时用于指认现场。
 	//
-	// 本模块的端点全部发生在拿到身份**之前**，身份作用域的策略在这里
-	// 无处可挂——装配层注入的取用函数会把这类引用记为装配错误并让启动
-	// 失败，而不是静默丢弃后让凭据端点裸奔。
+	// 这层来源限流发生在认证之前；已识别账号的凭据限流由 application 执行。
+	// 身份作用域策略在此处无可用身份，误配时由装配层报告错误。
 	RateLimit func(route string, policyIDs ...string) []gin.HandlerFunc
 }
 
@@ -78,6 +77,10 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 不该先付掉一次令牌解析与撤销查询。两者都在路由级，因此换序即可，
 	// 认证的挂载点数量不变。
 	token.POST("/logout", middleware.JSONBody(authBodyLimit), deps.Auth, handler.Logout)
+	if deps.Service.SessionLifecycleEnabled() {
+		credential.POST("/password/change", middleware.JSONBody(authBodyLimit), deps.Auth, handler.ChangePassword)
+		token.POST("/logout-all", middleware.NoBody(), deps.Auth, handler.LogoutAll)
+	}
 }
 
 // stageRateLimits 容错地调用装配层注入的 pre-identity 取用函数。

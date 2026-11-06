@@ -2,10 +2,12 @@ package example
 
 import (
 	"errors"
+	"testing"
+	"uuid"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"testing"
 )
 
 func TestAssemblyScopesSQLAndRollsBack(t *testing.T) {
@@ -40,6 +42,12 @@ func TestAssemblyScopesSQLAndRollsBack(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM `example_records` WHERE .*owner_id = \\? AND id = \\?.*deleted_at.*IS NULL").WithArgs(int64(8), record.ID, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	if _, err := service.Get(t.Context(), 8, record.ID); err == nil {
 		t.Fatal("cross-owner lookup returned data")
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE `example_records` SET `deleted_at`=.*owner_id = \\? AND id IN").WithArgs(sqlmock.AnyArg(), int64(7), record.ID, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectRollback()
+	if err := service.DeleteMany(t.Context(), 7, []string{record.ID, uuid.NewV7().String()}); err == nil {
+		t.Fatal("partial batch was committed")
 	}
 	failure := errors.New("write rejected")
 	mock.ExpectBegin()

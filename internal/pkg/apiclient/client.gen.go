@@ -122,6 +122,11 @@ func (c *Client) do(ctx context.Context, method, path string, input any, accessT
 	return nil
 }
 
+type ChangePasswordRequest struct {
+	NewPassword string `json:"new_password"`
+	OldPassword string `json:"old_password"`
+}
+
 type DependencyCheck struct {
 	Error  string `json:"error,omitempty"`
 	Status string `json:"status"`
@@ -174,6 +179,18 @@ func (c *Client) Login(ctx context.Context, request LoginRequest) (Envelope[Toke
 func (c *Client) Logout(ctx context.Context, accessToken string, request LogoutRequest) (Envelope[json.RawMessage], error) {
 	var result Envelope[json.RawMessage]
 	err := c.do(ctx, "POST", "/api/v1/auth/logout", request, accessToken, &result, true)
+	return result, err
+}
+
+func (c *Client) LogoutAll(ctx context.Context, accessToken string) (Envelope[json.RawMessage], error) {
+	var result Envelope[json.RawMessage]
+	err := c.do(ctx, "POST", "/api/v1/auth/logout-all", nil, accessToken, &result, true)
+	return result, err
+}
+
+func (c *Client) ChangePassword(ctx context.Context, accessToken string, request ChangePasswordRequest) (Envelope[json.RawMessage], error) {
+	var result Envelope[json.RawMessage]
+	err := c.do(ctx, "POST", "/api/v1/auth/password/change", request, accessToken, &result, true)
 	return result, err
 }
 

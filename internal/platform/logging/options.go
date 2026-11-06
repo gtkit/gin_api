@@ -59,6 +59,7 @@ func accessOptions(cfg *config.Config) []logger.Option {
 		logger.WithLevel(strings.TrimSpace(cfg.Log.Level)), logger.WithConsole(cfg.Log.ConsoleStdout != 0),
 		logger.WithFile(cfg.Log.FileStdout != 0),
 		logger.WithBuffered(true), logger.WithReplaceGlobals(false),
+		logger.WithFlushInterval(cfg.Log.EffectiveAccessFlushInterval()),
 	}
 	return append(opts, fileOptions(cfg.Log)...)
 }

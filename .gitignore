@@ -32,3 +32,5 @@ docs/*
 !docs/ci-security.md
 !docs/optional-capabilities.md
 !docs/production-scaffold-acceptance.md
+!docs/authorization.md
+!docs/auth-session-lifecycle.md

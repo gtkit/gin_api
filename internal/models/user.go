@@ -24,6 +24,8 @@ type User struct {
 	Phone    string     `gorm:"column:phone;size:20;uniqueIndex;comment:手机号"`
 	Email    *string    `gorm:"column:email;size:100;uniqueIndex;comment:邮箱"`
 	Password string     `gorm:"column:password;size:255;not null;comment:密码"`
+	// AuthVersion is incremented atomically on password change or logout-all.
+	AuthVersion int64 `gorm:"column:auth_version;not null;default:0;comment:认证会话版本"`
 
 	Status UserStatus `gorm:"column:status;type:tinyint(1);index;not null;default:1;comment:用户状态 1-正常 2-禁用 3-删除"`
 

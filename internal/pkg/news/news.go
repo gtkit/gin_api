@@ -58,8 +58,9 @@ func (n *Notifier) WarnContext(ctx context.Context, target string, args ...strin
 	if n == nil {
 		return nil
 	}
-	var result error
-	result = n.sendWebhook(ctx, result, target, args...)
-	result = n.sendMail(ctx, result, args...)
-	return n.sendSMS(ctx, result)
+	var err error
+	err = n.sendWebhook(ctx, err, target, args...)
+	err = n.sendMail(ctx, err, args...)
+	err = n.sendSMS(ctx, err)
+	return err
 }

@@ -3,6 +3,7 @@ package {{.Name}}
 import (
     "context"
     "errors"
+
     "{{.Module}}/internal/models"
     "{{.Module}}/internal/module/{{.Name}}/application"
     "{{.Module}}/internal/repository/dbtx"
@@ -31,4 +32,5 @@ func (a adapter) List(ctx context.Context, owner int64, offset, limit int) ([]ap
 func (a adapter) Create(ctx context.Context, owner int64, record application.Record) error { return a.repo.Create(ctx, model(owner,record)) }
 func (a adapter) Update(ctx context.Context, owner int64, record application.Record) (bool,error) { return a.repo.Update(ctx, model(owner,record)) }
 func (a adapter) Delete(ctx context.Context, owner int64, id string) (bool,error) { return a.repo.Delete(ctx,owner,id) }
+func (a adapter) DeleteMany(ctx context.Context, owner int64, ids []string)(int64,error) {return a.repo.DeleteMany(ctx,owner,ids)}
 var _ application.Repository = adapter{}

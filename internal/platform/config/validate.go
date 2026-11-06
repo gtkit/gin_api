@@ -575,6 +575,9 @@ func validateLogConfig(_ env.Env, logCfg LogConfig, _ string) error {
 	if threshold := logCfg.SQLSlowThresholdMS; threshold != nil && (*threshold < 0 || *threshold > math.MaxInt64/int64(time.Millisecond)) {
 		errs = append(errs, errors.New("log.sql_slow_threshold_ms must be nonnegative and fit time.Duration"))
 	}
+	if err := mustNonNegative("log.access_flush_interval", logCfg.AccessFlushInterval); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 

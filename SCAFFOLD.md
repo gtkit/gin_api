@@ -432,6 +432,10 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 
 开箱提供 `POST /api/v1/auth/{register,login,refresh,logout}`：
 
+`auth.session_lifecycle` 默认关闭；完成增量迁移并开启后，增加已登录改密与全部设备退出，
+访问/刷新令牌均按持久用户版本失效。无密码重置功能。接入、兼容与安全回滚见
+[会话管理](docs/auth-session-lifecycle.md)；功能权限和对象归属见 [授权约定](docs/authorization.md)。
+
 | 能力 | 实现要点 |
 |------|---------|
 | 密码 | bcrypt，cost 可配（默认 12，下限 10）。账号不存在时**同样执行一次哈希比对**，否则响应时间会泄漏手机号是否已注册 |

@@ -2,6 +2,16 @@
 
 项目质量检查脚本目录。
 
+## security-source.go
+
+独立源码检查脚本，源码与测试均使用 `//go:build ignore`，不作为服务包参与 `./...`。单元测试必须显式传入源文件对：
+
+```sh
+go test -trimpath -race -count=1 scripts/security-source.go scripts/security-source_test.go
+```
+
+该命令验证结果映射、脱敏和异常输出判定，不执行真实安全扫描器。
+
 ## load-api.go
 
 独立 API 负载工具，使用 `//go:build ignore`，不进入产品 `./...` 或默认覆盖率。先将请求场景保存为 JSON 数组，例如 `[{"method":"GET","path":"/health","weight":1}]`，再显式运行：

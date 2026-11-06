@@ -2,28 +2,31 @@ package http
 
 import (
 	"errors"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/module/example/application"
 	"github.com/gtkit/gin-api/internal/module/example/dto"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
+	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 	"github.com/gtkit/ginx"
 	"github.com/gtkit/goerr"
-	"time"
 )
 
 type Deps struct {
-	Service *application.Service
-	Auth    gin.HandlerFunc
+	Service    *application.Service
+	Auth       gin.HandlerFunc
+	Authorizer sharedauth.Authorizer
 }
 
 // Register mounts authenticated CRUD. The caller supplies its existing auth middleware.
 func Register(parent *gin.RouterGroup, deps Deps) {
-	if deps.Service == nil || deps.Auth == nil {
-		panic("record service and authentication required")
+	if deps.Service == nil || deps.Auth == nil || deps.Authorizer == nil {
+		panic("record service, authentication and authorization required")
 	}
-	group := parent.Group("/example", deps.Auth, middleware.NoStore(), middleware.Timeout(5*time.Second, time.Second))
+	group := parent.Group("/example", middleware.NoStore(), middleware.Timeout(5*time.Second, time.Second), deps.Auth, middleware.Authorize(deps.Authorizer, "example.access"))
 	handleError := func(c *gin.Context, err error) {
 		switch {
 		case errors.Is(err, application.ErrNotFound):
@@ -82,6 +85,18 @@ func Register(parent *gin.RouterGroup, deps Deps) {
 			return
 		}
 		resp.Ok(c, result)
+	})
+	group.DELETE("/batch", middleware.JSONBody(8192), func(c *gin.Context) {
+		var request dto.DeleteManyRequest
+		if err := ginx.BindBody(c, &request); err != nil {
+			resp.BindStructErr(c, err)
+			return
+		}
+		if err := deps.Service.DeleteMany(c.Request.Context(), ginc.UserIDFromContext(c), request.IDs); err != nil {
+			handleError(c, err)
+			return
+		}
+		resp.Ok(c, nil)
 	})
 	group.DELETE("/:id", middleware.NoBody(), func(c *gin.Context) {
 		if err := deps.Service.Delete(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id")); err != nil {

@@ -113,6 +113,7 @@ func TestOpenAPIFieldContracts(t *testing.T) {
 		request bool
 	}{
 		{"RegisterRequest", dto.RegisterRequest{}, true}, {"LoginRequest", dto.LoginRequest{}, true},
+		{"ChangePasswordRequest", dto.ChangePasswordRequest{}, true},
 		{"RefreshRequest", dto.RefreshRequest{}, true}, {"LogoutRequest", dto.LogoutRequest{}, true},
 		{"Token", dto.TokenResponse{}, false}, {"Envelope", resp.ResResult{}, false},
 		{"Liveness", router.LivenessResponse{}, false}, {"DependencyCheck", router.DependencyCheck{}, false},
@@ -192,5 +193,38 @@ func TestOpenAPIHTTPErrorAndSecurityContracts(t *testing.T) {
 	engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if response.Code != 200 || strings.TrimSpace(response.Body.String()) != `{"status":"ok"}` {
 		t.Fatalf("liveness contract: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestOpenAPISessionSecurityContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "openapi.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			Mode      string                     `json:"x-auth-mode"`
+			Lifecycle bool                       `json:"x-session-lifecycle"`
+			Body      json.RawMessage            `json:"requestBody"`
+			Security  []map[string][]string      `json:"security"`
+			Responses map[string]json.RawMessage `json:"responses"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/v1/auth/password/change", "/api/v1/auth/logout-all"} {
+		op := doc.Paths[path]["post"]
+		if op.Mode != "local" || !op.Lifecycle || len(op.Security) == 0 {
+			t.Fatalf("missing local authenticated session contract: %s", path)
+		}
+		for _, code := range []string{"200", "400", "401", "429", "500", "503", "504"} {
+			if _, ok := op.Responses[code]; !ok {
+				t.Fatalf("missing response %s for %s", code, path)
+			}
+		}
+		if path == "/api/v1/auth/logout-all" && len(op.Body) != 0 {
+			t.Fatal("logout-all must not accept a target account in the body")
+		}
 	}
 }

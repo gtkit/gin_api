@@ -15,8 +15,7 @@ tool: ## Lint Go code with the installed golangci-lint
 		[ -e "$$test_file" ] || continue; \
 		source_file="$${test_file%_test.go}.go"; \
 		if [ ! -f "$$source_file" ]; then \
-			printf 'script test has no matching source: %s\n' "$$test_file" >&2; \
-			exit 1; \
+			golangci-lint run --enable-only=errcheck "$$test_file" || exit "$$?"; \
 		fi; \
 	done; \
 	for source_file in scripts/*.go; do \

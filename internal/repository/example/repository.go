@@ -3,6 +3,7 @@ package example
 import (
 	"context"
 	"errors"
+
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 	"gorm.io/gorm"
@@ -43,4 +44,9 @@ func (r *Repository) Update(ctx context.Context, record models.ExampleRecord) (b
 func (r *Repository) Delete(ctx context.Context, owner int64, id string) (bool, error) {
 	result := r.mdbCtx(ctx).Where("owner_id = ? AND id = ?", owner, id).Delete(&models.ExampleRecord{})
 	return result.RowsAffected > 0, result.Error
+}
+
+func (r *Repository) DeleteMany(ctx context.Context, owner int64, ids []string) (int64, error) {
+	result := r.mdbCtx(ctx).Where("owner_id = ? AND id IN ?", owner, ids).Delete(&models.ExampleRecord{})
+	return result.RowsAffected, result.Error
 }

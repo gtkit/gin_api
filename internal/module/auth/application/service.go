@@ -12,6 +12,9 @@ import (
 
 // 业务错误。transport 层按类型映射状态码，不解析文本。
 var (
+	ErrSessionExpired    = errors.New("auth: session is no longer current")
+	ErrInvalidPassword   = errors.New("auth: password must contain 8 to 72 characters and at most 72 bytes")
+	ErrLifecycleDisabled = errors.New("auth: session lifecycle is disabled")
 	// ErrBusy 表示密码运算的等待人数或排队时间已达到上限。
 	ErrBusy = errors.New("auth: password capacity exhausted")
 	// ErrInvalidCredentials 表示账号不存在或密码错误。
@@ -81,11 +84,16 @@ type Service struct {
 	accounts AccountLimiter
 
 	// now 可注入，测试用它确定性地驱动撤销记录的存活时间。
-	now func() time.Time
+	now            func() time.Time
+	sessions       SessionRepository
+	sessionAccess  SessionAccessIssuer
+	sessionRefresh SessionRefreshStore
 }
 
 // Options 是 Service 的依赖。
 type Options struct {
+	// Sessions enables authenticated password changes and account-wide invalidation.
+	Sessions       SessionRepository
 	Credentials    CredentialRepository
 	Hasher         PasswordHasher
 	AccessIssuer   AccessIssuer
@@ -117,18 +125,34 @@ func NewService(opts Options) (*Service, error) {
 	case opts.AccessTTL <= 0:
 		return nil, fmt.Errorf("auth: access ttl must be positive, got %s", opts.AccessTTL)
 	}
+	var sessionAccess SessionAccessIssuer
+	var sessionRefresh SessionRefreshStore
+	if opts.Sessions != nil {
+		var ok bool
+		sessionAccess, ok = opts.AccessIssuer.(SessionAccessIssuer)
+		if !ok {
+			return nil, errors.New("auth: session-aware access issuer required")
+		}
+		sessionRefresh, ok = opts.RefreshStore.(SessionRefreshStore)
+		if !ok {
+			return nil, errors.New("auth: session-aware refresh store required")
+		}
+	}
 
 	return &Service{
-		creds:     opts.Credentials,
-		hasher:    opts.Hasher,
-		access:    opts.AccessIssuer,
-		refresh:   opts.RefreshStore,
-		revoked:   opts.RevocationList,
-		auditor:   opts.Auditor,
-		events:    opts.Events,
-		accessTTL: opts.AccessTTL,
-		accounts:  opts.Accounts,
-		now:       time.Now,
+		creds:          opts.Credentials,
+		hasher:         opts.Hasher,
+		access:         opts.AccessIssuer,
+		refresh:        opts.RefreshStore,
+		revoked:        opts.RevocationList,
+		auditor:        opts.Auditor,
+		events:         opts.Events,
+		accessTTL:      opts.AccessTTL,
+		accounts:       opts.Accounts,
+		now:            time.Now,
+		sessions:       opts.Sessions,
+		sessionAccess:  sessionAccess,
+		sessionRefresh: sessionRefresh,
 	}, nil
 }
 
@@ -184,7 +208,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 	}
 
 	s.audit(ctx, "account registered: uid=%d", uid)
-	pair, err := s.issuePair(ctx, uid)
+	pair, err := s.issuePair(ctx, uid, 0)
 	if err != nil {
 		// 账号已建、令牌未签发：必须显式表达这次部分成功。
 		// 审计走告警级——它意味着令牌基础设施（Redis/签发器）在注册路径上
@@ -253,7 +277,7 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		return TokenPair{}, ErrAccountInactive
 	}
 
-	pair, err := s.issuePair(ctx, cred.UserID)
+	pair, err := s.issuePair(ctx, cred.UserID, cred.AuthVersion)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -274,13 +298,22 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 // 判定与提交之间的竞态由 Consume 自己定局：它是唯一的原子权威，
 // 并发消费仍然只有一个成功，重用检测与族撤销的语义不受影响。
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
-	uid, err := s.refresh.Peek(ctx, refreshToken)
+	uid, version, err := s.peekRefresh(ctx, refreshToken)
 	if err != nil {
 		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
 	}
+	if s.sessions != nil {
+		credential, found, err := s.sessions.FindByID(ctx, uid)
+		if err != nil {
+			return TokenPair{}, fmt.Errorf("auth: verify refresh session: %w", err)
+		}
+		if !found || !credential.Active || credential.AuthVersion != version {
+			return TokenPair{}, ErrRefreshRejected
+		}
+	}
 
 	// 签发在消费之前：这一步失败时刷新令牌仍然有效。
-	accessToken, err := s.access.Issue(ctx, uid)
+	accessToken, err := s.issueAccess(ctx, uid, version)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf(
 			"auth: issue access token for uid=%d (the refresh token is untouched, retry is safe): %w",
@@ -288,9 +321,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	}
 
 	// 提交：轮换出下一代刷新令牌。到这里才第一次改动状态。
-	_, next, err := s.refresh.Consume(ctx, refreshToken)
+	consumedUID, consumedVersion, next, err := s.consumeRefresh(ctx, refreshToken)
 	if err != nil {
 		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
+	}
+	if s.sessions != nil && (consumedUID != uid || consumedVersion != version) {
+		return TokenPair{}, ErrRefreshRejected
 	}
 
 	return TokenPair{
@@ -363,13 +399,18 @@ func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Tim
 }
 
 // issuePair 签发访问令牌与刷新令牌。
-func (s *Service) issuePair(ctx context.Context, uid int64) (TokenPair, error) {
-	accessToken, err := s.access.Issue(ctx, uid)
+func (s *Service) issuePair(ctx context.Context, uid, version int64) (TokenPair, error) {
+	accessToken, err := s.issueAccess(ctx, uid, version)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: issue access token for uid=%d: %w", uid, err)
 	}
 
-	refreshToken, err := s.refresh.Issue(ctx, uid)
+	var refreshToken string
+	if s.sessionRefresh != nil {
+		refreshToken, err = s.sessionRefresh.IssueForSession(ctx, uid, version)
+	} else {
+		refreshToken, err = s.refresh.Issue(ctx, uid)
+	}
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: issue refresh token for uid=%d: %w", uid, err)
 	}
