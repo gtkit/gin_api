@@ -27,19 +27,37 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOPRIVATE: github.com/gtkit/*
+      GOPROXY: ${{ vars.GO_MODULE_PROXY || 'https://proxy.golang.org,direct' }}
     steps:
       # 第三方 action 一律钉 commit SHA，与 security/toolchain.mk 钉镜像摘要同一条理由：
       # tag 可变，同一个 @v7 在不同时间可能指向不同代码，于是"昨天通过、今天失败"
       # 无从复现。action 比镜像更值得钉——它在有仓库访问权的上下文里执行。
       # 保留可读 tag 作注释：只写 SHA 时没人能一眼看出这是哪个版本。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Go 版本取自 go.mod，不在这里写死：写死会产生第二个版本来源，
       # 而 toolchain-consistency 要求全仓一致。
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
+
+      - name: Download project dependencies
+        env:
+          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_MODULES_TOKEN}" ]; then
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0=credential.https://github.com.helper
+            export GIT_CONFIG_VALUE_0='!f() { printf "username=x-access-token\npassword=%s\n" "$PRIVATE_MODULES_TOKEN"; }; f'
+          fi
+          go mod download
 
       - name: Install golangci-lint (version from security/toolchain.mk)
         run: |
@@ -84,3 +102,39 @@ jobs:
       # runner 可以绑定回环，因此这里跑的是完整测试集。
       - name: make check-ci
         run: make check-ci
+
+  source-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOPRIVATE: github.com/gtkit/*
+      GOPROXY: ${{ vars.GO_MODULE_PROXY || 'https://proxy.golang.org,direct' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Download project dependencies
+        env:
+          PRIVATE_MODULES_TOKEN: ${{ secrets.PRIVATE_MODULES_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRIVATE_MODULES_TOKEN}" ]; then
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0=credential.https://github.com.helper
+            export GIT_CONFIG_VALUE_0='!f() { printf "username=x-access-token\npassword=%s\n" "$PRIVATE_MODULES_TOKEN"; }; f'
+          fi
+          go mod download
+      - name: Install the locked source scanner
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^GITLEAKS_IMAGE[[:space:]]*=.*:v([^@]+)@.*/\1/p' security/toolchain.mk)"
+          test -n "$version"
+          export GOBIN="$RUNNER_TEMP/source-scanner"
+          go install "github.com/zricethezav/gitleaks/v8@v${version}"
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Source vulnerabilities and secrets
+        run: make security-source

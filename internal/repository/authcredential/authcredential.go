@@ -19,11 +19,15 @@ import (
 
 // Repository 是凭据仓储。
 type Repository struct {
-	db *gorm.DB
+	db          *gorm.DB
+	withVersion bool
 }
 
 // New 构造仓储。
 func New(db *gorm.DB) *Repository { return &Repository{db: db} }
+
+// NewWithSessionVersion requires the additive auth_version migration.
+func NewWithSessionVersion(db *gorm.DB) *Repository { return &Repository{db: db, withVersion: true} }
 
 // mdbCtx 与其它仓储一致：事务内自动用事务句柄。
 func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
@@ -32,11 +36,12 @@ func (r *Repository) mdbCtx(ctx context.Context) *gorm.DB {
 
 // Credential 是登录所需的最小凭据集合。
 //
-// 刻意不返回整个 models.User：登录只需要这三项，而把完整用户对象交给认证
+// 刻意不返回整个 models.User：登录只需要身份、密码、状态及启用后的会话版本，把完整用户对象交给认证
 // 逻辑，会让"顺手用一下别的字段"变得自然，凭据校验因此悄悄依赖上业务字段。
 type Credential struct {
 	UserID       int64
 	PasswordHash string
+	AuthVersion  int64
 	// Active 表示账号当前是否可登录。
 	//
 	// 单独一个布尔而不是把 status 透出去：认证要回答的是"能不能登录"，
@@ -51,8 +56,12 @@ type Credential struct {
 // 比对**，否则响应时间会泄漏手机号是否已注册——见 credential.CompareWithDummy。
 func (r *Repository) FindByPhone(ctx context.Context, phone string) (cred Credential, found bool, err error) {
 	var user models.User
+	columns := []string{"id", "password", "status"}
+	if r.withVersion {
+		columns = append(columns, "auth_version")
+	}
 	err = r.mdbCtx(ctx).
-		Select("id", "password", "status").
+		Select(columns).
 		Where("phone = ?", phone).
 		First(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -68,6 +77,7 @@ func (r *Repository) FindByPhone(ctx context.Context, phone string) (cred Creden
 		UserID:       user.ID,
 		PasswordHash: user.Password,
 		Active:       user.Status == models.UserStatusNormal,
+		AuthVersion:  user.AuthVersion,
 	}, true, nil
 }
 
@@ -90,13 +100,53 @@ func (r *Repository) Create(ctx context.Context, phone, passwordHash, nickname s
 		Status:   models.UserStatusNormal,
 	}
 
-	if err := r.mdbCtx(ctx).Create(&user).Error; err != nil {
+	// The database default is zero after migration; omission also supports deployments
+	// where lifecycle is disabled and the new column has not been added yet.
+	if err := r.mdbCtx(ctx).Omit("auth_version").Create(&user).Error; err != nil {
 		if isDuplicateKey(err) {
 			return 0, ErrPhoneTaken
 		}
 		return 0, fmt.Errorf("create user: %w", err)
 	}
 	return user.ID, nil
+}
+
+// FindByID reads credentials only for authenticated lifecycle operations.
+func (r *Repository) FindByID(ctx context.Context, userID int64) (Credential, bool, error) {
+	var user models.User
+	err := r.mdbCtx(ctx).Select("id", "password", "status", "auth_version").Where("id = ?", userID).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Credential{}, false, nil
+	}
+	if err != nil {
+		return Credential{}, false, fmt.Errorf("find session credential: %w", err)
+	}
+	return Credential{UserID: user.ID, PasswordHash: user.Password, Active: user.Status == models.UserStatusNormal, AuthVersion: user.AuthVersion}, true, nil
+}
+
+// ChangePassword atomically changes the hash and invalidates the old session version.
+func (r *Repository) ChangePassword(ctx context.Context, userID, version int64, oldHash, newHash string) (bool, error) {
+	if userID <= 0 || version < 0 || version == 1<<63-1 || oldHash == "" || newHash == "" {
+		return false, nil
+	}
+	result := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ? AND status = ? AND auth_version = ? AND password = ?", userID, models.UserStatusNormal, version, oldHash).
+		Updates(map[string]any{"password": newHash, "auth_version": gorm.Expr("auth_version + 1")})
+	if result.Error != nil {
+		return false, fmt.Errorf("change credential password: %w", result.Error)
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// RevokeSessions invalidates every session issued for the expected account version.
+func (r *Repository) RevokeSessions(ctx context.Context, userID, version int64) (bool, error) {
+	if userID <= 0 || version < 0 || version == 1<<63-1 {
+		return false, nil
+	}
+	result := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).Update("auth_version", gorm.Expr("auth_version + 1"))
+	if result.Error != nil {
+		return false, fmt.Errorf("revoke user sessions: %w", result.Error)
+	}
+	return result.RowsAffected == 1, nil
 }
 
 // UpdatePassword 改密。

@@ -19,8 +19,8 @@ func RedisRequired(cfg *config.Config) bool {
 		return false
 	}
 
-	// 本地认证：刷新令牌存储、访问令牌撤销表与清理任务的单实例租约
-	// 全部以 Redis 为载体，Redis 不可用即认证不可用——此时实例不该被
+	// 本地认证：刷新令牌存储与访问令牌撤销表
+	// 以 Redis 为载体，Redis 不可用即认证不可用——此时实例不该被
 	// 判为 ready，否则 readiness 在对认证故障撒谎。
 	if cfg.Auth.LocalEnabled() {
 		return true
@@ -34,25 +34,10 @@ func RedisRequired(cfg *config.Config) bool {
 		return true
 	}
 
-	// 异步任务队列：入队端与调度器都以 Redis 为载体，两者在拿不到客户端时
-	// **无法装配**（tasks.NewProducer 与 scheduler 都对 nil client 返回错误）。
-	// 一行覆盖两者：调度器由 tasks.scheduler.enabled 门控，而那以 tasks.enabled 为前提。
-	//
-	// 漏掉这一行的后果不是"Redis 挂了任务不跑"，而是**进程起不来且错误指错方向**：
-	// 判为 optional 之后，Redis 已配置但启动期不可达时资源层保留 nil 客户端，
-	// 装配走到 tasks.NewProducer 才失败，报出的是"producer requires a redis client"——
-	// 那读起来像配置缺失，而真实原因（Redis 不可达）不在错误里任何位置。
-	//
-	// 也就是说：这不是"要不要让它成为必需"的权衡，进程两种情况下都起不来；
-	// 加进表里只是让失败发生在正确的位置、带上正确的原因。
-	if cfg.Tasks.Enabled {
-		return true
-	}
-
 	// 新增其他依赖 Redis 的能力时在此追加，形如：
 	//   if cfg.Cron.Enabled { return true }
 	//
 	// 判据（人工审查，非自动门禁）：被推导为 optional 的资源，其消费方都必须
 	// 能在空句柄下完成装配。任何消费方在空句柄下返回错误，就说明这张表少了一行。
-	return false
+	return cfg.TaskQueueEnabled()
 }

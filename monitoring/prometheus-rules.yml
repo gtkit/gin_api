@@ -1,0 +1,54 @@
+groups:
+  - name: gin-api-recording
+    interval: 30s
+    rules:
+      - record: gin_api:http_rps:rate5m
+        expr: sum by (service_name, service_instance_id) (rate(http_server_requests_total{http_route!~"/health|/ready"}[5m]))
+      - record: gin_api:http_errors:ratio5m
+        expr: sum by (service_name, service_instance_id) (rate(http_server_requests_total{http_response_status_code=~"5..",http_route!~"/health|/ready"}[5m])) / clamp_min(gin_api:http_rps:rate5m, 0.001)
+      - record: gin_api:http_p99:seconds5m
+        expr: histogram_quantile(0.99, sum by (service_name, service_instance_id, le) (rate(http_server_request_duration_seconds_bucket{http_route!~"/health|/ready"}[5m])))
+  - name: gin-api-alerts
+    rules:
+      - alert: GinAPIHighErrorRate
+        expr: gin_api:http_errors:ratio5m > 0.01 and on (service_name, service_instance_id) gin_api:http_rps:rate5m > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "API 5xx ratio exceeds 1% for ten minutes"
+          description: "Check dependency health, recent releases and admission rejection metrics. Threshold is a template; align with the service SLO."
+      - alert: GinAPIHighLatency
+        expr: gin_api:http_p99:seconds5m > 1 and on (service_name, service_instance_id) gin_api:http_rps:rate5m > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "API p99 exceeds one second"
+          description: "Compare DB/Redis wait, password queue duration and GC CPU before increasing concurrency."
+      - alert: GinAPIAdmissionSaturated
+        expr: sum by (service_name, service_instance_id) (rate(admission_rejections_total[5m])) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "API admission rejects more than one request per second"
+          description: "Inspect arrival rate and downstream latency; do not blindly raise the in-flight limit."
+      - alert: GinAPIPasswordQueueSaturated
+        expr: sum by (service_name, service_instance_id) (rate(auth_password_rejections_total[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Password worker capacity is rejecting requests"
+          description: "Review credential traffic, rate limits and CPU saturation."
+      - alert: GinAPIDatabasePoolSaturated
+        expr: sum by (service_name, service_instance_id, connection_name) (db_client_connections_usage{db_connection_state="used"}) / clamp_min(sum by (service_name, service_instance_id, connection_name) (db_client_connections_max), 1) > 0.9
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "MySQL pool utilization exceeds 90%"
+          description: "Inspect slow SQL and wait counters; verify the database-wide connection budget before increasing the pool."
+      - alert: GinAPIRedisPoolTimeouts
+        expr: sum by (service_name, service_instance_id) (rate(db_client_connection_timeouts_total[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis pool is timing out"
+          description: "Inspect Redis latency, pool.pending_requests and connection limits."

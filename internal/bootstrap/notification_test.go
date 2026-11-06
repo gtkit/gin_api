@@ -49,7 +49,12 @@ func (r *notificationTrace) stops() []string {
 
 type notificationSender struct{ sends *atomic.Int32 }
 
-func (s notificationSender) Send(context.Context, string, string) error { s.sends.Add(1); return nil }
+func (s notificationSender) Send(string)           { s.sends.Add(1) }
+func (s notificationSender) SendTo(_, text string) { s.Send(text) }
+func (s notificationSender) SendContext(context.Context, string, string) error {
+	s.sends.Add(1)
+	return nil
+}
 
 type notificationMailSender struct{ sends *atomic.Int32 }
 

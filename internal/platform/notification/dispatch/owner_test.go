@@ -20,7 +20,13 @@ import (
 
 type webhookFunc func(context.Context, string, string) error
 
-func (f webhookFunc) Send(ctx context.Context, target, text string) error {
+func (f webhookFunc) Send(text string) { f.SendTo("", text) }
+func (f webhookFunc) SendTo(target, text string) {
+	if err := f(context.Background(), target, text); err != nil {
+		panic(err) // Unexpected failures in the direct SDK test entry point must surface.
+	}
+}
+func (f webhookFunc) SendContext(ctx context.Context, target, text string) error {
 	return f(ctx, target, text)
 }
 
@@ -392,7 +398,7 @@ func TestStartupCancellationDoesNotCancelOpenedChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
-	if err := owner.Send(t.Context(), "target", "body"); err != nil || calls != 1 {
+	if err := owner.SendContext(t.Context(), "target", "body"); err != nil || calls != 1 {
 		t.Fatalf("Send=%v calls=%d", err, calls)
 	}
 	closeOwners(t, owner)

@@ -12,6 +12,12 @@ type UserVerifier interface {
 	ValidateUser(ctx context.Context, userID int64) (bool, error)
 }
 
+// SessionVerifier checks current account status and the durable authentication version.
+// A dependency failure must return an error; a stale version returns false, nil.
+type SessionVerifier interface {
+	ValidateSession(context.Context, int64, int64) (bool, error)
+}
+
 // VIPVerifier 定义会员资格校验能力。
 //
 // 返回 (bool, error) 而不是裸 bool，与 UserVerifier 保持同一契约：

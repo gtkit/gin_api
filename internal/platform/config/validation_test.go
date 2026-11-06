@@ -24,11 +24,9 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 			ReadTimeoutFullSeconds:   -1,
 			Timezone:                 "Mars/Nowhere",
 		},
-		Database: DatabaseConfig{
-			DBType: "",
-		},
-		Redis: RedisConfig{},
-		Log:   LogConfig{},
+		Database: DatabaseConfig{},
+		Redis:    RedisConfig{},
+		Log:      LogConfig{},
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -64,24 +62,21 @@ func TestValidateProdLogPathLocation(t *testing.T) {
 			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path without app root rejected",
-			env:         env.Prod,
-			logPath:     filepath.Join(appRoot, "logs", "app_client"),
-			wantErrText: "APP_ROOT",
+			name:    "prod absolute path without app root allowed",
+			env:     env.Prod,
+			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path with relative app root rejected",
-			env:         env.Prod,
-			appRoot:     "relative-root",
-			logPath:     filepath.Join(appRoot, "logs", "app_client"),
-			wantErrText: "APP_ROOT must be absolute",
+			name:    "prod absolute path with relative app root allowed",
+			env:     env.Prod,
+			appRoot: "relative-root",
+			logPath: filepath.Join(appRoot, "logs", "app_client"),
 		},
 		{
-			name:        "prod absolute path outside app root rejected",
-			env:         env.Prod,
-			appRoot:     appRoot,
-			logPath:     filepath.Join(outsideRoot, "logs", "app_client"),
-			wantErrText: "must be under APP_ROOT",
+			name:    "prod absolute path outside app root allowed",
+			env:     env.Prod,
+			appRoot: appRoot,
+			logPath: filepath.Join(outsideRoot, "logs", "app_client"),
 		},
 	}
 
@@ -122,7 +117,7 @@ func TestValidateRequiresAliyunSMSConfigWhenSMSEnabled(t *testing.T) {
 			Port: "8802",
 		},
 		Database: DatabaseConfig{
-			DBType:   "mysql",
+
 			Host:     "127.0.0.1",
 			Port:     "3306",
 			Name:     "sleep",
@@ -163,9 +158,8 @@ func TestValidateOutboundChannelShapes(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "email 半配置被拒绝",
-			email:   EmailConfig{From: "a@b.c"},
-			wantErr: "email.host is empty",
+			name:  "停用 email 可保留配置",
+			email: EmailConfig{From: "a@b.c"},
 		},
 		{
 			name:    "email from 非法地址被拒绝",
@@ -173,9 +167,8 @@ func TestValidateOutboundChannelShapes(t *testing.T) {
 			wantErr: "email.from",
 		},
 		{
-			name:    "sms 半配置被拒绝",
-			sms:     SMSConfig{SignName: "sign"},
-			wantErr: "sms.provider is empty",
+			name: "停用 sms 可保留配置",
+			sms:  SMSConfig{SignName: "sign"},
 		},
 		{
 			name: "sms 告警键必须成对",
@@ -372,7 +365,7 @@ func validConfigForTest() *Config {
 			Port: "8008",
 		},
 		Database: DatabaseConfig{
-			DBType:   "mysql",
+
 			Host:     "127.0.0.1",
 			Port:     "3306",
 			Name:     "sleep",
@@ -444,67 +437,6 @@ func TestValidateNewsConfig(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErrText) {
 				t.Fatalf("error %q does not contain %q", err, tt.wantErrText)
-			}
-		})
-	}
-}
-
-// TestNegativeConfigValuesAreRejected 钉住负值不静默回退（P2 回归）。
-//
-// 回退让"配了一个非法值"与"没配"变成同一种结果，而使用者以为自己配的
-// 那个值正在生效——排查时没有任何一处会提示真相。
-func TestNegativeConfigValuesAreRejected(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		mutate  func(*Config)
-		wantErr string
-	}{
-		{
-			name: "outbound client 负超时",
-			mutate: func(c *Config) {
-				c.Outbound.Clients = map[string]OutboundClientConfig{
-					"billing": {BaseURL: "https://billing.example.test", Timeout: -time.Second},
-				}
-			},
-			wantErr: "negative values are not allowed",
-		},
-		{
-			name:    "outbound defaults 负响应体上限",
-			mutate:  func(c *Config) { c.Outbound.Defaults.MaxResponseBytes = -1 },
-			wantErr: "outbound.defaults",
-		},
-		{
-			name: "base_url 非绝对 URL",
-			mutate: func(c *Config) {
-				c.Outbound.Clients = map[string]OutboundClientConfig{
-					"billing": {BaseURL: "billing.example.test/api"},
-				}
-			},
-			wantErr: "not an absolute http(s) URL",
-		},
-		{
-			name: "tasks 负并发",
-			mutate: func(c *Config) {
-				c.Tasks = TasksConfig{Enabled: true, Concurrency: -1, RedisDB: 0}
-			},
-			wantErr: "negative concurrency",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			cfg := validConfigForTest()
-			tt.mutate(cfg)
-			err := cfg.Validate()
-			if err == nil {
-				t.Fatalf("Validate() = nil, want an error containing %q", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error %q does not contain %q", err, tt.wantErr)
 			}
 		})
 	}

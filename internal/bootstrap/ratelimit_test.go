@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )

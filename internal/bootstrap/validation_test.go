@@ -1,38 +1,30 @@
 package bootstrap
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
 	"unicode"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/goerr"
 	"github.com/gtkit/verify"
 )
 
-func newProviders(ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator) (*providerSet, error) {
-	budget := &rollbackBudget{force: shutdown.ForcedCh()}
-	defer budget.Close()
-	return newProvidersWithBudget(ctx, runtime, shutdown, budget)
-}
-
-// TestInitValidationFailureBlocksProviders 反证「初始化失败阻断启动」：
-// 把 initValidation 从装配链上摘掉，本测试必须失败。
-// runtime 传 nil 是安全的：校验翻译器是第 0 步，失败即返回，不触碰任何资源。
-func TestInitValidationFailureBlocksProviders(t *testing.T) {
+// TestInitValidationFailureBlocksProcessRuntime verifies the single startup entry.
+func TestInitValidationFailureBlocksProcessRuntime(t *testing.T) {
 	sentinel := errors.New("forced init failure")
 	orig := verifyInit
 	verifyInit = func(_ ...verify.Option) error { return sentinel }
 	t.Cleanup(func() { verifyInit = orig })
 
-	_, err := newProviders(context.Background(), nil, nil)
+	err := initProcessRuntime(&config.Config{})
 	if err == nil {
-		t.Fatal("newProviders() = nil error, want validation init failure to block assembly")
+		t.Fatal("validator failure did not block process initialization")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("newProviders() error = %v, want wrapping %v", err, sentinel)
+		t.Fatalf("process initialization error = %v, want wrapping %v", err, sentinel)
 	}
 }
 
@@ -44,6 +36,13 @@ func TestValidationOptionsWiredIntoInit(t *testing.T) {
 		customMsg = "测试规则不通过"
 	)
 	orig := validationOptions
+	originalVerify := verifyInit
+	calls := 0
+	verifyInit = func(options ...verify.Option) error {
+		calls++
+		return originalVerify(options...)
+	}
+	t.Cleanup(func() { verifyInit = originalVerify })
 	validationOptions = func() []verify.Option {
 		return []verify.Option{
 			verify.WithTranslation(customTag, customMsg, func(fl validator.FieldLevel) bool {
@@ -53,8 +52,11 @@ func TestValidationOptionsWiredIntoInit(t *testing.T) {
 	}
 	t.Cleanup(func() { validationOptions = orig })
 
-	if err := initValidation(); err != nil {
-		t.Fatalf("initValidation() = %v, want nil", err)
+	if err := initProcessRuntime(&config.Config{}); err != nil {
+		t.Fatalf("initProcessRuntime() = %v, want nil", err)
+	}
+	if calls != 1 {
+		t.Fatalf("validator initialized %d times, want 1", calls)
 	}
 
 	type payload struct {

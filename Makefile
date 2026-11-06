@@ -1,4 +1,4 @@
-.PHONY: check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: check-optional-wiring check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
 ## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
 ## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
@@ -54,9 +54,7 @@ COVERAGE_PROFILE ?= .cache/coverage.out
 #
 # 门禁取 72.5（受限实测 73.0 之下留 0.5 余量）。**每批新增依赖 Redis 的能力都会压低受限下界**：miniredis 要绑
 # 回环端口，受限路径整包跳过，于是新增代码抬高了分母却没抬高受限分子。
-# 认证、指标、单实例租约三批都遇到过这一点，每次都是靠补一套**不碰网络的
-# 手写替身测试**把受限覆盖率拉回来的（见 internal/pkg/{tokenstore,singleton}
-# 的 logic_test.go）。
+# 认证和指标能力遇到过这一点，需要补充不碰网络的故障与纯逻辑测试。
 #
 # 因此新增此类能力时的固定动作：miniredis 版覆盖真实语义，替身版覆盖故障
 # 处置与纯逻辑。两者不是重复——替身能精确制造 miniredis 难触发的故障。

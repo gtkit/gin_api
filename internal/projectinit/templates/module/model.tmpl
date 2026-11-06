@@ -1,0 +1,19 @@
+package models
+
+import (
+    "time"
+
+    "gorm.io/gorm"
+)
+
+// {{.Type}}Record is the persisted record. Never bind HTTP requests to this model.
+type {{.Type}}Record struct {
+    ID string `gorm:"type:char(36);primaryKey;index:idx_{{.Name}}_owner,priority:4"`
+    OwnerID int64 `gorm:"not null;index:idx_{{.Name}}_owner,priority:1"`
+    Title string `gorm:"size:120;not null"`
+    CreatedAt time.Time `gorm:"not null;index:idx_{{.Name}}_owner,priority:3"`
+    UpdatedAt time.Time `gorm:"not null"`
+    DeletedAt gorm.DeletedAt `gorm:"index:idx_{{.Name}}_owner,priority:2"`
+}
+
+func ({{.Type}}Record) TableName() string { return "{{.Name}}_records" }

@@ -42,6 +42,34 @@ func (s stubCreds) Create(context.Context, string, string, string) (int64, error
 // stubHasher 把 "ok" 当作唯一正确的口令。
 type stubHasher struct{}
 
+type busyHasher struct{}
+
+func (busyHasher) Hash(context.Context, string) (string, error)   { return "", application.ErrBusy }
+func (busyHasher) Compare(context.Context, string, string) error  { return application.ErrBusy }
+func (busyHasher) CompareWithDummy(context.Context, string) error { return application.ErrBusy }
+
+func TestPasswordCapacityMapsToServiceUnavailable(t *testing.T) {
+	for _, found := range []bool{false, true} {
+		svc, err := application.NewService(application.Options{Credentials: stubCreds{found: found, cred: application.Credential{UserID: 7, Active: true}}, Hasher: busyHasher{}, AccessIssuer: stubIssuer{}, RefreshStore: stubRefresh{}, RevocationList: stubRevocation{}, AccessTTL: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := doRequest(t, NewHandler(svc).Login, `{"phone":"13800138000","password":"ok"}`, nil)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("found=%v: %d %s", found, w.Code, w.Body.String())
+		}
+		var body struct {
+			Code int `json:"code"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Code != 10010018 {
+			t.Fatalf("code=%d", body.Code)
+		}
+	}
+}
+
 func (stubHasher) Hash(context.Context, string) (string, error) { return "hashed", nil }
 
 func (stubHasher) Compare(_ context.Context, _, password string) error {

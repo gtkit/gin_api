@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -115,6 +114,9 @@ func (c *Config) Validate() error {
 	if err := validateRedisConfig(c.Redis); err != nil {
 		errs = append(errs, err)
 	}
+	if err := c.validateNamedConnections(); err != nil {
+		errs = append(errs, err)
+	}
 	if err := validateRedisCapabilities(*c); err != nil {
 		errs = append(errs, err)
 	}
@@ -151,16 +153,13 @@ func (c *Config) Validate() error {
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateOutboundConfig(c.Outbound); err != nil {
+	if err := c.validateOptional(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateTelemetryConfig(c.Telemetry); err != nil {
-		errs = append(errs, err)
-	}
-	if err := validateTasksConfig(c.Tasks, c.Redis); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateNewsConfig(c.News); err != nil {
@@ -310,6 +309,7 @@ func validateAppConfig(app AppConfig) error {
 	errs = append(errs,
 		mustNonNegative("application.read_header_timeout", app.ReadHeaderTimeoutSeconds),
 		mustNonNegative("application.read_timeout", app.ReadTimeoutFullSeconds),
+		mustNonNegative("application.max_inflight_requests", app.MaxInflightRequests),
 	)
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))
 
@@ -318,7 +318,6 @@ func validateAppConfig(app AppConfig) error {
 
 func validateDatabaseConfig(database DatabaseConfig) error {
 	errs := []error{
-		mustNonEmpty("database.dbtype", database.DBType),
 		mustNonEmpty("database.host", database.Host),
 		mustNonEmpty("database.port", database.Port),
 		mustPortRange("database.port", database.Port),
@@ -329,27 +328,18 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 		mustNonNegative("database.maxlifeseconds", database.MaxLifeSeconds),
 	}
 
-	if strings.TrimSpace(database.DBType) != "" && database.DBType != "mysql" {
-		errs = append(errs, errors.New("database.dbtype must be mysql"))
-	}
-
-	// 连接池必须交叉校验，不能留到底层构造时才报错。
-	//
-	// 口径：未设置（零值）走 Effective* 的默认值，不算错误——否则省略这些键的存量部署
-	// 会因为一次校验加强而起不动，而它们原本工作正常。显式写了负数，或写出
-	// max_idle > max_open 这种自相矛盾的组合，才是必须拦下的真错误。
-	//
-	// max_idle > max_open 尤其危险：底层会静默把空闲上限压到打开上限，
-	// 于是配置写的和实际生效的不一致，而没有任何地方会告诉你。
-	if database.MaxOpenConn > 0 && database.MaxIdleConn > database.MaxOpenConn {
-		errs = append(errs, fmt.Errorf(
-			"database.maxidleconn (%d) must not exceed database.maxopenconn (%d)",
-			database.MaxIdleConn, database.MaxOpenConn))
-	}
 	errs = append(errs,
 		mustNonNegative("database.maxidletimeseconds", database.MaxIdleTimeSeconds))
-	if err := validateMinVersion(database.EffectiveMinVersion()); err != nil {
-		errs = append(errs, err)
+	if database.PrepareStmtMaxSize < 0 {
+		errs = append(errs, fmt.Errorf(
+			"database.prepare_stmt_max_size must be nonnegative (0 uses default %d)",
+			DefaultDBPrepareStmtMaxSize))
+	}
+	// 在转换为 time.Duration 前限制整数秒，避免溢出或底层回退到无界默认值。
+	if database.PrepareStmtTTLSeconds < 0 || int64(database.PrepareStmtTTLSeconds) > math.MaxInt64/int64(time.Second) {
+		errs = append(errs, fmt.Errorf(
+			"database.prepare_stmt_ttl_seconds must be nonnegative and fit time.Duration (0 uses default %d)",
+			DefaultDBPrepareStmtTTLSeconds))
 	}
 
 	// 只配 migrate_password 而 migrate_username 为空是**非法组合**，不是「未启用」：
@@ -378,7 +368,7 @@ const fixedRedisDB = 0
 // 降级、本地认证的刷新令牌与撤销记录无处存放、日志声称 "redis is configured
 // but unreachable"，而 Redis 完全健康。运维会去查一个没有问题的 Redis。
 //
-// cache.redis_db 与 tasks.redis_db 早有同款校验，理由与此完全一致。
+// cache.redis_db 有同款校验，理由与此完全一致。
 //
 // 聚合成一条错误而不是逐项报：各项说的是同一件事，逐项会让运维看到几行
 // 几乎相同的消息。
@@ -453,7 +443,7 @@ func validateRedisCapabilities(c Config) error {
 	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis {
 		consumers = append(consumers, "redis response cache")
 	}
-	if c.Tasks.Enabled {
+	if c.TaskQueueEnabled() {
 		consumers = append(consumers, "task queue")
 	}
 	if len(consumers) == 0 {
@@ -511,17 +501,9 @@ func hasDuplicateInts(values []int) bool {
 	return false
 }
 
-// validateEmailConfig 校验 SMTP 出站通道。
-//
-// 启用键（host）为空时其余字段必须同为零值：填了一半的配置意味着使用者
-// 以为通道已启用，而它静默不存在——那比校验失败更难排查。
+// validateEmailConfig 校验已启用的 SMTP 出站通道。
 func validateEmailConfig(email EmailConfig) error {
 	if !email.Enabled() {
-		if email.Port != 0 || email.User != "" || email.Pass != "" || email.From != "" ||
-			email.FromName != "" || email.ImplicitSSL || len(email.AlertTo) > 0 {
-			return errors.New("email.host is empty but other email.* fields are set: " +
-				"set email.host to enable the channel, or remove the leftover fields")
-		}
 		return nil
 	}
 
@@ -545,11 +527,6 @@ func validateEmailConfig(email EmailConfig) error {
 // validateSMSConfig 校验出站短信通道。
 func validateSMSConfig(sms SMSConfig) error {
 	if !sms.Enabled() {
-		if sms.AccessID != "" || sms.AccessSecret != "" || sms.RegionID != "" || sms.SignName != "" ||
-			len(sms.Templates) > 0 || len(sms.AlertPhones) > 0 || sms.AlertTemplate != "" {
-			return errors.New("sms.provider is empty but other sms.* fields are set: " +
-				"set sms.provider to enable the channel, or remove the leftover fields")
-		}
 		return nil
 	}
 
@@ -588,58 +565,20 @@ func validateSMSConfig(sms SMSConfig) error {
 	return errors.Join(errs...)
 }
 
-func validateLogConfig(environment env.Env, logCfg LogConfig, appRoot string) error {
-	errs := []error{
-		mustNonEmpty("log.level", logCfg.Level),
-		mustNonEmpty("log.path", logCfg.Path),
-	}
-
-	// 与日志消费者一致，仅在校验时去除首尾空白，不改写原配置。
+func validateLogConfig(_ env.Env, logCfg LogConfig, _ string) error {
+	var errs []error
 	switch strings.TrimSpace(logCfg.Level) {
 	case "", "debug", "info", "warn", "error", "dpanic", "panic", "fatal":
 	default:
 		errs = append(errs, errors.New("log.level must be one of debug, info, warn, error, dpanic, panic, fatal"))
 	}
-	if environment.IsProd() && strings.TrimSpace(logCfg.Level) == "debug" {
-		errs = append(errs, errors.New("log.level debug is not allowed in prod"))
-	}
 	if threshold := logCfg.SQLSlowThresholdMS; threshold != nil && (*threshold < 0 || *threshold > math.MaxInt64/int64(time.Millisecond)) {
 		errs = append(errs, errors.New("log.sql_slow_threshold_ms must be nonnegative and fit time.Duration"))
 	}
-	if err := validateLogPathLocation(environment, logCfg.Path, appRoot); err != nil {
+	if err := mustNonNegative("log.access_flush_interval", logCfg.AccessFlushInterval); err != nil {
 		errs = append(errs, err)
 	}
-
 	return errors.Join(errs...)
-}
-
-func validateLogPathLocation(environment env.Env, logPath, appRoot string) error {
-	logPath = strings.TrimSpace(logPath)
-	if logPath == "" || !environment.IsProd() || !filepath.IsAbs(logPath) {
-		return nil
-	}
-
-	appRoot = strings.TrimSpace(appRoot)
-	if appRoot == "" {
-		return errors.New("log.path absolute path is not allowed in prod unless APP_ROOT is set; use a relative path or set APP_ROOT")
-	}
-	if !filepath.IsAbs(appRoot) {
-		return fmt.Errorf("APP_ROOT must be absolute when prod log.path is absolute: %q", appRoot)
-	}
-	if !pathWithinRoot(logPath, appRoot) {
-		return fmt.Errorf("log.path absolute path %q must be under APP_ROOT %q in prod", filepath.Clean(logPath), filepath.Clean(appRoot))
-	}
-
-	return nil
-}
-
-func pathWithinRoot(path, root string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	if err != nil {
-		return false
-	}
-
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // mustHostPort 校验 `host:port` 形式的地址，端口须落在合法 TCP 范围。

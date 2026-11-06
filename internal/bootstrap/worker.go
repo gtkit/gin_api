@@ -44,7 +44,7 @@ func (k WorkerKind) String() string {
 
 // Lifecycle 声明 worker 的运行形态。
 //
-// 零值非法。这个声明**必须由 worker 自己给出**，不能由管理器推断：
+// 零值非法。worker 可以通过 Kind().Lifecycle() 显式返回对应形态，不能根据 Run 结果推断：
 // 管理器唯一能观察到的信号是"Run 返回了"，而"长期任务意外退出"与
 // "一次性任务正常完成"在这个信号上完全一样。推断的结果必然是二者之一被静默误判——
 // 误判长期 worker 的代价是进程继续对外服务、功能却已经丢了。
@@ -59,6 +59,19 @@ const (
 	// LifecycleOneShot 表示 Run 执行一次任务后正常返回 nil。
 	LifecycleOneShot
 )
+
+// Lifecycle 返回类别对应的运行形态；未声明或未知类别返回 LifecycleUnspecified。
+// Worker 保留 Lifecycle 方法，既有实现无需修改，注册时仍校验声明一致性。
+func (k WorkerKind) Lifecycle() Lifecycle {
+	switch k {
+	case KindBootstrap:
+		return LifecycleOneShot
+	case KindProducer, KindConsumer:
+		return LifecycleLongRunning
+	default:
+		return LifecycleUnspecified
+	}
+}
 
 // String 返回稳定的小写生命周期名。
 func (l Lifecycle) String() string {
@@ -156,9 +169,7 @@ func validateWorkerContract(w Worker) error {
 	kind, lifecycle := w.Kind(), w.Lifecycle()
 
 	var errs []error
-	switch kind {
-	case KindBootstrap, KindProducer, KindConsumer:
-	default:
+	if kind.Lifecycle() == LifecycleUnspecified {
 		errs = append(errs, fmt.Errorf(
 			"%w: worker %q must declare a kind (bootstrap|producer|consumer), got %d", ErrWorkerContractViolation, name, kind))
 	}
@@ -172,24 +183,16 @@ func validateWorkerContract(w Worker) error {
 		return errors.Join(errs...)
 	}
 
-	// 组合约束：
-	//   OneShot 只能是 Bootstrap —— 一次性任务不参与 producer/consumer 的排序语义；
-	//   LongRunning 只能是 Producer 或 Consumer —— 关停顺序必须能确定它排在哪一相。
-	switch lifecycle {
-	case LifecycleOneShot:
-		if kind != KindBootstrap {
+	// 类别映射是组合约束的唯一来源，错误仍保持原有语义。
+	if lifecycle != kind.Lifecycle() {
+		if lifecycle == LifecycleOneShot {
 			return fmt.Errorf(
 				"%w: worker %q is one-shot and therefore must be of kind bootstrap, got %s",
 				ErrWorkerContractViolation, name, kind)
 		}
-	case LifecycleLongRunning:
-		if kind != KindProducer && kind != KindConsumer {
-			return fmt.Errorf(
-				"%w: worker %q is long-running and therefore must be producer or consumer, got %s",
-				ErrWorkerContractViolation, name, kind)
-		}
-	case LifecycleUnspecified:
-		// 已在上面拒绝。
+		return fmt.Errorf(
+			"%w: worker %q is long-running and therefore must be producer or consumer, got %s",
+			ErrWorkerContractViolation, name, kind)
 	}
 
 	return nil

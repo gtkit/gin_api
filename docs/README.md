@@ -28,6 +28,7 @@
 - [`../README.md`](../README.md)：项目概览、快速开始、部署
 - [`../SCAFFOLD.md`](../SCAFFOLD.md)：作为脚手架母版孵化新项目、**预置能力清单**
 - [`../database/README.md`](../database/README.md)：迁移目录布局、运行环境要求、schema 快照
+- [`../internal/optional/README.md`](../internal/optional/README.md)：默认未接线的可选扩展及启用、删除方式
 - [`../config/README.md`](../config/README.md)：配置字段说明
 - [`../scripts/README.md`](../scripts/README.md)：门禁脚本用法
 
@@ -66,3 +67,11 @@
 
 需要说明某项职责归属别处时用正向表述（「鉴权由业务注入，方式如下」），
 不写否定式（「本包不内置鉴权」）。
+
+## 脚手架开发与运维
+
+- [业务模块示例与生成](module-example.md)
+- [OpenAPI 与 Go 客户端](api-client.md)
+- [源码安全与私有依赖 CI](ci-security.md)
+- [监控模板与负载基线](../monitoring/README.md)
+- [可选能力装配](optional-capabilities.md)

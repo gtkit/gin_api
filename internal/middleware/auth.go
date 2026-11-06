@@ -14,6 +14,7 @@ import (
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
+	"github.com/gtkit/gin-api/internal/pkg/jwtauth"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
@@ -79,6 +80,9 @@ type RevocationChecker interface {
 type AuthOptions struct {
 	Verifier sharedauth.UserVerifier
 	Parser   TokenParser
+	// Sessions, when provided, combines account-status and current-version validation.
+	// It replaces the UserVerifier read, so versioning adds no second database query.
+	Sessions sharedauth.SessionVerifier
 	// Revocation 检查令牌是否已被撤销；为 nil 时不做检查。
 	//
 	// 允许为 nil 是给**外部身份模式**留的：那种部署里令牌由外部签发，
@@ -138,7 +142,18 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 			return
 		}
 
-		ok, err := opts.Verifier.ValidateUser(c.Request.Context(), claims.UserID)
+		var version int64
+		var ok bool
+		if opts.Sessions != nil {
+			version, err = jwtauth.SessionVersion(claims)
+			if err != nil {
+				abortWith(c, goerr.New(err, goerr.StatusAuth()))
+				return
+			}
+			ok, err = opts.Sessions.ValidateSession(c.Request.Context(), claims.UserID, version)
+		} else {
+			ok, err = opts.Verifier.ValidateUser(c.Request.Context(), claims.UserID)
+		}
 		if err != nil {
 			// 请求预算到点 / 客户端断开交终态中间件裁决（504 / 不回包）：
 			// 它们不是依赖不可用，写成 503 会让一次自身超时被记成下游故障。
@@ -184,8 +199,9 @@ func Auth(opts AuthOptions) gin.HandlerFunc {
 		// 记录令牌标识供登出撤销使用。ExpiresAt 决定撤销记录该活多久——
 		// 缺了它就只能给撤销记录一个猜出来的存活时间。
 		ginc.SetTokenIdentity(c, ginc.TokenIdentity{
-			TokenID:   claims.TokenID,
-			ExpiresAt: claimsExpiry(claims),
+			TokenID:        claims.TokenID,
+			ExpiresAt:      claimsExpiry(claims),
+			SessionVersion: version,
 		})
 		c.Next()
 	}
@@ -286,18 +302,18 @@ func tokenFromHeader(c *gin.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	legacy, err := singleHeaderValue(c, tokenHeaderName)
+	appToken, err := singleHeaderValue(c, tokenHeaderName)
 	if err != nil {
 		return "", err
 	}
 
 	switch {
-	case bearer != "" && legacy != "" && bearer != legacy:
+	case bearer != "" && appToken != "" && bearer != appToken:
 		return "", fmt.Errorf("authorization bearer token and %s header disagree", tokenHeaderName)
 	case bearer != "":
 		return validateRawToken(bearer, "authorization bearer token")
-	case legacy != "":
-		return validateRawToken(legacy, tokenHeaderName+" header")
+	case appToken != "":
+		return validateRawToken(appToken, tokenHeaderName+" header")
 	default:
 		return "", fmt.Errorf("%w: neither an authorization bearer token nor the %s header is present",
 			errTokenAbsent, tokenHeaderName)

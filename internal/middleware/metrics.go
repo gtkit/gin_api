@@ -18,6 +18,8 @@ func Metrics(recorder *metrics.Recorder) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		finish := recorder.TrackRequest(c.Request.Context(), c.Request.Method, requestScheme(c.Request))
+		defer finish()
 		start := time.Now()
 		c.Next()
 

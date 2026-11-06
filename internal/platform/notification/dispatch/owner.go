@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/gtkit/gin-api/internal/pkg/news"
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -60,15 +59,20 @@ func (p *Owner) initialize(ctx context.Context) error {
 			return result, false, errors.New("dispatch configuration is required")
 		}
 		var err error
-		options := news.Options{DefaultURL: cfg.News.FSURL, Environment: string(cfg.Env), Report: p.options.Report}
+		options := []news.Option{
+			news.WithDefaultURL(cfg.News.FSURL),
+			news.WithEnvironment(string(cfg.Env)),
+			news.WithReport(p.options.Report),
+		}
 		if p.options.Robot != nil {
 			if err := news.ValidateSender(p.options.Robot); err != nil {
 				return result, false, fmt.Errorf("robot provider: %w", err)
 			}
-			options.Webhook = p.options.Robot.Robot()
-			if err := news.ValidateSender(options.Webhook); err != nil {
+			webhook := p.options.Robot.Robot()
+			if err := news.ValidateSender(webhook); err != nil {
 				return result, false, fmt.Errorf("robot channel: %w", err)
 			}
+			options = append(options, news.WithWebhook(webhook))
 		} else if cfg.News.FSURL != "" {
 			return result, false, fmt.Errorf("configured robot channel: %w", news.ErrSenderMissing)
 		}
@@ -76,29 +80,38 @@ func (p *Owner) initialize(ctx context.Context) error {
 			if err := news.ValidateSender(p.options.Mail); err != nil {
 				return result, false, fmt.Errorf("configured mail provider: %w", err)
 			}
-			options.Mail = p.options.Mail.Mail()
-			if err := news.ValidateSender(options.Mail); err != nil {
+			mail := p.options.Mail.Mail()
+			if err := news.ValidateSender(mail); err != nil {
 				return result, false, fmt.Errorf("configured mail channel: %w", err)
 			}
-			options.MailTo = slices.Clone(cfg.Email.AlertTo)
+			options = append(options, news.WithMail(mail, cfg.Email.AlertTo...))
 		}
 		if cfg.SMS.Enabled() {
 			if err := news.ValidateSender(p.options.SMS); err != nil {
 				return result, false, fmt.Errorf("configured sms provider: %w", err)
 			}
-			options.SMS = p.options.SMS.SMS()
-			if err := news.ValidateSender(options.SMS); err != nil {
+			sms := p.options.SMS.SMS()
+			if err := news.ValidateSender(sms); err != nil {
 				return result, false, fmt.Errorf("configured sms channel: %w", err)
 			}
-			options.SMSPhones = slices.Clone(cfg.SMS.AlertPhones)
-			options.SMSTemplate = cfg.SMS.AlertTemplate
+			options = append(options, news.WithSMS(sms, cfg.SMS.AlertTemplate, cfg.SMS.AlertPhones...))
 		}
-		result.Sender, err = news.New(options)
+		result.Sender, err = news.New(options...)
 		return result, true, err
 	})
 }
 
 func (p *Owner) Close(ctx context.Context) error { return p.channel.Stop(ctx) }
+
+// Send and SendTo allow direct injection into logger.WithMessager.
+func (p *Owner) Send(text string) { p.SendTo("", text) }
+
+func (p *Owner) SendTo(target, text string) { p.Warn(target, text) }
+
+// SendContext preserves cancellation and aggregate channel errors.
+func (p *Owner) SendContext(ctx context.Context, target, text string) error {
+	return p.Notify(ctx, target, text)
+}
 
 func (p *Owner) Warn(target string, args ...string) {
 	// Warn has no receipt; Notify reports each failure through the safe callback.

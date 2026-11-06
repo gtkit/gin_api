@@ -1,6 +1,11 @@
 package cmd
 
 import (
+	"bytes"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,6 +92,11 @@ func managedModelNames(t *testing.T) []string {
 			t.Fatalf("读取 %s: %v", name, err)
 		}
 		for _, m := range tableNameDecl.FindAllStringSubmatch(string(body), -1) {
+			// The scaffold's demonstration is deliberately unregistered and has no migration.
+			// All other generated modules must be registered when they become managed tables.
+			if name == "example.go" && m[1] == "ExampleRecord" {
+				continue
+			}
 			names = append(names, m[1])
 		}
 	}
@@ -102,18 +112,39 @@ func ddlModelsBlock(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("读取 migrate.go: %v", err)
 	}
-	src := string(body)
-
-	const marker = "migrate.WithDDLModels("
-	_, after, ok := strings.Cut(src, marker)
-	if !ok {
-		t.Fatal("migrate.go 里找不到 migrate.WithDDLModels(：判据的锚点没了，" +
-			"改名时必须同步改这里，否则判据会静默失效")
+	set := token.NewFileSet()
+	file, err := parser.ParseFile(set, "migrate.go", body, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rest := after
-	before0, _, ok0 := strings.Cut(rest, "\n\t\t)")
-	if !ok0 {
-		t.Fatal("找不到 WithDDLModels 实参块的结尾")
+	var blocks []string
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "WithDDLModels" {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok || pkg.Name != "migrate" {
+			return true
+		}
+		var block bytes.Buffer
+		for _, arg := range call.Args {
+			if err := format.Node(&block, set, arg); err != nil {
+				t.Fatal(err)
+			}
+		}
+		blocks = append(blocks, block.String())
+		return false
+	})
+	if len(blocks) != 1 {
+		t.Fatalf("expected one WithDDLModels call, got %d", len(blocks))
 	}
-	return before0
+	if strings.Contains(blocks[0], "&models.ExampleRecord{}") {
+		t.Fatal("unregistered example must not enter default DDL")
+	}
+	return blocks[0]
 }

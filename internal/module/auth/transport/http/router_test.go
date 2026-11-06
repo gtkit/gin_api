@@ -1,13 +1,87 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/module/auth/application"
 )
+
+type waitingCredentials struct {
+	stubCreds
+	entered chan struct{}
+	calls   atomic.Int64
+}
+
+func (s *waitingCredentials) FindByPhone(ctx context.Context, _ string) (application.Credential, bool, error) {
+	s.calls.Add(1)
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return application.Credential{}, false, ctx.Err()
+}
+
+func TestCredentialAdmissionPreservesTokenCapacityBeforeDatabase(t *testing.T) {
+	credentials := &waitingCredentials{entered: make(chan struct{}, 1)}
+	service, err := application.NewService(application.Options{
+		Credentials: credentials, Hasher: stubHasher{}, AccessIssuer: stubIssuer{},
+		RefreshStore: stubRefresh{}, RevocationList: stubRevocation{}, AccessTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	group := engine.Group("/api/v1", middleware.GinRecovery(false), middleware.Admission(3, nil))
+	Register(group, Deps{Service: service, Auth: passthrough(), CredentialAdmission: middleware.Admission(1, nil)})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"phone":"13800138000","password":"ok"}`))
+		req.Header.Set("Content-Type", "application/json")
+		engine.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	<-credentials.entered
+	t.Cleanup(func() { cancel(); <-done })
+	request := func(path, payload string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/"+path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, req)
+		return response.Code
+	}
+	if status := request("login", `{"phone":"13800138000","password":"ok"}`); status != 503 {
+		t.Fatalf("second login = %d", status)
+	}
+	if status := request("register", `{"phone":"13800138001","password":"strong-password"}`); status != 503 {
+		t.Fatalf("register = %d", status)
+	}
+	if credentials.calls.Load() != 1 {
+		t.Fatal("rejected credential request reached database")
+	}
+	if status := request("refresh", `{"refresh_token":"valid"}`); status != 200 {
+		t.Fatalf("refresh = %d", status)
+	}
+	if status := request("logout", `{}`); status == 503 {
+		t.Fatal("logout occupied a credential slot")
+	}
+	cancel()
+	<-done
+	if status := request("register", `{"phone":"13800138001","password":"strong-password"}`); status != 200 {
+		t.Fatalf("credential slot not released after cancellation: %d", status)
+	}
+}
 
 func passthrough() gin.HandlerFunc {
 	return func(c *gin.Context) { c.Next() }

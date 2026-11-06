@@ -92,7 +92,8 @@ HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留
 - **不得直接写日志**——包内直接写日志会把使用者绑定到某个具体日志库，而换一个库只是换个绑定对象。
   把事件交给调用方则彻底消除这个选择。
 
-当前根 `pkg/` 下只有 `pkg/ratelimit`。
+限流实现位于 `internal/pkg/ratelimit`，仅供本项目使用；HTTP、日志和指标由现有适配层接入。
+当前项目没有根 `pkg/` 公共包，以上约束保留用于明确内部能力与公共库的边界。
 
 ## 开发期工具的构建隔离
 
@@ -135,7 +136,7 @@ HTTP 强制关闭、Shutdown 失败或其他日志源未确认结束时也保留
 func NewService(db *gorm.DB) (*someapp.Service, error)
 
 // 多个产物或依赖较多：Deps 入参 + Assembly 出参
-// internal/runtime/module/auth/module.go、internal/runtime/module/ai/module.go 都是这一种
+// internal/runtime/module/auth/module.go、internal/runtime/module/account/module.go 都是这一种
 type Deps struct {
     DB     *gorm.DB
     Redis  *redis.Client
@@ -180,23 +181,25 @@ TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；�
 ```
 resolveInfra（基础设施与派生 HTTP 配置）
   → 遥测导出 → 数据层追踪埋点 → 指标仪表          （telemetry.New / InstrumentTracing / metrics.New）
-  → 限流注册表 → 出站客户端 → 响应缓存 → 任务入队端   （buildRateLimits / httpclient / httpcache / tasks）
+  → 限流注册表 → 响应缓存                         （buildRateLimits / httpcache）
+  → [可选：出站客户端、任务入队端、上传、审计]       （默认注释，按模块 README 启用）
   → buildServices（各模块 application service）
-  → buildMiddlewares（认证与授权中间件）
+  → buildMiddlewares（当前路由需要的认证中间件）
   → buildWorkers（后台任务 + WorkerManager）
   → buildEngine（路由引擎，含限流引用的 fail-closed 判定）
 ```
 
-顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、出站、缓存、
-任务入队必须先于 service（service 在构造时按名字取用它们，名字未登记属装配错误）；
+顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、缓存及已启用的
+可选能力必须先于 service（service 构造时接收需要的依赖）；
 worker 必须先于路由（readiness 要读 worker 状态）。
 
-阶段间用三个聚合 struct 传递状态：`infra`（基础设施与派生配置）、`services`（各模块 application
-service 的具名字段）、`middlewares`（鉴权等 Gin 中间件）。新增基础设施时才往 `infra` 加字段，
-不提前占坑。
+阶段间用 `infra`（基础设施与派生配置）和 `services`（模块产物的具名字段）传递状态。
+`buildMiddlewares` 直接返回当前路由需要的认证函数；仅按实际消费者增加状态，不提前占坑。
+`newProvidersWithBudget` 最终直接构造 `App`，不另建中转结构；指标注销只登记到 `providerCleanup`。
 
 新增模块时，在 `services` 增加实际需要的产物字段，`buildServices` 调用模块装配入口，
-`buildEngine` 的 `RegisterModules` 注册路由。具名授权在 `buildAuthorizers` 注册，
+`buildEngine` 的 `RegisterModules` 注册路由。需要可选认证或具名授权的模块在 `buildEngine` 中显式构造并注入，
+默认启动不预先构造未使用的中间件或授权注册表；角色/VIP 适配器及共享注册表仍可复用。
 任务与调度器在 `buildWorkers` 接入。新增持久化模型同时登记到 `cmd/migrate.go` 的
 `WithDDLModels`，并添加经过审阅的迁移 SQL；新增配置字段同步更新配置示例与校验。
 

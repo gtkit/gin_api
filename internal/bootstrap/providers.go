@@ -8,58 +8,38 @@ import (
 	"fmt"
 
 	"github.com/gtkit/logger/v2"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 	"gorm.io/gorm"
 
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
-	"github.com/gtkit/gin-api/internal/pkg/httpclient"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
-	"github.com/gtkit/gin-api/internal/pkg/tasks"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/platform/telemetry"
 )
 
-type providerSet struct {
-	cleanup    *providerCleanup
-	httpConfig HTTPConfig
-	httpServer httpServer
-	workers    *WorkerManager
-	shutdown   *ShutdownCoordinator
-	// status 供 App 在 pprof 启动后登记它，让异常退出能出现在 readiness 里。
-	status *processStatus
-}
-
 // infra 聚合从 Runtime 解析出的进程级基础设施连接与派生配置，供后续各装配阶段共享。
 type infra struct {
-	accessLogger *logger.Logger
-	resources    *data.Resources
-	cfg          *config.Config
-	mysqlDB      *gorm.DB
-	httpConfig   HTTPConfig
+	optionalInfra //nolint:unused,nolintlint // Default needs the empty carrier; optional uses its fields, so the unused directive is conditional too.
+	accessLogger  *logger.Logger
+	resources     *data.Resources
+	connections   *runtimeResources
+	cfg           *config.Config
+	mysqlDB       *gorm.DB
+	httpConfig    HTTPConfig
 	// rateLimits 是限流注册表与键生成器；未配置策略时为零值。
 	rateLimits rateLimitAssembly
-	// outbound 是具名出站执行入口（客户端 + 熔断），供各模块按下游名取用。
-	outbound *httpclient.Downstreams
 	// cache 是 GET 响应缓存装配器；关闭时它产出透传中间件。
 	cache httpcache.ResponseCache
-	// telemetry 是 OTel 导出侧；关停时按独立预算 flush。
-	telemetry *telemetry.Provider
-	// tasksProducer 是异步任务入队端；未启用时 Enqueue 报 ErrDisabled。
-	tasksProducer *tasks.Producer
 	// recorder 是指标仪表。默认走 OTel 的 no-op：不接导出时每次记录都是
 	// 空操作，因此这里无条件构造，调用点不必判空。
 	recorder *metrics.Recorder
-	// metricsCleanup 注销异步回调，进程关停时调用。
-	//
-	// 不注销的话，回调会继续持有已经停掉的 worker 与已关闭的连接池，
-	// 采集到的是一份永远不再变化的陈旧状态。
-	metricsCleanup []func() error
 }
 
 func newProvidersWithBudget(
 	ctx context.Context, runtime *Runtime, shutdown *ShutdownCoordinator, budget *rollbackBudget,
-) (_ *providerSet, err error) {
+) (_ *App, err error) {
 	// 失败时逆序撤销已登记的副作用；成功时把同一份清理所有权交给 App。
 	cleanup := &providerCleanup{}
 	defer func() {
@@ -68,10 +48,7 @@ func newProvidersWithBudget(
 		}
 	}()
 
-	// 0. 首次绑定前初始化翻译器，避免 validator 缓存未经翻译的字段元数据。
-	if err := initValidation(); err != nil {
-		return nil, err
-	}
+	// Runtime 已在任何 HTTP 绑定前通过 initProcessRuntime 完成校验器初始化。
 
 	// 1. 基础设施视图：从 Runtime 借用已初始化的配置、数据库与日志，
 	//    并据此派生 HTTP 配置。连接的关闭权仍属于 Runtime，
@@ -87,7 +64,6 @@ func newProvidersWithBudget(
 	if err != nil {
 		return nil, fmt.Errorf("build telemetry: %w", err)
 	}
-	inf.telemetry = telemetryProvider
 	cleanup.push("telemetry", cleanupTelemetry, telemetryProvider.Shutdown)
 	if telemetryProvider.Enabled() {
 		logger.Infof("OpenTelemetry export enabled (endpoint=%s, metrics=%t, traces=%t)",
@@ -96,7 +72,7 @@ func newProvidersWithBudget(
 
 	// 2a'. telemetry.New 之后安装数据层追踪，失败即终止装配。
 	//      可恢复 Redis Owner 也在此获知 tracing 就绪；恢复候选须先完成埋点再发布。
-	if err := inf.resources.InstrumentTracing(inf.cfg.Database.Name); err != nil {
+	if err := runtime.instrumentConnections(); err != nil {
 		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
 	}
 
@@ -111,8 +87,27 @@ func newProvidersWithBudget(
 	if unregister, dbErr := registerDBPoolMetrics(recorder, inf.resources); dbErr != nil {
 		return nil, fmt.Errorf("register db pool metrics: %w", dbErr)
 	} else if unregister != nil {
-		inf.metricsCleanup = append(inf.metricsCleanup, unregister)
 		cleanup.push("db pool metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if unregister, runtimeErr := recorder.RegisterRuntimeStats(); runtimeErr != nil {
+		return nil, fmt.Errorf("register runtime metrics: %w", runtimeErr)
+	} else {
+		cleanup.push("runtime metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if unregister, redisErr := recorder.RegisterRedisPoolStats(inf.cfg.Redis.DBs, func(db int) metrics.RedisPoolStats {
+		client := inf.resources.Rdb(db)
+		if client == nil {
+			return metrics.RedisPoolStats{}
+		}
+		stats := client.PoolStats()
+		return metrics.RedisPoolStats{Client: client, Main: *stats, Pipeline: (*redis.PoolStats)(stats.PipelineStats)}
+	}); redisErr != nil {
+		return nil, fmt.Errorf("register Redis metrics: %w", redisErr)
+	} else {
+		cleanup.push("Redis metrics", cleanupMetrics, func(context.Context) error { return unregister() })
+	}
+	if err := registerNamedConnectionMetrics(&inf, cleanup); err != nil {
+		return nil, err
 	}
 
 	// 3. 限流。必须先于 service 与路由装配：认证模块的账号维度限流要从
@@ -124,17 +119,6 @@ func newProvidersWithBudget(
 	}
 	inf.rateLimits = rateLimits
 	cleanup.push("rate limits", cleanupExtensions, func(context.Context) error { return closeRateLimits(rateLimits) })
-
-	// 3b. 先构造具名出站客户端与熔断实例，供 service 按名取用；此处不做 I/O。
-	outbound, err := httpclient.NewDownstreams(inf.cfg.Outbound)
-	if err != nil {
-		return nil, fmt.Errorf("build outbound downstreams: %w", err)
-	}
-	inf.outbound = outbound
-	cleanup.push("outbound http clients", cleanupExtensions, func(context.Context) error { return outbound.Close() })
-	if names := outbound.Names(); len(names) > 0 {
-		logger.Infof("outbound downstreams assembled with circuit breakers: %v", names)
-	}
 
 	// 3c. 借用 Runtime 所有的响应缓存视图，不重复创建或关闭 Store。
 	//     Redis 恢复后既有中间件延迟接入 Store，Enabled 仅用于报告当前状态。
@@ -149,15 +133,9 @@ func newProvidersWithBudget(
 			inf.cfg.Cache.Store, inf.cfg.Cache.EffectiveTTL())
 	}
 
-	// 3d. 异步任务入队端。必须先于 service：service 要注入它才能入队。
-	//     未启用时它是一个空壳，Enqueue 报 ErrDisabled 而不是静默丢弃——
-	//     "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
-	tasksProducer, err := tasks.NewProducer(inf.cfg.Tasks, inf.resources.Rdb(inf.cfg.Tasks.RedisDB))
-	if err != nil {
-		return nil, fmt.Errorf("build task producer: %w", err)
+	if err := buildOptionalProviders(&inf, cleanup); err != nil {
+		return nil, err
 	}
-	inf.tasksProducer = tasksProducer
-	cleanup.push("task producer", cleanupExtensions, tasksProducer.Shutdown)
 
 	// 4. Service：各模块的业务逻辑。
 	svc, err := buildServices(ctx, inf, runtime)
@@ -178,17 +156,9 @@ func newProvidersWithBudget(
 
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
-	//    worker 健康指标的注销回调由 buildWorkers 追加进 inf.metricsCleanup，
-	//    只在构造成功后按长度差把增量纳入清理登记。
-	cleanupsBefore := len(inf.metricsCleanup)
 	workers, err := buildWorkers(&inf)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
-	}
-	for _, unregister := range inf.metricsCleanup[cleanupsBefore:] {
-		if unregister != nil {
-			cleanup.push("worker metrics", cleanupMetrics, func(context.Context) error { return unregister() })
-		}
 	}
 	// 协调器优先用注入的那个：信号在 NewApp 之前就可能到达，唯一的信号监督者
 	// （cmd 层）因此比装配更早构造它。未注入时自建，行为不变。
@@ -211,12 +181,14 @@ func newProvidersWithBudget(
 	}
 
 	// 装配成功：副作用的释放所有权移交 App 的关停序列。
-	return &providerSet{
+	return &App{
 		cleanup:    cleanup,
+		runtime:    runtime,
 		httpConfig: inf.httpConfig,
 		httpServer: newHTTPServer(engine, inf.httpConfig),
 		workers:    workers,
 		shutdown:   coordinator,
+		drainWait:  drainWaitFrom(inf.cfg),
 		status:     status,
 	}, nil
 }
@@ -227,9 +199,9 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	if resources == nil {
 		return infra{}, errors.New("runtime resources are not initialized")
 	}
-	mysqlDB := resources.Mdb()
-	if mysqlDB == nil {
-		return infra{}, errors.New("mysql connection is not available")
+	mysqlDB, err := runtime.Database(config.DefaultConnection)
+	if err != nil {
+		return infra{}, err
 	}
 
 	cfg := runtime.Config()
@@ -248,6 +220,7 @@ func resolveInfra(runtime *Runtime) (infra, error) {
 	return infra{
 		accessLogger: access,
 		resources:    resources,
+		connections:  runtime.owners,
 		cfg:          cfg,
 		mysqlDB:      mysqlDB,
 		httpConfig:   httpConfig,
@@ -268,7 +241,10 @@ func registerDBPoolMetrics(recorder *metrics.Recorder, resources *data.Resources
 	if resources == nil {
 		return nil, nil
 	}
-	gormDB := resources.Mdb()
+	return registerDatabaseMetrics(recorder, resources.Mdb(), "")
+}
+
+func registerDatabaseMetrics(recorder *metrics.Recorder, gormDB *gorm.DB, name string) (func() error, error) {
 	if gormDB == nil {
 		return nil, nil
 	}
@@ -280,11 +256,13 @@ func registerDBPoolMetrics(recorder *metrics.Recorder, resources *data.Resources
 	return recorder.RegisterDBPoolStats(func() metrics.DBPoolStats {
 		stats := sqlDB.Stats()
 		return metrics.DBPoolStats{
-			Open:    stats.OpenConnections,
-			InUse:   stats.InUse,
-			Idle:    stats.Idle,
-			Wait:    stats.WaitCount,
-			MaxOpen: stats.MaxOpenConnections,
+			ConnectionName: name,
+			Open:           stats.OpenConnections,
+			InUse:          stats.InUse,
+			Idle:           stats.Idle,
+			Wait:           stats.WaitCount,
+			MaxOpen:        stats.MaxOpenConnections,
+			WaitDuration:   stats.WaitDuration,
 		}
 	})
 }

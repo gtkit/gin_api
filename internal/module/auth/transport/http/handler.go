@@ -24,6 +24,10 @@ import (
 // 名字读起来正合适，实际会让一次登录失败返回 200——而路由描述符声明的是 401。
 // 那种组合下契约在说谎，客户端按状态码写的分支全部失效。
 var errMapper = resp.NewErrMapper(
+	resp.ErrMapping{Target: application.ErrSessionExpired, Status: goerr.StatusAuth(), Message: "登录状态已失效，请重新登录"},
+	resp.ErrMapping{Target: application.ErrInvalidPassword, Status: goerr.StatusValidateParams(), Message: "密码须为 8 至 72 个字符且不超过 72 字节"},
+	resp.ErrMapping{Target: application.ErrLifecycleDisabled, Status: goerr.StatusServiceUnavailable(), Message: "会话管理未启用"},
+	resp.ErrMapping{Target: application.ErrBusy, Status: goerr.StatusServiceUnavailable(), Message: "服务繁忙，请稍后重试"},
 	resp.ErrMapping{
 		Target: application.ErrInvalidCredentials,
 		Status: goerr.StatusAuth(), Message: "手机号或密码错误",
@@ -90,6 +94,10 @@ func (h *Handler) Register(c *gin.Context) {
 			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
 			return
 		}
+		if errors.Is(err, application.ErrBusy) {
+			resp.CapacityUnavailable(c)
+			return
+		}
 		resp.MapErr(c, err, errMapper)
 		return
 	}
@@ -111,6 +119,10 @@ func (h *Handler) Login(c *gin.Context) {
 		// "退避后重试"与"凭据错误"的处置完全不同。
 		if errors.Is(err, application.ErrAccountRateLimited) {
 			resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
+			return
+		}
+		if errors.Is(err, application.ErrBusy) {
+			resp.CapacityUnavailable(c)
 			return
 		}
 		resp.MapErr(c, err, errMapper)
@@ -161,6 +173,48 @@ func (h *Handler) Logout(c *gin.Context) {
 		return
 	}
 
+	resp.Ok(c, nil)
+}
+
+// ChangePassword changes only the authenticated principal's credential.
+func (h *Handler) ChangePassword(c *gin.Context) {
+	var request dto.ChangePasswordRequest
+	if err := ginx.BindBody(c, &request); err != nil {
+		resp.BindStructErr(c, err)
+		return
+	}
+	identity, ok := ginc.TokenIdentityFromContext(c)
+	if !ok {
+		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
+		return
+	}
+	err := h.service.ChangePassword(c.Request.Context(), ginc.UserIDFromContext(c), identity.SessionVersion, request.OldPassword, request.NewPassword)
+	if errors.Is(err, application.ErrAccountRateLimited) {
+		resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
+		return
+	}
+	if errors.Is(err, application.ErrBusy) {
+		resp.CapacityUnavailable(c)
+		return
+	}
+	if err != nil {
+		resp.MapErr(c, err, errMapper)
+		return
+	}
+	resp.Ok(c, nil)
+}
+
+// LogoutAll invalidates all devices for the authenticated principal.
+func (h *Handler) LogoutAll(c *gin.Context) {
+	identity, ok := ginc.TokenIdentityFromContext(c)
+	if !ok {
+		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
+		return
+	}
+	if err := h.service.LogoutAll(c.Request.Context(), ginc.UserIDFromContext(c), identity.SessionVersion); err != nil {
+		resp.MapErr(c, err, errMapper)
+		return
+	}
 	resp.Ok(c, nil)
 }
 

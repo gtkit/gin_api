@@ -109,15 +109,18 @@ cmd
 `register`/`login` 用 `auth.credential`（按来源，全站唯一接受口令猜测的入口），
 `refresh`/`logout` 用 `auth.token`。
 
+需要已登录改密和全部设备退出时，先执行 `auth_version` 增量迁移，再开启
+`auth.session_lifecycle`（默认 false，仅 local 模式）。新增 `POST /api/v1/auth/password/change`
+与 `POST /api/v1/auth/logout-all`，成功后所有会话需重新登录；不包含密码重置。
+部署与回滚要求见 [会话管理](docs/auth-session-lifecycle.md)，业务权限边界见 [授权约定](docs/authorization.md)。
+
 当前不提供 AI 对话与会话管理模块，`/api/v1/ai/*` 接口不注册。
 历史 SQL 和现有数据保留，旧迁移在新库仍可能创建 AI 表，详见 [数据库说明](database/README.md#ai-模块移除后的历史迁移)。
 
 基础探针：
 
 - `GET /health`：存活检查。
-- `GET /ready`：MySQL、Redis 就绪检查。响应体按依赖分列状态与失败原因，
-  例如 `{"database":{"status":"unavailable","error":"dial tcp ...: connection refused"}}`。
-  **错误详情会带出内网地址与数据库账号名，该端点只应对编排器与内网可达，不得暴露到公网。**
+- `GET /ready`：MySQL、Redis 就绪检查。失败只返回固定文案 `dependency check failed`，原始错误进入服务端日志。该端点提供依赖拓扑，应只对编排器和内网开放。
 
 ### 通用 HTTP 行为
 
@@ -230,13 +233,13 @@ make hooks
 目标机一次性准备：
 
 1. `RootPath` 下准备 `config/env/env.yml`（参照 `config/env.yml.example`）与 `config/pem/`。
-2. supervisor program 指向构建产物：
+2. supervisor program 指向构建产物（先将 `<deployment-root>` 替换为部署目录）：
 
    ```ini
    [program:gin_api]
-   directory=/home/www/gin-api
-   command=/home/www/gin-api/bin/gin_api server
-   environment=APP_ROOT="/home/www/gin-api"
+   directory=<deployment-root>
+   command=<deployment-root>/bin/gin_api server
+   environment=APP_ROOT="<deployment-root>"
    user=www
    autorestart=true
    ```
@@ -306,3 +309,5 @@ REQUIRE_DB_INTEGRATION=1使缺依赖失败；日常check仍不依赖数据库。
 `go run . --version`或二进制`--version`无需配置、数据库或Redis，输出version/commit/build_time。版本常量仍只在version.go；普通go build缺少注入时commit/time显示unknown。make build/image注入当前HEAD及UTC构建时间，CI可显式提供BUILD_COMMIT/BUILD_TIME固定输入；Docker直接构建的同名ARG默认unknown。未提交工作区内容不能仅由HEAD证明，交付应同时保留diff和构建证据。
 
 JWT生成公钥0644可通过doctor；Unix上私钥不得开放group/other访问，公钥及previous公钥不得group/other可写。Windows权限位不代表ACL，未声称ACL已验。生成器只清理本次独占创建的文件，输出失败仍返回错误，已完成且可用的密钥不会因打印失败被删除。
+
+本次补齐的生产脚手架入口：[模块示例与生成](docs/module-example.md)、[OpenAPI 与客户端](docs/api-client.md)、[CI 与私有依赖](docs/ci-security.md)、[监控与基线](monitoring/README.md)、[可选能力装配](docs/optional-capabilities.md)。这些文档分别标明实现、验证范围和部署前的未验证项。

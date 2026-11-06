@@ -1,9 +1,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,26 +22,17 @@ import (
 )
 
 // configFile 是外置配置的固定相对路径。配置一律从磁盘读取，不进二进制、不进 git；
-// 路径解析见 resource.ResolvePath（可执行文件同级的 config/env/ 优先）。
+// 非空 APP_ROOT 只在指定根内查找；未指定根时沿用 resource.ResolvePath。
 const configFile = "config/env/env.yml"
 
 // envPrefix 是配置覆盖层的环境变量前缀。
 //
-// 该前缀是本服务**独占**的命名空间：以它开头却映射不到任何配置键的变量会让启动
-// 失败（decode 的 ErrorUnused）。这是刻意的——这类变量最常见的成因是密钥变量名
-// 拼错，忽略它会让服务带着 YAML 里的空密码正常起来，直到第一次连库才报"认证失败"，
-// 而那条错误与真正的原因之间隔着一整条排查路径。
+// 已知配置键参与覆盖；未知或历史键被忽略，值不写入诊断。
 const envPrefix = "APP_"
 
 // envReservedNames 是 `APP_` 前缀下已被本项目占用、不参与配置覆盖的变量名。
 //
-// `APP_ROOT` 指定项目根目录，`resource.ResolvePath`、`resource.WriteRoot` 与
-// `validateLogConfig` 都读它，生产的 supervisor 配置里就有这一条
-// （见 SCAFFOLD.md 的部署段）。不排除的话它会被映射成配置键 `root`，
-// 撞上未知键 fail-fast——一个由本层引入、让所有既有部署直接起不来的回归。
-//
-// 新增 `APP_` 开头的进程级变量时必须同步登记到这里，否则它会以同样的方式
-// 让启动失败，而错误信息指向的是"未知配置项"，与真正的原因隔着一层。
+// APP_ROOT 选择配置根目录，不作为业务配置键解码。
 var envReservedNames = map[string]struct{}{
 	"APP_ROOT": {},
 }
@@ -67,10 +61,14 @@ func envKeyToConfigPath(name string) string {
 	return strings.ReplaceAll(strings.ToLower(trimmed), "__", ".")
 }
 
-// Load 从磁盘固定路径 config/env/env.yml 读取 typed config。
-// 找不到文件直接报错（fail-fast）：部署须显式提供该文件（参照 config/env.yml.example）。
+// Load 从磁盘读取 typed config。非空 APP_ROOT 只允许依次选择根内的
+// config/env/env.yml、v2/config/env/env.yml；未设置或为空时沿用原资源查找规则。
+// 选中文件后读取、解析或校验失败均直接返回，不再尝试其他配置。
 func Load() (*Config, error) {
-	configPath := resource.ResolvePath(configFile)
+	configPath, err := resolveConfigFile(os.Getenv("APP_ROOT"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve config file: %w", err)
+	}
 	k := koanf.New(".")
 	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
@@ -88,6 +86,24 @@ func Load() (*Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// resolveConfigFile 只约束主配置，不改变密钥、证书和写目录的资源解析。
+func resolveConfigFile(appRoot string) (string, error) {
+	if appRoot == "" {
+		return resource.ResolvePath(configFile), nil
+	}
+
+	primary := filepath.Join(appRoot, configFile)
+	for _, candidate := range [...]string{primary, filepath.Join(appRoot, "v2", configFile)} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	// 让现有读取流程报告主路径缺失，并保留底层 PathError。
+	return primary, nil
 }
 
 // checkConfigFileSafety 校验生产配置文件的形态（config-validation spec）：
@@ -142,42 +158,55 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	}
 
 	var cfg Config
+	var metadata mapstructure.Metadata
 	// This presence-aware field must not inherit mapstructure's float/bool-to-int
 	// coercions. Environment overrides are decimal integer strings.
-	if raw := k.Get("log.sql_slow_threshold_ms"); raw != nil {
-		switch value := raw.(type) {
-		case int, int64:
-		case string:
-			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer: %w", err)
+	for _, field := range []string{"log.sql_slow_threshold_ms", "auth.bcrypt_max_waiters"} {
+		if raw := k.Get(field); raw != nil {
+			switch value := raw.(type) {
+			case int, int64:
+			case string:
+				if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+					return nil, fmt.Errorf("%s must be an integer: %w", field, err)
+				}
+			default:
+				return nil, fmt.Errorf("%s must be an integer, got %T", field, raw)
 			}
-		default:
-			return nil, fmt.Errorf("log.sql_slow_threshold_ms must be an integer, got %T", raw)
 		}
 	}
 	// 配置结构体沿用 mapstructure tag，koanf 默认读 koanf tag，必须显式指定。
 	// cfg.Env 由顶层 env 字段（mapstructure:"env"）直接读入。
 	//
-	// DecoderConfig 复刻 koanf 缺省行为（WeaklyTypedInput + duration/text hooks，
-	// 见 koanf v2 UnmarshalWithConf 源码），仅追加 ErrorUnused：yaml 中存在而
-	// 结构体不认识的键（拼写错误、遗留死配置）直接启动失败，不再静默用默认值。
+	// 保留已知字段的类型转换；未知或历史字段不作为启动准入条件。
 	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{
 		Tag: "mapstructure",
 		DecoderConfig: &mapstructure.DecoderConfig{
+			Metadata: &metadata,
 			DecodeHook: mapstructure.ComposeDecodeHookFunc(
 				mapstructure.StringToTimeDurationHookFunc(),
 				mapstructure.TextUnmarshallerHookFunc(),
 			),
 			WeaklyTypedInput: true,
-			ErrorUnused:      true,
+			ErrorUnused:      false,
 		},
 	}); err != nil {
-		return nil, fmt.Errorf("decode config (存在未知配置项，检查拼写或删除): %w", err)
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
+	cfg.ignoredKeys = slices.Clone(metadata.Unused)
+	slices.Sort(cfg.ignoredKeys)
 
 	return &cfg, nil
+}
+
+// IgnoredKeys reports unrecognized configuration keys, never their values.
+// The returned slice is independent of the loaded configuration.
+func (c *Config) IgnoredKeys() []string {
+	if c == nil {
+		return nil
+	}
+	return slices.Clone(c.ignoredKeys)
 }

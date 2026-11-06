@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/logger/v2"
 	goredis "github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 type Client interface {
@@ -110,6 +112,11 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 		return owner, nil
 	}
 	owner.client = client
+	dbs := slices.Sorted(maps.Keys(client.PoolStats()))
+	logger.Info(
+		fmt.Sprintf("\x1b[0;32mredis connection established\x1b[0m \x1b[0;96mdbs=%v\x1b[0m", dbs),
+		zap.Ints("dbs", dbs),
+	)
 	return owner, nil
 }
 
@@ -302,9 +309,19 @@ func (p *Owner) Close(ctx context.Context) error {
 }
 
 func (p *Owner) finishClose(client Client, recoveryDone, done chan struct{}) {
+	var dbs []int
+	if client != nil {
+		dbs = slices.Sorted(maps.Keys(client.PoolStats()))
+	}
 	err := closeClient(client)
 	if recoveryDone != nil {
 		<-recoveryDone
+	}
+	if client != nil && err == nil {
+		logger.Info(
+			fmt.Sprintf("\x1b[0;31mredis connection closed\x1b[0m \x1b[0;96mdbs=%v\x1b[0m", dbs),
+			zap.Ints("dbs", dbs),
+		)
 	}
 	p.mu.Lock()
 	p.closeErr = errors.Join(err, p.terminalErr)

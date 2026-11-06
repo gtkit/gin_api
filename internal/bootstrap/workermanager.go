@@ -231,7 +231,7 @@ func (m *WorkerManager) prepareAll(ctx context.Context) error {
 			return fmt.Errorf("worker startup budget exhausted before preparing %q: %w", w.Name(), err)
 		}
 
-		prepareCtx, cancel := withBoundedTimeout(ctx, m.budget.Prepare)
+		prepareCtx, cancel := context.WithTimeout(ctx, m.budget.Prepare)
 		err := invokeWorker(prepareCtx, w.Name(), w.Prepare)
 		cancel()
 
@@ -603,17 +603,8 @@ func (m *WorkerManager) cleanupEntry(ctx context.Context, entry *preparedWorker)
 	cleanupCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx), m.budget.Cleanup)
 	defer cancel()
-	if m.forced != nil {
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			select {
-			case <-m.forced:
-				cancel()
-			case <-stop:
-			}
-		}()
-	}
+	cleanupCtx, finish := forceContext(cleanupCtx, m.forced)
+	defer finish()
 
 	return invokeWorker(cleanupCtx, entry.worker.Name(), entry.worker.Cleanup)
 }
@@ -622,19 +613,4 @@ func (m *WorkerManager) snapshotPrepared() []*preparedWorker {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]*preparedWorker(nil), m.prepared...)
-}
-
-// withBoundedTimeout 返回 min(limit, 父 ctx 剩余) 的子 ctx。
-//
-// 与资源预算同一形态：单项上限不能冲破总预算。
-func withBoundedTimeout(parent context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
-	if deadline, ok := parent.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < limit {
-			limit = remaining
-		}
-	}
-	if limit <= 0 {
-		return context.WithDeadline(parent, time.Now().Add(-time.Nanosecond))
-	}
-	return context.WithTimeout(parent, limit)
 }

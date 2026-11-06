@@ -68,6 +68,9 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: New called with mode %q, expected %q",
 			deps.Config.Mode, config.AuthModeLocal)
 	}
+	if deps.Config.EffectiveBcryptMaxWaiters() < 0 || deps.Config.BcryptQueueTimeout < 0 {
+		return Assembly{}, fmt.Errorf("auth: invalid password queue capacity or timeout")
+	}
 	if deps.DB == nil {
 		return Assembly{}, fmt.Errorf("auth: database is required")
 	}
@@ -99,9 +102,16 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 		return Assembly{}, fmt.Errorf("auth: build password hasher: %w", err)
 	}
 
+	credentials := authcredential.New(deps.DB)
+	var sessions authapp.SessionRepository
+	if deps.Config.SessionLifecycle {
+		credentials = authcredential.NewWithSessionVersion(deps.DB)
+		sessions = credentialRepo{repo: credentials}
+	}
 	service, err := authapp.NewService(authapp.Options{
-		Credentials:    credentialRepo{repo: authcredential.New(deps.DB)},
-		Hasher:         newPasswordHasher(hasher, deps.Config.EffectiveBcryptConcurrency()),
+		Credentials:    credentialRepo{repo: credentials},
+		Sessions:       sessions,
+		Hasher:         newPasswordHasher(hasher, deps.Config, deps.Metrics),
 		AccessIssuer:   deps.Issuer,
 		RefreshStore:   refreshStore{store: refresh},
 		RevocationList: revocation,

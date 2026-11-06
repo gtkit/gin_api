@@ -112,8 +112,9 @@ type RefreshStore struct {
 // KEYS[1] = 记录键
 // ARGV[1] = uid
 // ARGV[2] = TTL（毫秒）
+// ARGV[3] = 规范十进制会话版本字符串
 const issueScript = `
-redis.call('HSET', KEYS[1], 'uid', ARGV[1], 'used', '0')
+redis.call('HSET', KEYS[1], 'uid', ARGV[1], 'used', '0', 'session_version', ARGV[3])
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
 `
@@ -152,25 +153,26 @@ return 1
 // ARGV[1] 记录存活秒数；ARGV[2] 新秘密段的**密文**；ARGV[3] 重放截止时刻（毫秒）
 // ARGV[4] 当前时刻（毫秒）
 //
-// 返回 {code, uid, replayMaterial}（第三项是密文，解密在 Go 侧）：
+// 返回 {code, uid, replayMaterial, version}（第三项是密文，解密在 Go 侧）：
 //
 //	0 正常消费  1 令牌不存在  2 重用  3 族已撤销  4 窗口内重放
 const consumeScript = `
 if redis.call('EXISTS', KEYS[2]) == 1 then
-  return {3, '', ''}
+  return {3, '', '', '0'}
 end
 
-local record = redis.call('HMGET', KEYS[1], 'uid', 'used', 'next', 'replay_until')
+local record = redis.call('HMGET', KEYS[1], 'uid', 'used', 'next', 'replay_until', 'session_version')
 local uid, used, next_secret, replay_until = record[1], record[2], record[3], record[4]
+local version = record[5] or '0'
 
 if not uid then
-  return {1, '', ''}
+  return {1, '', '', '0'}
 end
 if used == '1' then
   -- 窗口内：把首次轮换出的密文原样返回，等价于那次调用的重放。
   if next_secret and next_secret ~= '' and replay_until
      and tonumber(ARGV[4]) < tonumber(replay_until) then
-    return {4, uid, next_secret}
+    return {4, uid, next_secret, version}
   end
   -- 窗口外：这次重放说明令牌被复制了出去。**就地撤销整族**。
   --
@@ -178,16 +180,16 @@ if used == '1' then
   -- "已判定重用而族尚未撤销"的窗口，窗口内并发请求可以消费下一代令牌
   -- 并换出新的访问令牌——泄漏链因此在防线已经报警之后仍然产出可用凭据。
   redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
-  return {2, uid, ''}
+  return {2, uid, '', version}
 end
 
 redis.call('HSET', KEYS[1], 'used', '1', 'next', ARGV[2], 'replay_until', ARGV[3])
 -- 原记录保留**完整寿命**，不缩短到重放窗口：缩短的话，窗口一过记录就消失，
 -- 泄漏令牌的迟到重放会走到"找不到"分支，而那条路径什么也不撤销。
 redis.call('EXPIRE', KEYS[1], ARGV[1])
-redis.call('HSET', KEYS[3], 'uid', uid, 'used', '0')
+redis.call('HSET', KEYS[3], 'uid', uid, 'used', '0', 'session_version', version)
 redis.call('EXPIRE', KEYS[3], ARGV[1])
-return {0, uid, ''}
+return {0, uid, '', version}
 `
 
 // peekScript 只读判定一个刷新令牌当前能否被消费，**不改动任何状态**。
@@ -203,29 +205,30 @@ return {0, uid, ''}
 // KEYS[1] 令牌记录；KEYS[2] 族撤销标记
 // ARGV[1] 当前时刻（毫秒）
 //
-// 返回 {code, uid}，code 与 consumeScript 同义：
+// 返回 {code, uid, version}，code 与 consumeScript 同义：
 //
 //	0 可消费  1 令牌不存在  2 重用（此处**不撤销**，撤销由 Consume 原子完成）
 //	3 族已撤销  4 窗口内重放（可消费）
 const peekScript = `
 if redis.call('EXISTS', KEYS[2]) == 1 then
-  return {3, ''}
+  return {3, '', '0'}
 end
 
 local record = redis.call('HMGET', KEYS[1], 'uid', 'used', 'next', 'replay_until')
 local uid, used, next_secret, replay_until = record[1], record[2], record[3], record[4]
+local version = redis.call('HGET', KEYS[1], 'session_version') or '0'
 
 if not uid then
-  return {1, ''}
+  return {1, '', '0'}
 end
 if used == '1' then
   if next_secret and next_secret ~= '' and replay_until
      and tonumber(ARGV[1]) < tonumber(replay_until) then
-    return {4, uid}
+    return {4, uid, version}
   end
-  return {2, uid}
+  return {2, uid, version}
 end
-return {0, uid}
+return {0, uid, version}
 `
 
 // NewRefreshStore 构造 RefreshStore 并预加载脚本。
@@ -291,15 +294,23 @@ const defaultReplayWindow = 10 * time.Second
 //
 // 登录时调用。返回的是**明文令牌**，只此一次——存储里只有它的哈希。
 func (s *RefreshStore) Issue(ctx context.Context, uid int64) (string, error) {
+	return s.IssueForSession(ctx, uid, 0)
+}
+
+// IssueForSession binds the refresh family to its authentication version.
+func (s *RefreshStore) IssueForSession(ctx context.Context, uid, version int64) (string, error) {
+	if version < 0 {
+		return "", ErrMalformedToken
+	}
 	family, err := randomSegment()
 	if err != nil {
 		return "", err
 	}
-	return s.issueInFamily(ctx, uid, family)
+	return s.issueInFamily(ctx, uid, family, version)
 }
 
 // issueInFamily 在指定族内签发令牌。
-func (s *RefreshStore) issueInFamily(ctx context.Context, uid int64, family string) (string, error) {
+func (s *RefreshStore) issueInFamily(ctx context.Context, uid int64, family string, version int64) (string, error) {
 	secret, err := randomSegment()
 	if err != nil {
 		return "", err
@@ -307,15 +318,15 @@ func (s *RefreshStore) issueInFamily(ctx context.Context, uid int64, family stri
 
 	// 写入与 TTL 原子生效（issueScript）：分步执行时 Expire 失败会留下
 	// 一条永不过期的垃圾记录。
-	if err := s.runIssue(ctx, s.recordKey(family, secret), uid); err != nil {
+	if err := s.runIssue(ctx, s.recordKey(family, secret), uid, version); err != nil {
 		return "", err
 	}
 	return family + tokenSeparator + secret, nil
 }
 
 // runIssue 执行签发脚本，并在 NOSCRIPT 时重载后重试一次。
-func (s *RefreshStore) runIssue(ctx context.Context, key string, uid int64) error {
-	args := []any{uid, s.ttl.Milliseconds()}
+func (s *RefreshStore) runIssue(ctx context.Context, key string, uid, version int64) error {
+	args := []any{uid, s.ttl.Milliseconds(), strconv.FormatInt(version, 10)}
 
 	_, err := s.client.EvalSha(ctx, *s.issueSHA.Load(), []string{key}, args...).Result()
 	if err != nil && isNoScript(err) {
@@ -343,9 +354,15 @@ func (s *RefreshStore) runIssue(ctx context.Context, key string, uid int64) erro
 // **重用在这里只报告、不撤销**：撤销必须与检测原子发生，那由 Consume 完成。
 // 调用方收到 ErrRefreshReused 时应调用 Consume 让撤销真正发生。
 func (s *RefreshStore) Peek(ctx context.Context, token string) (int64, error) {
+	uid, _, err := s.PeekSession(ctx, token)
+	return uid, err
+}
+
+// PeekSession also returns the immutable version that authorized the family.
+func (s *RefreshStore) PeekSession(ctx context.Context, token string) (int64, int64, error) {
 	family, secret, err := splitToken(token)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	keys := []string{s.recordKey(family, secret), s.familyKey(family)}
@@ -355,30 +372,34 @@ func (s *RefreshStore) Peek(ctx context.Context, token string) (int64, error) {
 	if err != nil && isNoScript(err) {
 		sha, loadErr := s.client.ScriptLoad(ctx, peekScript).Result()
 		if loadErr != nil {
-			return 0, fmt.Errorf("tokenstore: reload peek script: %w", loadErr)
+			return 0, 0, fmt.Errorf("tokenstore: reload peek script: %w", loadErr)
 		}
 		s.peekSHA.Store(&sha)
 		raw, err = s.client.EvalSha(ctx, sha, keys, args...).Result()
 	}
 	if err != nil {
-		return 0, fmt.Errorf("tokenstore: peek refresh token: %w", err)
+		return 0, 0, fmt.Errorf("tokenstore: peek refresh token: %w", err)
 	}
 
+	raw, version, err := sessionResult(raw, 2)
+	if err != nil {
+		return 0, 0, err
+	}
 	code, uid, err := parsePeekResult(raw)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	switch code {
 	case 0, 4: // 可消费（含窗口内重放）
-		return uid, nil
+		return uid, version, nil
 	case 1:
-		return 0, ErrRefreshNotFound
+		return 0, 0, ErrRefreshNotFound
 	case 2:
-		return 0, ErrRefreshReused
+		return 0, 0, ErrRefreshReused
 	case 3:
-		return 0, ErrFamilyRevoked
+		return 0, 0, ErrFamilyRevoked
 	default:
-		return 0, fmt.Errorf("tokenstore: unexpected peek result %d", code)
+		return 0, 0, fmt.Errorf("tokenstore: unexpected peek result %d", code)
 	}
 }
 
@@ -412,30 +433,36 @@ func parsePeekResult(raw any) (code, uid int64, err error) {
 // Consume 消费一个刷新令牌并轮换出新的。
 //
 // 返回用户 ID 与新的刷新令牌。检测到重用时撤销整族并返回 ErrRefreshReused。
-func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, newToken string, err error) {
+func (s *RefreshStore) Consume(ctx context.Context, token string) (int64, string, error) {
+	uid, _, next, err := s.ConsumeSession(ctx, token)
+	return uid, next, err
+}
+
+// ConsumeSession rotates or replays a token while preserving its original version.
+func (s *RefreshStore) ConsumeSession(ctx context.Context, token string) (uid, version int64, newToken string, err error) {
 	family, secret, err := splitToken(token)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 
 	// 下一代秘密段仍是随机值（不可预测性不变）；写入存储前加密。
 	nextSecret, err := randomSegment()
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 	sealedNext, err := s.sealReplay(nextSecret)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 
-	code, uid, replayMaterial, err := s.runConsume(ctx, family, secret, nextSecret, sealedNext)
+	code, uid, replayMaterial, version, err := s.runConsume(ctx, family, secret, nextSecret, sealedNext)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 
 	switch code {
 	case 0:
-		return uid, family + tokenSeparator + nextSecret, nil
+		return uid, version, family + tokenSeparator + nextSecret, nil
 	case 4:
 		// 窗口内重放：解密出首次轮换的那个令牌，与首次调用返回完全一致。
 		// **不报重用**——这次重放几乎可以肯定是客户端在重试一个丢失的响应。
@@ -444,11 +471,11 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 			// 解密失败（密钥轮换、记录被篡改）判为**普通拒绝**：重新登录即可。
 			// 不当成重用——误判会连带撤销合法用户的整族，而这里根本无法区分
 			// 密钥换了与记录被动过。
-			return 0, "", fmt.Errorf("%w: %w", ErrRefreshNotFound, openErr)
+			return 0, 0, "", fmt.Errorf("%w: %w", ErrRefreshNotFound, openErr)
 		}
-		return uid, family + tokenSeparator + replaySecret, nil
+		return uid, version, family + tokenSeparator + replaySecret, nil
 	case 1:
-		return 0, "", ErrRefreshNotFound
+		return 0, 0, "", ErrRefreshNotFound
 	case 2:
 		// 一个已被消费的令牌再次出现，意味着它被复制到了别处。仅拒绝这一次
 		// 会让攻击者继续持有可用凭据；撤销整族会同时切断攻击者与合法用户，
@@ -457,18 +484,18 @@ func (s *RefreshStore) Consume(ctx context.Context, token string) (uid int64, ne
 		// **撤销已由脚本就地完成**：返回码 2 意味着族撤销标记此刻已经写入，
 		// 因此这里不再补一次调用——那一次补调用正是"已判定重用而族尚未撤销"
 		// 窗口的来源。
-		return 0, "", ErrRefreshReused
+		return 0, 0, "", ErrRefreshReused
 	case 3:
-		return 0, "", ErrFamilyRevoked
+		return 0, 0, "", ErrFamilyRevoked
 	default:
-		return 0, "", fmt.Errorf("tokenstore: unexpected consume result %d", code)
+		return 0, 0, "", fmt.Errorf("tokenstore: unexpected consume result %d", code)
 	}
 }
 
 // runConsume 执行脚本，并在 NOSCRIPT 时重载后重试一次。
 func (s *RefreshStore) runConsume(
 	ctx context.Context, family, secret, nextSecret, sealedNext string,
-) (code, uid int64, replayMaterial string, err error) {
+) (code, uid int64, replayMaterial string, version int64, err error) {
 	keys := []string{
 		s.recordKey(family, secret),
 		s.familyKey(family),
@@ -489,16 +516,21 @@ func (s *RefreshStore) runConsume(
 		// 一次重启不该把所有在线用户都踢下线。
 		sha, loadErr := s.client.ScriptLoad(ctx, consumeScript).Result()
 		if loadErr != nil {
-			return 0, 0, "", fmt.Errorf("tokenstore: reload refresh script: %w", loadErr)
+			return 0, 0, "", 0, fmt.Errorf("tokenstore: reload refresh script: %w", loadErr)
 		}
 		s.sha.Store(&sha)
 		raw, err = s.client.EvalSha(ctx, sha, keys, args...).Result()
 	}
 	if err != nil {
-		return 0, 0, "", fmt.Errorf("tokenstore: consume refresh token: %w", err)
+		return 0, 0, "", 0, fmt.Errorf("tokenstore: consume refresh token: %w", err)
 	}
 
-	return parseConsumeResult(raw)
+	raw, version, err = sessionResult(raw, 3)
+	if err != nil {
+		return 0, 0, "", 0, err
+	}
+	code, uid, replayMaterial, err = parseConsumeResult(raw)
+	return code, uid, replayMaterial, version, err
 }
 
 // parseConsumeResult 解析脚本返回的三元组。
@@ -660,4 +692,28 @@ func hashSegment(secret string) string {
 // isNoScript 判断错误是否为脚本缓存缺失。
 func isNoScript(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), "NOSCRIPT")
+}
+
+// sessionResult accepts pre-versioning records as version zero. Explicit malformed
+// versions fail closed, including values that cannot be represented exactly.
+func sessionResult(raw any, width int) (any, int64, error) {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, 0, ErrMalformedToken
+	}
+	if len(values) == width {
+		return values, 0, nil
+	}
+	if len(values) != width+1 {
+		return nil, 0, ErrMalformedToken
+	}
+	text, ok := values[width].(string)
+	if !ok {
+		return nil, 0, ErrMalformedToken
+	}
+	version, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || version < 0 || strconv.FormatInt(version, 10) != text {
+		return nil, 0, ErrMalformedToken
+	}
+	return values[:width], version, nil
 }

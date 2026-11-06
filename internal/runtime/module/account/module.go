@@ -13,9 +13,10 @@ import (
 
 // Assembly 提供账号状态与具名授权需要的校验能力。
 type Assembly struct {
-	Users sharedauth.UserVerifier
-	VIP   sharedauth.VIPVerifier
-	Roles sharedauth.RoleVerifier
+	Users    sharedauth.UserVerifier
+	VIP      sharedauth.VIPVerifier
+	Roles    sharedauth.RoleVerifier
+	Sessions sharedauth.SessionVerifier
 }
 
 // New 只装配校验源，不查询数据库；Users 与 VIP 共享一个账号仓储。
@@ -24,5 +25,5 @@ func New(db *gorm.DB) (Assembly, error) {
 		return Assembly{}, errors.New("account: database is required")
 	}
 	accounts := useraccount.New(db)
-	return Assembly{Users: accounts, VIP: accounts, Roles: userrole.New(db)}, nil
+	return Assembly{Users: accounts, VIP: accounts, Roles: userrole.New(db), Sessions: accounts}, nil
 }

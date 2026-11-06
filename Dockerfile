@@ -9,16 +9,18 @@ FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e
 ARG APP_NAME
 # GOPROXY 可覆盖：容器内默认 proxy.golang.org 在部分网络不可达，Go 会回退 direct，
 # 而 direct 需要 builder 基础镜像里并不存在的 git，最终表现为 `go mod download` 失败。
-# 依赖全部公开，注入一个可达的 proxy 即可，无需给镜像装 git。
+# 私有模块可使用只读 netrc secret；不要把凭据放进 build args 或代理 URL。
 ARG GOPROXY
+ARG GOPRIVATE=github.com/gtkit/*
 ARG BUILD_COMMIT=unknown
 ARG BUILD_TIME=unknown
-ENV GOPROXY=${GOPROXY}
+RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=netrc,target=/root/.netrc,mode=0600 \
+    GOPROXY=${GOPROXY:-https://proxy.golang.org,direct} GOPRIVATE=${GOPRIVATE} go mod download
 
 COPY . .
 

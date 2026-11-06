@@ -7,9 +7,6 @@
 # 匹配按 文件路径 + 变量名，不含行号：行号会随无关改动漂移，
 # 让登记表变成需要频繁维护的噪声，最终被人整体放宽。
 
-cmd/registry.go:rootCommandFactories   # cmd — 命令自注册表，只在各命令文件的 init() 里追加，NewRootCmd 之后只读
-cmd/registry.go:dbCommandFactories     # cmd — 同上，db 命令组的自注册表
-
 internal/pkg/console/console.go:consoleWriter  # pkg/console — 测试期重定向输出，save/restore 成对，仅测试路径调用
 internal/pkg/console/console.go:exitFunc       # pkg/console — 同上，测试期替换退出函数
 

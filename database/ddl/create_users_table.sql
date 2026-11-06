@@ -6,6 +6,7 @@ CREATE TABLE `users` (
   `phone` varchar(20) COMMENT '手机号',
   `email` varchar(100) COMMENT '邮箱',
   `password` varchar(255) NOT NULL COMMENT '密码',
+  `auth_version` bigint NOT NULL DEFAULT 0 COMMENT '认证会话版本',
   `status` tinyint(1) NOT NULL DEFAULT 1 COMMENT '用户状态 1-正常 2-禁用 3-删除',
   `vip_status` tinyint(1) NOT NULL DEFAULT 0 COMMENT '会员状态 0-非会员 1-会员 2-已过期 3-已取消',
   `vip_level` tinyint(1) NOT NULL DEFAULT 0 COMMENT '会员级别',

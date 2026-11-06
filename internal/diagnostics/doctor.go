@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,6 +45,7 @@ const (
 	CodeOK                = "ok"
 	CodeConfigInvalid     = "config_invalid"
 	CodeUnreachable       = "unreachable"
+	CodeProbeFailed       = "probe_failed"
 	CodeTimeout           = "timeout"
 	CodePermission        = "permission"
 	CodeMissing           = "missing"
@@ -145,8 +147,10 @@ type Options struct {
 // 注入而不是在本包内建连：本包不应该知道如何建立数据库连接，
 // 那是资源装配的职责，复制一份就会与真正的装配路径漂移。
 type Probes struct {
-	PingDB    func(context.Context) error
-	PingRedis func(context.Context) error
+	PingDB         func(context.Context) error
+	PingRedis      func(context.Context) error
+	NamedDatabases map[string]func(context.Context) error
+	NamedRedis     map[string]func(context.Context) error
 }
 
 const defaultCheckTimeout = 3 * time.Second
@@ -171,6 +175,12 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) Report {
 	}
 
 	checks := buildChecks(cfg, opts)
+	if keys := cfg.IgnoredKeys(); len(keys) != 0 {
+		checks = append(checks, check{name: "ignored_config_keys", run: func(context.Context) CheckResult {
+			return CheckResult{Status: StatusDegraded, ErrorCode: CodeInconsistent,
+				Detail: "unrecognized configuration keys: " + strings.Join(keys, ", ")}
+		}})
+	}
 	results := make([]CheckResult, len(checks))
 
 	var group sync.WaitGroup
@@ -212,7 +222,7 @@ func runCheck(parent context.Context, chk check, timeout time.Duration) CheckRes
 }
 
 func buildChecks(cfg *config.Config, opts Options) []check {
-	return []check{
+	checks := []check{
 		{name: "config", run: func(context.Context) CheckResult { return checkConfig(cfg) }},
 		{name: "jwt_keys", run: func(context.Context) CheckResult { return checkJWTKeys(cfg) }},
 		{name: "log_dir_writable", run: func(context.Context) CheckResult { return checkLogDir(cfg, opts.Deep) }},
@@ -227,6 +237,20 @@ func buildChecks(cfg *config.Config, opts Options) []check {
 			return checkProbe(ctx, opts, opts.Probes.PingRedis, opts.RedisRequired)
 		}},
 	}
+	addNamed := func(name string, probe func(context.Context) error) {
+		checks = append(checks, check{name: name, run: func(ctx context.Context) CheckResult {
+			namedOpts := opts
+			namedOpts.ProbesUnavailable = opts.ProbesUnavailable || probe == nil
+			return checkProbe(ctx, namedOpts, probe, true)
+		}})
+	}
+	for name := range cfg.DatabaseConnections {
+		addNamed("database["+name+"]", opts.Probes.NamedDatabases[name])
+	}
+	for name := range cfg.RedisConnections {
+		addNamed("redis["+name+"]", opts.Probes.NamedRedis[name])
+	}
+	return checks
 }
 
 func checkConfig(cfg *config.Config) CheckResult {
@@ -381,9 +405,6 @@ func nearestExistingDir(dir string) (string, bool) {
 func checkPoolConsistency(cfg *config.Config) CheckResult {
 	var issues []string
 
-	if cfg.Database.MaxOpenConn > 0 && cfg.Database.MaxIdleConn > cfg.Database.MaxOpenConn {
-		issues = append(issues, "database.maxidleconn exceeds database.maxopenconn")
-	}
 	if cfg.Redis.PoolSize > 0 && cfg.Redis.MinIdleConns > cfg.Redis.PoolSize {
 		issues = append(issues, "redis.min_idle_conns exceeds redis.pool_size")
 	}
@@ -429,7 +450,21 @@ func checkProbe(ctx context.Context, opts Options, probe func(context.Context) e
 			status = StatusFail
 		}
 		// 绝不回显原始错误：它经常带完整 DSN（含用户名，有时含密码）。
-		return CheckResult{Status: status, ErrorCode: CodeUnreachable, Detail: "dependency is not reachable"}
+		code, detail := CodeProbeFailed, "dependency check failed"
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			code, detail = CodeTimeout, "dependency check timed out"
+		case errors.Is(err, os.ErrPermission):
+			code, detail = CodePermission, "dependency access denied"
+		default:
+			if op, ok := errors.AsType[*net.OpError](err); ok {
+				code, detail = CodeUnreachable, "dependency connection failed"
+				if op.Timeout() {
+					code, detail = CodeTimeout, "dependency connection timed out"
+				}
+			}
+		}
+		return CheckResult{Status: status, ErrorCode: code, Detail: detail}
 	}
 	return CheckResult{Status: StatusPass, ErrorCode: CodeOK, Detail: "reachable"}
 }

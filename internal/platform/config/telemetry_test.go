@@ -41,12 +41,11 @@ func TestValidateTelemetryConfig(t *testing.T) {
 			wantErr: "sample_ratio",
 		},
 		{
-			name: "flush 预算超上限",
+			name: "允许长 flush 预算",
 			cfg: TelemetryConfig{
 				Enabled: true, Endpoint: "collector:4318", Metrics: true,
 				ShutdownTimeout: time.Hour,
 			},
-			wantErr: "exceeds the",
 		},
 	}
 

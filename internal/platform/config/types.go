@@ -8,9 +8,17 @@ import (
 
 // Config 是服务的强类型运行配置。
 type Config struct {
-	Env      env.Env        `mapstructure:"env"`
-	App      AppConfig      `mapstructure:"application"`
-	Database DatabaseConfig `mapstructure:"database"`
+	OptionalConfig `mapstructure:",squash"`
+	ignoredKeys    []string
+	Env            env.Env        `mapstructure:"env"`
+	App            AppConfig      `mapstructure:"application"`
+	Database       DatabaseConfig `mapstructure:"database"`
+	// DatabaseConnections holds additional MySQL instances. Empty means only the
+	// "default" connection; entries are independent and never inherit it.
+	DatabaseConnections map[string]DatabaseConfig `mapstructure:"database_connections"`
+	// RedisConnections holds additional required Redis instances. Each entry has
+	// its own address, DB set and pool settings; "default" is reserved for Redis.
+	RedisConnections map[string]RedisConfig `mapstructure:"redis_connections"`
 	// Email / SMS 是出站通知通道：host / provider 为空即不启用（不构造客户端），
 	// 启用时其余必填字段在 Validate fail-fast。告警多通道消费见 internal/pkg/news。
 	Email EmailConfig `mapstructure:"email"`
@@ -27,19 +35,14 @@ type Config struct {
 	Proxy ProxyConfig `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
-	// Outbound 是出站 HTTP 客户端的具名声明。clients 为空即不启用。
-	Outbound OutboundConfig `mapstructure:"outbound"`
 	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
 	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
 	Cache CacheConfig `mapstructure:"cache"`
 	// Telemetry 是 OpenTelemetry 导出配置。默认关闭，此时埋点仍在但走 no-op。
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
-	// Tasks 是异步任务队列配置。默认关闭——队列一旦开始入队就必须有人消费。
-	Tasks TasksConfig `mapstructure:"tasks"`
 }
 
 type AppConfig struct {
-	Domain      string `mapstructure:"domain"`
 	Host        string `mapstructure:"host"`
 	EnableHTTPS bool   `mapstructure:"ishttps"`
 	Name        string `mapstructure:"name"`
@@ -53,6 +56,9 @@ type AppConfig struct {
 	Timezone               string `mapstructure:"timezone"`
 	// MaxBodyBytes 全局请求体大小上限（字节）。<=0 时由中间件兜底为默认 10MB。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// MaxInflightRequests 限制 /api/v1 同时处理数；0/省略使用 128，负数非法。
+	// 满载返回 503；探针不占名额，不提供关闭准入的配置值。
+	MaxInflightRequests int `mapstructure:"max_inflight_requests"`
 	// DrainWaitSeconds 是优雅关停时「/ready 翻成 503」与「关闭 HTTP 监听」之间的等待秒数。
 	//
 	// 它等的是**负载均衡器的传播延迟**：本实例已经宣告自己不再就绪，但 LB 还需要
@@ -67,6 +73,14 @@ type AppConfig struct {
 //
 // 5s 覆盖常见 LB（Nginx upstream check / k8s readinessProbe）的默认探测间隔。
 const DefaultDrainWait = 5 * time.Second
+
+// EffectiveMaxInflightRequests 返回业务并发初值；实际部署应按延迟和吞吐校准。
+func (a AppConfig) EffectiveMaxInflightRequests() int {
+	if a.MaxInflightRequests > 0 {
+		return a.MaxInflightRequests
+	}
+	return 128
+}
 
 // ProxyConfig 描述本进程前面的反向代理拓扑。
 //
@@ -87,7 +101,6 @@ type ProxyConfig struct {
 }
 
 type DatabaseConfig struct {
-	DBType   string `mapstructure:"dbtype"`
 	Host     string `mapstructure:"host"`
 	Port     string `mapstructure:"port"`
 	Name     string `mapstructure:"name"`
@@ -109,14 +122,17 @@ type DatabaseConfig struct {
 	// 与 MaxLifeSeconds 一样必须为正：0 会被底层解释成"无限空闲"，等于无意关闭了
 	// 连接轮换——数据库侧单方面断开的连接会一直留在池里，直到某次请求才发现它已死。
 	MaxIdleTimeSeconds int `mapstructure:"maxidletimeseconds"`
+	// PrepareStmtMaxSize 限制服务与迁移各自 GORM 缓存驻留的 SQL 种类。
+	// 省略或 0 使用 128；显式值必须为正，不能用 0 关闭预编译。
+	PrepareStmtMaxSize int `mapstructure:"prepare_stmt_max_size"`
+	// PrepareStmtTTLSeconds 是预编译缓存项的存活时间（秒），不是 SQL 执行超时。
+	// 省略或 0 使用 3600；显式值必须为正且秒数转换不溢出 time.Duration，与 PrepareStmtMaxSize 共同限制缓存。
+	PrepareStmtTTLSeconds int `mapstructure:"prepare_stmt_ttl_seconds"`
 	// Charset / Collation 是连接与迁移**共用**的单一来源。
 	// 不依赖数据库环境默认值：同一份 SQL 在不同默认 collation 的实例上，
 	// 比较与排序结果会不同，而这种差异只在数据量上来后才暴露。
 	Charset   string `mapstructure:"charset"`
 	Collation string `mapstructure:"collation"`
-	// MinVersion 是受支持的最低 MySQL 版本（形如 "8.0"）。
-	// 它同时用于跳过 GORM 的版本探测（WithServerVersion）与启动期的实测校验。
-	MinVersion string `mapstructure:"min_version"`
 }
 
 // 数据库连接的默认值，未配置时使用。
@@ -126,11 +142,16 @@ type DatabaseConfig struct {
 const (
 	DefaultDBCharset            = "utf8mb4"
 	DefaultDBCollation          = "utf8mb4_unicode_ci"
-	DefaultDBMinVersion         = "8.0"
 	DefaultDBMaxOpenConn        = 25
 	DefaultDBMaxIdleConn        = 10
 	DefaultDBMaxLifeSeconds     = 1800
 	DefaultDBMaxIdleTimeSeconds = 300
+)
+
+// 预编译缓存必须传入有限的正值，避免底层把零值解释为近乎无限容量。
+const (
+	DefaultDBPrepareStmtMaxSize    = 128
+	DefaultDBPrepareStmtTTLSeconds = 3600
 )
 
 // DBCredentials 是一次数据库连接使用的凭据。
@@ -146,7 +167,7 @@ type DBCredentials struct {
 // notification.mail.Init; AlertTo independently opts it into alert fan-out.
 // Configuration validates values even when a composition selects pure logging.
 type EmailConfig struct {
-	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client and requires other email fields empty.
+	Host        string   `mapstructure:"host"`         // SMTP host; empty disables the client; unused fields are ignored.
 	Port        int      `mapstructure:"port"`         // SMTP port, 0 uses 25; allowed 0..65535; 465 normally requires ImplicitSSL.
 	User        string   `mapstructure:"user"`         // SMTP authentication user; empty uses no authentication (trusted relay only).
 	Pass        string   `mapstructure:"pass"`         // SMTP authentication secret used with User; empty sends no password.
@@ -195,6 +216,9 @@ type LogConfig struct {
 	MaxBackups         int    `mapstructure:"maxbackups"`
 	MaxSize            int    `mapstructure:"maxsize"`
 	Path               string `mapstructure:"path"`
+	// AccessFlushInterval 控制访问文件日志缓冲的自动刷新间隔。
+	// 省略或零值使用 1s；正时长原样生效，负值拒绝；仅 filestdout 开启时生效。
+	AccessFlushInterval time.Duration `mapstructure:"access_flush_interval"`
 	// AccessRequestBody 控制是否在 HTTP 访问日志中记录请求体。默认 false（不记录）。
 	// 开启后请求体仍会经敏感字段脱敏；非结构化 body 只记录 content-type 与大小占位。
 	AccessRequestBody bool `mapstructure:"access_request_body"`
@@ -216,7 +240,7 @@ type RedisConfig struct {
 	Prefix string `mapstructure:"prefix"`
 
 	// 连接池与超时。全部允许留空——留空时由 redisx 自身的默认值生效，
-	// 不在本层复制一份可能与上游漂移的默认值。填了就必须自洽（见 validateRedisConfig）。
+	// 不在本层复制默认值。显式小池会将继承的空闲目标钳制到池容量；显式空闲数仍须自洽。
 	//
 	// 单位统一用毫秒而不是秒：Redis 的合理超时普遍在百毫秒量级，
 	// 用秒做单位会让"最小可表达值"就已经过大。
@@ -337,15 +361,13 @@ const (
 // newsPlatforms 是启动校验用的平台白名单。
 var newsPlatforms = []string{NewsPlatformFeishu, NewsPlatformDingTalk, NewsPlatformWeCom}
 
-// NewsConfig configures the default robot and the separate image-message app.
+// NewsConfig configures the default robot.
 // Text alerts use only FSURL, Platform and Secret. The registered robot remains
 // available for explicit targets even when FSURL is empty.
 type NewsConfig struct {
-	FSURL     string `mapstructure:"fsurl"`     // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
-	Platform  string `mapstructure:"platform"`  // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
-	Secret    string `mapstructure:"secret"`    // Optional platform signing secret; required operationally when platform-side signing is enabled.
-	AppID     string `mapstructure:"appid"`     // Image-message application ID; empty means not supplied, unused by text alert plugins.
-	AppSecret string `mapstructure:"appsecret"` // Image-message application secret; empty means not supplied, unused by text alert plugins.
+	FSURL    string `mapstructure:"fsurl"`    // Default absolute http(s) webhook; empty skips default robot delivery, explicit Warn target overrides it.
+	Platform string `mapstructure:"platform"` // feishu/dingtalk/wecom, case-insensitive after trimming; empty uses feishu.
+	Secret   string `mapstructure:"secret"`   // Optional platform signing secret; required operationally when platform-side signing is enabled.
 }
 
 type CORSConfig struct {

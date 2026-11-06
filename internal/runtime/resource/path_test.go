@@ -1,6 +1,11 @@
 package resource
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,20 +13,63 @@ import (
 )
 
 func TestResolvePathFindsProjectResourceWithoutChdir(t *testing.T) {
-	resolved := ResolvePath(filepath.Join("config", "pem", "jwtpri.pem"))
+	root := t.TempDir()
+	t.Setenv("APP_ROOT", root)
+	relative := filepath.Join("config", "pem", "jwtpri.pem")
+	expected := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(expected), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(expected, fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved := ResolvePath(relative)
 
 	expectedSuffix := filepath.Join("config", "pem", "jwtpri.pem")
 	if !strings.HasSuffix(filepath.Clean(resolved), expectedSuffix) {
 		t.Fatalf("ResolvePath = %q, want suffix %q", resolved, expectedSuffix)
 	}
 
-	// 当运行环境确实包含 PEM 文件时，要求路径为绝对路径并且文件可达。
-	// 在 CI 或独立 go test 中文件可能不存在，此时仅校验路径格式。
-	if _, err := os.Stat(resolved); err != nil {
-		t.Skipf("PEM file not available in this environment, skipping stat check: %v", err)
-	}
 	if !filepath.IsAbs(resolved) {
 		t.Fatalf("ResolvePath = %q, want absolute project path", resolved)
+	}
+	if resolved != expected {
+		t.Fatalf("ResolvePath = %q, want fixture path %q", resolved, expected)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatal("resolved PEM is not a regular file")
+	}
+	contents, err := os.ReadFile(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, fixture) {
+		t.Fatal("resolved PEM contents differ from the test fixture")
+	}
+	after, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != cwd {
+		t.Fatalf("working directory changed from %q to %q", cwd, after)
 	}
 }
 

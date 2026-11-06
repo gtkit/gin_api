@@ -10,15 +10,9 @@ import (
 
 // minSecretLen 是配置里各专用密钥的最小字节数。
 //
-// 与 pkg/ratelimit 的键密钥下限同值：两者都是"泄漏即失效"的服务端密钥，
+// 与 internal/pkg/ratelimit 的键密钥下限同值：两者都是"泄漏即失效"的服务端密钥，
 // 对暴力枚举的抵抗力要求一致。
 const minSecretLen = 32
-
-// maxBcryptConcurrency 是口令校验并发上限的上限。
-//
-// 取 CPU 核数的 8 倍：bcrypt 是刻意的 CPU 密集计算，远超核数的并发只是让
-// 每个请求都变慢，同时把"有上限"这件事变成形式。
-var maxBcryptConcurrency = runtime.GOMAXPROCS(0) * 8
 
 // AuthMode 是认证模式。
 //
@@ -45,6 +39,9 @@ type AuthConfig struct {
 	// 无人看管的凭据端点；默认到 external，使用者会以为认证已就绪，
 	// 而实际上没有任何签发入口——两种默认都会静默地给出错误的系统。
 	Mode AuthMode `mapstructure:"mode"`
+	// SessionLifecycle enables password change/logout-all and durable session checks.
+	// False by default; local mode only. Apply the auth_version migration before enabling.
+	SessionLifecycle bool `mapstructure:"session_lifecycle"`
 
 	// BcryptCost 是密码哈希代价，留空按 defaultBcryptCost。
 	//
@@ -69,6 +66,12 @@ type AuthConfig struct {
 	// bcrypt 是刻意昂贵的计算：限流约束的是单来源/单账号的速率，约束不了
 	// **聚合并发**——一批分布式登录请求就能把全部 CPU 吃光。超限的校验排队。
 	BcryptMaxConcurrent int `mapstructure:"bcrypt_max_concurrent"`
+	// BcryptMaxWaiters 限制正在等候密码运算的请求数。
+	// 省略/null 使用有效执行并发数，0 禁止排队，正数显式指定；负数非法。
+	BcryptMaxWaiters *int `mapstructure:"bcrypt_max_waiters"`
+	// BcryptQueueTimeout 是排队上限；0/省略用 1s，负数非法。
+	// 仅等待者使用，且不超过调用方剩余预算；不会中断已开始的 bcrypt。
+	BcryptQueueTimeout time.Duration `mapstructure:"bcrypt_queue_timeout"`
 
 	// RefreshTTL 是刷新令牌寿命，留空按 defaultRefreshTTL。
 	//
@@ -117,6 +120,22 @@ func (c AuthConfig) EffectiveBcryptConcurrency() int {
 	return runtime.GOMAXPROCS(0)
 }
 
+// EffectiveBcryptMaxWaiters 保留显式 0 的快速拒绝语义。
+func (c AuthConfig) EffectiveBcryptMaxWaiters() int {
+	if c.BcryptMaxWaiters != nil {
+		return *c.BcryptMaxWaiters
+	}
+	return c.EffectiveBcryptConcurrency()
+}
+
+// EffectiveBcryptQueueTimeout 返回等待名额的最大时间。
+func (c AuthConfig) EffectiveBcryptQueueTimeout() time.Duration {
+	if c.BcryptQueueTimeout > 0 {
+		return c.BcryptQueueTimeout
+	}
+	return time.Second
+}
+
 // EffectiveRefreshTTL 返回生效的刷新令牌寿命。
 func (c AuthConfig) EffectiveRefreshTTL() time.Duration {
 	if c.RefreshTTL > 0 {
@@ -131,6 +150,9 @@ func (c AuthConfig) EffectiveRefreshTTL() time.Duration {
 // 就拦下——见下方 fail-closed 的理由。
 func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration) error {
 	var errs []error
+	if c.SessionLifecycle && !c.LocalEnabled() {
+		errs = append(errs, errors.New("auth.session_lifecycle requires local authentication"))
+	}
 
 	switch c.Mode {
 	case AuthModeLocal, AuthModeExternal:
@@ -164,15 +186,15 @@ func validateAuthConfig(c AuthConfig, redis RedisConfig, accessTTL time.Duration
 			"auth.bcrypt_max_concurrent must not be negative, got %d (leave it empty to take "+
 				"the CPU count)", c.BcryptMaxConcurrent))
 	}
-	if c.BcryptMaxConcurrent > maxBcryptConcurrency {
-		errs = append(errs, fmt.Errorf(
-			"auth.bcrypt_max_concurrent %d exceeds %d: bcrypt is deliberately CPU-bound, and a "+
-				"limit far above the core count defeats the point of having one",
-			c.BcryptMaxConcurrent, maxBcryptConcurrency))
-	}
 
 	if c.RefreshTTL < 0 {
 		errs = append(errs, errors.New("auth.refresh_ttl must not be negative"))
+	}
+	if c.BcryptMaxWaiters != nil && *c.BcryptMaxWaiters < 0 {
+		errs = append(errs, errors.New("auth.bcrypt_max_waiters must not be negative"))
+	}
+	if c.BcryptQueueTimeout < 0 {
+		errs = append(errs, errors.New("auth.bcrypt_queue_timeout must not be negative"))
 	}
 	// 刷新令牌比访问令牌还短就没有存在意义：它的整个作用是在访问令牌过期后
 	// 换取新的，寿命更短意味着它先死，用户被迫重新登录——那等于没有刷新机制。

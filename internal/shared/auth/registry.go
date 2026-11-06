@@ -13,10 +13,9 @@ var authorizerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
 
 // AuthorizerRegistry 持有具名 authorizer，在装配期填充，此后只读。
 //
-// 未注册标识的处置收口在装配层：按 ID 取用时兜底为恒拒绝并告警
-// （"可启动且不放行"，见 bootstrap 的 newAuthorizeByID），因此注册表
-// 只提供注册与查找两个入口。写入只发生在装配的单线程窗口内，
-// 装配完成后不存在任何写路径。
+// 实际路由按需创建并注入授权中间件。Lookup 未命中时，由装配调用方
+// 显式绑定恒拒绝实现并告警，不能跳过授权；注册表本身不处理该兜底。
+// 写入只发生在装配的单线程窗口内，装配完成后不再写入。
 type AuthorizerRegistry struct {
 	entries map[string]Authorizer
 }

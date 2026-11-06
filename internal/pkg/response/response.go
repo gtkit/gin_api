@@ -85,6 +85,31 @@ func Err(c *gin.Context, err error) {
 	ErrWithData(c, err, nil)
 }
 
+const capacityRejectionKey = "response.capacity.rejection"
+
+// CapacityUnavailable preserves the 503 envelope without creating an error
+// stack for expected load shedding. The access logger aggregates diagnostics;
+// the admitting component records every rejection in its existing metrics.
+func CapacityUnavailable(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(capacityRejectionKey, true)
+	status := goerr.StatusServiceUnavailable()
+	WriteJSON(c, status.HTTPCode(), newResponse(status.Code(), "服务繁忙，请稍后重试", nil))
+}
+
+// IsCapacityRejection identifies only an explicitly tagged capacity response.
+// An unrelated 503 must retain its full diagnostic path.
+func IsCapacityRejection(c *gin.Context) bool {
+	if c == nil || c.Writer.Status() != http.StatusServiceUnavailable {
+		return false
+	}
+	value, exists := c.Get(capacityRejectionKey)
+	rejected, ok := value.(bool)
+	return exists && ok && rejected
+}
+
 // BindErr 处理参数绑定/验证错误，返回 HTTP 422；请求体超限单独映射为 413。
 func BindErr(c *gin.Context, err error) {
 	bindErrResponse(c, err)

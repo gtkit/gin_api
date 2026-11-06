@@ -53,6 +53,37 @@ func installCommandConfiguration(t *testing.T, cfg *config.Config) {
 	t.Setenv("APP_ROOT", root)
 }
 
+func TestDefaultDoctorReadsExplicitRootWithoutProbes(t *testing.T) {
+	installCommandConfiguration(t, configWithRealKeysForDoctor(t))
+	command := newDoctorCmd(nil)
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetErr(&bytes.Buffer{})
+	command.SetArgs([]string{"--json"})
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("default doctor failed for its own configuration: %v", err)
+	}
+	var report diagnostics.Report
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion == 0 || report.Deep || len(report.Checks) == 0 || report.ExitCode() != diagnostics.ExitOK {
+		t.Fatalf("unexpected default report: version=%d deep=%t exit=%d", report.SchemaVersion, report.Deep, report.ExitCode())
+	}
+	skippedProbes := 0
+	for _, check := range report.Checks {
+		if check.Name == "database" || check.Name == "redis" || check.Name == "log_dir_writable" {
+			if check.Status != diagnostics.StatusSkipped || check.ErrorCode != diagnostics.CodeNotRequestedDeep {
+				t.Fatalf("default doctor requested deep check %s: %s/%s", check.Name, check.Status, check.ErrorCode)
+			}
+			skippedProbes++
+		}
+	}
+	if skippedProbes != 3 {
+		t.Fatalf("default doctor reported %d skipped deep checks, want 3", skippedProbes)
+	}
+}
+
 func TestDefaultDoctorLoadsConfigWithoutOpeningNotificationChannels(t *testing.T) {
 	testutil.RequireLoopback(t)
 	var requests atomic.Int32

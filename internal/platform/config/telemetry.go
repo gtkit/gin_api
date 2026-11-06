@@ -45,9 +45,6 @@ const (
 	telemetryDefaultSampleRatio     = 0.1
 )
 
-// maxTelemetryShutdownTimeout 是 flush 预算的上限。
-const maxTelemetryShutdownTimeout = 30 * time.Second
-
 // EffectiveExportInterval 返回生效的指标导出周期。
 func (c TelemetryConfig) EffectiveExportInterval() time.Duration {
 	if c.ExportInterval > 0 {
@@ -94,12 +91,9 @@ func validateTelemetryConfig(cfg TelemetryConfig) error {
 		errs = append(errs, fmt.Errorf(
 			"telemetry.sample_ratio %v is outside (0, 1]", cfg.SampleRatio))
 	}
-	if cfg.EffectiveShutdownTimeout() > maxTelemetryShutdownTimeout {
-		errs = append(errs, fmt.Errorf(
-			"telemetry.shutdown_timeout %s exceeds the %s cap: it is taken out of the graceful "+
-				"shutdown budget, and losing some telemetry beats holding connections open",
-			cfg.EffectiveShutdownTimeout(), maxTelemetryShutdownTimeout))
-	}
 
+	errs = append(errs,
+		mustNonNegative("telemetry.export_interval", cfg.ExportInterval),
+		mustNonNegative("telemetry.shutdown_timeout", cfg.ShutdownTimeout))
 	return errors.Join(errs...)
 }

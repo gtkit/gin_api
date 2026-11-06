@@ -26,6 +26,14 @@ func (c LogConfig) EffectiveSQLSlowThreshold() time.Duration {
 	return time.Duration(*c.SQLSlowThresholdMS) * time.Millisecond
 }
 
+// EffectiveAccessFlushInterval 返回访问文件日志刷新间隔，零值使用 1s。
+func (c LogConfig) EffectiveAccessFlushInterval() time.Duration {
+	if c.AccessFlushInterval == 0 {
+		return time.Second
+	}
+	return c.AccessFlushInterval
+}
+
 // EffectiveDrainWait 返回生效的 LB 传播等待时长。
 func (a AppConfig) EffectiveDrainWait() time.Duration {
 	if a.DrainWaitSeconds <= 0 {
@@ -87,20 +95,28 @@ func (c DatabaseConfig) EffectiveCollation() string {
 	return DefaultDBCollation
 }
 
-// EffectiveMinVersion 返回受支持的最低 MySQL 版本。
-func (c DatabaseConfig) EffectiveMinVersion() string {
-	if s := strings.TrimSpace(c.MinVersion); s != "" {
-		return s
-	}
-	return DefaultDBMinVersion
-}
-
 // EffectiveMaxIdleTimeSeconds 返回生效的空闲连接最长存活时间（秒）。
 func (c DatabaseConfig) EffectiveMaxIdleTimeSeconds() int {
 	if c.MaxIdleTimeSeconds > 0 {
 		return c.MaxIdleTimeSeconds
 	}
 	return DefaultDBMaxIdleTimeSeconds
+}
+
+// EffectivePrepareStmtMaxSize 返回已校验配置的预编译缓存容量，0 使用 128。
+func (c DatabaseConfig) EffectivePrepareStmtMaxSize() int {
+	if c.PrepareStmtMaxSize > 0 {
+		return c.PrepareStmtMaxSize
+	}
+	return DefaultDBPrepareStmtMaxSize
+}
+
+// EffectivePrepareStmtTTLSeconds 返回已校验配置的缓存存活秒数，0 使用 3600。
+func (c DatabaseConfig) EffectivePrepareStmtTTLSeconds() int {
+	if c.PrepareStmtTTLSeconds > 0 {
+		return c.PrepareStmtTTLSeconds
+	}
+	return DefaultDBPrepareStmtTTLSeconds
 }
 
 // RuntimeCredentials 返回服务进程使用的凭据。

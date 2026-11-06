@@ -17,7 +17,7 @@ import (
 
 // Timeout 给请求施加协作式超时，用法与任何 gin 中间件一致：
 //
-//	g := r.Group("/user", middleware.Timeout(5*time.Second, 2*time.Second))
+//	g := r.Group("/auth", middleware.Timeout(5*time.Second, 2*time.Second))
 //
 // deadline 取消业务 ctx，忽略 ctx 的 handler 仍会继续执行。调用链观察到
 // DeadlineExceeded 并返回后，终态中间件才会尝试写 504。
@@ -66,8 +66,20 @@ func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 		defer cancel()
 		c.Request = c.Request.WithContext(ctx)
 
-		restore := applyWriteDeadline(c, policy.deadline+policy.writeGrace)
-		defer restore()
+		deadline, _ := ctx.Deadline()
+		deadline = deadline.Add(policy.writeGrace)
+		if previous, ok := routeWriteLimit(c); ok && previous.Before(deadline) {
+			deadline = previous
+		}
+		c.Set(routeWriteLimitKey, deadline)
+		if value, ok := c.Get(streamWriteLimitKey); ok {
+			if idle, ok := value.(time.Time); ok && idle.Before(deadline) {
+				deadline = idle
+			}
+		}
+		if err := applyWriteDeadline(c, deadline); err != nil {
+			logWriteDeadlineIssue("set", err)
+		}
 
 		c.Next()
 	}
@@ -79,8 +91,9 @@ func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 // 间隔短于空闲预算；写阻塞时仍由 socket deadline 解除阻塞。
 func streamingTimeout(policy timeoutBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		restore := applyWriteDeadline(c, policy.idleWrite)
-		defer restore()
+		if err := renewWriteDeadline(c, policy.idleWrite); err != nil {
+			logWriteDeadlineIssue("set", err)
+		}
 
 		// 把续期入口放进 context，供流式 handler 每次 flush 后调用。
 		c.Set(streamRenewKey, func() error { return renewWriteDeadline(c, policy.idleWrite) })
@@ -91,6 +104,8 @@ func streamingTimeout(policy timeoutBudget) gin.HandlerFunc {
 
 // streamRenewKey 是流式续期函数在 gin.Context 中的键。
 const streamRenewKey = "route.stream.renew"
+const routeWriteLimitKey = "route.write.limit"
+const streamWriteLimitKey = "route.stream.limit"
 
 // RenewStreamDeadline 续期当前流式响应的写空闲超时。
 //
@@ -108,43 +123,30 @@ func RenewStreamDeadline(c *gin.Context) error {
 	return renew()
 }
 
-// applyWriteDeadline 设置连接级写 deadline，并返回正常结束时的清理函数。
-//
-// **清理是必需的**：SetWriteDeadline 作用于底层 keep-alive 连接，不是只作用于
-// 当前请求。不清零的话，第一条路由的短 deadline 会污染同一连接上的下一个请求——
-// 一个 200ms 预算的探针接口之后紧跟一个 30s 的业务接口，后者会在 200ms 处写失败。
-//
-// 已过期时不再清零：连接的写已经废了，重置只会掩盖真实状态。
-func applyWriteDeadline(c *gin.Context, budget time.Duration) func() {
-	if budget <= 0 {
-		return func() {}
-	}
-
-	deadline := time.Now().Add(budget)
+// applyWriteDeadline keeps the deadline through outer error handling and final flush.
+// net/http clears it after finishing an HTTP/1 response; HTTP/2 owns per-stream deadlines.
+func applyWriteDeadline(c *gin.Context, deadline time.Time) error {
 	rc := http.NewResponseController(c.Writer)
-	if err := rc.SetWriteDeadline(deadline); err != nil {
-		// 不支持时降级为无 socket deadline，但必须留痕：
-		// 静默忽略会让"保护配了但没生效"完全不可见。
-		// 错误按固定原因记录，不带请求路径等高基数字段。
-		logWriteDeadlineIssue("set", err)
-		return func() {}
-	}
+	return rc.SetWriteDeadline(deadline)
+}
 
-	return func() {
-		if time.Now().After(deadline) {
-			// 已过期：这条连接的写已经废了，重置无意义且会掩盖真实状态。
-			return
-		}
-		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-			logWriteDeadlineIssue("clear", err)
-		}
+func routeWriteLimit(c *gin.Context) (time.Time, bool) {
+	value, ok := c.Get(routeWriteLimitKey)
+	if !ok {
+		return time.Time{}, false
 	}
+	deadline, ok := value.(time.Time)
+	return deadline, ok
 }
 
 // renewWriteDeadline 把写 deadline 向后推一个空闲预算。
 func renewWriteDeadline(c *gin.Context, idle time.Duration) error {
-	rc := http.NewResponseController(c.Writer)
-	if err := rc.SetWriteDeadline(time.Now().Add(idle)); err != nil {
+	deadline := time.Now().Add(idle)
+	c.Set(streamWriteLimitKey, deadline)
+	if limit, ok := routeWriteLimit(c); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	if err := applyWriteDeadline(c, deadline); err != nil {
 		return fmt.Errorf("renew stream write deadline: %w", err)
 	}
 	return nil
