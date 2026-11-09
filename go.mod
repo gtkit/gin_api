@@ -8,7 +8,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/dustin/go-humanize v1.1.0
 	github.com/gin-gonic/gin v1.12.0
-	github.com/go-playground/validator/v10 v10.30.5
+	github.com/go-playground/validator/v10 v10.30.6
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -30,7 +30,7 @@ require (
 	github.com/gtkit/smsx v1.1.0
 	github.com/gtkit/smsx/providers/aliyun v1.1.0
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037
-	github.com/gtkit/verify v1.2.5
+	github.com/gtkit/verify v1.3.2
 	github.com/hibiken/asynq v0.26.0
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/env v1.1.0

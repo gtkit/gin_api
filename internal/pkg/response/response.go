@@ -111,6 +111,8 @@ func IsCapacityRejection(c *gin.Context) bool {
 }
 
 // BindErr 处理参数绑定/验证错误，返回 HTTP 422；请求体超限单独映射为 413。
+// 多字段同时失败时只回字段名排序后的**第一条**；需要一次回**全部**字段错误
+// （msg 聚合摘要 + data.fields 逐字段结构化明细）用 validation.go 的 BindAllErr。
 func BindErr(c *gin.Context, err error) {
 	bindErrResponse(c, err)
 }
@@ -128,6 +130,7 @@ func EnableValidationTranslation() { validationTranslationReady.Store(true) }
 // 校验类错误（validator.ValidationErrors）在翻译器就绪时输出中文、
 // 按对外 json 字段名组织的消息；多字段失败时取字段名排序后的第一条。
 // 翻译器未就绪或错误非校验类时返回固定文案，原始错误保留为诊断 cause。
+// 一次回全部字段错误的变体见 validation.go 的 BindAllErr。
 func bindErrResponse(c *gin.Context, err error) {
 	if payloadTooLargeFromBind(c, err) {
 		return
@@ -145,6 +148,10 @@ func bindErrResponse(c *gin.Context, err error) {
 
 // MapErr 通过 mapper 解析业务错误并返回统一响应。
 // 匹配到已注册的 sentinel error 时使用对应业务码和文案，未匹配时按内部错误处理。
+//
+// 命名辨析：本函数是**业务错误映射**（sentinel error → goerr.Status），与 map
+// 参数校验无关。verify.Map / verify.MapCtx 的校验结果（map[string]any）走
+// validation.go 的 ValidateMapErr / ValidateMapAllErr，不要混用。
 //
 // 协作式超时/取消例外：未登记的 context.DeadlineExceeded / context.Canceled
 // 不在这里定局，记进 gin 错误链后交终态中间件（ErrorHandler）裁决——
@@ -283,6 +290,8 @@ func OkErr(c *gin.Context, err goerr.Error) {
 }
 
 // BindStructErr 处理结构体绑定/验证错误，使用 HTTP 422；请求体超限单独映射为 413。
+// 与 BindErr 同收口（bindErrResponse），多字段失败只回第一条；要一次回全部字段
+// 错误（msg 聚合 + data.fields 结构化明细）用 validation.go 的 BindAllErr。
 func BindStructErr(c *gin.Context, err error) {
 	bindErrResponse(c, err)
 }

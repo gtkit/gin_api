@@ -380,7 +380,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |
 | 安全响应头 | `internal/middleware/securityheaders.go` | 五类固定头；不发 HSTS（由 TLS 终止层负责） |
 | 统一错误响应 | `internal/middleware/error.go` | 收集 handler 挂在 gin context 上的错误，转成与业务接口同一个 JSON 信封 |
-| 校验错误中文消息 | `internal/bootstrap/validation.go` + `internal/pkg/response` | 绑定/校验失败的 422 `msg` 为中文、按对外 json 字段名呈现（多字段失败取字段名排序后的第一条）；启动阶段初始化翻译器（`gtkit/verify`），失败即启动失败——validator 首次校验即缓存字段名，晚初始化会让消息漏出 Go 字段名。非校验类绑定错误（如 JSON 语法错误）不经翻译路径 |
+| 校验错误中文消息 | `internal/bootstrap/validation.go` + `internal/pkg/response` | 绑定/校验失败的 422 `msg` 为中文、按对外 json 字段名呈现；启动阶段初始化翻译器（`gtkit/verify`），失败即启动失败——validator 首次校验即缓存字段名，晚初始化会让消息漏出 Go 字段名。非校验类绑定错误（如 JSON 语法错误）不经翻译路径。`gtkit/verify` 三类校验各有响应收口：结构体 `resp.BindStructErr`（回排序后第一条）/ `resp.BindAllErr`（回全部字段 + `data.fields` 结构化明细）、单值 `resp.FieldErr`、动态 map `resp.ValidateMapErr` / `resp.ValidateMapAllErr`。注册示例见 `internal/bootstrap/validation_example_test.go`，内置 tag 的 DTO 用法见 `internal/module/example/dto/validation_showcase.go` |
 | 请求指标 | `internal/middleware/metrics.go` | 记录每请求的量/时延/状态码。recorder 为 nil 时返回直接放行的中间件——"没接指标"是正常路径，装配处不写判空。默认 no-op，导出见「接指标导出」 |
 | CORS | `internal/middleware/cors.go` | **仅当 `cors.allowed_origins` 非空时才装配**；预检放行的请求头与响应声明的同源，避免浏览器放行服务端并不接受的头。允许方法取自 gin 在 405 路径上写好的 `Allow` 头（真实路由树匹配），不自建路由索引、也不硬编码——自建索引要在应用层重写一遍路由匹配，而两份匹配逻辑一旦在带参路由这类边界上不一致，表现就是「预检说路径不存在、实际请求却成功」。因此本中间件要求 engine 开启 `HandleMethodNotAllowed`；路径上自行注册了 OPTIONS 时，预检交给那个 handler |
 | 可信代理边界 | `proxy.trusted_proxies` | **默认不信任任何代理**；部署在反代之后必须配置 |
@@ -576,7 +576,7 @@ telemetry:
 | 后台任务 | 在 `modules.go` 的 `buildWorkers` 中追加 `Worker` 构造 |
 | 具名授权实现 | 在 `buildEngine` 中按实际路由显式构造并注入；可直接使用 `newRoleAuthorizer` / `newVIPAuthorizer`，需要按 ID 共享时使用 `shared/auth.AuthorizerRegistry`，未知 ID 绑定 `DenyAll` |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
-| 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争 |
+| 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。消息模板里的 `{0}` 是字段名占位符，**必须带**，否则对客消息里没有字段名。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争。三条路径各有编译校验过的可复制模板见 `internal/bootstrap/validation_example_test.go` |
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |

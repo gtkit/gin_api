@@ -290,14 +290,41 @@ func Register(r *gin.RouterGroup, deps Deps) {
 ### 校验错误的对客消息
 
 校验失败（`validator.ValidationErrors`）的 422 响应中，`msg` 是中文、以对外 json
-字段名呈现的消息；多字段同时失败时取字段名排序后的第一条，保证同一输入的响应确定。
-这由 `internal/bootstrap/validation.go` 在启动阶段初始化的翻译器（`gtkit/verify`）
-与 `resp.BindErr` / `resp.BindStructErr` 共同兑现，handler 照常把绑定错误交给这两个
-函数即可，不需要感知翻译。
+字段名呈现的消息。这由 `internal/bootstrap/validation.go` 在启动阶段初始化的翻译器
+（`gtkit/verify`）与 `internal/pkg/response` 的一组渲染函数共同兑现，handler 照常把
+校验错误交出去即可，不需要感知翻译。
+
+`gtkit/verify` 的三类校验（单字段 / 结构体 / map）各有对应的响应收口，按「回第一条」
+还是「回全部」选用：
+
+| 场景 | 回第一条（`msg` 单句，`data` 空） | 回全部字段 |
+| --- | --- | --- |
+| 结构体绑定 `c.ShouldBind(&req)` | `resp.BindErr` / `resp.BindStructErr` | `resp.BindAllErr` |
+| 单值校验 `verify.Field(v, tag)` | — | `resp.FieldErr(c, "字段名", err)` |
+| 动态 map 校验 `verify.Map(m, rules)` | `resp.ValidateMapErr` | `resp.ValidateMapAllErr` |
+
+- **`BindAllErr`** 一次回全部字段错误：`msg` 是聚合摘要（如 `age age必须大于18; phone phone为必填字段`），
+  `data.fields` 是逐字段结构化明细 `[{"field":"age","message":"..."}]`，适合表单类接口让客户端
+  逐字段高亮。`BindStructErr` 多字段失败时只回**字段名排序后的第一条**，适合一次只提示一个错误。
+  两者都是 422、都不泄漏 Go 结构体名与导出字段名。
+- `data.fields` 只含 `field`（对外 json 名）与 `message`（中文），**刻意不含** `verify.FieldError`
+  的 `Tag`（内部规则名）与 `Value`（用户提交的敏感原值）——二者只进日志，不进响应体。
+- `FieldErr` 的字段名由调用方给出：单值校验没有结构体上下文可提取 json tag。它遵守 `verify.FieldErr`
+  的透传约定——`err` 非校验类错误时原样交统一错误处理，不强行套 422。
+- `ValidateMapAllErr` 只在 `msg` 给聚合摘要（嵌套 map 字段名按点号拼接，如 `user.email`），`data`
+  保持空数组：verify 只为结构体导出了结构化提取器 `StructFieldErrors`，map 没有对应公开 API。
+- 请求体超限（`*http.MaxBytesError`）在所有绑定渲染函数里都**优先**映射为 413，不进翻译路径。
+- 翻译器未就绪（启动阶段 `verify.New` 未成功）时，全部渲染函数回退固定文案 `请求参数格式错误`
+  并保留原始错误作诊断 cause，绝不触发翻译。
 
 初始化必须早于任何绑定：validator 在首次校验某类型时缓存字段名元数据，
 晚初始化会让已缓存类型的消息漏出 Go 字段名。因此**参与校验的 DTO 字段必须有
 稳定的 json tag**——它就是错误消息里的字段名。
+
+> ⚠ `eqfield` 的已知副作用：它的 param 是**目标字段的 Go 名**，validator 的中文翻译会把 param
+> 原样插进消息（`confirm必须等于Password`），从而泄漏 Go 字段名。要干净就改用 `WithStructValidation`
+> + `sl.ReportError(..., "confirm", ...)` 指定对外 json 名，或给 `eqfield` 注册不含 param 的自定义消息。
+> 详见 `internal/module/example/dto/validation_showcase.go` 的 `Confirm` 字段注释。
 
 ### 自定义校验规则
 
@@ -307,12 +334,14 @@ func Register(r *gin.RouterGroup, deps Deps) {
 ```go
 var validationOptions = func() []verify.Option {
     return []verify.Option{
-        // 新 tag + 校验函数 + 中文消息
-        verify.WithTranslation("mobile_cn", "必须是有效的大陆手机号", func(fl validator.FieldLevel) bool {
+        // 新 tag + 校验函数 + 中文消息。info 里的 {0} 是字段名占位符，
+        // verify 内部经 ut.T(tag, field) 替换——**必须带 {0}**，否则消息里
+        // 没有字段名，客户端不知道是哪个字段错了。
+        verify.WithTranslation("mobile_cn", "{0}必须是有效的大陆手机号", func(fl validator.FieldLevel) bool {
             return mobileRe.MatchString(fl.Field().String())
         }),
-        // 给既有 tag 补中文消息
-        verify.WithValidationTranslation("datetime", "时间格式不正确"),
+        // 给既有 tag 补中文消息（同样用 {0} 占位字段名）
+        verify.WithValidationTranslation("datetime", "{0}的日期格式不正确"),
     }
 }
 ```
@@ -320,6 +349,12 @@ var validationOptions = func() []verify.Option {
 只能在这里注册：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争。
 需要查库的唯一性检查不属于校验规则——那是业务规则，放 application 层并以数据库
 唯一索引兜底（校验层查库会让 transport 依赖数据访问，违反分层禁止规则）。
+
+三条注册路径（`WithTranslation` 新 tag / `WithValidationTranslation` 既有 tag 补消息 /
+`WithStructValidation` 跨字段结构体级）各有**编译校验过**的可复制模板，见
+`internal/bootstrap/validation_example_test.go`；常用内置 tag（`oneof` / `email` /
+`eqfield` / `datetime` / `dive` / `gte`-`lte`）的 DTO 用法与可运行校验见
+`internal/module/example/dto/validation_showcase.go`。
 
 ## 中间件
 
