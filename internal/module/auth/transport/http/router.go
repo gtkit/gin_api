@@ -17,19 +17,22 @@ import (
 const (
 	authDeadline   = 10 * time.Second
 	authWriteGrace = 2 * time.Second
+	authBodyLimit  = 8 << 10
 )
 
 // Deps 是注册路由所需的依赖。
 type Deps struct {
 	Service *authapp.Service
-	// Auth 是认证中间件，只有登出用得到。
+	// CredentialAdmission bounds register/login/password changes before database and hashing work.
+	// Production assembly supplies it; isolated handler tests may omit it.
+	CredentialAdmission gin.HandlerFunc
+	// Auth 验证登出和已登录会话管理端点。
 	Auth gin.HandlerFunc
 	// RateLimit 按策略标识取限流中间件（pre-identity 形态）。
 	// 首参是引用发生处的路由标识，装配失败时用于指认现场。
 	//
-	// 本模块的端点全部发生在拿到身份**之前**，身份作用域的策略在这里
-	// 无处可挂——装配层注入的取用函数会把这类引用记为装配错误并让启动
-	// 失败，而不是静默丢弃后让凭据端点裸奔。
+	// 这层来源限流发生在认证之前；已识别账号的凭据限流由 application 执行。
+	// 身份作用域策略在此处无可用身份，误配时由装配层报告错误。
 	RateLimit func(route string, policyIDs ...string) []gin.HandlerFunc
 }
 
@@ -55,22 +58,29 @@ func Register(r *gin.RouterGroup, deps Deps) {
 	// 只按来源限、不按身份限：请求发生在拿到身份**之前**，此时没有可用的
 	// 用户维度——按身份限流对未登录的爆破者不起任何作用。
 	credential := g.Group("")
+	if deps.CredentialAdmission != nil {
+		credential.Use(deps.CredentialAdmission)
+	}
 	credential.Use(stageRateLimits(deps.RateLimit, "/auth", "auth.credential")...)
-	credential.POST("/register", middleware.JSONBody(0), handler.Register)
-	credential.POST("/login", middleware.JSONBody(0), handler.Login)
+	credential.POST("/register", middleware.JSONBody(authBodyLimit), handler.Register)
+	credential.POST("/login", middleware.JSONBody(authBodyLimit), handler.Login)
 
 	// 令牌端点的额度可以宽一些：它们要求持有一个已签发的有效令牌，
 	// 不构成口令猜测面。
 	token := g.Group("")
 	token.Use(stageRateLimits(deps.RateLimit, "/auth", "auth.token")...)
-	token.POST("/refresh", middleware.JSONBody(0), handler.Refresh)
+	token.POST("/refresh", middleware.JSONBody(authBodyLimit), handler.Refresh)
 	// 登出要求认证：要撤销的正是本次请求所用的令牌，
 	// 而它的标识只有认证中间件能提供。
 	//
 	// body 治理排在认证之前（http-request-contract spec）：内容类型不符的请求
 	// 不该先付掉一次令牌解析与撤销查询。两者都在路由级，因此换序即可，
 	// 认证的挂载点数量不变。
-	token.POST("/logout", middleware.JSONBody(0), deps.Auth, handler.Logout)
+	token.POST("/logout", middleware.JSONBody(authBodyLimit), deps.Auth, handler.Logout)
+	if deps.Service.SessionLifecycleEnabled() {
+		credential.POST("/password/change", middleware.JSONBody(authBodyLimit), deps.Auth, handler.ChangePassword)
+		token.POST("/logout-all", middleware.NoBody(), deps.Auth, handler.LogoutAll)
+	}
 }
 
 // stageRateLimits 容错地调用装配层注入的 pre-identity 取用函数。

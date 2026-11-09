@@ -3,11 +3,13 @@ package middleware
 import (
 	"fmt"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/logger/v2"
@@ -34,9 +36,8 @@ const (
 // 中间件只做三件事：组键、调用执行体、翻译成响应。限额算法、后端选择与
 // 降级语义全在 ratelimit 包内——中间件不认识 Redis，也不认识令牌桶。
 //
-// **指标记在这里而不是 ratelimit 包内**：那个包是可独立发布的（pkg/），
-// 不该依赖本仓的 internal 包，也不该替使用者选一套遥测栈。判定结果在这里
-// 已经拿到，记一次的成本就是一次计数器递增。
+// 指标由 HTTP 适配层记录，ratelimit 执行层只返回判定结果，保持职责边界。
+// 判定结果在这里已经拿到，记一次的成本就是一次计数器递增。
 //
 // recorder 为 nil 时不记录。
 func RateLimit(
@@ -50,6 +51,7 @@ func RateLimit(
 	}
 
 	policy := limiter.Policy()
+	logs := rateLimitLogState{now: time.Now}
 
 	return func(c *gin.Context) {
 		subject, err := rateLimitSubject(c, policy)
@@ -66,13 +68,17 @@ func RateLimit(
 		key := keys.Build(policy, c.Request.Method, c.FullPath(), subject)
 
 		decision, checkErr := limiter.Check(c.Request.Context(), key)
-		if checkErr != nil {
-			// 后端故障已由执行体按 FailureMode 翻译成最终判定，
-			// 这里只负责留痕——不留的话，一次长时间的降级不会有任何记录。
+		action, suppressed := logs.observe(checkErr)
+		switch action {
+		case rateLimitLogFailure:
+			// 执行体保留 FailureMode 决策；日志只限制重复输出。
 			logger.Warn("rate limit backend error; the policy's failure mode decided the outcome",
 				zap.String("policy", policy.ID),
 				zap.String("outcome", decision.Outcome.String()),
-				zap.Error(checkErr))
+				zap.Error(checkErr), zap.Uint64("suppressed", suppressed))
+		case rateLimitLogRecovery:
+			logger.Info("rate limit backend recovered", zap.String("policy", policy.ID),
+				zap.Uint64("suppressed", suppressed))
 		}
 
 		// **每次判定都记**，不只记拒绝：没有分母就算不出拒绝率，
@@ -88,6 +94,50 @@ func RateLimit(
 		}
 		rejectRateLimited(c, decision)
 	}
+}
+
+const rateLimitLogInterval = 30 * time.Second
+
+type rateLimitLogAction uint8
+
+const (
+	rateLimitLogNone rateLimitLogAction = iota
+	rateLimitLogFailure
+	rateLimitLogRecovery
+)
+
+// rateLimitLogState stores a fixed amount of state per middleware instance.
+type rateLimitLogState struct {
+	mu         sync.Mutex
+	now        func() time.Time
+	failing    bool
+	lastLogged time.Time
+	suppressed uint64
+}
+
+func (s *rateLimitLogState) observe(err error) (rateLimitLogAction, uint64) {
+	if err != nil && IsClientGone(err) {
+		return rateLimitLogNone, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		if !s.failing {
+			return rateLimitLogNone, 0
+		}
+		suppressed := s.suppressed
+		s.failing, s.suppressed = false, 0
+		s.lastLogged = time.Time{}
+		return rateLimitLogRecovery, suppressed
+	}
+	now := s.now()
+	if s.failing && now.Sub(s.lastLogged) < rateLimitLogInterval {
+		s.suppressed++
+		return rateLimitLogNone, 0
+	}
+	suppressed := s.suppressed
+	s.failing, s.lastLogged, s.suppressed = true, now, 0
+	return rateLimitLogFailure, suppressed
 }
 
 // rateLimitSubject 取限流主体。
@@ -155,8 +205,8 @@ func rejectRateLimited(c *gin.Context, decision ratelimit.Decision) {
 
 // rateLimitOutcome 把限流包的判定翻译成指标取值。
 //
-// 两套枚举而不是共用一套：ratelimit 是可独立发布的包，让它认识本仓的指标
-// 类型就是一条反向依赖。翻译函数是这条边界的实际成本，且它很短。
+// 限流判定与指标取值分别表达各自职责，适配层在这里完成转换，
+// ratelimit 执行层无需依赖指标类型。
 func rateLimitOutcome(outcome ratelimit.Outcome) metrics.RateLimitOutcome {
 	switch outcome {
 	case ratelimit.OutcomeAllowed:

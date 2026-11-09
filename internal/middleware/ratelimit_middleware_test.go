@@ -11,13 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 )
 
 // fakeLimiter 返回预设判定，让中间件的翻译逻辑可以被单独验证。
 //
 // 用假执行体而不是真后端：这里要验的是"判定 → HTTP 响应"这一段，
-// 而真后端（令牌桶、Redis、降级）在 pkg/ratelimit 自己的测试里已有覆盖。
+// 而真后端（令牌桶、Redis、降级）在 internal/pkg/ratelimit 自己的测试里已有覆盖。
 type fakeLimiter struct {
 	policy   ratelimit.Policy
 	decision ratelimit.Decision

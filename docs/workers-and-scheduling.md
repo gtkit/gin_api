@@ -12,8 +12,8 @@ worker 遵守模块化边界：`module/<m>/worker` 只依赖 application，不�
 
 ## Worker 契约
 
-`internal/bootstrap` 的 `Worker` 接口有七个方法，其中三个是**声明**——它们必须由 worker
-自己给出，管理器不做推断：
+`internal/bootstrap` 的 `Worker` 接口保留七个方法。`Kind` 和 `Required` 由 worker 声明；
+`Lifecycle` 可通过 `Kind().Lifecycle()` 返回固定映射，管理器不根据运行结果猜测：
 
 ```go
 type Worker interface {
@@ -39,12 +39,16 @@ type Worker interface {
 就会静默落进那一类**，而错的方向恰恰最难发现——一个本该最先停的 producer 被当成 consumer，
 会在 HTTP 关停期间继续生产新任务。
 
-### `Lifecycle`：必须自己声明，不能推断
+### `Lifecycle`：由 Kind 显式映射，保留现有接口
 
 `LifecycleLongRunning` 表示 `Run` 应阻塞直到 ctx 取消；**在此之前返回（包括返回 `nil`）
 一律视为 `ErrUnexpectedExit`**。`LifecycleOneShot` 表示执行一次后正常返回 `nil`。
 
-这个声明不能由管理器推断：管理器唯一能观察到的信号是「Run 返回了」，
+合法组合只有 `KindBootstrap → LifecycleOneShot`、`KindProducer/KindConsumer → LifecycleLongRunning`。
+适配器的 `Lifecycle()` 返回 `w.Kind().Lifecycle()` 即可；未声明或未知 Kind 返回 `LifecycleUnspecified`，
+注册期仍拒绝未知值及不匹配的既有声明，原有 Worker 实现可继续使用。
+
+不能根据运行结果推断形态：管理器观察到的「Run 返回了」，
 而「长期任务意外退出」与「一次性任务正常完成」在这个信号上完全一样。
 推断的结果必然是二者之一被静默误判——误判长期 worker 的代价是进程继续对外服务、
 功能却已经丢了。
@@ -71,9 +75,9 @@ NewWorkerManager(budget WorkerBudget, workers ...Worker) (*WorkerManager, error)
 与全部 required OneShot 的 Run）、`Cleanup`（单个 Cleanup 上限）。默认值取
 `DefaultWorkerBudget()`。
 
-`buildWorkers` 对自身的进程级副作用承担回滚责任：它注册的指标回调在**任何**错误出口
-都必须被撤销，因此回滚写在 `defer` 里而不是末尾——扩展段加入多个「构造 + 注册指标」块之后，
-任何中途 return 都不得让此前已注册的回调逃逸。
+当前 `buildWorkers` 只构造 worker 与管理器，不注册异步指标回调，因此没有额外的指标回滚栈。
+指标回调在实际注册成功处加入 `providerCleanup`，失败逆序撤销、正常退出按既有阶段注销。
+未来新增会取得资源或注册回调的构造函数时，仍须负责自身中途失败的清理，不能只在成功返回后登记。
 
 ## 生命周期与关停顺序
 
@@ -98,134 +102,64 @@ HTTP 优雅关停完成后才显式取消 worker context，**保证关停期间�
 
 ## 执行指标
 
-默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；singleton 使用
-`singletonObserver` 的可选 `ExecutionObserver` 回调；队列消费者通过
-`tasks.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
-原 `tasks.NewConsumer` 与 `singleton.Observer` 接口继续可用，不强制自定义实现升级。
+默认 `buildWorkers` 为 OneShot 注入 `metrics.Recorder`；可选队列启用后，消费者通过
+`taskqueue.NewObservedConsumer(..., recorder, handlers...)` 接入每次处理尝试。
 
 实际任务每次结束记录 `worker.executions` 与 `worker.execution.duration`（秒），
-按装配期 worker 名、kind、有限 outcome 聚合。未获租约不计执行，续租/释放不计入耗时；
-队列重试各计一次。自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
-不要把进程存活时间当任务耗时。标签和旧 `worker.runs` 的口径见
+按装配期 worker 名、kind、有限 outcome 聚合。队列重试各计一次。
+自定义 LongRunning 循环需在每次处理工作时调用 `Recorder.RunWorker`，
+不要把进程存活时间当任务耗时。指标口径见
 [Worker 单次执行](observability.md#worker-单次执行)。
-
-## 单实例执行
-
-多副本部署下定时任务在每个实例上都会跑。`internal/pkg/singleton` 提供基于 Redis 租约的
-单实例执行。
-
-**注册时必须声明重复执行时靠什么保证正确**，零值会被拒绝：
-
-| 声明 | 含义 |
-|---|---|
-| `GuaranteeIdempotent` | 重复执行无副作用差异（如批量 `DELETE ... LIMIT`，第二次影响 0 行） |
-| `GuaranteeFenced` | 每个写操作携带 `Held.Fence` 序号，且**写路径拒绝比已见值更小的序号** |
-
-这个约束不是形式主义。**锁不是正确性保证**：网络分区、进程长时间暂停（GC、宿主机挂起）、
-租约过期后旧实例恢复，都会让两个实例同时在跑。声明强迫作者在注册时就回答
-「重复执行会怎样」，而不是把问题留到事故现场。
-
-两个容易混淆的概念：
-
-- **随机 token** 只解决「别删掉/续期别人的锁」（compare-and-delete / compare-and-renew）；
-- **fence 序号**才解决「租约过期后旧实例仍在写」。它必须单调递增，且由下游拒绝旧序号。
-
-把随机 token 当 fencing 用，是一个看起来能工作、实际毫无保护的组合：
-两个随机值之间没有先后关系，下游无从判断谁更旧。
-
-单实例 worker 的 `Prepare` 会在启动期用随机探测键真跑一遍抢锁/续租/释放——
-只 PING 不能证明当前 ACL 能执行脚本，也不能证明锁键与 fence 键在同一个集群 slot。
 
 ## 定时任务
 
-两种机制，按「按间隔」还是「按时刻」选：
+只需在本进程按固定间隔执行时，在普通 LongRunning worker 中使用
+`time.Ticker`，监听 `ctx.Done()` 并为每次执行设置超时。
+需要 cron 表达式并通过队列消费时，使用下面的周期任务调度器。
 
-| | `singleton.Runner` | 周期任务调度器 |
-|---|---|---|
-| 触发 | 固定间隔（`time.Ticker`） | cron 表达式 |
-| 能表达「每天 03:00」 | 否 | 是 |
-| 重启后 | 相位漂移到重启时刻 | 时刻不变 |
-| 依赖 | Redis | Redis + 任务队列 |
-| 执行方式 | 本进程直接执行 | 投递到队列，由消费者执行 |
+### 周期任务调度器（`internal/optional/taskqueue`）
 
-固定间隔的任务用 `Runner`——它更简单，且不依赖任务队列。
-
-通用约束：
-
-- 可重复执行；重复运行不造成重复扣款、发送、删除。
-- 明确时区、错过执行的补偿策略、最长运行时间。
-- 长任务拆小批次，记录游标或 checkpoint。
-- 调度入口只做调度，业务逻辑下沉 application service。
-
-### 周期任务调度器（`internal/pkg/tasks`）
-
-默认关闭，配 `tasks.scheduler.enabled` 启用（要求 `tasks.enabled` 也开着——
-调度器投递的任务需要有人消费）。
-
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中向 `tasks.NewScheduler` 追加声明：
+默认未接入主程序。先按 [启用说明](../internal/optional/taskqueue/README.md) 恢复 TASKQUEUE 接线，
+再配置 `tasks.scheduler.enabled` 和 `tasks.enabled`。
+在 `internal/bootstrap/taskqueue.go` 的 `buildTaskQueueWorkers` 中向 `taskqueue.NewScheduler` 追加声明：
 
 ```go
-tasks.PeriodicTask{
-    Spec:      "0 3 * * *",              // 每天 03:00
-    TaskType:  "cleanup:ai-conversations", // 必须有对应的已注册处理器
-    Payload:   cleanupPayload{Scope: "expired"},
-    Guarantee: singleton.GuaranteeIdempotent,
+taskqueue.PeriodicTask{
+    Spec:     "0 3 * * *",                // 每天 03:00
+    TaskType: "cleanup:ai-conversations", // 必须有对应的已注册处理器
+    Payload:  cleanupPayload{Scope: "expired"},
 },
 ```
 
-**触发时刻、任务类型与重复执行保证写在代码里，不在配置里**：配置里的 cron spec
-可能指向一个没有处理器的任务类型，而那种失配的表现是任务按时入队、
-一直重试到进死信队列，配置文件看起来完全正常。
+触发时刻、任务类型和投递选项写在代码里。调度器只在当前进程内运行，
+每个启用它的进程都会独立投递；将来部署多个副本时，应单独安排调度职责。
 
-#### 多副本下的重复投递
+队列仍可能重试，处理器需要按业务要求保证幂等。明确任务时区、错过执行的补偿策略
+和最长运行时间；长任务拆小批次，记录处理进度。调度入口只负责投递，
+业务逻辑放在 application service。
 
-底层调度器**没有任何跨实例协调**——每个实例的触发点到了就各自投递一次，
-N 个副本就是每次触发投递 N 次。
+投递选项通过 `PeriodicTask.Options` 显式设置，例如队列、重试次数和超时。
+调度器不自动添加去重窗口；业务需要时可显式使用 `asynqx.WithTaskUnique`，
+但投递去重不能替代处理器的业务幂等。
 
-因此调度经 Redis 租约选主：取得租约后才启动调度器，失去租约时请求停止并等待真实退出。
-这不是能靠「只在一个实例上启用」约束的事——那需要部署侧记住并正确执行，
-而它出错时没有任何症状，只表现为下游被执行了 N 次。
-
-**租约把重复降到易主窗口内，消除不了它。** 租约过期而旧 leader 尚未察觉的窗口内，
-两个实例会同时认为自己是 leader。网络分区、进程长时间暂停（GC、宿主机挂起）
-都会拉长这个窗口。
-
-每条周期任务都**必须声明 `GuaranteeIdempotent`**，由业务处理器保证重复投递安全。
-零值、`GuaranteeFenced` 与未知枚举在构造期拒绝。虽然复用 `singleton.Guarantee` 类型，
-周期任务当前不把 fence 放进消息，也没有消费者写入校验，不能承诺 fencing。
-一般 `singleton.Runner` 仍支持把 `Held.Fence` 交给执行函数，不受此限制影响。
-
-声明了 `GuaranteeIdempotent` 的任务会自动附加投递去重窗口（`tasks.scheduler.unique_ttl`）
-作为第二道防线。它同样不是保证：底层的唯一性锁在**任务成功完成时**就释放，
-不是维持整个 TTL，一个很快跑完的任务配合实例间时钟偏移仍可能被投递两次。
-有了它就放松声明要求，正好是把「看起来能工作」当成「正确」。
-
-#### 生命周期
+### 生命周期
 
 调度器是 `KindProducer` + `LifecycleLongRunning` + 非 required：
 
-- 关停时**最先**停——先停生产者再停消费者，在飞的任务才能被处理完；
-- 底层真实退出且续租 goroutine 结束后，使用原 token 主动释放租约；
-- 非 required：调度器不可用时实例仍能提供同步接口，而周期任务本就允许迟到。
+- `Prepare` 构造并注册一个实例，校验 cron、payload 和投递选项；注册失败会回收该实例。
+- `Run` 启动这个实例，等待取消；关停时先停止调度器，再停止队列消费者。
+- 首次 `Shutdown` 按 `tasks.shutdown_timeout` 等待；超时后继续等待同一实例实际退出，并保留超时错误。
+- `Cleanup(ctx)` 支持重复等待，遵守调用方预算。
+- 非 required：准备失败会降级该能力，实例仍可提供同步接口。
 
-`Prepare` 会实测租约能力（真跑一遍抢锁/续租/释放）并验证全部 cron spec 可解析。
-spec 写错如果留到运行期才发现，表现是这个任务**永远不触发**——
-而没有任何人在等一个不存在的信号。
+底层尚未退出时，`WorkerManager` 保持 worker 的未退出状态，
+`App` 不提前关闭它使用的扩展和共享 Redis。实例停止后，管理器完成清理。
 
-每一轮显式 `Start`，在停止请求后用 `tasks.shutdown_timeout` 等待 `Shutdown`。
-首次等待超时会立即发出一次 `RoundFailed`，并保留在本轮返回错误中；同一个 `Run`
-goroutine 随后继续等待同一实例真实退出，期间不创建下一代、不主动释放本轮租约。
-租约仍可能自然过期，跨实例重叠的风险由业务幂等承担。
+## 异步任务队列（`internal/optional/taskqueue`）
 
-`Cleanup(ctx)` 同样等待当前代实例的幂等 `Shutdown`，超时不清除实例归属。
-整体退出预算仍由 `WorkerManager` 管理：底层未退出时，worker 保持未退出状态，
-`App` 跳过扩展及共享客户端的关闭并报告错误。晚退出后，supervisor 才执行 worker 清理；
-晚退出不消除首次排空超时记录。2026-10-24 已通过关停阻塞、失租后两代切换、重复 Cleanup 及 App 资源安全门的故障注入和 race 回归，另验证真实 UniqueTTL 入队选项；证据见[修复计划第 9.3 节](review-remediation-plan-2026-10-23.md#93-追加测试授权与最终执行记录)。
-
-## 异步任务队列（`internal/pkg/tasks`）
-
-`asynqx` 的装配，**默认关闭**。队列是有状态的基础设施：一旦开始入队，任务就必须有人消费——
-预置打开只会在某个部署里留下一堆没人处理的积压。
+`asynqx` 的可选装配，**默认接线已注释**。启用和完整删除步骤见
+[taskqueue README](../internal/optional/taskqueue/README.md)。仅修改 YAML 不会启用当前未接入的包；
+恢复接线后，队列仍由 `tasks.enabled` 控制。
 
 **一个开关管两端**：只开生产端会攒下没人处理的积压；只开消费端则是一个空转的 worker
 占着并发配额。
@@ -234,7 +168,7 @@ goroutine 随后继续等待同一实例真实退出，期间不创建下一代�
 
 ```go
 if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil {
-    if errors.Is(err, tasks.ErrDisabled) {
+    if errors.Is(err, taskqueue.ErrDisabled) {
         // 队列未启用。这是一个错误而不是静默丢弃——
         // "以为任务排上了、实际什么也没发生"是这类能力最难查的失效形态。
     }
@@ -243,8 +177,8 @@ if err := p.tasks.Enqueue(ctx, "email:send", EmailPayload{To: addr}); err != nil
 
 ### 注册处理器
 
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中向 `tasks.NewObservedConsumer` 追加一个
-`tasks.Registrar`：
+在 `internal/bootstrap/taskqueue.go` 的 `buildTaskQueueWorkers` 中向 `taskqueue.NewObservedConsumer` 追加一个
+`taskqueue.Registrar`：
 
 ```go
 func(w *asynqx.Worker) error {

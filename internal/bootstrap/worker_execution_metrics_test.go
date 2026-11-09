@@ -5,15 +5,32 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+func newWorkerRecorderWithReader(t *testing.T) (*metrics.Recorder, *sdkmetric.ManualReader) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	recorder, err := metrics.New(provider.Meter("github.com/gtkit/gin-api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recorder, reader
+}
+
 func TestWorkerMetricsExcludeLongRunningLifetime(t *testing.T) {
 	t.Parallel()
-	observer, reader := newObserverWithReader(t)
-	manager := &WorkerManager{recorder: observer.recorder}
+	recorder, reader := newWorkerRecorderWithReader(t)
+	manager := &WorkerManager{recorder: recorder}
 	failure := errors.New("one-shot panic")
 	for _, tc := range []struct {
 		lifecycle Lifecycle
@@ -35,7 +52,6 @@ func TestWorkerMetricsExcludeLongRunningLifetime(t *testing.T) {
 			t.Fatalf("panic boundary changed: %v", err)
 		}
 	}
-	observer.TaskFinished(t.Context(), "singleton", time.Second, nil, false)
 	var data metricdata.ResourceMetrics
 	if err := reader.Collect(t.Context(), &data); err != nil {
 		t.Fatal(err)
@@ -55,14 +71,14 @@ func TestWorkerMetricsExcludeLongRunningLifetime(t *testing.T) {
 			}
 		}
 	}
-	if counts["one_shot"] != 2 || counts["singleton"] != 1 || len(counts) != 2 {
+	if counts["one_shot"] != 2 || len(counts) != 1 {
 		t.Fatalf("execution counts = %v", counts)
 	}
 }
 
 func TestWorkerManagerStartRecordsBothOneShotPaths(t *testing.T) {
 	t.Parallel()
-	observer, reader := newObserverWithReader(t)
+	recorder, reader := newWorkerRecorderWithReader(t)
 	var calls atomic.Int32
 	workers := []*funcWorker{
 		{name: "required", kind: KindBootstrap, lifecycle: LifecycleOneShot, required: true},
@@ -75,7 +91,7 @@ func TestWorkerManagerStartRecordsBothOneShotPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.recorder = observer.recorder
+	manager.recorder = recorder
 	t.Cleanup(func() {
 		if err := manager.StopAll(context.WithoutCancel(t.Context())); err != nil {
 			t.Error(err)

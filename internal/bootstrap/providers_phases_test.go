@@ -80,7 +80,7 @@ func TestBuildMiddlewares(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildMiddlewares returned error: %v", err)
 			}
-			if mw.auth == nil {
+			if mw == nil {
 				t.Fatal("buildMiddlewares returned nil auth middleware")
 			}
 		})

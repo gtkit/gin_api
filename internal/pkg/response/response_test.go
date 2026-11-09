@@ -21,6 +21,26 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
+func TestCapacityUnavailablePreservesEnvelopeWithoutErrorLog(t *testing.T) {
+	_, read := newNativeTestLogger(t, "info")
+	c, response := newCtx()
+	c.Request = c.Request.WithContext(logger.ContextWithRequestID(t.Context(), "capacity-request"))
+	CapacityUnavailable(c)
+	body := decode(t, response)
+	if response.Code != 503 || body["code"] != float64(10010018) || body["msg"] != "服务繁忙，请稍后重试" || body["request_id"] != "capacity-request" {
+		t.Fatalf("capacity envelope: %d %v", response.Code, body)
+	}
+	if !IsCapacityRejection(c) || len(read()) != 0 {
+		t.Fatal("expected a tagged capacity response without duplicate diagnostics")
+	}
+	other, _ := newCtx()
+	other.Set(capacityRejectionKey, true)
+	other.Writer.WriteHeader(http.StatusInternalServerError)
+	if IsCapacityRejection(other) {
+		t.Fatal("a different final status retained capacity classification")
+	}
+}
+
 // newCtx 返回一个可写响应的测试上下文。
 func newCtx() (*gin.Context, *httptest.ResponseRecorder) {
 	rec := httptest.NewRecorder()

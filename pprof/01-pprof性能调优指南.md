@@ -407,7 +407,7 @@ go test -run=^$ -bench=. -benchmem \
 go tool pprof -http=localhost:8080 cpu.pprof
 ```
 
-> 本仓目前没有 benchmark（`grep -rl "func Benchmark" --include=*_test.go .` 为空）。
+> 本仓已有 JWT、日志、GORM 日志与容量拒绝的 Benchmark。选择与问题对应的包；包级结果不能替代端到端基线。
 > 要用这条路径，先为目标热点包补一个 `func BenchmarkXxx(b *testing.B)`，再跑上面的命令。
 > 补哪个包应由性能工作本身决定——为了让文档成立而随便补一个基准，等于给自己造一条
 > 没人看的曲线。

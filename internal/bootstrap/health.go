@@ -13,14 +13,31 @@ import (
 // 探活直接走 Resources 而不是各自持有的连接句柄：句柄一旦被复制出去，
 // "谁负责关闭"就不再有唯一答案，而探活恰恰是最容易在关停期仍持有旧句柄的地方。
 type runtimeHealthChecker struct {
-	resources *data.Resources
+	resources   *data.Resources
+	connections *runtimeResources
 }
 
 // 编译时接口实现检查。
 var _ router.HealthChecker = (*runtimeHealthChecker)(nil)
 
-func newHealthChecker(resources *data.Resources) router.HealthChecker {
-	return &runtimeHealthChecker{resources: resources}
+func newHealthChecker(resources *data.Resources, connections *runtimeResources) router.HealthChecker {
+	return &runtimeHealthChecker{resources: resources, connections: connections}
+}
+
+// NamedConnectionChecks adds only the explicitly configured required instances.
+// The router captures these bound checks once, retaining its existing budgets.
+func (h *runtimeHealthChecker) NamedConnectionChecks() map[string]func(context.Context) error {
+	if h.connections == nil {
+		return nil
+	}
+	checks := make(map[string]func(context.Context) error, len(h.connections.databases)+len(h.connections.redisConnections))
+	for name, owner := range h.connections.databases {
+		checks["database/"+name] = owner.PingContext
+	}
+	for name, owner := range h.connections.redisConnections {
+		checks["redis/"+name] = owner.HealthCheck
+	}
+	return checks
 }
 
 func (h *runtimeHealthChecker) PingDB(ctx context.Context) error {

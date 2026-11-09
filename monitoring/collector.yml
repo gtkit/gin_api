@@ -1,0 +1,30 @@
+# Single-host/sidecar example. Network listeners are loopback-only by default.
+receivers:
+  otlp:
+    protocols:
+      http:
+        # application telemetry.endpoint must match host:port (without scheme).
+        endpoint: 127.0.0.1:4318
+processors:
+  memory_limiter:
+    # Collector budget only; tune to its actual memory allocation before use.
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+exporters:
+  prometheus:
+    # Scrape /metrics from the same host. Do not expose this unauthenticated port publicly.
+    endpoint: 127.0.0.1:9464
+    translation_strategy: UnderscoreEscapingWithSuffixes
+    # Preserve replica attribution without exporting every resource attribute.
+    resource_constant_labels:
+      included: [service.name, service.instance.id]
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

@@ -25,7 +25,8 @@ type callbackNotification struct {
 	bind func(context.Context) func()
 }
 
-func (n *callbackNotification) Warn(target string, args ...string) { n.warn(target, args...) }
+func (n *callbackNotification) Send(text string)           { n.warn("", text) }
+func (n *callbackNotification) SendTo(target, text string) { n.warn(target, text) }
 func (n *callbackNotification) BindDrain(ctx context.Context) func() {
 	if n.bind != nil {
 		return n.bind(ctx)
@@ -164,7 +165,13 @@ func TestDrainAndPartialOpenBindTheRealCleanupContext(t *testing.T) {
 
 type webhookFunc func(context.Context, string, string) error
 
-func (f webhookFunc) Send(ctx context.Context, target, text string) error {
+func (f webhookFunc) Send(text string) { f.SendTo("", text) }
+func (f webhookFunc) SendTo(target, text string) {
+	if err := f(context.Background(), target, text); err != nil {
+		panic(err) // Unexpected failures in the direct SDK test entry point must surface.
+	}
+}
+func (f webhookFunc) SendContext(ctx context.Context, target, text string) error {
 	return f(ctx, target, text)
 }
 

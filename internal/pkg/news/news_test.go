@@ -30,7 +30,7 @@ var _ ImageMessageSender = (*feishu.App)(nil)
 // 删掉包级 defaultNotifier 之后，测试不再需要"重置全局 → 设 hook → 调包级函数"
 // 这一套：每个用例持有自己的实例，天然隔离，也不会因执行顺序互相影响。
 func newTestNotifier(url, env, now string, sender func(context.Context, string, ...string) error, errLogger func(string)) *Notifier {
-	n, err := New(Options{})
+	n, err := New()
 	if err != nil {
 		panic("construct disabled test notifier: " + err.Error())
 	}
@@ -38,7 +38,9 @@ func newTestNotifier(url, env, now string, sender func(context.Context, string, 
 	n.envName = env
 	n.now = func() string { return now }
 	if sender != nil {
-		n.webhookSender = sender
+		n.webhook = injectedWebhook(func(ctx context.Context, target, text string) error {
+			return sender(ctx, target, text)
+		})
 	}
 	if errLogger != nil {
 		n.report = func(delivery Delivery) {
@@ -71,8 +73,8 @@ func TestWarnUsesDefaultURLAndHooks(t *testing.T) {
 	if gotURL != "https://example.invalid/hook" {
 		t.Fatalf("expected default url to be used, got %q", gotURL)
 	}
-	if len(gotArgs) != 2 {
-		t.Fatalf("expected title and body args, got %#v", gotArgs)
+	if len(gotArgs) != 1 {
+		t.Fatalf("expected formatted message, got %#v", gotArgs)
 	}
 	if !strings.Contains(gotArgs[0], "TEST-ENV") || !strings.Contains(gotArgs[0], "2026-03-22 22:00:00") {
 		t.Fatalf("unexpected title %q", gotArgs[0])

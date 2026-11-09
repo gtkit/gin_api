@@ -91,13 +91,9 @@ func printBanner(w io.Writer) error {
 	for i, ln := range lines {
 		parts = append(parts, bannerPalette[i%len(bannerPalette)], ln, bannerReset, "\n")
 	}
-	parts = append(parts, bannerRule, strings.Repeat("─", width), bannerReset, "\n\n")
+	parts = append(parts, gopherBlue, strings.Repeat("─", width), bannerReset, "\n\n")
 	_, err := io.WriteString(w, strings.Join(parts, ""))
 	return err
-}
-
-func init() {
-	RegisterRootCommand(newServerCmd)
 }
 
 // newServerCmd 构造 server 子命令——CLI 的主用途：启动 HTTP 服务与后台 worker。

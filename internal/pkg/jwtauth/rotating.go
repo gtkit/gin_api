@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
@@ -124,21 +125,40 @@ func NewIssuer(keys *KeySet, parser RotatingTokenParser, opts IssuerOptions) (*I
 func (i *Issuer) ActiveKID() string { return i.keys.ActiveKID() }
 
 // Issue 用 active 密钥签发一个新令牌。
-func (i *Issuer) Issue(_ context.Context, uid int64, roles ...string) (string, error) {
+func (i *Issuer) Issue(ctx context.Context, uid int64, roles ...string) (string, error) {
+	return i.issue(ctx, uid, nil, roles...)
+}
+
+// IssueForSession binds the token to the account version that authorized this session.
+func (i *Issuer) IssueForSession(ctx context.Context, uid, version int64, roles ...string) (string, error) {
+	if version < 0 {
+		return "", ErrTokenInvalid
+	}
+	return i.issue(ctx, uid, &version, roles...)
+}
+
+func (i *Issuer) issue(ctx context.Context, uid int64, version *int64, roles ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	tokenID, err := newTokenID()
 	if err != nil {
 		return "", err
 	}
 
 	// 保留现有 128-bit 十六进制 ID；gojwt 同步 jti 与 token_id。
-	signed, err := i.signer.GenerateToken(uid,
+	options := []claims.Option{
 		claims.WithIssuer(i.opts.Issuer),
 		claims.WithAudience(i.opts.Audiences...),
 		claims.WithSubject(formatUID(uid)),
 		claims.WithJwtID(tokenID),
 		claims.WithPrv(i.opts.Prv),
 		claims.WithRoles(roles...),
-	)
+	}
+	if version != nil {
+		options = append(options, claims.WithExt(SessionVersionKey, strconv.FormatInt(*version, 10)))
+	}
+	signed, err := i.signer.GenerateToken(uid, options...)
 	if err != nil {
 		return "", fmt.Errorf("sign token: %w", err)
 	}
@@ -157,6 +177,13 @@ func (i *Issuer) Refresh(ctx context.Context, token string) (string, error) {
 	parsed, err := i.parser.ParseToken(ctx, token)
 	if err != nil {
 		return "", err
+	}
+	if _, present := parsed.Ext[SessionVersionKey]; present {
+		version, err := SessionVersion(parsed)
+		if err != nil {
+			return "", err
+		}
+		return i.IssueForSession(ctx, parsed.UserID, version, parsed.Roles...)
 	}
 	return i.Issue(ctx, parsed.UserID, parsed.Roles...)
 }

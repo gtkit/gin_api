@@ -29,10 +29,17 @@ func From(ctx context.Context) (*gorm.DB, bool) {
 	return tx, ok
 }
 
-// DB 是各仓储 mdbCtx 的统一实现：ctx 内携带事务时返回事务句柄，否则返回底座 db。
-// 约定：所有 repo 的 mdbCtx 都应 `return dbtx.DB(ctx, r.db)`，从而任意 repo 默认事务安全。
+// DB 是各仓储 mdbCtx 的统一实现：已管理事务只允许同一底座的仓储加入。
+// 跨库访问在发出SQL前失败并使事务不可提交；无scope的手工With保留既有语义。
 func DB(ctx context.Context, fallback *gorm.DB) *gorm.DB {
 	if tx, ok := From(ctx); ok {
+		if scope, managed := ctx.Value(scopeKey{}).(*transactionScope); managed &&
+			(scope.handle != tx || scope.state.owner != fallback) {
+			scope.state.fail(ErrForeignTransaction)
+			rejected := tx.WithContext(ctx)
+			rejected.Error = errors.Join(rejected.Error, ErrForeignTransaction)
+			return rejected
+		}
 		return tx.WithContext(ctx)
 	}
 	return fallback.WithContext(ctx)

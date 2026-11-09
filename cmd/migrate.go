@@ -13,11 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() {
-	// 注册根命令
-	RegisterRootCommands(newMigrateCmd, newMakeCmd)
-}
-
 // buildMigrationCommands 初始化运行时并构建 migratex 命令集，仅在执行迁移子命令时调用。
 //
 // ctx 由调用方（cobra 命令）传入而不是用背景上下文：中断信号因此能覆盖数据库
@@ -52,11 +47,7 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 		migrate.WithProjectName(modulePath),
 		migrate.WithMigrationDir("database/migrations"),
 		// 新增持久化模型时同步登记，供 --from-model 和 DDL 差异检查使用。
-		migrate.WithDDLModels(
-			&models.User{},
-			&models.UserRole{},
-			&models.OperationAudit{},
-		),
+		migrate.WithDDLModels(append([]any{&models.User{}, &models.UserRole{}}, optionalDDLModels(rt.Config())...)...),
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {

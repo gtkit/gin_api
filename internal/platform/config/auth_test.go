@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+func TestSessionLifecycleRequiresLocalMode(t *testing.T) {
+	for _, mode := range []AuthMode{AuthModeLocal, AuthModeExternal} {
+		for _, enabled := range []bool{false, true} {
+			cfg := AuthConfig{Mode: mode, SessionLifecycle: enabled, RefreshReplaySecret: testReplaySecret}
+			err := validateAuthConfig(cfg, RedisConfig{Addr: "127.0.0.1:6379"}, testAccessTTL)
+			if wantErr := enabled && mode != AuthModeLocal; (err != nil) != wantErr {
+				t.Fatalf("mode=%s enabled=%v err=%v", mode, enabled, err)
+			}
+		}
+	}
+}
+
 // TestAuthModeMustBeChosenExplicitly 钉住"忘记选择必须失败"。
 //
 // 这是本次最重要的一条：任何一种默认都会静默地给出错误的系统——
@@ -170,7 +182,7 @@ func TestAccessTTLHasASingleSource(t *testing.T) {
 		// 访问令牌默认短寿命；外部模式描述"接受的外部令牌"，兜底保持宽松。
 		{name: "local zero falls back to short ttl", hours: 0, mode: AuthModeLocal, want: defaultLocalTokenTTL},
 		{name: "local negative falls back", hours: -1, mode: AuthModeLocal, want: defaultLocalTokenTTL},
-		{name: "external zero keeps legacy ttl", hours: 0, mode: AuthModeExternal, want: defaultExternalTokenTTLHours * time.Hour},
+		{name: "external zero uses external ttl", hours: 0, mode: AuthModeExternal, want: defaultExternalTokenTTLHours * time.Hour},
 	}
 
 	for _, tt := range tests {

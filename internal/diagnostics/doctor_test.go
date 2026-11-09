@@ -46,7 +46,7 @@ func validConfig() *config.Config {
 		// 不给这些与认证无关的用例强加一个依赖。
 		Auth: config.AuthConfig{Mode: config.AuthModeExternal},
 		Database: config.DatabaseConfig{
-			DBType: "mysql", Host: "127.0.0.1", Port: "3306", Name: "sleep", Username: "root",
+			Host: "127.0.0.1", Port: "3306", Name: "sleep", Username: "root",
 		},
 		Redis: config.RedisConfig{Addr: "127.0.0.1:6379", DBs: []int{0, 1, 2}},
 		Log:   config.LogConfig{Level: "info", Path: "./logs/app_client"},
@@ -172,7 +172,7 @@ func TestDeepProbeFailureSeverityFollowsRequiredness(t *testing.T) {
 	// redis 必需时必须是 fail 而不是 degraded。
 	//
 	// 这条缺失的后果具体而危险：auth.mode: local 的部署里 Redis 是必需的
-	// （刷新令牌、撤销表、租约都在它上面）。此前 redis 检查把 required 写死为
+	// （刷新令牌、撤销表都在它上面）。此前 redis 检查把 required 写死为
 	// false，Redis 挂掉时 doctor --deep 报退出码 2「仅降级」，部署脚本据此放行，
 	// 紧接着服务因必需 Redis 失败而根本起不来——doctor 在它最该拦住的那一刻放了行。
 	//
@@ -311,7 +311,7 @@ func TestPoolConsistencyCrossValidation(t *testing.T) {
 	if got.ErrorCode != CodeInconsistent {
 		t.Fatalf("error code = %q, want %q", got.ErrorCode, CodeInconsistent)
 	}
-	for _, want := range []string{"maxidleconn", "min_idle_conns"} {
+	for _, want := range []string{"min_idle_conns"} {
 		if !strings.Contains(got.Detail, want) {
 			t.Fatalf("detail %q does not mention %q", got.Detail, want)
 		}

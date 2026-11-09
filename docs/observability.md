@@ -13,6 +13,11 @@
 main 直接调用 SDK 包级函数，结构化字段使用 `zap.Field`；access 由 bootstrap 经 router
 装配参数传入 `GinLogger`，中间件直接调用原生 `*logger.Logger`，不另设日志门面。
 
+访问文件日志通过 `log.access_flush_interval` 设置自动刷新间隔，默认 `1s`；
+省略、`null` 或 `0s` 使用默认值，正时长（如 `500ms`、`2s`）按配置生效，负值拒绝。
+可用 `APP_LOG__ACCESS_FLUSH_INTERVAL` 覆盖，重启后生效。该选项仅作用于开启文件输出的
+access 缓冲，不影响 main 或控制台；缓冲写满也会刷出，异常退出仍可能丢失尚未刷出的日志。
+
 main 和 access 共用按日期及文件大小轮转的策略（`division: both`），均使用
 `log.maxsize`、`maxage`、`maxbackups` 和 `compress`。`maxsize` 的单位是 MiB；
 `maxage`、`maxbackups` 为 0 时保留 SDK 默认值，不表示无限保留。
@@ -46,11 +51,11 @@ logger.ErrorCtx(ctx, "query failed", zap.Error(err))
 
 - 请求/任务总数：success / error / timeout / canceled
 - 耗时分布
-- 队列积压、租约超时、重试次数
+- 队列积压、任务超时、重试次数
 - 缓存 hit / miss / backfill / delete_failed
 
 母版已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 单次执行量/耗时、
-连续失败与最后成功时间、DB 连接池、认证事件。
+DB 连接池、认证事件。
 
 ### Worker 单次执行
 
@@ -60,7 +65,7 @@ logger.ErrorCtx(ctx, "query failed", zap.Error(err))
 | `worker.execution.duration` | Histogram / 秒 | 同一次执行从进入任务函数到返回或异常退出的耗时 |
 
 两项共用 `worker.name`、`worker.kind`、`worker.outcome` 三个标签。
-`worker.name` 必须在装配期确定；`worker.kind` 为 `one_shot`、`singleton`、`queue`，
+`worker.name` 必须在装配期确定；`worker.kind` 为 `one_shot`、`queue`，
 API 收到其他 kind 时统一归入 `other`。队列按 consumer 名聚合，不按任意任务类型、task ID
 或 payload 拆标签。
 
@@ -68,14 +73,13 @@ API 收到其他 kind 时统一归入 `other`。队列按 consumer 名聚合，�
 归入对应结果；与真实失败混合时保留 `failure`。`panic` 表示任务未正常返回，也包含
 `runtime.Goexit` 这类异常退出；埋点不 recover，不改变既有 panic 处理流程。
 
-默认装配覆盖 OneShot 的 `Run`、带 `singletonObserver` 的 singleton 实际任务函数、
-`NewObservedConsumer` 创建的队列消费者每次处理尝试。队列重试会再次计数。
-没有执行任务、没抢到租约、租约续期/释放、Prepare/Cleanup 均不产生执行样本；
+默认装配覆盖 OneShot 的 `Run`、
+启用可选 taskqueue 后，由 `NewObservedConsumer` 创建的队列消费者每次处理尝试。队列重试会再次计数。
+没有执行任务、Prepare/Cleanup 均不产生执行样本；
 LongRunning 的整个存活时间也不作为一次任务耗时。自定义循环内的工作需在实际处理边界
 调用 `Recorder.RunWorker`，或自行调用 `RecordWorkerExecution`。
 
-旧 `worker.runs` 保留原口径，singleton 的租约丢失也可能计入其 failure，不能用作实际
-执行次数。既有健康指标 API 同样保留，新指标没有任务样本时不会伪造零次执行。
+没有任务样本时不会伪造零次执行。
 
 ### 标签基数是硬约束
 
@@ -168,6 +172,24 @@ handler、worker、外部调用尽量透传 request ID；后台任务没有 requ
 告警执行点**收口在 bootstrap**（worker 异常/降级与进程退出错误）。
 请求级异常刻意不接告警——一次流量异常就会形成告警风暴，淹没真正的进程级事件。
 `internal/middleware/recovery.go` 因此只走日志与指标。
+
+### 重复故障日志与键预算告警
+
+每个RateLimit中间件实例首次后端失败立即WARN，持续失败每30秒最多一条，
+下一次输出带窗口内`suppressed`数量；恢复记录一次INFO。错误文字变化不重开窗口，
+纯客户端取消不触发故障或虚假恢复。每次请求仍记录`ratelimit.decisions`，日志限频不改变限流结果。
+每台HTTP server的精确`http: TLS handshake error from `前缀日志采用相同30秒WARN窗口；
+未知HTTP错误及`http: panic serving `仍逐条ERROR，不受TLS窗口抑制。
+
+键预算耗尽时拒绝新键，已有键继续按原桶判定；不得通过淘汰活跃桶使旧主体获得满桶。
+IP经常变化的流量可能让新访客先遇到拒绝，多副本的本地桶也不代表一个全局配额。
+告警以真实仪表名`ratelimit.decisions`及属性`ratelimit.policy`、`ratelimit.outcome=key_limit`为依据：
+建议连续两个1分钟采集窗口均有新增key_limit时告警，连续5分钟无新增时恢复。
+该阈值是初始运维建议；导出后的series名称、属性映射、采集周期、规则路由与接收人需部署方确认，
+当前未接入任何告警接收器，也未验证真实送达。
+
+处置顺序：核对受影响policy、独立主体规模、异常流量及应用副本数；先限制攻击来源或修正过细的键维度，
+在测量容量与资源余量后调整`max_keys`。保留拒绝新键的安全语义，不用清空/淘汰活跃桶掩盖耗尽。
 
 ### 告警通道有真实对外副作用
 

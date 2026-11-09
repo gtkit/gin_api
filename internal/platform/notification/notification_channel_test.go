@@ -16,7 +16,13 @@ import (
 
 type channelSender func(context.Context, string, string) error
 
-func (f channelSender) Send(ctx context.Context, target, text string) error {
+func (f channelSender) Send(text string) { f.SendTo("", text) }
+func (f channelSender) SendTo(target, text string) {
+	if err := f(context.Background(), target, text); err != nil {
+		panic(err) // Unexpected failures in the direct SDK test entry point must surface.
+	}
+}
+func (f channelSender) SendContext(ctx context.Context, target, text string) error {
 	return f(ctx, target, text)
 }
 
@@ -42,7 +48,9 @@ func TestNotificationChannelAdmissionAndSingleCleanup(t *testing.T) {
 		t.Fatalf("configured=%v opens=%d", channel.Configured(), opens)
 	}
 	use := func(ctx context.Context) error {
-		return channel.Use(ctx, func(ctx context.Context, sender news.WebhookSender) error { return sender.Send(ctx, "target", "text") })
+		return channel.Use(ctx, func(ctx context.Context, sender news.WebhookSender) error {
+			return sender.SendContext(ctx, "target", "text")
+		})
 	}
 	if err := use(t.Context()); !errors.Is(err, news.ErrNotRunning) {
 		t.Fatalf("pre-start Send = %v", err)
@@ -193,7 +201,7 @@ func TestNotificationChannelStopWaitsForActiveSend(t *testing.T) {
 	sent, stopped := make(chan error, 1), make(chan error, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		sent <- channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.Send(ctx, "", "text") })
+		sent <- channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.SendContext(ctx, "", "text") })
 	})
 	<-entered
 	workers.Go(func() { stopped <- channel.Stop(t.Context()) })
@@ -232,7 +240,7 @@ func TestNotificationChannelUncooperativeSendRetainsResource(t *testing.T) {
 		}
 		var workers sync.WaitGroup
 		workers.Go(func() {
-			if err := channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.Send(ctx, "", "text") }); !errors.Is(err, context.Canceled) {
+			if err := channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.SendContext(ctx, "", "text") }); !errors.Is(err, context.Canceled) {
 				t.Errorf("canceled send=%v", err)
 			}
 		})
@@ -270,7 +278,7 @@ func TestNotificationChannelDrainReleaseAndInitContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := func() error {
-		return channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.Send(ctx, "", "text") })
+		return channel.Use(t.Context(), func(ctx context.Context, s news.WebhookSender) error { return s.SendContext(ctx, "", "text") })
 	}
 	drain, cancel := context.WithCancel(t.Context())
 	release := channel.BindDrain(drain)

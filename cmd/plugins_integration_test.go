@@ -88,6 +88,51 @@ func TestIsolatedPluginRoot(t *testing.T) {
 	}
 }
 
+func TestPluginRootRequiresMainConfig(t *testing.T) {
+	for _, mode := range []string{"missing main", "v2 only", "directory main"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			switch mode {
+			case "v2 only":
+				dir := filepath.Join(root, "v2", "config", "env")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "env.yml"), []byte("# metadata-only fixture\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory main":
+				if err := os.MkdirAll(filepath.Join(root, "config", "env", "env.yml"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := isolatedPluginRoot(root); err == nil {
+				t.Fatal("accepted a root without a regular main configuration file")
+			} else if mode != "directory main" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing main configuration cause lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestLocalPluginConfigurationUsesSyntheticFile(t *testing.T) {
+	cfg := validConfigForDoctor()
+	cfg.Database.Name = "v11_owned_config"
+	cfg.Database.Username = "v11_fixture_user"
+	installPluginConfiguration(t, *cfg)
+	t.Setenv("APP_DATABASE__NAME", "inherited_value_must_not_win")
+	loaded := localPluginConfiguration(t)
+	if loaded.Database.Name != cfg.Database.Name || loaded.Database.Username != cfg.Database.Username {
+		t.Fatal("plugin configuration did not use the synthetic file")
+	}
+	if loaded.Database.Host != "127.0.0.1" || loaded.Database.Port != "3306" || loaded.Redis.Addr != "127.0.0.1:6379" {
+		t.Fatal("plugin configuration lost its loopback target restrictions")
+	}
+	if loaded.Auth.Mode != config.AuthModeExternal || loaded.JWT.Active.KID != "plugin-itest" {
+		t.Fatal("plugin configuration did not install its synthetic authentication settings")
+	}
+}
+
 // This opt-in suite performs only startup/session checks and isolated cache writes
 // on the existing local services. It never runs DDL, DML, FLUSH, or migrations.
 func TestFixedRuntimeRealDependencies(t *testing.T) {
@@ -223,8 +268,7 @@ func localPluginConfiguration(t *testing.T) config.Config {
 	cfg.Redis.DialTimeoutMS, cfg.Redis.ReadTimeoutMS, cfg.Redis.WriteTimeoutMS = 500, 500, 500
 	cfg.Auth = config.AuthConfig{Mode: config.AuthModeExternal}
 	cfg.RateLimit = config.RateLimitConfig{}
-	cfg.Outbound = config.OutboundConfig{}
-	cfg.Tasks = config.TasksConfig{}
+	cfg.OptionalConfig = config.OptionalConfig{}
 	cfg.Telemetry = config.TelemetryConfig{}
 	cfg.Pprof = config.PprofConfig{}
 	cfg.News = config.NewsConfig{}

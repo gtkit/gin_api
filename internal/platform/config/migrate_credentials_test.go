@@ -76,7 +76,7 @@ func TestValidateDatabaseMigrationCredentialCombination(t *testing.T) {
 	t.Parallel()
 
 	base := DatabaseConfig{
-		DBType: "mysql", Host: "127.0.0.1", Port: "3306", Name: "db", Username: "app",
+		Host: "127.0.0.1", Port: "3306", Name: "db", Username: "app",
 	}
 
 	tests := []struct {

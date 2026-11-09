@@ -1,5 +1,19 @@
 # 配置说明
 
+## 并发性能初值
+
+当前本地配置与分发示例使用 `log.level: info`、`log.sql: 0`、`log.consolestdout: 0`、
+`log.filestdout: 1`：默认只输出文件，不逐条打印正常SQL，保留错误与慢查询。
+排障需要控制台时可设 `consolestdout: 1`，但两个输出开关不能同时为0。
+`level`必填，允许值和生产环境限制见下方校验表；这些显式示例值不改变旧配置的加载语义。
+
+`database.maxlifeseconds: 1800` 是连接寿命初值，省略/0同样回落1800秒，负值拒绝；
+部署时结合数据库/代理连接寿命调整，避免频繁重连。本机值不是生产校准结果。
+
+`jwt.cache_max_entries: 1024` 是成功验签缓存的显式初值，省略或0仍表示关闭，负值拒绝。
+容量只限制条目数；缓存最晚在令牌exp过期，自定义解析选项绕过缓存，账号状态与Redis撤销检查仍逐次执行。
+按令牌复用率、内存与锁等待测量调整，不能用缓存延后禁用账号或登出生效。
+
 ## 加载方式
 
 运行时固定从磁盘读取：
@@ -18,7 +32,22 @@ cp config/env.yml.example config/env/env.yml
 
 `config/env/env.yml` 不进入 Git。配置缺失、YAML 无法解析或关键字段校验失败时，进程 fail-fast。
 
-配置只使用当前字段，不保留旧键别名或专门的迁移诊断。YAML 和 `APP_` 环境变量覆盖中的未知键统一在解码阶段拒绝。
+### APP_ROOT 与主配置路径
+
+`APP_ROOT` 用于指定运行根目录，不参与 `APP_` 配置键覆盖。它未设置或为空字符串时，主配置沿用现有资源查找顺序；设置为非空值时，`config.Load` 只依次考虑：
+
+1. `<APP_ROOT>/config/env/env.yml`
+2. `<APP_ROOT>/v2/config/env/env.yml`
+
+只有前一个候选不存在时才尝试后一个。两个都不存在时，返回第一个路径的缺文件错误；路径探测遇到权限等其他错误，或选中文件后读取、解析、校验失败，都直接失败，不改读其他位置。非空根不会再回退到可执行文件上级、源码目录或工作目录中的其他配置。
+
+相对 `APP_ROOT` 仍相对进程工作目录解释，值中的空格不会被去除；部署建议使用绝对路径。`v2` 候选为兼容既有查找规则而保留，实际部署使用情况尚未确认。
+
+此规则适用于 `server`、`migrate`、项目 CLI 的 `make` 及 `doctor` 进入共享配置加载器的路径。依赖“显式根缺配置时从别处补齐”的启动方式会改为失败，升级前须在指定根内准备所属环境的配置。CLI 的 `make` 指项目命令，不是 Makefile 工具；帮助和无参分支是否加载配置，仍按各命令原有控制流处理。
+
+JWT 命令有独立的配置读取规则，不支持这里的 `v2` 候选；密钥、TLS 文件和写目录仍使用各自现有的资源路径规则。主配置的逻辑根约束不等同于文件系统或符号链接隔离。
+
+配置只使用当前字段，不保留旧键别名。YAML 和 `APP_` 覆盖中的未知键忽略；`doctor` 以 `ignored_config_keys` 报告键名，返回降级状态，不输出对应值。已知字段的类型和业务校验仍生效。
 
 ## 目录
 
@@ -40,12 +69,14 @@ config/
 - `application`：监听地址、端口、域名、超时、时区。
 - `database`：MySQL 连接和连接池。
 - `redis`：地址、密码和初始化 DB 列表。
-- `log`：日志级别、路径和滚动策略。
+- `database_connections`、`redis_connections`：额外具名实例，省略或空 map 仅使用原有默认连接；字段及默认值分别与 `database`、`redis` 相同，各实例独立填写凭据，不继承默认值以外的配置。名称须匹配 `[a-z][a-z0-9_]{0,63}`，`default` 保留给原有连接；额外 Redis 的 `addr`、`dbs` 必填。声明的额外实例建连失败会终止启动。使用与生命周期见 [具名连接](../docs/named-data-connections.md)。
+- `log`：日志级别、路径、滚动策略和访问日志缓冲刷新间隔。
 - `jwt`、`ssl`：JWT 和 TLS 文件路径。
 - `auth`：本地认证或外部身份模式。
 - `email`、`sms`、`news`：通知渠道与告警配置。
-- `ratelimit`、`cache`、`outbound`：限流、响应缓存和出站请求。
-- `telemetry`、`tasks`：可观测性导出与异步任务，默认关闭。
+- `ratelimit`、`cache`：限流和响应缓存。
+- `telemetry`：可观测性导出，默认关闭。
+- `outbound`、`tasks`：可选出站 HTTP 和任务队列，默认未接线；恢复配置字段及装配后才能使用，见 [可选扩展](../internal/optional/README.md)。
 - `cors`：允许的来源。
 - `pprof`：独立性能分析端点，默认关闭。
 
@@ -66,11 +97,47 @@ JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
 
+## 访问日志刷新间隔
+
+```yaml
+log:
+  access_flush_interval: 1s
+```
+
+`log.access_flush_interval` 控制访问文件日志缓冲的自动刷新间隔，默认 **1 秒**。
+使用 Go duration 格式，例如 `500ms`、`1s`、`2s`；省略、`null` 或 `0s` 回落到 1 秒，
+负值、非法时长或溢出值会在配置加载时被拒绝。可用环境变量
+`APP_LOG__ACCESS_FLUSH_INTERVAL=500ms` 覆盖，修改后重启服务生效。
+
+仅在 `log.filestdout` 开启时生效，不影响主日志或控制台输出。
+缓冲区写满时也会刷出；缩短间隔可能增加文件刷新次数，进程异常退出仍可能丢失尚未刷出的日志。
+
 ## MySQL 预编译语句与 ProxySQL
 
 `internal/platform/mysql/open.go` 的 `buildOpenOptions` 固定传入 `ormx.WithPrepareStmt(true)`，
 服务连接和迁移连接都使用这组选项。当前 YAML **没有** `database.prepare_stmt` 等开关，
 不能通过增加一个未被读取的字段来关闭它。
+
+缓存通过同一 `buildOpenOptions` 给服务和迁移传入有限参数：
+
+| 配置键 | 用途 | 省略/0 | 合法显式值 |
+|---|---|---|---|
+| `database.prepare_stmt_max_size` | 每个 GORM 缓存驻留的 SQL 种类上限 | 128 | 1..4096 |
+| `database.prepare_stmt_ttl_seconds` | 每条缓存语句的存活秒数，独立于 SQL 执行超时 | 3600 | 1..86400 |
+
+负数或超上界在配置加载时拒绝，两项可分别设置；`APP_DATABASE__PREPARE_STMT_MAX_SIZE`
+和 `APP_DATABASE__PREPARE_STMT_TTL_SECONDS` 可覆盖 YAML。旧配置不加新键也使用有限默认值。
+淘汰和过期会异步关闭语句；TTL 不是空闲超时，不因命中缓存而续期。
+
+容量配置不是 MySQL 的全局 prepared statement 配额。部署估算可先用
+`缓存种类上限 × 实际参与连接数 × 同库副本数 + 其他客户端占用`；例如 128 × 25 = 3200
+只是单副本的粗略估算输入。实际占用还受连接轮换、异步关闭、SQL 种类及其他进程影响，
+必须用真实 MySQL/代理指标核对，不能据此承诺瞬时上限或生产容量充分。
+
+部署交接需确认实际配置来源、同库副本数、连接池上限、MySQL 配额和代理版本，再决定是否覆盖默认值。
+本次没有读取或修改含密钥的 `config/env/env.yml`，没有真实服务或多副本容量验证。
+若回滚到不认识新字段的旧二进制，**先从 YAML 和 APP_ 覆盖中移除这两个新键，再回滚二进制**，
+否则旧版本的严格配置解码会拒绝未知字段；回滚不涉及数据库 schema 或历史 SQL。
 
 ProxySQL 支持 MySQL 预编译语句，不能把启用 PrepareStmt 一概判定为不兼容。
 需要关注的是预编译语句生命周期与后端连接复用：按
@@ -82,7 +149,7 @@ SQL 文本 `PREPARE` 与驱动使用的二进制预编译协议还有不同的�
 事务、连接回收/重连和后端切换，并观察实际后端连接占用及预编译语句统计。
 `database.maxopenconn` 是单个应用连接池上限，不能据此直接推断 ProxySQL 的总后端连接需求。
 本仓没有针对指定 ProxySQL 部署的联调结果，不承诺任意版本/配置兼容，也不因缺少说明而认定现有查询会失败。
-若部署验证表明需要关闭缓存，再单独实施配置与代码变更，并同步示例和验收；本文不改变当前默认行为。
+若部署验证表明需要关闭缓存，再单独实施开关与代码变更，并同步示例和验收；本次仍保持预编译开启。
 
 ## 通知通道与告警开关
 
@@ -185,3 +252,17 @@ JWT 使用 gojwt 的 Ed25519 签发：私钥为 PKCS#8 PEM（`PRIVATE KEY`，060
 新目录必须不存在，父目录须存在；固定输出 jwtpri.pem（0600）/jwtpub.pem（0644），原文件不改写。
 转换后只更新 active 的两条路径（或对应 previous 的公钥路径），保留原 kid、作用域和兼容截止值。
 重编码不使现有签名失效，但不延长过期或绕过吊销/截止规则；生成新密钥则须走上述轮换流程。
+
+### 请求和密码运算容量
+
+`application.max_inflight_requests` 控制每进程 `/api/v1` 的同时处理数：0/省略使用 128，正数显式指定，负数启动失败；不提供关闭值。满载直接返回 503，不排队，不附固定 Retry-After；`/health`、`/ready` 独立。长轮询、SSE 等将长期占用名额，接入时须另行分组和定限。
+
+`auth.bcrypt_max_concurrent` 的 0/省略仍取有效 CPU 并发数。`auth.bcrypt_max_waiters` 使用 `null` 表示默认额外等待一批同等人数，显式 0 才禁排队，正整数指定等待人数。`auth.bcrypt_queue_timeout` 的 0/省略使用 1s，实际不超过父请求预算；只约束等待，不中断已开始的 bcrypt。负值非法；队满或排队超时返回 503，调用方取消保留取消语义。四个本地认证 JSON 路由均额外限制为 8 KiB。
+
+这些初值未经生产容量校准，须结合吞吐、平均延迟、DB 等待和 503 调整；网关不要对过载 503 无条件重试。指标和内存预算见 [容量说明](../docs/capacity-and-memory.md)。
+
+### 可选能力配置
+
+默认构建不装配 taskqueue、outbound、upload、auditlog。`-tags optional` 构建读取根级配置，完整字段、默认值及约束见 [optional.yml.example](optional.yml.example)。将需要的段合并到实际 `config/env/env.yml`；仅设置配置不能让默认构建启用可选包，未使用键由 doctor 报告。全部开关默认关闭，outbound 以 clients 为空表示关闭。
+
+上传启用时，完成目录、分片临时目录、单文件字节上限和扩展名白名单均须显式填写；没有默认路径或任意类型兜底。审计开关不自动执行迁移或给全部路由挂中间件。接线和运行边界见 [可选能力](../docs/optional-capabilities.md)。

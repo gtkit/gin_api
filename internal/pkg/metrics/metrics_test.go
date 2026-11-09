@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,6 +12,79 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
+
+func TestCapacityMetricAttributesAndBalance(t *testing.T) {
+	r, reader := newTestRecorder(t)
+	finish := r.TrackRequest(t.Context(), "CLIENT_METHOD", "https")
+	m := collect(t, reader, "http.server.active_requests")
+	sum := mustMetricData[metricdata.Sum[int64]](t, m)
+	if sum.IsMonotonic || len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 1 {
+		t.Fatalf("active: %+v", sum)
+	}
+	assertMetricAttrs(t, sum.DataPoints[0].Attributes, map[string]any{"http.request.method": "_OTHER", "url.scheme": "https"})
+	finish()
+	if mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "http.server.active_requests")).DataPoints[0].Value != 0 {
+		t.Fatal("active request leaked")
+	}
+	r.RecordAdmissionRejection(t.Context(), "GET", "http", "/api/v1/items/:id")
+	r.RecordAdmissionRejection(t.Context(), "GET", "http", "")
+	rejections := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "admission.rejections"))
+	if len(rejections.DataPoints) != 1 || rejections.DataPoints[0].Value != 1 {
+		t.Fatalf("rejections: %+v", rejections)
+	}
+	assertMetricAttrs(t, rejections.DataPoints[0].Attributes, map[string]any{"http.request.method": "GET", "url.scheme": "http", "http.route": "/api/v1/items/:id", "reason": "saturated"})
+	for _, name := range []string{"auth.password.active", "auth.password.queued"} {
+		if name == "auth.password.active" {
+			r.AddPasswordActive(t.Context(), 1)
+			r.AddPasswordActive(t.Context(), -1)
+		} else {
+			r.AddPasswordQueued(t.Context(), 1)
+			r.AddPasswordQueued(t.Context(), -1)
+		}
+		d := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, name))
+		if d.IsMonotonic || d.DataPoints[0].Value != 0 || d.DataPoints[0].Attributes.Len() != 0 {
+			t.Fatalf("%s: %+v", name, d)
+		}
+	}
+	for _, outcome := range []string{"acquired", "timeout", "canceled"} {
+		r.RecordPasswordQueue(t.Context(), time.Millisecond, outcome)
+	}
+	r.RecordPasswordQueue(t.Context(), time.Second, "invalid")
+	for _, dp := range mustMetricData[metricdata.Histogram[float64]](t, collect(t, reader, "auth.password.queue.duration")).DataPoints {
+		v, _ := dp.Attributes.Value("outcome")
+		assertMetricAttrs(t, dp.Attributes, map[string]any{"outcome": v.AsString()})
+		if dp.Count != 1 {
+			t.Fatal("queue sample count")
+		}
+	}
+	for _, reason := range []string{"queue_full", "queue_timeout", "canceled"} {
+		r.RecordPasswordRejection(t.Context(), reason)
+	}
+	d := mustMetricData[metricdata.Sum[int64]](t, collect(t, reader, "auth.password.rejections"))
+	if len(d.DataPoints) != 2 {
+		t.Fatalf("rejection reasons: %+v", d)
+	}
+}
+
+func assertMetricAttrs(t *testing.T, attrs attribute.Set, want map[string]any) {
+	t.Helper()
+	got := map[string]any{}
+	for _, kv := range attrs.ToSlice() {
+		got[string(kv.Key)] = kv.Value.AsInterface()
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("attributes=%v, want %v", got, want)
+	}
+}
+
+func mustMetricData[T any](t *testing.T, m metricdata.Metrics) T {
+	t.Helper()
+	data, ok := m.Data.(T)
+	if !ok {
+		t.Fatalf("metric %s has data %T", m.Name, m.Data)
+	}
+	return data
+}
 
 // newTestRecorder 装配一个可读回记录值的 Recorder。
 //
@@ -236,94 +310,6 @@ func TestDurationHistogramHasUsefulBuckets(t *testing.T) {
 	}
 }
 
-// TestWorkerHealthIsObservedAtCollectionTime 钉住状态量走异步回调。
-//
-// 主动上报的话，一个每天跑一次的任务这两个指标一天只有一个数据点，
-// 中间二十多小时没有值——告警规则拿不到数据，只能配"无数据"这种钝规则。
-func TestWorkerHealthIsObservedAtCollectionTime(t *testing.T) {
-	t.Parallel()
-
-	rec, reader := newTestRecorder(t)
-
-	health := WorkerHealth{ConsecutiveFailures: 3}
-	unregister, err := rec.RegisterWorkerHealth("cleanup", func() WorkerHealth { return health })
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := unregister(); err != nil {
-			t.Errorf("unregister(): %v", err)
-		}
-	})
-
-	m := collect(t, reader, "worker.consecutive_failures")
-	gauge, ok := m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 3 {
-		t.Fatalf("consecutive failures = %d, want 3", gauge.DataPoints[0].Value)
-	}
-
-	// **不重新注册**，只改状态再采一次：这正是异步回调的价值——
-	// 采集时读当前值，而不是等下一次业务事件来上报。
-	health = WorkerHealth{ConsecutiveFailures: 0, LastSuccess: time.Unix(1754000000, 0)}
-
-	m = collect(t, reader, "worker.consecutive_failures")
-	gauge, ok = m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 0 {
-		t.Fatalf("after a success the streak reads %d, want 0: the callback is not reading "+
-			"the current state", gauge.DataPoints[0].Value)
-	}
-
-	m = collect(t, reader, "worker.last_success_timestamp")
-	gauge, ok = m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if gauge.DataPoints[0].Value != 1754000000 {
-		t.Fatalf("last success = %d, want 1754000000", gauge.DataPoints[0].Value)
-	}
-}
-
-// TestNeverSucceededReportsZeroInsteadOfNothing 钉住"从未成功"也有数据点。
-//
-// 跳过上报会让这条序列在最需要它的时候（任务从启动起就一直失败）根本不存在，
-// 而"无数据"与"值为 0"在告警规则里是两种完全不同的处置。
-func TestNeverSucceededReportsZeroInsteadOfNothing(t *testing.T) {
-	t.Parallel()
-
-	rec, reader := newTestRecorder(t)
-	unregister, err := rec.RegisterWorkerHealth("never-ran", func() WorkerHealth {
-		return WorkerHealth{ConsecutiveFailures: 5}
-	})
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := unregister(); err != nil {
-			t.Errorf("unregister(): %v", err)
-		}
-	})
-
-	m := collect(t, reader, "worker.last_success_timestamp")
-	gauge, ok := m.Data.(metricdata.Gauge[int64])
-	if !ok {
-		t.Fatalf("metric has unexpected shape %T", m.Data)
-	}
-	if len(gauge.DataPoints) != 1 {
-		t.Fatalf("data points = %d, want 1: a worker that never succeeded must still report "+
-			"a series, otherwise the alert rule sees no data instead of a problem",
-			len(gauge.DataPoints))
-	}
-	if gauge.DataPoints[0].Value != 0 {
-		t.Errorf("last success = %d, want 0", gauge.DataPoints[0].Value)
-	}
-}
-
 // TestDBPoolStatsSplitByState 钉住连接池按状态分标签。
 func TestDBPoolStatsSplitByState(t *testing.T) {
 	t.Parallel()
@@ -376,16 +362,7 @@ func TestNilRecorderIsSafe(t *testing.T) {
 	// 不 panic 即通过。
 	rec.RecordRequest(ctx, "GET", "/x", 200, time.Millisecond)
 	rec.RecordRateLimitDecision(ctx, "p", RateLimitThrottled)
-	rec.RecordWorkerRun(ctx, "w", false)
 	rec.RecordAuthEvent(ctx, AuthLoginFailed)
-
-	unregister, err := rec.RegisterWorkerHealth("w", func() WorkerHealth { return WorkerHealth{} })
-	if err != nil {
-		t.Fatalf("RegisterWorkerHealth on a nil recorder: %v", err)
-	}
-	if err := unregister(); err != nil {
-		t.Fatalf("unregister: %v", err)
-	}
 }
 
 // TestNoMeterFallsBackToNoop 钉住 nil meter 走 no-op 而不是崩。

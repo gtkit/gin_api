@@ -18,6 +18,10 @@ project-init: ## Instantiate a new project from this scaffold mother (usage: mak
 	@ test -n "$(NAME)" || { echo "usage: make project-init NAME=<project-name> [ARGS=\"--dry-run\"]" >&2; exit 2; }
 	go run -tags $(GO_BUILD_TAGS) . project init --name $(NAME) $(ARGS)
 
+project-module: ## Generate a module in this project (NAME=note ARGS="--dry-run")
+	@ test -n "$(NAME)" || { echo "usage: make project-module NAME=<module-name> [ARGS=\"--dry-run\"]" >&2; exit 2; }
+	go run -trimpath -tags scaffold . project module --name "$(NAME)" $(ARGS)
+
 gen-appmeta: ## 由 project.mk 生成 internal/appmeta 身份常量（改身份先改 project.mk）
 	@ bash ./scripts/gen-appmeta.sh
 

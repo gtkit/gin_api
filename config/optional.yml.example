@@ -1,0 +1,53 @@
+# Merge these keys into config/env/env.yml only for a build with -tags optional.
+# No capability below is enabled by this example.
+tasks:
+  # Producer/consumer switch; false by default. Requires redis.addr and redis_db in redis.dbs.
+  enabled: false
+  # Per-process task concurrency; 0 uses 10. Must not be negative.
+  concurrency: 10
+  # Queue weights; empty uses default:1. Names nonempty, weights positive.
+  queues: {default: 1}
+  # Default per-task deadline; 0 uses 5m, negative values rejected.
+  task_timeout: 5m
+  # Consumer/scheduler shutdown budget; 0 uses 25s, upper bound 5m.
+  shutdown_timeout: 25s
+  # Redis logical DB for asynq keys; 0 by default and must be listed in redis.dbs.
+  redis_db: 0
+  scheduler:
+    # False by default; true also requires tasks.enabled and explicit PeriodicTask registrations.
+    enabled: false
+outbound:
+  # Empty clients means disabled. Each named client inherits defaults below.
+  clients: {}
+  defaults:
+    # Per-client HTTP(S) base URL; no default. Every configured client needs one.
+    base_url: ""
+    # Total request timeout; 0 uses 10s, positive values at most 5m.
+    timeout: 10s
+    # Maximum response body bytes; 0 uses 8 MiB, positive explicit values only.
+    max_response_bytes: 8388608
+    # Active + idle connections per destination; 0 uses 64.
+    max_conns_per_host: 64
+    # Idle connections per destination; 0 uses 16, cannot exceed max_conns_per_host.
+    max_idle_conns_per_host: 16
+  breaker:
+    # Consecutive failures to open a circuit; 0 uses 5.
+    consecutive_failures: 5
+    # Open interval before half-open probes; 0 uses 60s, at most 10m.
+    open_timeout: 60s
+    # Parallel probes in half-open state; 0 uses 1.
+    half_open_max_requests: 1
+upload:
+  # Creates the uploader only; false by default. Public routes still require business registration.
+  enabled: false
+  # Completed-file directory; no default, required when enabled. Deployment supplies the path.
+  dir: ""
+  # Temporary chunk directory; no default, required when enabled. Deployment supplies the path.
+  chunk_dir: ""
+  # Per-file byte limit; no default, must be positive when enabled.
+  max_file_size: 0
+  # Allowed file extensions; no default, must be nonempty when enabled.
+  allowed_types: []
+auditlog:
+  # Creates the best-effort recorder/consumer; false by default. Explicit routes and reviewed migration required.
+  enabled: false

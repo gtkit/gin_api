@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gtkit/logger/v2"
 
@@ -18,9 +19,10 @@ import (
 	authapp "github.com/gtkit/gin-api/internal/module/auth/application"
 	"github.com/gtkit/gin-api/internal/pkg/credential"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
+	"github.com/gtkit/gin-api/internal/pkg/ratelimit"
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
+	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/repository/authcredential"
-	"github.com/gtkit/gin-api/pkg/ratelimit"
 )
 
 // credentialRepo 把仓储适配到 application 的端口。
@@ -40,7 +42,19 @@ func (r credentialRepo) FindByPhone(ctx context.Context, phone string) (authapp.
 		UserID:       cred.UserID,
 		PasswordHash: cred.PasswordHash,
 		Active:       cred.Active,
+		AuthVersion:  cred.AuthVersion,
 	}, true, nil
+}
+
+func (r credentialRepo) FindByID(ctx context.Context, uid int64) (authapp.Credential, bool, error) {
+	cred, found, err := r.repo.FindByID(ctx, uid)
+	return authapp.Credential{UserID: cred.UserID, PasswordHash: cred.PasswordHash, Active: cred.Active, AuthVersion: cred.AuthVersion}, found, err
+}
+func (r credentialRepo) ChangePassword(ctx context.Context, uid, version int64, oldHash, newHash string) (bool, error) {
+	return r.repo.ChangePassword(ctx, uid, version, oldHash, newHash)
+}
+func (r credentialRepo) RevokeSessions(ctx context.Context, uid, version int64) (bool, error) {
+	return r.repo.RevokeSessions(ctx, uid, version)
 }
 
 func (r credentialRepo) Create(ctx context.Context, phone, passwordHash, nickname string) (int64, error) {
@@ -57,29 +71,65 @@ func (r credentialRepo) Create(ctx context.Context, phone, passwordHash, nicknam
 // 计算，限流约束的是单来源/单账号速率，约束不了聚合并发——一批分布式
 // 登录请求就能把全部 CPU 吃光。
 //
-// 用带权信号量而不是缓冲 channel：**排队必须可取消**。channel 收发没有
-// 取消入口，请求被客户端放弃或被路由超时中止后仍占着名额，排队者会随
-// 攻击持续累积（每个都挂着一个 goroutine 与一份请求上下文）。
+// 运算名额由可取消信号量管理，等待名额单独非阻塞申请，防止无界排队。
 type passwordHasher struct {
-	hasher *credential.Hasher
-	gate   *semaphore.Weighted
+	hasher       *credential.Hasher
+	gate         *semaphore.Weighted
+	waiters      chan struct{}
+	queueTimeout time.Duration
+	recorder     *metrics.Recorder
 }
 
-// newPasswordHasher 构造带并发闸门的适配器；maxConcurrent <= 0 时取 1。
-func newPasswordHasher(hasher *credential.Hasher, maxConcurrent int) passwordHasher {
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
-	}
-	return passwordHasher{hasher: hasher, gate: semaphore.NewWeighted(int64(maxConcurrent))}
+func newPasswordHasher(hasher *credential.Hasher, cfg config.AuthConfig, recorder *metrics.Recorder) passwordHasher {
+	return passwordHasher{hasher: hasher,
+		gate:         semaphore.NewWeighted(int64(cfg.EffectiveBcryptConcurrency())),
+		waiters:      make(chan struct{}, cfg.EffectiveBcryptMaxWaiters()),
+		queueTimeout: cfg.EffectiveBcryptQueueTimeout(), recorder: recorder}
 }
 
 // acquire 占用一个校验名额；ctx 取消即离队。
 func (h passwordHasher) acquire(ctx context.Context) (release func(), err error) {
-	if err := h.gate.Acquire(ctx, 1); err != nil {
-		// 取消/超时在这里如实返回：调用方据此知道"没算，不是算错了"。
-		return nil, fmt.Errorf("auth: wait for a password hashing slot: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return func() { h.gate.Release(1) }, nil
+	if !h.gate.TryAcquire(1) {
+		select {
+		case h.waiters <- struct{}{}:
+		default:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			h.recorder.RecordPasswordRejection(ctx, "queue_full")
+			return nil, authapp.ErrBusy
+		}
+		started := time.Now()
+		h.recorder.AddPasswordQueued(ctx, 1)
+		waitCtx, cancel := context.WithTimeout(ctx, h.queueTimeout)
+		err = h.gate.Acquire(waitCtx, 1)
+		cancel()
+		h.recorder.AddPasswordQueued(ctx, -1)
+		<-h.waiters
+		outcome := "acquired"
+		if err != nil {
+			if ctx.Err() != nil {
+				outcome = "canceled"
+				err = ctx.Err()
+			} else {
+				outcome = "timeout"
+				h.recorder.RecordPasswordRejection(ctx, "queue_timeout")
+				err = authapp.ErrBusy
+			}
+		}
+		h.recorder.RecordPasswordQueue(ctx, time.Since(started), outcome)
+		if err != nil {
+			return nil, fmt.Errorf("auth: wait for a password hashing slot: %w", err)
+		}
+	}
+	h.recorder.AddPasswordActive(ctx, 1)
+	return func() {
+		h.recorder.AddPasswordActive(ctx, -1)
+		h.gate.Release(1)
+	}, nil
 }
 
 func (h passwordHasher) Hash(ctx context.Context, password string) (string, error) {
@@ -186,6 +236,28 @@ func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) err
 	return err
 }
 
+func (s refreshStore) IssueForSession(ctx context.Context, uid, version int64) (string, error) {
+	return s.store.IssueForSession(ctx, uid, version)
+}
+func (s refreshStore) PeekSession(ctx context.Context, token string) (int64, int64, error) {
+	uid, version, err := s.store.PeekSession(ctx, token)
+	return uid, version, sessionRefreshError(err)
+}
+func (s refreshStore) ConsumeSession(ctx context.Context, token string) (int64, int64, string, error) {
+	uid, version, next, err := s.store.ConsumeSession(ctx, token)
+	return uid, version, next, sessionRefreshError(err)
+}
+func sessionRefreshError(err error) error {
+	switch {
+	case errors.Is(err, tokenstore.ErrRefreshReused):
+		return authapp.ErrRefreshReused
+	case errors.Is(err, tokenstore.ErrRefreshNotFound), errors.Is(err, tokenstore.ErrFamilyRevoked), errors.Is(err, tokenstore.ErrMalformedToken):
+		return authapp.ErrRefreshRejected
+	default:
+		return err
+	}
+}
+
 // authAuditor 把认证事件写进日志栈。
 type authAuditor struct{}
 
@@ -217,6 +289,8 @@ func (e eventRecorder) RecordAuthEvent(ctx context.Context, event string) {
 // 报错，错误信息会指向装配函数而不是真正需要修改的适配器。
 var (
 	_ authapp.CredentialRepository = credentialRepo{}
+	_ authapp.SessionRepository    = credentialRepo{}
+	_ authapp.SessionRefreshStore  = refreshStore{}
 	_ authapp.PasswordHasher       = passwordHasher{}
 	_ authapp.RefreshStore         = refreshStore{}
 	_ authapp.RevocationList       = (*tokenstore.RevocationList)(nil)

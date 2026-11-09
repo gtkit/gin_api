@@ -24,7 +24,7 @@ func validConfigForDoctor() *config.Config {
 		// 不给这些与认证无关的用例强加一个依赖。
 		Auth: config.AuthConfig{Mode: config.AuthModeExternal},
 		Database: config.DatabaseConfig{
-			DBType: "mysql", Host: "127.0.0.1", Port: "3306", Name: "sleep", Username: "root",
+			Host: "127.0.0.1", Port: "3306", Name: "sleep", Username: "root",
 		},
 		Redis: config.RedisConfig{Addr: "127.0.0.1:6379", DBs: []int{0, 1, 2}},
 		Log:   config.LogConfig{Level: "info", Path: "./logs/app_client"},

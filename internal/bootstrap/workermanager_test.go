@@ -13,6 +13,24 @@ func testWorkerBudget() WorkerBudget {
 	return WorkerBudget{Prepare: time.Second, Startup: 3 * time.Second, Cleanup: time.Second}
 }
 
+func TestWorkerKindLifecycle(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		kind WorkerKind
+		want Lifecycle
+	}{
+		{KindUnspecified, LifecycleUnspecified},
+		{KindBootstrap, LifecycleOneShot},
+		{KindProducer, LifecycleLongRunning},
+		{KindConsumer, LifecycleLongRunning},
+		{WorkerKind(255), LifecycleUnspecified},
+	} {
+		if got := tc.kind.Lifecycle(); got != tc.want {
+			t.Errorf("kind %d: lifecycle = %v, want %v", tc.kind, got, tc.want)
+		}
+	}
+}
+
 // TestWorkerContractValidation 覆盖注册期的全部声明约束。
 //
 // 零值类别/生命周期必须拒绝：若零值被解释成某个具体取值，忘记声明的 worker

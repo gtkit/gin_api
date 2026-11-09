@@ -2,6 +2,43 @@
 
 项目质量检查脚本目录。
 
+## security-source.go
+
+独立源码检查脚本，源码与测试均使用 `//go:build ignore`，不作为服务包参与 `./...`。单元测试必须显式传入源文件对：
+
+```sh
+go test -trimpath -race -count=1 scripts/security-source.go scripts/security-source_test.go
+```
+
+该命令验证结果映射、脱敏和异常输出判定，不执行真实安全扫描器。
+
+## load-api.go
+
+独立 API 负载工具，使用 `//go:build ignore`，不进入产品 `./...` 或默认覆盖率。先将请求场景保存为 JSON 数组，例如 `[{"method":"GET","path":"/health","weight":1}]`，再显式运行：
+
+```bash
+GOTOOLCHAIN=local go run scripts/load-api.go -target http://127.0.0.1:8008 -scenario scenario.json -rate 20 -concurrency 4 -duration 10s -timeout 5s
+GOTOOLCHAIN=local go test -vet=off -count=1 scripts/load-api.go scripts/load-api_test.go
+GOTOOLCHAIN=local go build -o .cache/load-api scripts/load-api.go
+```
+
+默认只允许 loopback，localhost 固定拨号到 127.0.0.1；远程需显式 `-allow-remote`，且应取得目标所有者许可。工具不跟随重定向、不使用环境代理。支持场景 `method/path/weight/headers/body`，不打印正文、凭据或完整 URL。文件≤1 MiB、场景≤64、每正文≤64 KiB、头≤32；并发≤4096、到达率≤100000/s、时长≤24h、单请求超时≤1min，均须为正。超出 1 MiB 的响应按传输失败记录并关闭。
+
+`-duration` 默认 10s，限定计划发压窗口。派发按调度循环取时间时的判定接受：计划发送时刻 ≤ 判定时刻 < 截止时间；抢占可能使一次已接受的派发延后完成，这段延迟仍计入 scheduled_latency。已接受请求按各自 `-timeout`（默认 5s）继续收尾，超时从 worker 开始处理请求时起算；不承诺整个进程在 duration+timeout 的严格墙钟上限内结束。调用方取消或收到退出信号仍立即取消请求。`elapsed_seconds` 包含收尾，可能大于 duration；自然结束发压不会提前截断请求或响应体。
+
+输出保留 offered/sent/completed/generator_dropped、状态码、传输失败和从计划发送时刻计算的固定桶延迟 P95/P99 上界；越界分位明确标注 overflow。`scheduler_dropped` 记录发生器调度落后漏过的计划发送，`worker_dropped` 记录派发时没有空闲 worker 的请求。`canceled_requests` 只统计父级主动取消且请求错误也匹配 context.Canceled 的请求；这些请求计入 completed，但不计入 transport_errors、不进入延迟桶。真正的 I/O 错误、单请求超时和父级 deadline 引发的失败仍计入 transport_errors 和延迟桶。延迟分布表示非主动取消请求的终结耗时，包括成功和真实失败，并非只统计成功响应。
+
+`status` 统计实际收到的响应头，不能当作完整成功数：收到 200 后正文超时会同时计入 status[200] 和 transport_errors；正文被主动取消则同时计入 status[200] 和 canceled_requests。它们不是互斥分类。收尾后的不变量为：
+
+- completed = sent；offered = sent + generator_dropped。
+- generator_dropped = scheduler_dropped + worker_dropped。
+- 延迟桶总数 = completed - canceled_requests。
+- status 各项之和 ≤ completed。
+
+等待所有 worker 结束后，`termination_reason` 为 `completed`（正常结束）、`canceled`（父级主动取消）或 `deadline_exceeded`（父级预算耗尽）。命令行父级当前来自 SIGINT/SIGTERM；父级 deadline 只涉及直接调用或测试，不等于单请求 timeout。正常完成输出 JSON 并退出 0；中止先输出 JSON，再向 stderr 报错并退出 1。参数错误也退出 1，但不输出结果 JSON。退出 0 表示压测过程完成，不代表所有请求成功；外层超时包装器的退出码由包装器自行决定。
+
+不建立等待队列；必须结合丢弃率读分位，不能把低延迟当作服务容量。worker 满载也可能由下游变慢造成，不能只归因于并发参数。旧字段保留，但严格拒绝未知 JSON 字段的消费者需接受新增字段；原先依赖桶总数等于 completed 的消费者需更新。场景权重按固定顺序轮转；超载丢弃可能改变实际发送比例，应以服务端观测核对。
+
 ## install-hooks.sh / check-hooks.sh / git-hooks/
 
 `git-hooks/` 下是随仓库分发的 git 钩子（当前只有 `pre-push`，执行 `make check-ci`）。
@@ -79,6 +116,28 @@ GOWORK=off go run ./scripts/check-doc-refs.go --self-test     # 只跑自检
 不在反引号里的散文式路径提及、以及符号引用（`包路径.符号`）是否仍然存在。
 判定"是不是仓内路径"的规则刻意保守（须含内部 `/`，末段带已知扩展名或以 `/` 结尾，
 排除绝对路径 / `~` / `$` / 花括号 / glob），因此外部模块名与符号引用不参与判定。
+
+## check-optional-wiring.go
+
+独立验证注释中的可选接线；不属于默认`check`、`check-ci`或CI。工具仅用Go标准库：
+
+```bash
+make check-optional-wiring
+GOWORK=off go run ./scripts/check-optional-wiring.go -case taskqueue
+GOWORK=off go test -vet=off -count=1 -run '^TestOptionalWiring' ./scripts/check-optional-wiring.go ./scripts/check-optional-wiring_test.go
+```
+
+固定样例为default、taskqueue、upload、outbound、auditlog、all、removed。每例创建自有临时副本，
+只复制白名单源文件和示例配置，按manifest恢复40处wiring标记；主工作区不改接线。
+副本不包含实际运行配置、pem、go.work、.git或缓存；白名单内符号链接拒绝，清理核对目录身份。
+每例用`-trimpath`构建主程序，再用`go test -c -tags=integration -vet=off`编译cmd/bootstrap/config测试，
+不执行任何测试二进制、服务或迁移。子进程固定离线Go环境、清除APP_并设置自有APP_ROOT；
+单子进程120秒、单例300秒。结果以JSON记录命令、耗时和退出码；这只是编译证据。
+
+`-case all -negative`仅在副本中损坏一个已恢复的调用，预期构建失败并返回非零，用于检验错误接线不会被放过；不要将它作为正常构建成功入口。
+
+工具单元与真实七例矩阵是两类证据。成本评估要对同一源码做三组冷/热缓存配对，使用自有GOCACHE，
+不清用户缓存；没有成本结果和新决定前保持独立入口。当前实现面向本机/POSIX验证，Windows未验收。
 
 ## test-coverage.sh / check-coverage.sh
 

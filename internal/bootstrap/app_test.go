@@ -176,7 +176,8 @@ func TestNewAppTransfersCleanupWithoutOwningRuntimeResources(t *testing.T) {
 	for _, step := range app.cleanup.steps {
 		names = append(names, step.name)
 	}
-	want := []string{"telemetry", "db pool metrics", "rate limits", "outbound http clients", "task producer"}
+	want := []string{"telemetry", "db pool metrics", "runtime metrics", "Redis metrics", "rate limits"}
+	// Optional fields may be compiled in; disabled capabilities own no resources.
 	if !slices.Equal(names, want) {
 		t.Fatalf("registered provider resources = %v, want %v", names, want)
 	}
@@ -682,15 +683,15 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 	}
 
 	originalLocal := time.Local
-	originalVerify := initVerify
+	originalVerify := verifyInit
 	originalJSONCheck := checkJSONRuntime
 	defer func() {
 		time.Local = originalLocal
-		initVerify = originalVerify
+		verifyInit = originalVerify
 		checkJSONRuntime = originalJSONCheck
 	}()
 
-	initVerify = func(...verify.Option) error { return nil }
+	verifyInit = func(...verify.Option) error { return nil }
 	checkJSONRuntime = func() {}
 
 	ApplyRuntimeTimezone(&config.Config{App: config.AppConfig{Timezone: "Asia/Shanghai"}})
@@ -702,10 +703,10 @@ func TestInitProcessRuntimeAppliesConfiguredTimezone(t *testing.T) {
 // TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail verifies the outer Runtime
 // failure path, including the selected logging owner and original validator error.
 func TestInitProcessRuntimeFlushesLogsWhenLaterStepsFail(t *testing.T) {
-	originalVerify := initVerify
-	t.Cleanup(func() { initVerify = originalVerify })
+	originalVerify := verifyInit
+	t.Cleanup(func() { verifyInit = originalVerify })
 	failure := errors.New("validator exploded")
-	initVerify = func(...verify.Option) error { return failure }
+	verifyInit = func(...verify.Option) error { return failure }
 	fixture := newLifecycleFixture(t)
 	if _, err := NewRuntime(t.Context(), fixture.options()); !errors.Is(err, failure) {
 		t.Fatalf("validator failure lost: %v", err)

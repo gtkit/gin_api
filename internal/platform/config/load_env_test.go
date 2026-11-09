@@ -9,7 +9,7 @@ import (
 	"github.com/gtkit/gin-api/internal/appmeta"
 )
 
-func TestEnvOverrideRejectsLegacyConfigKeys(t *testing.T) {
+func TestEnvOverrideIgnoresLegacyConfigKeys(t *testing.T) {
 	clearConfigEnv(t)
 	root := t.TempDir()
 	t.Setenv("APP_ROOT", root)
@@ -27,8 +27,8 @@ func TestEnvOverrideRejectsLegacyConfigKeys(t *testing.T) {
 		t.Run(tc.variable, func(t *testing.T) {
 			t.Setenv(tc.variable, tc.value)
 			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), "decode config") || !strings.Contains(err.Error(), tc.key) {
-				t.Fatalf("expected unknown-key decode error for %s, got %v", tc.variable, err)
+			if err != nil {
+				t.Fatalf("legacy environment variable %s blocked loading: %v", tc.variable, err)
 			}
 		})
 	}
@@ -47,13 +47,11 @@ application:
   host: localhost
   port: "8008"
   name: %s
-  domain: "https://example.com"
   ishttps: false
   read_header_timeout: 2
   read_timeout: 30
   timezone: "Asia/Shanghai"
 database:
-  dbtype: mysql
   host: 127.0.0.1
   port: "3306"
   name: sleep
@@ -225,26 +223,15 @@ func TestEnvOverrideKeepsSingleUnderscoreInKey(t *testing.T) {
 	}
 }
 
-// TestUnknownEnvOverrideFailsFast 钉住拼错的 APP_ 变量导致启动失败。
-//
-// 忽略它的代价：服务带着 YAML 里的空密码正常起来，直到第一次连库才报"认证失败"，
-// 而那条错误与真正的原因（变量名拼错）之间隔着一整条排查路径。
-func TestUnknownEnvOverrideFailsFast(t *testing.T) {
-	const secretValue = "super-secret-value"
-	t.Setenv("APP_DATABSE__PASSWORD", secretValue) // 故意拼错 DATABASE
-
-	_, err := loadFromReader(strings.NewReader(minimalConfigYAML()))
-	if err == nil {
-		t.Fatal("loadFromReader accepted an APP_ variable that maps to no config key")
+func TestUnknownEnvOverrideIsIgnored(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("APP_DATABSE__PASSWORD", "unused-secret")
+	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML()))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 断言错误指向拼错的那个键，而不是只断言"有错误"——后者任何失败原因都能满足，
-	// 包括这条 fail-fast 根本没生效、而配置因为别的原因没通过校验。
-	if !strings.Contains(err.Error(), "databse") {
-		t.Fatalf("error must name the offending key so the typo is findable, got: %v", err)
-	}
-	// 该层承载的正是密钥：错误信息绝不能把值带出去。
-	if strings.Contains(err.Error(), secretValue) {
-		t.Fatalf("error message leaked the variable value: %v", err)
+	if cfg.Database.Password != "" {
+		t.Fatal("unknown environment key changed the database password")
 	}
 }
 

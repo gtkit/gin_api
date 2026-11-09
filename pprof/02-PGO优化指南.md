@@ -237,7 +237,7 @@ build:
 
 完全没有可施压的运行环境时，可用 benchmark 产出的 CPU profile（代表性弱于真实流量，聊胜于无）：
 
-前提：本仓目前**没有 benchmark**，这条路径要先为目标包补一个 `func BenchmarkXxx`。
+前提：选择现有 JWT、日志、GORM 日志或容量拒绝 Benchmark；缺少对应热点时再补充。包级 profile 不代表完整业务流量。
 
 ```bash
 # 先为热点包写好 benchmark，再对该包采样（<包路径> 换成你补了 benchmark 的包）

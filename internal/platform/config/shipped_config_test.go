@@ -72,6 +72,12 @@ func TestShippedExampleStaysInSyncWithTheCode(t *testing.T) {
 	if cfg.JWT.Active.KID == "" {
 		t.Error("jwt.active.kid did not survive decoding")
 	}
+	if cfg.Log.Level != "info" || cfg.Log.SQL != 0 || cfg.Log.ConsoleStdout != 0 || cfg.Log.FileStdout != 1 {
+		t.Error("shipped performance logging settings drifted")
+	}
+	if cfg.Database.EffectiveMaxLifeSeconds() != 1800 || cfg.JWT.CacheMaxEntries != 1024 {
+		t.Error("shipped connection lifetime or JWT cache settings drifted")
+	}
 }
 
 // TestShippedExampleShipsNoUsableCredentials 钉住模板不携带可直接使用的凭据。

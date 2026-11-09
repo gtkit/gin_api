@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -11,6 +12,11 @@ import (
 
 // 业务错误。transport 层按类型映射状态码，不解析文本。
 var (
+	ErrSessionExpired    = errors.New("auth: session is no longer current")
+	ErrInvalidPassword   = errors.New("auth: password must contain 8 to 72 characters and at most 72 bytes")
+	ErrLifecycleDisabled = errors.New("auth: session lifecycle is disabled")
+	// ErrBusy 表示密码运算的等待人数或排队时间已达到上限。
+	ErrBusy = errors.New("auth: password capacity exhausted")
 	// ErrInvalidCredentials 表示账号不存在或密码错误。
 	//
 	// **两种情况共用一个错误是刻意的**：区分它们等于提供一个不需要口令
@@ -78,11 +84,16 @@ type Service struct {
 	accounts AccountLimiter
 
 	// now 可注入，测试用它确定性地驱动撤销记录的存活时间。
-	now func() time.Time
+	now            func() time.Time
+	sessions       SessionRepository
+	sessionAccess  SessionAccessIssuer
+	sessionRefresh SessionRefreshStore
 }
 
 // Options 是 Service 的依赖。
 type Options struct {
+	// Sessions enables authenticated password changes and account-wide invalidation.
+	Sessions       SessionRepository
 	Credentials    CredentialRepository
 	Hasher         PasswordHasher
 	AccessIssuer   AccessIssuer
@@ -114,34 +125,39 @@ func NewService(opts Options) (*Service, error) {
 	case opts.AccessTTL <= 0:
 		return nil, fmt.Errorf("auth: access ttl must be positive, got %s", opts.AccessTTL)
 	}
+	var sessionAccess SessionAccessIssuer
+	var sessionRefresh SessionRefreshStore
+	if opts.Sessions != nil {
+		var ok bool
+		sessionAccess, ok = opts.AccessIssuer.(SessionAccessIssuer)
+		if !ok {
+			return nil, errors.New("auth: session-aware access issuer required")
+		}
+		sessionRefresh, ok = opts.RefreshStore.(SessionRefreshStore)
+		if !ok {
+			return nil, errors.New("auth: session-aware refresh store required")
+		}
+	}
 
 	return &Service{
-		creds:     opts.Credentials,
-		hasher:    opts.Hasher,
-		access:    opts.AccessIssuer,
-		refresh:   opts.RefreshStore,
-		revoked:   opts.RevocationList,
-		auditor:   opts.Auditor,
-		events:    opts.Events,
-		accessTTL: opts.AccessTTL,
-		accounts:  opts.Accounts,
-		now:       time.Now,
+		creds:          opts.Credentials,
+		hasher:         opts.Hasher,
+		access:         opts.AccessIssuer,
+		refresh:        opts.RefreshStore,
+		revoked:        opts.RevocationList,
+		auditor:        opts.Auditor,
+		events:         opts.Events,
+		accessTTL:      opts.AccessTTL,
+		accounts:       opts.Accounts,
+		now:            time.Now,
+		sessions:       opts.Sessions,
+		sessionAccess:  sessionAccess,
+		sessionRefresh: sessionRefresh,
 	}, nil
 }
 
-// normalizeAccount 规范化账号标识，供限流、查询与写入**共用同一个值**。
-//
-// 三者必须同源：数据库列用 utf8mb4_unicode_ci，那是 PAD SPACE 语义——
-// "13800000000 " 与 "13800000000" 在查询里是同一行，而按原始输入派生的
-// HMAC 限流键却是两个不同的桶。攻击者每次在尾部多加一个空格，就能对同一个
-// 账号无限次尝试而每次都落在一个全新的桶里，账号维度限流形同虚设。
-//
-// 规范化在 application 入口一次完成：放到限流那一步单独做，写入路径就会
-// 存进未规范化的值，同一个账号从此有两种存在形式。
-//
-// 只做 Trim 与"不得含内部空白"，不做大小写折叠或 Unicode 归一：手机号是
-// 数字串，多做的每一步都要与数据库 collation 的口径逐条对齐，而对不上的
-// 那一步会重新打开同一个洞。
+// normalizeAccount 保留已有标识格式，统一读写的空白处理。
+// 登录限流另用查询得到的稳定用户 ID，避免复制数据库的字符等价规则。
 func normalizeAccount(account string) (string, error) {
 	normalized := strings.TrimSpace(account)
 	if normalized == "" {
@@ -171,7 +187,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 	if err != nil {
 		return TokenPair{}, err
 	}
-	if err := s.gateAccount(ctx, phone, "register"); err != nil {
+	if err := s.gateAccount(ctx, "input:"+phone, "register"); err != nil {
 		return TokenPair{}, err
 	}
 
@@ -192,7 +208,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 	}
 
 	s.audit(ctx, "account registered: uid=%d", uid)
-	pair, err := s.issuePair(ctx, uid)
+	pair, err := s.issuePair(ctx, uid, 0)
 	if err != nil {
 		// 账号已建、令牌未签发：必须显式表达这次部分成功。
 		// 审计走告警级——它意味着令牌基础设施（Redis/签发器）在注册路径上
@@ -211,13 +227,18 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		// 它不泄漏"这个账号是否存在"——因为这样的账号根本不可能存在。
 		return TokenPair{}, err
 	}
-	if err := s.gateAccount(ctx, phone, "login"); err != nil {
-		return TokenPair{}, err
-	}
-
 	cred, found, err := s.creds.FindByPhone(ctx, phone)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: look up credentials: %w", err)
+	}
+	// 数据库等价的多个输入必须共享一个桶。使用已有查询的结果，不增加 I/O；
+	// 查询前的容量保护由路由上的 IP 限流与凭据准入承担。
+	subject := "input:" + phone
+	if found {
+		subject = "user:" + strconv.FormatInt(cred.UserID, 10)
+	}
+	if err := s.gateAccount(ctx, subject, "login"); err != nil {
+		return TokenPair{}, err
 	}
 
 	if !found {
@@ -256,7 +277,7 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		return TokenPair{}, ErrAccountInactive
 	}
 
-	pair, err := s.issuePair(ctx, cred.UserID)
+	pair, err := s.issuePair(ctx, cred.UserID, cred.AuthVersion)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -277,13 +298,22 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 // 判定与提交之间的竞态由 Consume 自己定局：它是唯一的原子权威，
 // 并发消费仍然只有一个成功，重用检测与族撤销的语义不受影响。
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
-	uid, err := s.refresh.Peek(ctx, refreshToken)
+	uid, version, err := s.peekRefresh(ctx, refreshToken)
 	if err != nil {
 		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
 	}
+	if s.sessions != nil {
+		credential, found, err := s.sessions.FindByID(ctx, uid)
+		if err != nil {
+			return TokenPair{}, fmt.Errorf("auth: verify refresh session: %w", err)
+		}
+		if !found || !credential.Active || credential.AuthVersion != version {
+			return TokenPair{}, ErrRefreshRejected
+		}
+	}
 
 	// 签发在消费之前：这一步失败时刷新令牌仍然有效。
-	accessToken, err := s.access.Issue(ctx, uid)
+	accessToken, err := s.issueAccess(ctx, uid, version)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf(
 			"auth: issue access token for uid=%d (the refresh token is untouched, retry is safe): %w",
@@ -291,9 +321,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	}
 
 	// 提交：轮换出下一代刷新令牌。到这里才第一次改动状态。
-	_, next, err := s.refresh.Consume(ctx, refreshToken)
+	consumedUID, consumedVersion, next, err := s.consumeRefresh(ctx, refreshToken)
 	if err != nil {
 		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
+	}
+	if s.sessions != nil && (consumedUID != uid || consumedVersion != version) {
+		return TokenPair{}, ErrRefreshRejected
 	}
 
 	return TokenPair{
@@ -366,13 +399,18 @@ func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Tim
 }
 
 // issuePair 签发访问令牌与刷新令牌。
-func (s *Service) issuePair(ctx context.Context, uid int64) (TokenPair, error) {
-	accessToken, err := s.access.Issue(ctx, uid)
+func (s *Service) issuePair(ctx context.Context, uid, version int64) (TokenPair, error) {
+	accessToken, err := s.issueAccess(ctx, uid, version)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: issue access token for uid=%d: %w", uid, err)
 	}
 
-	refreshToken, err := s.refresh.Issue(ctx, uid)
+	var refreshToken string
+	if s.sessionRefresh != nil {
+		refreshToken, err = s.sessionRefresh.IssueForSession(ctx, uid, version)
+	} else {
+		refreshToken, err = s.refresh.Issue(ctx, uid)
+	}
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("auth: issue refresh token for uid=%d: %w", uid, err)
 	}
@@ -403,9 +441,8 @@ func (s *Service) event(ctx context.Context, name string) {
 	}
 }
 
-// gateAccount 执行账号维度限流（rate-limiting spec）：在任何凭据查找与
-// bcrypt 计算之前拦截——被限的尝试不该再消耗昂贵资源，也不该获得
-// 时间信道信息。维度未配置（accounts 为 nil）时零判定。
+// gateAccount 在密码计算前执行账号限流。主体区分稳定用户与未识别输入，
+// 适配层对其做 HMAC；未配置 accounts 时不改变既有行为。
 func (s *Service) gateAccount(ctx context.Context, account, action string) error {
 	if s.accounts == nil {
 		return nil

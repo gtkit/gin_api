@@ -18,10 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() {
-	RegisterRootCommand(newJWTCmd)
-}
-
 // newJWTCmd 构造 jwt 子命令树。
 func newJWTCmd(_ *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
