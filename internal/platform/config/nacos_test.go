@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gtkit/httpc"
 )
 
 // writeNacosBody 向假服务端响应写入 body，把写错误上报给测试
@@ -305,9 +307,9 @@ func TestApplyNacosOverridesTimeout(t *testing.T) {
 	})
 	t.Setenv(nacosAddrEnv, fakeServerAddr(server))
 
-	origClient := nacosHTTPClient
-	nacosHTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
-	t.Cleanup(func() { nacosHTTPClient = origClient })
+	origClient := nacosClient
+	nacosClient = httpc.New(httpc.WithTimeout(50 * time.Millisecond))
+	t.Cleanup(func() { nacosClient = origClient })
 
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "Timeout") {
 		t.Fatalf("err = %v, want a timeout error", err)
@@ -344,9 +346,9 @@ func TestApplyNacosOverridesAllAddrFailed(t *testing.T) {
 	t.Setenv("APP_ROOT", root)
 	t.Setenv(nacosAddrEnv, "127.0.0.1:1,127.0.0.1:2")
 
-	origClient := nacosHTTPClient
-	nacosHTTPClient = &http.Client{Timeout: 200 * time.Millisecond}
-	t.Cleanup(func() { nacosHTTPClient = origClient })
+	origClient := nacosClient
+	nacosClient = httpc.New(httpc.WithTimeout(200 * time.Millisecond))
+	t.Cleanup(func() { nacosClient = origClient })
 
 	_, err := Load()
 	if err == nil {
