@@ -153,6 +153,9 @@ func (c *Config) Validate() error {
 	if err := validateRateLimitConfig(c.RateLimit); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateSignatureConfig(c.Signature); err != nil {
+		errs = append(errs, err)
+	}
 	if err := c.validateOptional(); err != nil {
 		errs = append(errs, err)
 	}

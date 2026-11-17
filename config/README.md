@@ -49,6 +49,25 @@ JWT 命令有独立的配置读取规则，不支持这里的 `v2` 候选；密�
 
 配置只使用当前字段，不保留旧键别名。YAML 和 `APP_` 覆盖中的未知键忽略；`doctor` 以 `ignored_config_keys` 报告键名，返回降级状态，不输出对应值。已知字段的类型和业务校验仍生效。
 
+### Nacos 配置覆盖层
+
+设置 `NACOS_ADDR` 后，启动时从 Nacos 拉取一份 YAML 配置作为覆盖层，合并进本地文件之上。三层优先级：**本地 `env.yml` < Nacos < `APP_` 环境变量**。本地文件仍是必读打底来源，缺文件照样启动失败。
+
+| 环境变量 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `NACOS_ADDR` | 启用即必填 | 未设置=不启用 | `host:port`，逗号分隔多地址依次尝试 |
+| `NACOS_DATA_ID` | 否 | `gin_api_local` | 配置定位 |
+| `NACOS_GROUP` | 否 | `DEFAULT_GROUP` | 配置分组 |
+| `NACOS_NAMESPACE_ID` | 否 | 空=public | 命名空间 ID |
+| `NACOS_USERNAME` / `NACOS_PASSWORD` | 否 | 空=匿名 | 鉴权开启时必填，必须成对提供 |
+
+行为边界：
+
+- 仅启动时拉取一次（5 秒超时），不做变更监听或热更新；Nacos 中改配置须重启进程生效。
+- `NACOS_ADDR` 已设置但登录失败、配置不存在、网络超时或返回内容解析失败时启动失败，不静默回落到仅本地配置；错误信息不含配置内容与凭据。
+- 协议为 Nacos 3.x v3 client HTTP API（`/nacos/v3/auth/user/login` + `/nacos/v3/client/cs/config`），仅支持明文 HTTP；不引入 Nacos SDK、不建长连接。
+- 回滚方式：清空 `NACOS_ADDR` 即回到纯本地文件模式，无数据迁移。
+
 ## 目录
 
 ```text

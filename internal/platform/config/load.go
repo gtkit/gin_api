@@ -73,6 +73,11 @@ func Load() (*Config, error) {
 	if err := k.Load(file.Provider(configPath), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
 	}
+	// Nacos 覆盖层（NACOS_ADDR 未设置时为 no-op）：本地文件打底，
+	// 远端同名键覆盖，APP_ 环境变量在 decode 里最后加载、优先级不变。
+	if err := applyNacosOverrides(k); err != nil {
+		return nil, fmt.Errorf("load nacos config overrides: %w", err)
+	}
 
 	cfg, err := decode(k)
 	if err != nil {
