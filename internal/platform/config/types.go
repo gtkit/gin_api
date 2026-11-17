@@ -35,6 +35,8 @@ type Config struct {
 	Proxy ProxyConfig `mapstructure:"proxy"`
 	// RateLimit 是限流的进程级配置（密钥与策略集合）。
 	RateLimit RateLimitConfig `mapstructure:"ratelimit"`
+	// Signature 是服务端间调用的请求签名校验配置。默认关闭（clients 为空）。
+	Signature SignatureConfig `mapstructure:"signature"`
 	// Cache 是 GET 响应缓存配置。默认关闭——它把响应字节原样复用，
 	// 挂错路由就是把 A 的数据发给 B，母版不替使用者打开。
 	Cache CacheConfig `mapstructure:"cache"`
@@ -265,6 +267,24 @@ type RateLimitConfig struct {
 	KeyHMACSecret string `mapstructure:"key_hmac_secret"`
 	// Policies 是策略集合。为空表示不启用限流。
 	Policies []RateLimitPolicyConfig `mapstructure:"policies"`
+}
+
+// SignatureConfig 是服务端间调用请求签名的静态配置。
+//
+// 面向"服务端→本服务"的调用方，用 HMAC-SHA256 对 method + path + query +
+// body + appId + timestamp + nonce 签名，校验完整性、新鲜性与来源合法性。
+// 与 JWT 鉴权不同：JWT 只证明"调用方是谁"，本机制证明"这次请求的参数
+// 没有被篡改、不是旧请求重放"——两者是不同的防线，可叠加挂载。
+type SignatureConfig struct {
+	// Clients 是 appId → appSecret 的静态映射，为空表示不启用签名校验。
+	//
+	// **appSecret 必须由消费方自己注入**（各机 env.yml / 部署时下发），
+	// 绝不落本项目 env.yml.example 的明文：它是验签的根密钥。
+	Clients map[string]string `mapstructure:"clients"`
+	// MaxSkewSeconds 是允许的时钟偏移（调用方与本服务的时钟差），默认 60 秒。
+	MaxSkewSeconds int `mapstructure:"max_skew_seconds"`
+	// ValidWindowSeconds 是时间戳有效期，默认 300 秒（5 分钟），防长时重放。
+	ValidWindowSeconds int `mapstructure:"valid_window_seconds"`
 }
 
 // RateLimitPolicyConfig 是一条限流策略的配置形态。
