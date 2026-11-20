@@ -1,12 +1,19 @@
 package upload
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gtkit/gouploader"
+	"github.com/gtkit/gouploader/aliyun"
+	"github.com/gtkit/gouploader/huawei"
+	gouploaderredis "github.com/gtkit/gouploader/redis"
+	"github.com/gtkit/gouploader/tencent"
 	"github.com/gtkit/logger/v2"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // LocalOptions 是本地磁盘上传器的必填参数。
@@ -69,4 +76,175 @@ func NewLocalUploader(o LocalOptions, extra ...gouploader.Option) (*gouploader.U
 		return nil, fmt.Errorf("upload: assemble local uploader: %w", err)
 	}
 	return uploader, nil
+}
+
+// UploaderOptions 是统一装配入口的必填参数。
+//
+// 安全三项（大小上限、类型白名单、分片临时目录）对所有驱动必填，
+// local 驱动另要求落盘目录；Redis 客户端承载分片会话与续传索引，
+// 缺失即构造失败——没有它会静默退回进程内文件会话，重启即丢进度。
+type UploaderOptions struct {
+	// Storage 选择单活存储驱动及连接参数。
+	Storage StorageConfig
+	// Dir 是 local 驱动的落盘根目录。
+	Dir string
+	// ChunkDir 是代理路径分片数据的本地目录（所有驱动必填）。
+	ChunkDir string
+	// MaxFileSize 是单文件字节上限，必须为正。
+	MaxFileSize int64
+	// AllowedTypes 是允许的扩展名白名单，必须非空。
+	AllowedTypes []string
+	// Redis 是分片会话存储客户端，归调用方所有（Close 不关闭它）。
+	Redis goredis.UniversalClient
+	// KeyPrefix 是项目 Redis 命名空间；会话键在其下追加 "gu:"。
+	KeyPrefix string
+}
+
+// NewUploader 构造统一上传器：按 StorageConfig 选择存储驱动，
+// 分片会话落 Redis（跨进程/多实例续传），并强制会话身份策略。
+//
+// 与 NewLocalUploader 的关系：后者是纯本地、文件会话的存量入口，保持不变；
+// 业务路由装配用本入口。v1 全走代理路径（WithMultipartDisabled），
+// 云驱动仅经 Storage 四方法读写；STS/预签名直传后续另行接入。
+//
+// 身份策略：WithUserIDFn 从请求 context 的 UploadInfo 解析请求者，
+// WithRequireUserID 禁止匿名共享秒传索引；会话创建者的硬校验由
+// application 层在调用前注入身份完成（库不拒绝匿名 init）。
+//
+// 后台错误默认出口与 NewLocalUploader 同款，排在 extra 之前可被覆盖；
+// Redis 会话存储的后台错误（孤儿数据清理等）同样接入本仓日志。
+// 返回的 Uploader.Close 会级联关闭注入的会话存储。
+func NewUploader(o UploaderOptions, extra ...gouploader.Option) (*gouploader.Uploader, error) {
+	if strings.TrimSpace(o.ChunkDir) == "" {
+		return nil, errors.New("upload: chunk dir is required")
+	}
+	if o.MaxFileSize <= 0 {
+		return nil, errors.New("upload: max file size must be positive: an unbounded upload hands the disk to clients")
+	}
+	if len(o.AllowedTypes) == 0 {
+		return nil, errors.New("upload: allowed types must be explicit: an empty whitelist means gouploader accepts every type")
+	}
+	if err := o.Storage.Validate(); err != nil {
+		return nil, err
+	}
+	if o.Redis == nil {
+		return nil, errors.New("upload: redis client is required for chunk sessions")
+	}
+	if o.Storage.EffectiveDriver() == DriverLocal && strings.TrimSpace(o.Dir) == "" {
+		return nil, errors.New("upload: local dir is required")
+	}
+
+	storageOpt, err := storageOption(o)
+	if err != nil {
+		return nil, err
+	}
+
+	chunkStore, err := gouploaderredis.New(o.Redis,
+		gouploaderredis.WithKeyPrefix(o.KeyPrefix+"gu:"),
+		gouploaderredis.WithDataDir(o.ChunkDir),
+		gouploaderredis.WithOnBackgroundError(func(err error) {
+			logger.Errorf("upload: chunk store background error: %v", err)
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upload: assemble redis chunk store: %w", err)
+	}
+
+	opts := []gouploader.Option{
+		storageOpt,
+		gouploader.WithMaxFileSize(o.MaxFileSize),
+		gouploader.WithAllowedTypes(o.AllowedTypes...),
+		gouploader.WithChunkStore(chunkStore),
+		gouploader.WithUserIDFn(userIDFromUploadInfo),
+		gouploader.WithRequireUserID(),
+		gouploader.WithMultipartDisabled(),
+		// 排在 extra 之前：装配方可用自己的实现取代。
+		gouploader.WithOnBackgroundError(func(err error) {
+			logger.Errorf("upload: gouploader background error: %v", err)
+		}),
+	}
+	if o.Storage.EffectiveDriver() == DriverLocal {
+		// 本地代理合并走预分配装配文件：会话过期/中断后的 *.assembling
+		// 残留由 sweeper 周期回收。云驱动不产生装配残留（分片数据在
+		// chunk_dir，由 Redis 会话存储的孤儿清理回收），不启用以免启动噪音。
+		opts = append(opts, gouploader.WithOrphanCleanup(24*time.Hour, time.Hour))
+	}
+	opts = append(opts, extra...)
+	uploader, err := gouploader.New(opts...)
+	if err != nil {
+		// 构造失败时会话存储的后台清理协程已启动，就地关闭避免泄漏。
+		_ = chunkStore.Close()
+		return nil, fmt.Errorf("upload: assemble uploader: %w", err)
+	}
+	return uploader, nil
+}
+
+// storageOption 把驱动配置翻译成 gouploader 的存储选项。
+// 调用前 StorageConfig.Validate 已通过，default 分支不可达。
+func storageOption(o UploaderOptions) (gouploader.Option, error) {
+	switch o.Storage.EffectiveDriver() {
+	case DriverLocal:
+		return gouploader.WithLocalStorage(o.Dir), nil
+	case DriverS3:
+		s := o.Storage.S3
+		return gouploader.WithS3Storage(gouploader.S3Config{
+			Endpoint:  s.Endpoint,
+			AccessKey: s.AccessKey,
+			SecretKey: s.SecretKey,
+			Bucket:    s.Bucket,
+			Region:    s.Region,
+			UseSSL:    s.UseSSL,
+			CDNHost:   s.CDNHost,
+		}), nil
+	case DriverAliyun:
+		s := o.Storage.Aliyun
+		storage, err := aliyun.NewStorage(aliyun.Config{
+			Endpoint:        s.Endpoint,
+			AccessKeyID:     s.AccessKeyID,
+			AccessKeySecret: s.AccessKeySecret,
+			Bucket:          s.Bucket,
+			Region:          s.Region,
+			UseSSL:          s.UseSSL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("upload: aliyun storage: %w", err)
+		}
+		return gouploader.WithStorage(storage), nil
+	case DriverTencent:
+		s := o.Storage.Tencent
+		storage, err := tencent.NewStorage(tencent.Config{
+			BucketURL: s.BucketURL,
+			SecretID:  s.SecretID,
+			SecretKey: s.SecretKey,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("upload: tencent storage: %w", err)
+		}
+		return gouploader.WithStorage(storage), nil
+	case DriverHuawei:
+		s := o.Storage.Huawei
+		storage, err := huawei.NewStorage(huawei.Config{
+			Endpoint:  s.Endpoint,
+			AccessKey: s.AccessKey,
+			SecretKey: s.SecretKey,
+			Bucket:    s.Bucket,
+			Region:    s.Region,
+			UseSSL:    s.UseSSL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("upload: huawei storage: %w", err)
+		}
+		return gouploader.WithStorage(storage), nil
+	default:
+		return nil, fmt.Errorf("upload: unknown storage driver %q", o.Storage.Driver)
+	}
+}
+
+// userIDFromUploadInfo 是 WithUserIDFn 的实现：application 层在每次
+// 引擎调用前经 ContextWithUploadInfo 注入请求者身份。
+func userIDFromUploadInfo(ctx context.Context) string {
+	if info, ok := gouploader.UploadInfoFromContext(ctx); ok {
+		return info.UserID
+	}
+	return ""
 }

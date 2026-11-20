@@ -15,7 +15,7 @@ import (
 func TestRenderModule(t *testing.T) {
 	for _, name := range []string{"example", "billing_record", "application"} {
 		files, err := RenderModule("example.com/service", name)
-		if err != nil || len(files) != 10 {
+		if err != nil || len(files) != 11 {
 			t.Fatalf("render %s: %d files, %v", name, len(files), err)
 		}
 		for path, content := range files {

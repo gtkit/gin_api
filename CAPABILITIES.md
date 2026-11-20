@@ -410,7 +410,33 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 
 ### 新增路由
 
-用 gin 的方式写：
+`transport/http` 分两个文件：`handler.go` 放 `Handler` 与端点方法（绑定 → 调 Service →
+`resp.MapErr` → `resp.Ok`），领域错误经 `errMapper` 集中声明，不散落在 handler 分支里；
+`router.go` 只做装配（Deps、超时常量、路由挂载）。参照 example 与 auth 模块。
+
+```go
+// internal/module/<name>/transport/http/handler.go
+var errMapper = resp.NewErrMapper(
+    resp.ErrMapping{Target: application.ErrNotFound, Status: goerr.StatusNotFound(), Message: "record not found"},
+    resp.ErrMapping{Target: application.ErrInvalid, Status: goerr.StatusValidateParams(), Message: "invalid record input"},
+    resp.ErrMapping{Target: application.ErrForbidden, Status: goerr.StatusPermission()},
+)
+
+type Handler struct{ service *application.Service }
+
+func NewHandler(service *application.Service) *Handler { return &Handler{service: service} }
+
+func (h *Handler) Get(c *gin.Context) {
+    result, err := h.service.Get(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id"))
+    if err != nil {
+        resp.MapErr(c, err, errMapper)
+        return
+    }
+    resp.Ok(c, result)
+}
+```
+
+路由注册用 gin 的方式写：
 
 ```go
 // internal/module/<name>/transport/http/router.go

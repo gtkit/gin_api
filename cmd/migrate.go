@@ -47,7 +47,9 @@ func buildMigrationCommands(ctx context.Context, shutdown *bootstrap.ShutdownCoo
 		migrate.WithProjectName(modulePath),
 		migrate.WithMigrationDir("database/migrations"),
 		// 新增持久化模型时同步登记，供 --from-model 和 DDL 差异检查使用。
-		migrate.WithDDLModels(append([]any{&models.User{}, &models.UserRole{}}, optionalDDLModels(rt.Config())...)...),
+		// files 随上传能力引入，模型在 internal/models（默认构建可引用），
+		// DDL 登记不随 upload.enabled 开关变化。
+		migrate.WithDDLModels(append([]any{&models.User{}, &models.UserRole{}, &models.File{}}, optionalDDLModels(rt.Config())...)...),
 		migrate.WithTimeout(5*time.Minute),
 	)
 	if err != nil {

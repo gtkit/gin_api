@@ -1,0 +1,41 @@
+package http
+
+import (
+    "time"
+
+    "github.com/gin-gonic/gin"
+
+    "{{.Module}}/internal/middleware"
+    "{{.Module}}/internal/module/{{.Name}}/application"
+    sharedauth "{{.Module}}/internal/shared/auth"
+)
+
+// 本模块的业务超时预算：CRUD 各是一次数据库往返，5 秒足够；
+// 写宽限 1 秒，让已开始的写在超时后有机会收尾。
+const (
+    {{.Name}}Deadline   = 5 * time.Second
+    {{.Name}}WriteGrace = time.Second
+    {{.Name}}BodyLimit  = 8 << 10
+)
+
+// Deps 是注册路由所需的依赖。
+type Deps struct {
+    Service    *application.Service
+    Auth       gin.HandlerFunc
+    Authorizer sharedauth.Authorizer
+}
+
+// Register mounts authenticated CRUD. The caller supplies its existing auth middleware.
+func Register(parent *gin.RouterGroup, deps Deps) {
+    if deps.Service == nil || deps.Auth == nil || deps.Authorizer == nil {
+        panic("record service, authentication and authorization required")
+    }
+    handler := NewHandler(deps.Service)
+    group := parent.Group("/{{.Name}}", middleware.NoStore(), middleware.Timeout({{.Name}}Deadline, {{.Name}}WriteGrace), deps.Auth, middleware.Authorize(deps.Authorizer, "{{.Name}}.access"))
+    group.GET("", middleware.NoBody(), handler.List)
+    group.GET("/:id", middleware.NoBody(), handler.Get)
+    group.POST("", middleware.JSONBody({{.Name}}BodyLimit), handler.Create)
+    group.PUT("/:id", middleware.JSONBody({{.Name}}BodyLimit), handler.Update)
+    group.DELETE("/batch", middleware.JSONBody({{.Name}}BodyLimit), handler.DeleteMany)
+    group.DELETE("/:id", middleware.NoBody(), handler.Delete)
+}

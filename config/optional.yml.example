@@ -38,9 +38,9 @@ outbound:
     # Parallel probes in half-open state; 0 uses 1.
     half_open_max_requests: 1
 upload:
-  # Creates the uploader only; false by default. Public routes still require business registration.
+  # Creates the uploader and mounts the file module routes; false by default.
   enabled: false
-  # Completed-file directory; no default, required when enabled. Deployment supplies the path.
+  # Completed-file directory for the local driver; required for local, no default.
   dir: ""
   # Temporary chunk directory; no default, required when enabled. Deployment supplies the path.
   chunk_dir: ""
@@ -48,6 +48,48 @@ upload:
   max_file_size: 0
   # Allowed file extensions; no default, must be nonempty when enabled.
   allowed_types: []
+  # Redis logical DB for chunk sessions; must be listed in redis.dbs when enabled.
+  redis_db: 0
+  # Upload/merge route timeout in seconds; 0 uses 300, negative values rejected.
+  request_timeout: 300
+  storage:
+    # Single active driver: local | s3 | aliyun | tencent | huawei. Empty means local.
+    driver: local
+    s3:
+      # S3-compatible endpoint (MinIO/AWS etc.), no scheme; use_ssl decides HTTP(S).
+      endpoint: ""
+      bucket: ""
+      region: ""
+      use_ssl: true
+      # Credentials: inject via APP_UPLOAD__STORAGE__S3__ACCESS_KEY / __SECRET_KEY, never commit.
+      access_key: ""
+      secret_key: ""
+      # Optional CDN acceleration domain bound to the bucket.
+      cdn_host: ""
+    aliyun:
+      # OSS endpoint, e.g. oss-cn-hangzhou.aliyuncs.com; may carry a scheme.
+      endpoint: ""
+      bucket: ""
+      region: ""
+      use_ssl: true
+      # Inject via APP_UPLOAD__STORAGE__ALIYUN__ACCESS_KEY_ID / __ACCESS_KEY_SECRET.
+      access_key_id: ""
+      access_key_secret: ""
+    tencent:
+      # Bucket URL from console, e.g. https://my-bucket-1250000000.cos.ap-guangzhou.myqcloud.com
+      bucket_url: ""
+      # Inject via APP_UPLOAD__STORAGE__TENCENT__SECRET_ID / __SECRET_KEY.
+      secret_id: ""
+      secret_key: ""
+    huawei:
+      # OBS endpoint, e.g. obs.cn-north-4.myhuaweicloud.com; may carry a scheme.
+      endpoint: ""
+      bucket: ""
+      region: ""
+      use_ssl: true
+      # Inject via APP_UPLOAD__STORAGE__HUAWEI__ACCESS_KEY / __SECRET_KEY.
+      access_key: ""
+      secret_key: ""
 auditlog:
   # Creates the best-effort recorder/consumer; false by default. Explicit routes and reviewed migration required.
   enabled: false

@@ -44,6 +44,8 @@ type services struct {
 	auth authruntime.Assembly
 	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
 	accounts account.Assembly
+	// optionalServices 承载 optional 构建的业务模块产物（默认构建为空载体）。
+	optionalServices
 }
 
 // buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。
@@ -93,6 +95,10 @@ func buildServices(ctx context.Context, inf infra, runtime *Runtime) (services, 
 		return services{}, fmt.Errorf("build account sources: %w", accountErr)
 	}
 	svc.accounts = accounts
+
+	if err := buildOptionalServices(&svc, inf); err != nil {
+		return services{}, err
+	}
 
 	return svc, nil
 }
@@ -181,6 +187,7 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 				RateLimit: preIdentityRateLimits,
 			})
 		}
+		registerOptionalModules(v1, svc, auth, inf)
 	}
 
 	engine, err := router.New(cfg.Env, opt)
