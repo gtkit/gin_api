@@ -11,7 +11,7 @@ upload.enabled=true 时 file 业务模块注册上传/下载路由并维护归�
 | 文件 | 作用 |
 |---|---|
 | `uploader.go` | `NewLocalUploader`（存量本地入口）与 `NewUploader`（统一入口：单活驱动 + Redis 会话 + 身份策略） |
-| `config.go` | `StorageConfig`：local/s3/aliyun/tencent/huawei 驱动选择与必填校验 |
+| `config.go` | `StorageConfig`：local/s3 驱动选择与必填校验 |
 | `policy.go` | 文件内联展示白名单；零值策略全部强制下载 |
 | `headers.go` | `FileHeaders`，设置 nosniff 和附件下载头 |
 

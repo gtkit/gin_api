@@ -8,10 +8,7 @@ import (
 	"time"
 
 	"github.com/gtkit/gouploader"
-	"github.com/gtkit/gouploader/aliyun"
-	"github.com/gtkit/gouploader/huawei"
 	gouploaderredis "github.com/gtkit/gouploader/redis"
-	"github.com/gtkit/gouploader/tencent"
 	"github.com/gtkit/logger/v2"
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -196,45 +193,6 @@ func storageOption(o UploaderOptions) (gouploader.Option, error) {
 			UseSSL:    s.UseSSL,
 			CDNHost:   s.CDNHost,
 		}), nil
-	case DriverAliyun:
-		s := o.Storage.Aliyun
-		storage, err := aliyun.NewStorage(aliyun.Config{
-			Endpoint:        s.Endpoint,
-			AccessKeyID:     s.AccessKeyID,
-			AccessKeySecret: s.AccessKeySecret,
-			Bucket:          s.Bucket,
-			Region:          s.Region,
-			UseSSL:          s.UseSSL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("upload: aliyun storage: %w", err)
-		}
-		return gouploader.WithStorage(storage), nil
-	case DriverTencent:
-		s := o.Storage.Tencent
-		storage, err := tencent.NewStorage(tencent.Config{
-			BucketURL: s.BucketURL,
-			SecretID:  s.SecretID,
-			SecretKey: s.SecretKey,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("upload: tencent storage: %w", err)
-		}
-		return gouploader.WithStorage(storage), nil
-	case DriverHuawei:
-		s := o.Storage.Huawei
-		storage, err := huawei.NewStorage(huawei.Config{
-			Endpoint:  s.Endpoint,
-			AccessKey: s.AccessKey,
-			SecretKey: s.SecretKey,
-			Bucket:    s.Bucket,
-			Region:    s.Region,
-			UseSSL:    s.UseSSL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("upload: huawei storage: %w", err)
-		}
-		return gouploader.WithStorage(storage), nil
 	default:
 		return nil, fmt.Errorf("upload: unknown storage driver %q", o.Storage.Driver)
 	}

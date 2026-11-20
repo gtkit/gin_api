@@ -52,7 +52,7 @@ func TestNewUploaderRequiresExplicitSafety(t *testing.T) {
 		{"local missing dir", func(o *UploaderOptions) { o.Dir = "" }},
 		{"unknown driver", func(o *UploaderOptions) { o.Storage.Driver = "gcs" }},
 		{"cloud missing credentials", func(o *UploaderOptions) {
-			o.Storage = StorageConfig{Driver: DriverAliyun, Aliyun: AliyunStorageConfig{Endpoint: "oss.example.test", Bucket: "b"}}
+			o.Storage = StorageConfig{Driver: DriverS3, S3: S3StorageConfig{Endpoint: "minio.example.test", Bucket: "b"}}
 		}},
 	}
 	for _, tt := range tests {

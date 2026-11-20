@@ -13,7 +13,7 @@ func TestStorageConfigEffectiveDriver(t *testing.T) {
 		{"empty defaults to local", "", DriverLocal},
 		{"blank defaults to local", "  ", DriverLocal},
 		{"explicit local", DriverLocal, DriverLocal},
-		{"explicit cloud", DriverAliyun, DriverAliyun},
+		{"explicit cloud", DriverS3, DriverS3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -32,12 +32,6 @@ func TestStorageConfigValidate(t *testing.T) {
 	complete := StorageConfig{
 		Driver: DriverS3,
 		S3:     S3StorageConfig{Endpoint: "minio:9000", Bucket: "b", AccessKey: "ak", SecretKey: "sk"},
-		Aliyun: AliyunStorageConfig{Endpoint: "oss-cn-hangzhou.aliyuncs.com", Bucket: "b", AccessKeyID: "ak", AccessKeySecret: "sk"},
-		Tencent: TencentStorageConfig{
-			BucketURL: "https://b-1250000000.cos.ap-guangzhou.myqcloud.com",
-			SecretID:  "id", SecretKey: "sk",
-		},
-		Huawei: HuaweiStorageConfig{Endpoint: "obs.cn-north-4.myhuaweicloud.com", Bucket: "b", AccessKey: "ak", SecretKey: "sk"},
 	}
 	tests := []struct {
 		name    string
@@ -46,14 +40,9 @@ func TestStorageConfigValidate(t *testing.T) {
 	}{
 		{"empty driver is local", func(c *StorageConfig) { c.Driver = "" }, false},
 		{"unknown driver", func(c *StorageConfig) { c.Driver = "gcs" }, true},
+		{"removed cloud driver", func(c *StorageConfig) { c.Driver = "aliyun" }, true},
 		{"complete s3", func(c *StorageConfig) { c.Driver = DriverS3 }, false},
 		{"s3 missing secret", func(c *StorageConfig) { c.Driver = DriverS3; c.S3.SecretKey = " " }, true},
-		{"complete aliyun", func(c *StorageConfig) { c.Driver = DriverAliyun }, false},
-		{"aliyun missing bucket", func(c *StorageConfig) { c.Driver = DriverAliyun; c.Aliyun.Bucket = "" }, true},
-		{"complete tencent", func(c *StorageConfig) { c.Driver = DriverTencent }, false},
-		{"tencent missing bucket url", func(c *StorageConfig) { c.Driver = DriverTencent; c.Tencent.BucketURL = "" }, true},
-		{"complete huawei", func(c *StorageConfig) { c.Driver = DriverHuawei }, false},
-		{"huawei missing endpoint", func(c *StorageConfig) { c.Driver = DriverHuawei; c.Huawei.Endpoint = "" }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -78,14 +67,6 @@ func TestStorageConfigBucketName(t *testing.T) {
 	}{
 		{"local has no bucket", StorageConfig{}, ""},
 		{"s3", StorageConfig{Driver: DriverS3, S3: S3StorageConfig{Bucket: "files"}}, "files"},
-		{"aliyun", StorageConfig{Driver: DriverAliyun, Aliyun: AliyunStorageConfig{Bucket: "files"}}, "files"},
-		{"huawei", StorageConfig{Driver: DriverHuawei, Huawei: HuaweiStorageConfig{Bucket: "files"}}, "files"},
-		{
-			"tencent first host label",
-			StorageConfig{Driver: DriverTencent, Tencent: TencentStorageConfig{BucketURL: "https://files-1250000000.cos.ap-guangzhou.myqcloud.com"}},
-			"files-1250000000",
-		},
-		{"tencent invalid url", StorageConfig{Driver: DriverTencent, Tencent: TencentStorageConfig{BucketURL: "://bad"}}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

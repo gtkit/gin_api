@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 任务队列 | tasks.enabled | 共享 Producer；有 Registrar/PeriodicTask 才创建对应 worker | 处理器、幂等、重试和死信处理、入队调用 |
 | 出站 HTTP | outbound.clients 非空 | 按名字隔离的客户端与熔断入口 | 实际下游、调用契约；写调用不擅自重试 |
-| 上传 | upload.enabled | 单活存储驱动（local/s3/aliyun/tencent/huawei）+ Redis 分片会话的共享 Uploader；file 模块提供上传/下载路由与归属记录 | 云凭据经 env 注入、files 迁移审阅、分片目录容量 |
+| 上传 | upload.enabled | 单活存储驱动（local/s3）+ Redis 分片会话的共享 Uploader；file 模块提供上传/下载路由与归属记录 | 云凭据经 env 注入、files 迁移审阅、分片目录容量 |
 | 审计 | auditlog.enabled | 有界尽力记录器及 consumer | 表迁移、要审计的写路由、保留策略 |
 
 `bootstrap/optional_enabled.go` 只聚合现有构造函数，资源关闭仍进入 providerCleanup，启动中途失败按取得逆序撤销。tasks 与 upload 启用都让 Redis 成为必需资源（upload.redis_db 必须在 redis.dbs 内）。审计 worker 在 HTTP drain 后停止；上传关闭沿用 SDK Close，级联关闭注入的 Redis 会话存储（不关借用的客户端）；这些所有权不转交给业务服务。代理路径的分片数据仍在 chunk_dir 本地磁盘，多实例部署需共享挂载或粘性路由。

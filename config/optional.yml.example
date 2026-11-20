@@ -53,7 +53,7 @@ upload:
   # Upload/merge route timeout in seconds; 0 uses 300, negative values rejected.
   request_timeout: 300
   storage:
-    # Single active driver: local | s3 | aliyun | tencent | huawei. Empty means local.
+    # Single active driver: local | s3. Empty means local.
     driver: local
     s3:
       # S3-compatible endpoint (MinIO/AWS etc.), no scheme; use_ssl decides HTTP(S).
@@ -66,30 +66,6 @@ upload:
       secret_key: ""
       # Optional CDN acceleration domain bound to the bucket.
       cdn_host: ""
-    aliyun:
-      # OSS endpoint, e.g. oss-cn-hangzhou.aliyuncs.com; may carry a scheme.
-      endpoint: ""
-      bucket: ""
-      region: ""
-      use_ssl: true
-      # Inject via APP_UPLOAD__STORAGE__ALIYUN__ACCESS_KEY_ID / __ACCESS_KEY_SECRET.
-      access_key_id: ""
-      access_key_secret: ""
-    tencent:
-      # Bucket URL from console, e.g. https://my-bucket-1250000000.cos.ap-guangzhou.myqcloud.com
-      bucket_url: ""
-      # Inject via APP_UPLOAD__STORAGE__TENCENT__SECRET_ID / __SECRET_KEY.
-      secret_id: ""
-      secret_key: ""
-    huawei:
-      # OBS endpoint, e.g. obs.cn-north-4.myhuaweicloud.com; may carry a scheme.
-      endpoint: ""
-      bucket: ""
-      region: ""
-      use_ssl: true
-      # Inject via APP_UPLOAD__STORAGE__HUAWEI__ACCESS_KEY / __SECRET_KEY.
-      access_key: ""
-      secret_key: ""
 auditlog:
   # Creates the best-effort recorder/consumer; false by default. Explicit routes and reviewed migration required.
   enabled: false
