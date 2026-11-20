@@ -79,32 +79,56 @@ func (m *memory) DeleteMany(ctx context.Context, owner int64, ids []string) (int
 	return count, m.fail
 }
 
+func callGet(service *Service, ctx context.Context, owner int64, id string) (Record, error) {
+	return service.Get(ctx, GetRequest{OwnerID: owner, ID: id})
+}
+
+func callList(service *Service, ctx context.Context, owner int64, page, size int) (Page, error) {
+	return service.List(ctx, ListRequest{OwnerID: owner, Page: page, Size: size})
+}
+
+func callCreate(service *Service, ctx context.Context, owner int64, title string) (Record, error) {
+	return service.Create(ctx, CreateRequest{OwnerID: owner, Title: title})
+}
+
+func callUpdate(service *Service, ctx context.Context, owner int64, id, title string) (Record, error) {
+	return service.Update(ctx, UpdateRequest{OwnerID: owner, ID: id, Title: title})
+}
+
+func callDelete(service *Service, ctx context.Context, owner int64, id string) error {
+	return service.Delete(ctx, DeleteRequest{OwnerID: owner, ID: id})
+}
+
+func callDeleteMany(service *Service, ctx context.Context, owner int64, ids []string) error {
+	return service.DeleteMany(ctx, DeleteManyRequest{OwnerID: owner, IDs: ids})
+}
+
 func TestMixedOwnerBatchRollsBack(t *testing.T) {
 	store := &memory{records: map[string]stored{}}
 	service, err := New(store, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	own, err := service.Create(t.Context(), 7, "own")
+	own, err := callCreate(service, t.Context(), 7, "own")
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := service.Create(t.Context(), 8, "other")
+	other, err := callCreate(service, t.Context(), 8, "other")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.DeleteMany(t.Context(), 7, []string{own.ID, other.ID}); !errors.Is(err, ErrNotFound) {
+	if err := callDeleteMany(service, t.Context(), 7, []string{own.ID, other.ID}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("mixed batch: %v", err)
 	}
 	if len(store.records) != 2 {
 		t.Fatal("rejected batch partially deleted records")
 	}
 	for _, ids := range [][]string{nil, {own.ID, own.ID}, {"bad"}} {
-		if err := service.DeleteMany(t.Context(), 7, ids); !errors.Is(err, ErrInvalid) {
+		if err := callDeleteMany(service, t.Context(), 7, ids); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid batch accepted: %v", err)
 		}
 	}
-	if err := service.DeleteMany(t.Context(), 7, []string{own.ID}); err != nil {
+	if err := callDeleteMany(service, t.Context(), 7, []string{own.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.records) != 1 {
@@ -118,34 +142,34 @@ func TestOwnerScopedRecordLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := service.Create(t.Context(), 7, " first ")
+	record, err := callCreate(service, t.Context(), 7, " first ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if record.Title != "first" || !validID(record.ID) {
 		t.Fatalf("invalid created record: %+v", record)
 	}
-	if _, err := service.Get(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := callGet(service, t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-owner get: %v", err)
 	}
-	if _, err := service.Update(t.Context(), 8, record.ID, "stolen"); !errors.Is(err, ErrNotFound) {
+	if _, err := callUpdate(service, t.Context(), 8, record.ID, "stolen"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-owner update: %v", err)
 	}
-	if err := service.Delete(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
+	if err := callDelete(service, t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-owner delete: %v", err)
 	}
-	page, err := service.List(t.Context(), 8, 1, 20)
+	page, err := callList(service, t.Context(), 8, 1, 20)
 	if err != nil || len(page.Items) != 0 {
 		t.Fatalf("cross-owner list: %+v %v", page, err)
 	}
-	updated, err := service.Update(t.Context(), 7, record.ID, "second")
+	updated, err := callUpdate(service, t.Context(), 7, record.ID, "second")
 	if err != nil || updated.Title != "second" {
 		t.Fatalf("update: %+v %v", updated, err)
 	}
-	if err := service.Delete(t.Context(), 7, record.ID); err != nil {
+	if err := callDelete(service, t.Context(), 7, record.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Get(t.Context(), 7, record.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := callGet(service, t.Context(), 7, record.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted record: %v", err)
 	}
 }
@@ -157,21 +181,21 @@ func TestValidationAndTransactionRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Create(t.Context(), 0, "title"); !errors.Is(err, ErrForbidden) {
+	if _, err := callCreate(service, t.Context(), 0, "title"); !errors.Is(err, ErrForbidden) {
 		t.Fatal(err)
 	}
-	if _, err := service.Create(t.Context(), 7, " "); !errors.Is(err, ErrInvalid) {
+	if _, err := callCreate(service, t.Context(), 7, " "); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := service.List(t.Context(), 7, 1, 101); !errors.Is(err, ErrInvalid) {
+	if _, err := callList(service, t.Context(), 7, 1, 101); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := service.Create(t.Context(), 7, "title"); !errors.Is(err, failure) || len(store.records) != 0 {
+	if _, err := callCreate(service, t.Context(), 7, "title"); !errors.Is(err, failure) || len(store.records) != 0 {
 		t.Fatalf("failed write was not rolled back: %v", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := service.Create(ctx, 7, "title"); !errors.Is(err, context.Canceled) {
+	if _, err := callCreate(service, ctx, 7, "title"); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 }

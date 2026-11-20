@@ -87,7 +87,11 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	pair, err := h.service.Register(c.Request.Context(), req.Phone, req.Password, req.Nickname)
+	pair, err := h.service.Register(c.Request.Context(), application.RegisterRequest{
+		Phone:    req.Phone,
+		Password: req.Password,
+		Nickname: req.Nickname,
+	})
 	if err != nil {
 		// 与 Login 同款：账号维度限流走 429（见 Login 的注释）。
 		if errors.Is(err, application.ErrAccountRateLimited) {
@@ -113,7 +117,10 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	pair, err := h.service.Login(c.Request.Context(), req.Phone, req.Password)
+	pair, err := h.service.Login(c.Request.Context(), application.LoginRequest{
+		Phone:    req.Phone,
+		Password: req.Password,
+	})
 	if err != nil {
 		// 账号维度限流必须是 429 而不是 401/403：客户端与网关对
 		// "退避后重试"与"凭据错误"的处置完全不同。
@@ -140,7 +147,9 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	pair, err := h.service.Refresh(c.Request.Context(), req.RefreshToken)
+	pair, err := h.service.Refresh(c.Request.Context(), application.RefreshRequest{
+		RefreshToken: req.RefreshToken,
+	})
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
@@ -168,7 +177,11 @@ func (h *Handler) Logout(c *gin.Context) {
 		return
 	}
 
-	if err := h.service.Logout(c.Request.Context(), identity.TokenID, identity.ExpiresAt, req.RefreshToken); err != nil {
+	if err := h.service.Logout(c.Request.Context(), application.LogoutRequest{
+		TokenID:      identity.TokenID,
+		ExpiresAt:    identity.ExpiresAt,
+		RefreshToken: req.RefreshToken,
+	}); err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
@@ -188,7 +201,12 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
 		return
 	}
-	err := h.service.ChangePassword(c.Request.Context(), ginc.UserIDFromContext(c), identity.SessionVersion, request.OldPassword, request.NewPassword)
+	err := h.service.ChangePassword(c.Request.Context(), application.ChangePasswordRequest{
+		UserID:         ginc.UserIDFromContext(c),
+		SessionVersion: identity.SessionVersion,
+		OldPassword:    request.OldPassword,
+		NewPassword:    request.NewPassword,
+	})
 	if errors.Is(err, application.ErrAccountRateLimited) {
 		resp.TooManyRequestsErr(c, "尝试过于频繁，请稍后再试")
 		return
@@ -211,7 +229,10 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
 		return
 	}
-	if err := h.service.LogoutAll(c.Request.Context(), ginc.UserIDFromContext(c), identity.SessionVersion); err != nil {
+	if err := h.service.LogoutAll(c.Request.Context(), application.LogoutAllRequest{
+		UserID:         ginc.UserIDFromContext(c),
+		SessionVersion: identity.SessionVersion,
+	}); err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}

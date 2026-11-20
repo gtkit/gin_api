@@ -1,4 +1,4 @@
-package upload
+package upload_test
 
 import (
 	"context"
@@ -7,25 +7,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gtkit/gin-api/internal/optional/upload"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	defaultlogging "github.com/gtkit/gin-api/internal/platform/logging"
 	"github.com/gtkit/gouploader"
 	"github.com/gtkit/logger/v2"
 )
 
-// plainHashStore 只实现 HashStore，**不**实现 UserScopedHashStore。
-//
-// 这是本文件用来触发后台错误的开关：gouploader 在 New() 时对这种组合
-// 必然产出一条启动期安全建议（多租户越权风险），并经
-// WithOnBackgroundError 上报。相比等待后台清理失败之类的偶发事件，
-// 启动期建议是同步且确定的，测试无需轮询或等待。
-type plainHashStore struct{}
+// advisoryHashStore intentionally lacks UserScopedHashStore so the uploader
+// emits its startup advisory.
+type advisoryHashStore struct{}
 
-func (plainHashStore) LookupByHash(context.Context, string, string) (*gouploader.HashedFile, error) {
+func (advisoryHashStore) LookupByHash(context.Context, string, string) (*gouploader.HashedFile, error) {
 	return nil, nil
 }
 
-func (plainHashStore) Register(context.Context, *gouploader.HashedFile) error { return nil }
+func (advisoryHashStore) Register(context.Context, *gouploader.HashedFile) error { return nil }
 
 // newAdvisoryTriggeringUploader 构造一个必然触发启动期建议的上传器。
 // extra 追加在本仓默认装配之后，与生产调用路径一致。
@@ -34,10 +31,10 @@ func newAdvisoryTriggeringUploader(t *testing.T, extra ...gouploader.Option) *go
 
 	opts := append([]gouploader.Option{
 		gouploader.WithChunkTempDir(t.TempDir()),
-		gouploader.WithHashStore(plainHashStore{}),
+		gouploader.WithHashStore(advisoryHashStore{}),
 	}, extra...)
 
-	u, err := NewLocalUploader(LocalOptions{
+	u, err := upload.NewLocalUploader(upload.LocalOptions{
 		Dir:          t.TempDir(),
 		MaxFileSize:  1 << 20,
 		AllowedTypes: []string{".txt"},

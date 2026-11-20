@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+func callChangePassword(svc *Service, ctx context.Context, uid, version int64, oldPassword, newPassword string) error {
+	return svc.ChangePassword(ctx, ChangePasswordRequest{
+		UserID:         uid,
+		SessionVersion: version,
+		OldPassword:    oldPassword,
+		NewPassword:    newPassword,
+	})
+}
+
+func callLogoutAll(svc *Service, ctx context.Context, uid, version int64) error {
+	return svc.LogoutAll(ctx, LogoutAllRequest{UserID: uid, SessionVersion: version})
+}
+
 type sessionCredentials struct {
 	*fakeCreds
 	writeErr error
@@ -103,10 +116,10 @@ func newSessionService(t *testing.T) (*Service, *sessionCredentials, *sessionIss
 func TestPasswordChangeAndLogoutAll(t *testing.T) {
 	svc, creds, issuer, refresh := newSessionService(t)
 	ctx := t.Context()
-	if err := svc.ChangePassword(ctx, 7, 0, "wrong-password", "new-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if err := callChangePassword(svc, ctx, 7, 0, "wrong-password", "new-password"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong password: %v", err)
 	}
-	if err := svc.ChangePassword(ctx, 7, 0, "old-password", "new-password"); err != nil {
+	if err := callChangePassword(svc, ctx, 7, 0, "old-password", "new-password"); err != nil {
 		t.Fatal(err)
 	}
 	cred, found, err := creds.FindByID(ctx, 7)
@@ -116,26 +129,26 @@ func TestPasswordChangeAndLogoutAll(t *testing.T) {
 	if cred.AuthVersion != 1 || cred.PasswordHash != "hashed:new-password" {
 		t.Fatalf("credential change was incomplete: %+v", cred)
 	}
-	if _, err := svc.Refresh(ctx, "old-refresh"); !errors.Is(err, ErrRefreshRejected) || issuer.issued != 0 || refresh.consumeCalls != 0 {
+	if _, err := callRefresh(svc, ctx, "old-refresh"); !errors.Is(err, ErrRefreshRejected) || issuer.issued != 0 || refresh.consumeCalls != 0 {
 		t.Fatalf("revoked refresh reached issuance/consumption: %v", err)
 	}
-	if err := svc.LogoutAll(ctx, 7, 0); !errors.Is(err, ErrSessionExpired) {
+	if err := callLogoutAll(svc, ctx, 7, 0); !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("stale session changed current version: %v", err)
 	}
-	if _, err := svc.Login(ctx, "account", "old-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := callLogin(svc, ctx, "account", "old-password"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("old password still accepted: %v", err)
 	}
-	if _, err := svc.Login(ctx, "account", "new-password"); err != nil {
+	if _, err := callLogin(svc, ctx, "account", "new-password"); err != nil {
 		t.Fatal(err)
 	}
 	if issuer.versions[0] != 1 || refresh.issuedVersion != 1 {
 		t.Fatal("login did not issue the verified credential version")
 	}
 	refresh.version = 1
-	if err := svc.LogoutAll(ctx, 7, 1); err != nil {
+	if err := callLogoutAll(svc, ctx, 7, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Refresh(ctx, "new-refresh"); !errors.Is(err, ErrRefreshRejected) {
+	if _, err := callRefresh(svc, ctx, "new-refresh"); !errors.Is(err, ErrRefreshRejected) {
 		t.Fatalf("logout-all did not invalidate refresh: %v", err)
 	}
 }
@@ -170,13 +183,13 @@ func TestLoginDoesNotUpgradeVersionAfterPasswordCheck(t *testing.T) {
 			t.Fatalf("interleaved revocation: %v", err)
 		}
 	}}
-	if _, err := svc.Login(t.Context(), "account", "old-password"); err != nil {
+	if _, err := callLogin(svc, t.Context(), "account", "old-password"); err != nil {
 		t.Fatal(err)
 	}
 	if issuer.versions[0] != 0 || refresh.issuedVersion != 0 {
 		t.Fatal("in-flight login upgraded a revoked credential version")
 	}
-	if _, err := svc.Refresh(t.Context(), "refresh"); !errors.Is(err, ErrRefreshRejected) {
+	if _, err := callRefresh(svc, t.Context(), "refresh"); !errors.Is(err, ErrRefreshRejected) {
 		t.Fatalf("in-flight login issued a usable refresh: %v", err)
 	}
 }
@@ -188,7 +201,7 @@ func TestPasswordChangeRejectsInterleavedRevocation(t *testing.T) {
 			t.Fatalf("interleaved revocation: %v", err)
 		}
 	}}
-	if err := svc.ChangePassword(t.Context(), 7, 0, "old-password", "new-password"); !errors.Is(err, ErrSessionExpired) {
+	if err := callChangePassword(svc, t.Context(), 7, 0, "old-password", "new-password"); !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("stale password update accepted: %v", err)
 	}
 	cred, found, err := creds.FindByID(t.Context(), 7)
@@ -203,24 +216,24 @@ func TestPasswordChangeRejectsInterleavedRevocation(t *testing.T) {
 func TestSessionLifecycleFailures(t *testing.T) {
 	svc, creds, _, _ := newSessionService(t)
 	for _, password := range []string{"short", strings.Repeat("界", 25), string([]byte{0xff, 0xfe})} {
-		if err := svc.ChangePassword(t.Context(), 7, 0, "old-password", password); !errors.Is(err, ErrInvalidPassword) {
+		if err := callChangePassword(svc, t.Context(), 7, 0, "old-password", password); !errors.Is(err, ErrInvalidPassword) {
 			t.Fatalf("invalid password accepted: %v", err)
 		}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := svc.LogoutAll(ctx, 7, 0); !errors.Is(err, context.Canceled) {
+	if err := callLogoutAll(svc, ctx, 7, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 	failure := errors.New("database unavailable")
 	creds.writeErr = failure
-	if err := svc.ChangePassword(t.Context(), 7, 0, "old-password", "new-password"); !errors.Is(err, failure) {
+	if err := callChangePassword(svc, t.Context(), 7, 0, "old-password", "new-password"); !errors.Is(err, failure) {
 		t.Fatalf("write failure lost: %v", err)
 	}
-	if err := svc.LogoutAll(t.Context(), 7, 0); !errors.Is(err, failure) {
+	if err := callLogoutAll(svc, t.Context(), 7, 0); !errors.Is(err, failure) {
 		t.Fatalf("revoke failure lost: %v", err)
 	}
-	if err := newHarness(t).svc.LogoutAll(t.Context(), 7, 0); !errors.Is(err, ErrLifecycleDisabled) {
+	if err := callLogoutAll(newHarness(t).svc, t.Context(), 7, 0); !errors.Is(err, ErrLifecycleDisabled) {
 		t.Fatalf("disabled service accepted lifecycle operation: %v", err)
 	}
 }

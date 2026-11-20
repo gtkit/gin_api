@@ -182,8 +182,8 @@ type TokenPair struct {
 //
 // 注册后立即登录而不是要求再调一次登录：客户端刚提交过正确的口令，
 // 再要一次除了多一个往返没有任何安全收益。
-func (s *Service) Register(ctx context.Context, phone, password, nickname string) (TokenPair, error) {
-	phone, err := normalizeAccount(phone)
+func (s *Service) Register(ctx context.Context, request RegisterRequest) (TokenPair, error) {
+	phone, err := normalizeAccount(request.Phone)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -191,7 +191,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 		return TokenPair{}, err
 	}
 
-	hashed, err := s.hasher.Hash(ctx, password)
+	hashed, err := s.hasher.Hash(ctx, request.Password)
 	if err != nil {
 		if errors.Is(err, ErrPasswordTooLong) {
 			return TokenPair{}, ErrPasswordTooLong
@@ -199,7 +199,7 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 		return TokenPair{}, fmt.Errorf("auth: hash password: %w", err)
 	}
 
-	uid, err := s.creds.Create(ctx, phone, hashed, nickname)
+	uid, err := s.creds.Create(ctx, phone, hashed, request.Nickname)
 	if err != nil {
 		if errors.Is(err, ErrPhoneTaken) {
 			return TokenPair{}, ErrPhoneTaken
@@ -220,8 +220,8 @@ func (s *Service) Register(ctx context.Context, phone, password, nickname string
 }
 
 // Login 校验凭据并签发令牌。
-func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair, error) {
-	phone, err := normalizeAccount(phone)
+func (s *Service) Login(ctx context.Context, request LoginRequest) (TokenPair, error) {
+	phone, err := normalizeAccount(request.Phone)
 	if err != nil {
 		// 不做掩护比对：账号形态非法在任何存储访问之前就能判定，
 		// 它不泄漏"这个账号是否存在"——因为这样的账号根本不可能存在。
@@ -251,7 +251,7 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		// 比对被取消/超时（闸门饱和、请求放弃）时必须与存在账号的路径
 		// **同语义传播**：这里吞掉错误的话，存在的账号报基础设施错误、
 		// 不存在的账号报 401，状态码与耗时就重新泄漏了账号是否存在。
-		if err := s.hasher.CompareWithDummy(ctx, password); err != nil && !errors.Is(err, ErrInvalidCredentials) {
+		if err := s.hasher.CompareWithDummy(ctx, request.Password); err != nil && !errors.Is(err, ErrInvalidCredentials) {
 			return TokenPair{}, fmt.Errorf("auth: compare password: %w", err)
 		}
 		s.fail(ctx, "login rejected: no account for the supplied phone")
@@ -259,7 +259,7 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 		return TokenPair{}, ErrInvalidCredentials
 	}
 
-	if err := s.hasher.Compare(ctx, cred.PasswordHash, password); err != nil {
+	if err := s.hasher.Compare(ctx, cred.PasswordHash, request.Password); err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
 			s.fail(ctx, "login rejected: wrong password for uid=%d", cred.UserID)
 			s.event(ctx, EventLoginFailed)
@@ -297,10 +297,10 @@ func (s *Service) Login(ctx context.Context, phone, password string) (TokenPair,
 //
 // 判定与提交之间的竞态由 Consume 自己定局：它是唯一的原子权威，
 // 并发消费仍然只有一个成功，重用检测与族撤销的语义不受影响。
-func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
-	uid, version, err := s.peekRefresh(ctx, refreshToken)
+func (s *Service) Refresh(ctx context.Context, request RefreshRequest) (TokenPair, error) {
+	uid, version, err := s.peekRefresh(ctx, request.RefreshToken)
 	if err != nil {
-		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
+		return TokenPair{}, s.refreshRejected(ctx, request.RefreshToken, err)
 	}
 	if s.sessions != nil {
 		credential, found, err := s.sessions.FindByID(ctx, uid)
@@ -321,9 +321,9 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 	}
 
 	// 提交：轮换出下一代刷新令牌。到这里才第一次改动状态。
-	consumedUID, consumedVersion, next, err := s.consumeRefresh(ctx, refreshToken)
+	consumedUID, consumedVersion, next, err := s.consumeRefresh(ctx, request.RefreshToken)
 	if err != nil {
-		return TokenPair{}, s.refreshRejected(ctx, refreshToken, err)
+		return TokenPair{}, s.refreshRejected(ctx, request.RefreshToken, err)
 	}
 	if s.sessions != nil && (consumedUID != uid || consumedVersion != version) {
 		return TokenPair{}, ErrRefreshRejected
@@ -364,31 +364,31 @@ func (s *Service) refreshRejected(ctx context.Context, refreshToken string, err 
 //
 // tokenID 是访问令牌的 jti，expiresAt 是它的过期时刻。refreshToken 可以为空
 // ——客户端只带了访问令牌时仍然应当能登出，只是那条刷新链要等自然过期。
-func (s *Service) Logout(ctx context.Context, tokenID string, expiresAt time.Time, refreshToken string) error {
+func (s *Service) Logout(ctx context.Context, request LogoutRequest) error {
 	// **先撤刷新族、后撤访问令牌**（local-authentication spec）。
 	//
 	// 部分成功的残留必须取危害更小的一侧：反过来先撤访问令牌，族撤销一旦
 	// 失败，同一个 access token 已进不了登出端点（401），重试被自己撤掉的
 	// 令牌挡死，而长寿命的刷新链还活着、仍可换发新令牌；本序的残留只是
 	// 一个短 TTL 的访问令牌——无法续期，且重试登出自然可行。
-	if refreshToken != "" {
-		if err := s.refresh.RevokeFamilyOfToken(ctx, refreshToken); err != nil {
+	if request.RefreshToken != "" {
+		if err := s.refresh.RevokeFamilyOfToken(ctx, request.RefreshToken); err != nil {
 			return fmt.Errorf("auth: revoke refresh family: %w (the access token is still "+
 				"valid, retry logout)", err)
 		}
 	}
 
-	if err := s.revoked.Revoke(ctx, tokenID, expiresAt); err != nil {
+	if err := s.revoked.Revoke(ctx, request.TokenID, request.ExpiresAt); err != nil {
 		// 刷新链已死，残留的访问令牌在自身 TTL 内到期且无法续期——
 		// 仍然报错：登出没有完整生效，不能表现成成功。
-		if refreshToken != "" {
+		if request.RefreshToken != "" {
 			return fmt.Errorf("auth: the refresh family was revoked but the access token is "+
 				"still live until it expires: %w", err)
 		}
 		return fmt.Errorf("auth: revoke access token: %w", err)
 	}
 
-	if refreshToken == "" {
+	if request.RefreshToken == "" {
 		s.audit(ctx, "logout: access token revoked, no refresh token supplied")
 		return nil
 	}

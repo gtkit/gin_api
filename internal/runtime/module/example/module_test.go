@@ -6,6 +6,7 @@ import (
 	"uuid"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/gtkit/gin-api/internal/module/example/application"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -35,25 +36,25 @@ func TestAssemblyScopesSQLAndRollsBack(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO `example_records`").WithArgs(sqlmock.AnyArg(), int64(7), "record", sqlmock.AnyArg(), sqlmock.AnyArg(), nil).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	record, err := service.Create(t.Context(), 7, "record")
+	record, err := service.Create(t.Context(), application.CreateRequest{OwnerID: 7, Title: "record"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery("SELECT .* FROM `example_records` WHERE .*owner_id = \\? AND id = \\?.*deleted_at.*IS NULL").WithArgs(int64(8), record.ID, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	if _, err := service.Get(t.Context(), 8, record.ID); err == nil {
+	if _, err := service.Get(t.Context(), application.GetRequest{OwnerID: 8, ID: record.ID}); err == nil {
 		t.Fatal("cross-owner lookup returned data")
 	}
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE `example_records` SET `deleted_at`=.*owner_id = \\? AND id IN").WithArgs(sqlmock.AnyArg(), int64(7), record.ID, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectRollback()
-	if err := service.DeleteMany(t.Context(), 7, []string{record.ID, uuid.NewV7().String()}); err == nil {
+	if err := service.DeleteMany(t.Context(), application.DeleteManyRequest{OwnerID: 7, IDs: []string{record.ID, uuid.NewV7().String()}}); err == nil {
 		t.Fatal("partial batch was committed")
 	}
 	failure := errors.New("write rejected")
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO `example_records`").WillReturnError(failure)
 	mock.ExpectRollback()
-	if _, err := service.Create(t.Context(), 7, "other"); !errors.Is(err, failure) {
+	if _, err := service.Create(t.Context(), application.CreateRequest{OwnerID: 7, Title: "other"}); !errors.Is(err, failure) {
 		t.Fatalf("write error lost: %v", err)
 	}
 }

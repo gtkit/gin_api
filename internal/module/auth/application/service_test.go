@@ -252,6 +252,22 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
+func callRegister(svc *Service, ctx context.Context, phone, password, nickname string) (TokenPair, error) {
+	return svc.Register(ctx, RegisterRequest{Phone: phone, Password: password, Nickname: nickname})
+}
+
+func callLogin(svc *Service, ctx context.Context, phone, password string) (TokenPair, error) {
+	return svc.Login(ctx, LoginRequest{Phone: phone, Password: password})
+}
+
+func callRefresh(svc *Service, ctx context.Context, refreshToken string) (TokenPair, error) {
+	return svc.Refresh(ctx, RefreshRequest{RefreshToken: refreshToken})
+}
+
+func callLogout(svc *Service, ctx context.Context, tokenID string, expiresAt time.Time, refreshToken string) error {
+	return svc.Logout(ctx, LogoutRequest{TokenID: tokenID, ExpiresAt: expiresAt, RefreshToken: refreshToken})
+}
+
 // --- 用例 ---
 
 type authEventRecorderFunc func(context.Context, string)
@@ -296,7 +312,7 @@ func TestLoginRecordsSuccessAfterTokenPair(t *testing.T) {
 				calls = append(calls, event)
 			})
 
-			pair, err := h.svc.Login(t.Context(), "13800000000", tt.password)
+			pair, err := callLogin(h.svc, t.Context(), "13800000000", tt.password)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("Login error = %v, want %v", err, tt.wantErr)
 			}
@@ -320,15 +336,15 @@ func TestLoginRecordsSuccessAfterTokenPair(t *testing.T) {
 func TestAuditPreservesRequestContext(t *testing.T) {
 	t.Parallel()
 	register := func(h *harness, ctx context.Context) error {
-		_, err := h.svc.Register(ctx, "13900000000", "pw", "nick")
+		_, err := callRegister(h.svc, ctx, "13900000000", "pw", "nick")
 		return err
 	}
 	login := func(h *harness, ctx context.Context) error {
-		_, err := h.svc.Login(ctx, "13800000000", "pw")
+		_, err := callLogin(h.svc, ctx, "13800000000", "pw")
 		return err
 	}
 	refresh := func(h *harness, ctx context.Context) error {
-		_, err := h.svc.Refresh(ctx, "refresh-token")
+		_, err := callRefresh(h.svc, ctx, "refresh-token")
 		return err
 	}
 	for _, tt := range []struct {
@@ -349,10 +365,10 @@ func TestAuditPreservesRequestContext(t *testing.T) {
 			h.refresh.peekErr, h.refresh.consumeErr = ErrRefreshReused, errors.New("revocation unavailable")
 		}, invoke: refresh, want: 2, err: ErrRefreshRejected},
 		{name: "logout both", invoke: func(h *harness, ctx context.Context) error {
-			return h.svc.Logout(ctx, "jti", time.Now().Add(time.Minute), "refresh-token")
+			return callLogout(h.svc, ctx, "jti", time.Now().Add(time.Minute), "refresh-token")
 		}, want: 1},
 		{name: "logout access only", invoke: func(h *harness, ctx context.Context) error {
-			return h.svc.Logout(ctx, "jti", time.Now().Add(time.Minute), "")
+			return callLogout(h.svc, ctx, "jti", time.Now().Add(time.Minute), "")
 		}, want: 1},
 		{name: "limited login", setup: func(h *harness) { h.svc.accounts = denyAllAccounts{} }, invoke: login, want: 1, err: ErrAccountRateLimited},
 		{name: "limited register", setup: func(h *harness) { h.svc.accounts = denyAllAccounts{} }, invoke: register, want: 1, err: ErrAccountRateLimited},
@@ -441,7 +457,7 @@ func TestRegisterIssuesTokens(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t)
-	pair, err := h.svc.Register(context.Background(), "13800000000", "pw", "nick")
+	pair, err := callRegister(h.svc, context.Background(), "13800000000", "pw", "nick")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -464,11 +480,11 @@ func TestRegisterRejectsTakenPhone(t *testing.T) {
 
 	h := newHarness(t)
 	ctx := context.Background()
-	if _, err := h.svc.Register(ctx, "13800000000", "pw", "nick"); err != nil {
+	if _, err := callRegister(h.svc, ctx, "13800000000", "pw", "nick"); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
 
-	_, err := h.svc.Register(ctx, "13800000000", "other", "nick2")
+	_, err := callRegister(h.svc, ctx, "13800000000", "other", "nick2")
 	if !errors.Is(err, ErrPhoneTaken) {
 		t.Fatalf("second Register = %v, want ErrPhoneTaken (a normal business outcome, not a 500)", err)
 	}
@@ -479,11 +495,11 @@ func TestLoginSucceedsWithRightPassword(t *testing.T) {
 
 	h := newHarness(t)
 	ctx := context.Background()
-	if _, err := h.svc.Register(ctx, "13800000000", "correct", "nick"); err != nil {
+	if _, err := callRegister(h.svc, ctx, "13800000000", "correct", "nick"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	pair, err := h.svc.Login(ctx, "13800000000", "correct")
+	pair, err := callLogin(h.svc, ctx, "13800000000", "correct")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -502,7 +518,7 @@ func TestUnknownAccountStillComparesAPassword(t *testing.T) {
 
 	h := newHarness(t)
 
-	_, err := h.svc.Login(context.Background(), "13900000000", "whatever")
+	_, err := callLogin(h.svc, context.Background(), "13900000000", "whatever")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login with an unknown account = %v, want ErrInvalidCredentials", err)
 	}
@@ -518,12 +534,12 @@ func TestUnknownAccountAndWrongPasswordAreIndistinguishable(t *testing.T) {
 
 	h := newHarness(t)
 	ctx := context.Background()
-	if _, err := h.svc.Register(ctx, "13800000000", "correct", "nick"); err != nil {
+	if _, err := callRegister(h.svc, ctx, "13800000000", "correct", "nick"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	_, unknownErr := h.svc.Login(ctx, "13900000000", "correct")
-	_, wrongErr := h.svc.Login(ctx, "13800000000", "wrong")
+	_, unknownErr := callLogin(h.svc, ctx, "13900000000", "correct")
+	_, wrongErr := callLogin(h.svc, ctx, "13800000000", "wrong")
 
 	if !errors.Is(unknownErr, ErrInvalidCredentials) || !errors.Is(wrongErr, ErrInvalidCredentials) {
 		t.Fatalf("unknown account = %v, wrong password = %v; both must be ErrInvalidCredentials",
@@ -548,15 +564,15 @@ func TestGateFailureIsUniformAcrossAccountExistence(t *testing.T) {
 	// 不存在的账号：掩护比对报闸门错误。
 	unknown := newHarness(t)
 	unknown.hasher.dummyErr = gateErr
-	_, unknownErr := unknown.svc.Login(ctx, "13900000000", "pw")
+	_, unknownErr := callLogin(unknown.svc, ctx, "13900000000", "pw")
 
 	// 存在的账号：真实比对报同一个闸门错误。
 	known := newHarness(t)
-	if _, err := known.svc.Register(ctx, "13800000000", "correct", "nick"); err != nil {
+	if _, err := callRegister(known.svc, ctx, "13800000000", "correct", "nick"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	known.hasher.compareErr = gateErr
-	_, knownErr := known.svc.Login(ctx, "13800000000", "correct")
+	_, knownErr := callLogin(known.svc, ctx, "13800000000", "correct")
 
 	if errors.Is(unknownErr, ErrInvalidCredentials) {
 		t.Fatalf("unknown-account path masked the gate failure as invalid credentials: %v", unknownErr)
@@ -577,7 +593,7 @@ func TestRegisterPartialSuccessIsExplicit(t *testing.T) {
 	h := newHarness(t)
 	h.refresh.issueErr = errors.New("redis is down")
 
-	_, err := h.svc.Register(context.Background(), "13800000000", "pw", "nick")
+	_, err := callRegister(h.svc, context.Background(), "13800000000", "pw", "nick")
 	if !errors.Is(err, ErrRegisteredLoginRequired) {
 		t.Fatalf("Register = %v, want ErrRegisteredLoginRequired", err)
 	}
@@ -603,13 +619,13 @@ func TestInactiveAccountIsCheckedAfterThePassword(t *testing.T) {
 	ctx := context.Background()
 
 	// 密码错误 + 账号停用：必须报凭据错误，因为密码先被检查。
-	if _, err := h.svc.Login(ctx, "13800000000", "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := callLogin(h.svc, ctx, "13800000000", "wrong"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong password on an inactive account = %v, want ErrInvalidCredentials "+
 			"(the status check must not run first)", err)
 	}
 
 	// 密码正确 + 账号停用：这时才报账号状态。
-	if _, err := h.svc.Login(ctx, "13800000000", "correct"); !errors.Is(err, ErrAccountInactive) {
+	if _, err := callLogin(h.svc, ctx, "13800000000", "correct"); !errors.Is(err, ErrAccountInactive) {
 		t.Fatalf("right password on an inactive account = %v, want ErrAccountInactive", err)
 	}
 }
@@ -622,7 +638,7 @@ func TestCorruptHashIsNotACredentialError(t *testing.T) {
 	h.creds.byPhone["13800000000"] = Credential{UserID: 1, PasswordHash: "garbage", Active: true}
 	h.hasher.compareErr = errors.New("hash is not a valid bcrypt digest")
 
-	_, err := h.svc.Login(context.Background(), "13800000000", "pw")
+	_, err := callLogin(h.svc, context.Background(), "13800000000", "pw")
 	if err == nil {
 		t.Fatal("a corrupt hash let the login through")
 	}
@@ -639,7 +655,7 @@ func TestLookupFailureIsNotACredentialError(t *testing.T) {
 	h := newHarness(t)
 	h.creds.findErr = errors.New("database is down")
 
-	_, err := h.svc.Login(context.Background(), "13800000000", "pw")
+	_, err := callLogin(h.svc, context.Background(), "13800000000", "pw")
 	if errors.Is(err, ErrInvalidCredentials) {
 		t.Fatal("a database outage was reported as invalid credentials: users would be told " +
 			"their password is wrong while the real problem is the database")
@@ -652,7 +668,7 @@ func TestRefreshRotates(t *testing.T) {
 	h := newHarness(t)
 	h.refresh.consumeUID = 42
 
-	pair, err := h.svc.Refresh(context.Background(), "old-refresh")
+	pair, err := callRefresh(h.svc, context.Background(), "old-refresh")
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -687,7 +703,7 @@ func TestRefreshReuseIsAuditedAtFailureLevel(t *testing.T) {
 			h := newHarness(t)
 			h.refresh.consumeErr = tt.consumeErr
 
-			_, err := h.svc.Refresh(context.Background(), "token")
+			_, err := callRefresh(h.svc, context.Background(), "token")
 			// 两种情况对客户端同义：都该重新登录。
 			if !errors.Is(err, ErrRefreshRejected) {
 				t.Fatalf("Refresh = %v, want ErrRefreshRejected", err)
@@ -706,7 +722,7 @@ func TestLogoutRevokesBoth(t *testing.T) {
 	h := newHarness(t)
 	expiry := time.Now().Add(10 * time.Minute)
 
-	if err := h.svc.Logout(context.Background(), "jti-1", expiry, "refresh-token"); err != nil {
+	if err := callLogout(h.svc, context.Background(), "jti-1", expiry, "refresh-token"); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	if _, ok := h.revoke.revoked["jti-1"]; !ok {
@@ -722,7 +738,7 @@ func TestLogoutWithoutRefreshTokenStillRevokesAccess(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t)
-	if err := h.svc.Logout(context.Background(), "jti-1", time.Now().Add(time.Minute), ""); err != nil {
+	if err := callLogout(h.svc, context.Background(), "jti-1", time.Now().Add(time.Minute), ""); err != nil {
 		t.Fatalf("Logout without a refresh token: %v", err)
 	}
 	if _, ok := h.revoke.revoked["jti-1"]; !ok {
@@ -744,7 +760,7 @@ func TestPartialLogoutIsAnError(t *testing.T) {
 	h := newHarness(t)
 	h.refresh.revokeErr = errors.New("redis is down")
 
-	err := h.svc.Logout(context.Background(), "jti-1", time.Now().Add(time.Minute), "refresh")
+	err := callLogout(h.svc, context.Background(), "jti-1", time.Now().Add(time.Minute), "refresh")
 	if err == nil {
 		t.Fatal("logout reported success while the refresh chain stayed live: the user " +
 			"would believe they are logged out")
@@ -764,7 +780,7 @@ func TestLogoutAccessRevokeFailureLeavesBoundedResidue(t *testing.T) {
 	h := newHarness(t)
 	h.revoke.err = errors.New("redis is down")
 
-	err := h.svc.Logout(context.Background(), "jti-1", time.Now().Add(time.Minute), "refresh")
+	err := callLogout(h.svc, context.Background(), "jti-1", time.Now().Add(time.Minute), "refresh")
 	if err == nil {
 		t.Fatal("logout reported success while the access token stayed live")
 	}
@@ -803,10 +819,10 @@ func TestAccountRateLimitGatesCredentialAttempts(t *testing.T) {
 	h.hasher.hashErr = errors.New("bcrypt must not be reached behind the gate")
 	h.hasher.compareErr = errors.New("password comparison must not be reached behind the gate")
 
-	if _, err := svc.Login(context.Background(), "13800000000", "pw"); !errors.Is(err, ErrAccountRateLimited) {
+	if _, err := callLogin(svc, context.Background(), "13800000000", "pw"); !errors.Is(err, ErrAccountRateLimited) {
 		t.Fatalf("Login = %v, want ErrAccountRateLimited", err)
 	}
-	if _, err := svc.Register(context.Background(), "13800000000", "pw", "nick"); !errors.Is(err, ErrAccountRateLimited) {
+	if _, err := callRegister(svc, context.Background(), "13800000000", "pw", "nick"); !errors.Is(err, ErrAccountRateLimited) {
 		t.Fatalf("Register = %v, want ErrAccountRateLimited", err)
 	}
 	if got := h.hasher.dummyCallCount(); got != 0 {
@@ -820,7 +836,7 @@ func TestAccountLimiterNilMeansDimensionOff(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t) // 默认不注入 Accounts
-	if _, err := h.svc.Login(context.Background(), "13800000000", "pw"); errors.Is(err, ErrAccountRateLimited) {
+	if _, err := callLogin(h.svc, context.Background(), "13800000000", "pw"); errors.Is(err, ErrAccountRateLimited) {
 		t.Fatal("a nil account limiter must not rate limit anything")
 	}
 }
@@ -837,7 +853,7 @@ func TestRefreshDoesNotConsumeWhenIssuanceFails(t *testing.T) {
 	h.refresh.consumeUID = 42
 	h.issuer.err = errors.New("signing key unavailable")
 
-	_, err := h.svc.Refresh(context.Background(), "refresh-token")
+	_, err := callRefresh(h.svc, context.Background(), "refresh-token")
 	if err == nil {
 		t.Fatal("Refresh succeeded although access token issuance failed")
 	}
@@ -863,7 +879,7 @@ func TestRefreshReuseStillRevokesFamily(t *testing.T) {
 	h.refresh.peekErr = ErrRefreshReused
 	h.refresh.consumeErr = ErrRefreshReused
 
-	_, err := h.svc.Refresh(context.Background(), "leaked-token")
+	_, err := callRefresh(h.svc, context.Background(), "leaked-token")
 	if !errors.Is(err, ErrRefreshRejected) {
 		t.Fatalf("Refresh = %v, want ErrRefreshRejected", err)
 	}
@@ -883,7 +899,7 @@ func TestRefreshRotatesAfterSuccessfulIssuance(t *testing.T) {
 	h := newHarness(t)
 	h.refresh.consumeUID = 7
 
-	pair, err := h.svc.Refresh(context.Background(), "refresh-token")
+	pair, err := callRefresh(h.svc, context.Background(), "refresh-token")
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -915,12 +931,12 @@ func TestAccountNormalizationClosesTheRateLimitBypass(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, err := svc.Register(ctx, "13800000000", "pw", "nick"); err != nil {
+	if _, err := callRegister(svc, ctx, "13800000000", "pw", "nick"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// PAD SPACE 下这是同一个数据库账号。
 	for _, phone := range []string{"13800000000 ", "  13800000000"} {
-		if _, err := svc.Login(ctx, phone, "pw"); err != nil {
+		if _, err := callLogin(svc, ctx, phone, "pw"); err != nil {
 			t.Fatalf("Login with account whitespace: %v", err)
 		}
 	}
@@ -951,13 +967,13 @@ func TestInvalidAccountIsRejectedBeforeAnyHashing(t *testing.T) {
 			t.Parallel()
 
 			h := newHarness(t)
-			if _, err := h.svc.Login(context.Background(), tt.phone, "pw"); !errors.Is(err, ErrInvalidAccount) {
+			if _, err := callLogin(h.svc, context.Background(), tt.phone, "pw"); !errors.Is(err, ErrInvalidAccount) {
 				t.Fatalf("Login(%q) = %v, want ErrInvalidAccount", tt.phone, err)
 			}
 			if got := h.hasher.dummyCallCount(); got != 0 {
 				t.Fatalf("非法账号仍执行了 %d 次哈希比对：形态判定应在任何昂贵计算之前", got)
 			}
-			if _, err := h.svc.Register(context.Background(), tt.phone, "pw", "n"); !errors.Is(err, ErrInvalidAccount) {
+			if _, err := callRegister(h.svc, context.Background(), tt.phone, "pw", "n"); !errors.Is(err, ErrInvalidAccount) {
 				t.Fatalf("Register(%q) = %v, want ErrInvalidAccount", tt.phone, err)
 			}
 		})
@@ -982,11 +998,11 @@ func TestLoginAliasesShareStableAccountLimit(t *testing.T) {
 	limit := &subjectLimiter{remaining: 2}
 	h.svc.accounts = limit
 	for _, alias := range []string{"Alice", "alice"} {
-		if _, err := h.svc.Login(t.Context(), alias, "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+		if _, err := callLogin(h.svc, t.Context(), alias, "wrong"); !errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("Login(%q): %v", alias, err)
 		}
 	}
-	if _, err := h.svc.Login(t.Context(), "Ａlice", "pw"); !errors.Is(err, ErrAccountRateLimited) {
+	if _, err := callLogin(h.svc, t.Context(), "Ａlice", "pw"); !errors.Is(err, ErrAccountRateLimited) {
 		t.Fatalf("alias escaped account limit: %v", err)
 	}
 	if len(limit.subjects) != 1 || limit.subjects["user:42"] != 3 {

@@ -79,14 +79,14 @@ func title(value string) (string, error) {
 	return value, nil
 }
 
-func (s *Service) Get(ctx context.Context, owner int64, id string) (Record, error) {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) Get(ctx context.Context, request GetRequest) (Record, error) {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return Record{}, err
 	}
-	if !validID(id) {
+	if !validID(request.ID) {
 		return Record{}, ErrInvalid
 	}
-	record, found, err := s.repo.Find(ctx, owner, id)
+	record, found, err := s.repo.Find(ctx, request.OwnerID, request.ID)
 	if err != nil {
 		return Record{}, err
 	}
@@ -96,20 +96,22 @@ func (s *Service) Get(ctx context.Context, owner int64, id string) (Record, erro
 	return record, nil
 }
 
-func (s *Service) List(ctx context.Context, owner int64, page, size int) (Page, error) {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) List(ctx context.Context, request ListRequest) (Page, error) {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return Page{}, err
 	}
+	page := request.Page
 	if page == 0 {
 		page = 1
 	}
+	size := request.Size
 	if size == 0 {
 		size = 20
 	}
 	if page < 1 || page > 10000 || size < 1 || size > 100 {
 		return Page{}, ErrInvalid
 	}
-	records, total, err := s.repo.List(ctx, owner, (page-1)*size, size)
+	records, total, err := s.repo.List(ctx, request.OwnerID, (page-1)*size, size)
 	if err != nil {
 		return Page{}, err
 	}
@@ -123,43 +125,43 @@ func (s *Service) List(ctx context.Context, owner int64, page, size int) (Page, 
 	return Page{Items: records, Paging: paging.Paging{CurrentPage: page, PageSize: size, TotalCount: total, TotalPage: pages}}, nil
 }
 
-func (s *Service) Create(ctx context.Context, owner int64, value string) (Record, error) {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) Create(ctx context.Context, request CreateRequest) (Record, error) {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return Record{}, err
 	}
-	value, err := title(value)
+	value, err := title(request.Title)
 	if err != nil {
 		return Record{}, err
 	}
 	now := time.Now().UTC()
 	record := Record{ID: uuid.NewV7().String(), Title: value, CreatedAt: now, UpdatedAt: now}
-	err = s.tx.Do(ctx, func(ctx context.Context) error { return s.repo.Create(ctx, owner, record) })
+	err = s.tx.Do(ctx, func(ctx context.Context) error { return s.repo.Create(ctx, request.OwnerID, record) })
 	if err != nil {
 		return Record{}, err
 	}
 	return record, nil
 }
 
-func (s *Service) Update(ctx context.Context, owner int64, id, value string) (Record, error) {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) Update(ctx context.Context, request UpdateRequest) (Record, error) {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return Record{}, err
 	}
-	if !validID(id) {
+	if !validID(request.ID) {
 		return Record{}, ErrInvalid
 	}
-	value, err := title(value)
+	value, err := title(request.Title)
 	if err != nil {
 		return Record{}, err
 	}
 	var record Record
 	err = s.tx.Do(ctx, func(ctx context.Context) error {
 		var err error
-		record, err = s.Get(ctx, owner, id)
+		record, err = s.Get(ctx, GetRequest{OwnerID: request.OwnerID, ID: request.ID})
 		if err != nil {
 			return err
 		}
 		record.Title, record.UpdatedAt = value, time.Now().UTC()
-		changed, err := s.repo.Update(ctx, owner, record)
+		changed, err := s.repo.Update(ctx, request.OwnerID, record)
 		if err == nil && !changed {
 			return ErrNotFound
 		}
@@ -171,15 +173,15 @@ func (s *Service) Update(ctx context.Context, owner int64, id, value string) (Re
 	return record, nil
 }
 
-func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) Delete(ctx context.Context, request DeleteRequest) error {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return err
 	}
-	if !validID(id) {
+	if !validID(request.ID) {
 		return ErrInvalid
 	}
 	return s.tx.Do(ctx, func(ctx context.Context) error {
-		changed, err := s.repo.Delete(ctx, owner, id)
+		changed, err := s.repo.Delete(ctx, request.OwnerID, request.ID)
 		if err == nil && !changed {
 			return ErrNotFound
 		}
@@ -188,15 +190,15 @@ func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
 }
 
 // DeleteMany is all-or-nothing, including when any requested record belongs to another owner.
-func (s *Service) DeleteMany(ctx context.Context, owner int64, ids []string) error {
-	if err := validOwner(ctx, owner); err != nil {
+func (s *Service) DeleteMany(ctx context.Context, request DeleteManyRequest) error {
+	if err := validOwner(ctx, request.OwnerID); err != nil {
 		return err
 	}
-	if len(ids) == 0 || len(ids) > 100 {
+	if len(request.IDs) == 0 || len(request.IDs) > 100 {
 		return ErrInvalid
 	}
-	seen := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
+	seen := make(map[string]struct{}, len(request.IDs))
+	for _, id := range request.IDs {
 		if !validID(id) {
 			return ErrInvalid
 		}
@@ -206,11 +208,11 @@ func (s *Service) DeleteMany(ctx context.Context, owner int64, ids []string) err
 		seen[id] = struct{}{}
 	}
 	return s.tx.Do(ctx, func(ctx context.Context) error {
-		deleted, err := s.repo.DeleteMany(ctx, owner, ids)
+		deleted, err := s.repo.DeleteMany(ctx, request.OwnerID, request.IDs)
 		if err != nil {
 			return err
 		}
-		if deleted != int64(len(ids)) {
+		if deleted != int64(len(request.IDs)) {
 			return ErrNotFound
 		}
 		return nil
