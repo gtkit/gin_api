@@ -30,16 +30,16 @@ type memRepo struct {
 	byID map[string]application.Record
 }
 
-func (m *memRepo) Create(_ context.Context, record application.Record) error {
+func (m *memRepo) Create(_ context.Context, record application.Record) (application.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, existing := range m.byID {
 		if existing.OwnerID == record.OwnerID && existing.StorageKey == record.StorageKey {
-			return nil
+			return existing, nil
 		}
 	}
 	m.byID[record.ID] = record
-	return nil
+	return record, nil
 }
 
 func (m *memRepo) Find(_ context.Context, owner int64, id string) (application.Record, bool, error) {
@@ -50,17 +50,6 @@ func (m *memRepo) Find(_ context.Context, owner int64, id string) (application.R
 		return application.Record{}, false, nil
 	}
 	return record, true, nil
-}
-
-func (m *memRepo) FindByStorageKey(_ context.Context, owner int64, key string) (application.Record, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, record := range m.byID {
-		if record.OwnerID == owner && record.StorageKey == key {
-			return record, true, nil
-		}
-	}
-	return application.Record{}, false, nil
 }
 
 func (m *memRepo) List(_ context.Context, owner int64, offset, limit int) ([]application.Record, int64, error) {
@@ -91,6 +80,10 @@ func (m *memRepo) Delete(_ context.Context, owner int64, id string) (bool, error
 }
 
 func newTestRouter(t *testing.T, allow bool) *gin.Engine {
+	return newTestRouterWithHooks(t, allow, nil, nil)
+}
+
+func newTestRouterWithHooks(t *testing.T, allow bool, authCalls, authorizeCalls *int) *gin.Engine {
 	t.Helper()
 
 	up, err := gouploader.New(
@@ -119,6 +112,9 @@ func newTestRouter(t *testing.T, allow bool) *gin.Engine {
 	Register(engine.Group("/api/v1", middleware.ErrorHandler()), Deps{
 		Service: service,
 		Auth: func(c *gin.Context) {
+			if authCalls != nil {
+				(*authCalls)++
+			}
 			owner := int64(7)
 			if c.GetHeader("X-Test-Owner") == "other" {
 				owner = 8
@@ -127,6 +123,9 @@ func newTestRouter(t *testing.T, allow bool) *gin.Engine {
 			ginc.SetPrincipal(c, sharedauth.Principal{UserID: owner})
 		},
 		Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
+			if authorizeCalls != nil {
+				(*authorizeCalls)++
+			}
 			return allow, nil
 		}),
 		Policy:         upload.DefaultPolicy(),
@@ -135,6 +134,15 @@ func newTestRouter(t *testing.T, allow bool) *gin.Engine {
 		RequestTimeout: 30 * time.Second,
 	})
 	return engine
+}
+
+func TestUploadRejectsWrongContentTypeBeforeAuthentication(t *testing.T) {
+	authCalls, authorizeCalls := 0, 0
+	engine := newTestRouterWithHooks(t, true, &authCalls, &authorizeCalls)
+	status, _ := doJSON(t, engine, http.MethodPost, "/api/v1/upload", `{}`, nil)
+	if status != http.StatusUnsupportedMediaType || authCalls != 0 || authorizeCalls != 0 {
+		t.Fatalf("wrong content type status=%d auth=%d authorize=%d", status, authCalls, authorizeCalls)
+	}
 }
 
 type envelope struct {

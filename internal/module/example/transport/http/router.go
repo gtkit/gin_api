@@ -38,13 +38,14 @@ func Register(parent *gin.RouterGroup, deps Deps) {
 		panic("record service, authentication and authorization required")
 	}
 	handler := NewHandler(deps.Service)
-	group := parent.Group("/example", middleware.NoStore(), middleware.Timeout(exampleDeadline, exampleWriteGrace), deps.Auth, middleware.Authorize(deps.Authorizer, "example.access"))
-	group.GET("", middleware.NoBody(), handler.List)
-	group.GET("/:id", middleware.NoBody(), handler.Get)
-	group.POST("", middleware.JSONBody(exampleBodyLimit), handler.Create)
-	group.PUT("/:id", middleware.JSONBody(exampleBodyLimit), handler.Update)
-	group.DELETE("/batch", middleware.JSONBody(exampleBodyLimit), handler.DeleteMany)
-	group.DELETE("/:id", middleware.NoBody(), handler.Delete)
+	group := parent.Group("/example", middleware.NoStore(), middleware.Timeout(exampleDeadline, exampleWriteGrace))
+	authorize := middleware.Authorize(deps.Authorizer, "example.access")
+	group.GET("", middleware.NoBody(), deps.Auth, authorize, handler.List)
+	group.GET("/:id", middleware.NoBody(), deps.Auth, authorize, handler.Get)
+	group.POST("", middleware.JSONBody(exampleBodyLimit), deps.Auth, authorize, handler.Create)
+	group.PUT("/:id", middleware.JSONBody(exampleBodyLimit), deps.Auth, authorize, handler.Update)
+	group.DELETE("/batch", middleware.JSONBody(exampleBodyLimit), deps.Auth, authorize, handler.DeleteMany)
+	group.DELETE("/:id", middleware.NoBody(), deps.Auth, authorize, handler.Delete)
 
 	registerInterService(parent, deps)
 }

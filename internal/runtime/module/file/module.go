@@ -54,17 +54,13 @@ func model(record application.Record) models.File {
 	}
 }
 
-func (a adapter) Create(ctx context.Context, record application.Record) error {
-	return a.repo.Create(ctx, model(record))
+func (a adapter) Create(ctx context.Context, record application.Record) (application.Record, error) {
+	stored, err := a.repo.Create(ctx, model(record))
+	return value(stored), err
 }
 
 func (a adapter) Find(ctx context.Context, owner int64, id string) (application.Record, bool, error) {
 	record, found, err := a.repo.Find(ctx, owner, id)
-	return value(record), found, err
-}
-
-func (a adapter) FindByStorageKey(ctx context.Context, owner int64, key string) (application.Record, bool, error) {
-	record, found, err := a.repo.FindByStorageKey(ctx, owner, key)
 	return value(record), found, err
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/repository/dbtx"
 	"gorm.io/gorm"
@@ -27,7 +28,7 @@ func (r *Repository) Find(ctx context.Context, owner int64, id string) (models.F
 	return record, err == nil, err
 }
 
-func (r *Repository) FindByStorageKey(ctx context.Context, owner int64, key string) (models.File, bool, error) {
+func (r *Repository) findByStorageKey(ctx context.Context, owner int64, key string) (models.File, bool, error) {
 	var record models.File
 	err := r.mdbCtx(ctx).Where("owner_id = ? AND storage_key = ?", owner, key).First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -43,22 +44,40 @@ func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) (
 		return nil, 0, err
 	}
 	var records []models.File
-	err := r.mdbCtx(ctx).Where("owner_id = ?", owner).
+	err := r.mdbCtx(ctx).Select("id", "owner_id", "storage_key", "file_name", "size", "driver", "bucket", "checksum", "mime_type", "created_at", "updated_at").
+		Where("owner_id = ?", owner).
 		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
 	return records, total, err
 }
 
 // Create 写入记录；同一 (owner_id, storage_key) 的重复写入按幂等成功处理，
 // 兜底分片合并的并发/重试场景（唯一键 uk_files_owner_storage）。
-func (r *Repository) Create(ctx context.Context, record models.File) error {
+func (r *Repository) Create(ctx context.Context, record models.File) (models.File, error) {
 	err := r.mdbCtx(ctx).Create(&record).Error
 	if err == nil {
-		return nil
+		return record, nil
 	}
-	if _, found, findErr := r.FindByStorageKey(ctx, record.OwnerID, record.StorageKey); findErr == nil && found {
-		return nil
+	if !isDuplicateKey(err) {
+		return models.File{}, err
 	}
-	return err
+	stored, found, findErr := r.findByStorageKey(ctx, record.OwnerID, record.StorageKey)
+	if findErr != nil {
+		return models.File{}, findErr
+	}
+	if found {
+		return stored, nil
+	}
+	return models.File{}, err
+}
+
+const mysqlDuplicateEntry = 1062
+
+func isDuplicateKey(err error) bool {
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	mysqlErr, ok := errors.AsType[*mysql.MySQLError](err)
+	return ok && mysqlErr.Number == mysqlDuplicateEntry
 }
 
 func (r *Repository) Delete(ctx context.Context, owner int64, id string) (bool, error) {

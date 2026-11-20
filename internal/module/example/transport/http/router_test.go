@@ -82,6 +82,35 @@ func TestRecordRejectsMissingPermission(t *testing.T) {
 	}
 }
 
+func TestRecordRejectsOversizedBodyBeforeAuthentication(t *testing.T) {
+	store := &recordStore{}
+	service, err := application.New(store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authCalls, authorizeCalls := 0, 0
+	engine := gin.New()
+	Register(engine.Group("/api/v1", middleware.ErrorHandler()), Deps{
+		Service: service,
+		Auth: func(c *gin.Context) {
+			authCalls++
+			ginc.SetUserID(c, 7)
+			ginc.SetPrincipal(c, sharedauth.Principal{UserID: 7})
+		},
+		Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
+			authorizeCalls++
+			return true, nil
+		}),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/example", strings.NewReader(`{"title":"`+strings.Repeat("x", 9000)+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge || authCalls != 0 || authorizeCalls != 0 {
+		t.Fatalf("oversized body status=%d auth=%d authorize=%d", response.Code, authCalls, authorizeCalls)
+	}
+}
+
 func TestRecordHTTPContract(t *testing.T) {
 	store := &recordStore{}
 	service, err := application.New(store, store)

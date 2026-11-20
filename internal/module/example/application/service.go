@@ -135,7 +135,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Record, er
 	}
 	now := time.Now().UTC()
 	record := Record{ID: uuid.NewV7().String(), Title: value, CreatedAt: now, UpdatedAt: now}
-	err = s.tx.Do(ctx, func(ctx context.Context) error { return s.repo.Create(ctx, request.OwnerID, record) })
+	err = s.repo.Create(ctx, request.OwnerID, record)
 	if err != nil {
 		return Record{}, err
 	}
@@ -180,13 +180,11 @@ func (s *Service) Delete(ctx context.Context, request DeleteRequest) error {
 	if !validID(request.ID) {
 		return ErrInvalid
 	}
-	return s.tx.Do(ctx, func(ctx context.Context) error {
-		changed, err := s.repo.Delete(ctx, request.OwnerID, request.ID)
-		if err == nil && !changed {
-			return ErrNotFound
-		}
-		return err
-	})
+	changed, err := s.repo.Delete(ctx, request.OwnerID, request.ID)
+	if err == nil && !changed {
+		return ErrNotFound
+	}
+	return err
 }
 
 // DeleteMany is all-or-nothing, including when any requested record belongs to another owner.

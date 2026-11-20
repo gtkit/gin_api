@@ -52,9 +52,8 @@ type Page struct {
 // Repository scopes every operation to an authenticated owner.
 // Create 对同一 (owner, storage_key) 的重复写入按幂等成功处理。
 type Repository interface {
-	Create(context.Context, Record) error
+	Create(context.Context, Record) (Record, error)
 	Find(ctx context.Context, owner int64, id string) (Record, bool, error)
-	FindByStorageKey(ctx context.Context, owner int64, key string) (Record, bool, error)
 	List(ctx context.Context, owner int64, offset, limit int) ([]Record, int64, error)
 	Delete(ctx context.Context, owner int64, id string) (bool, error)
 }
@@ -263,15 +262,9 @@ func (s *Service) recordResult(ctx context.Context, owner int64, result *gouploa
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	if err := s.repo.Create(ctx, record); err != nil {
-		return Record{}, fmt.Errorf("record uploaded file: %w", err)
-	}
-	stored, found, err := s.repo.FindByStorageKey(ctx, owner, result.StorageKey)
+	stored, err := s.repo.Create(ctx, record)
 	if err != nil {
-		return Record{}, err
-	}
-	if !found {
-		return Record{}, errors.New("file record missing after create")
+		return Record{}, fmt.Errorf("record uploaded file: %w", err)
 	}
 	return stored, nil
 }

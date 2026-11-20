@@ -23,16 +23,16 @@ type fakeRepo struct {
 
 func newFakeRepo() *fakeRepo { return &fakeRepo{byID: map[string]Record{}} }
 
-func (f *fakeRepo) Create(_ context.Context, record Record) error {
+func (f *fakeRepo) Create(_ context.Context, record Record) (Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, existing := range f.byID {
 		if existing.OwnerID == record.OwnerID && existing.StorageKey == record.StorageKey {
-			return nil
+			return existing, nil
 		}
 	}
 	f.byID[record.ID] = record
-	return nil
+	return record, nil
 }
 
 func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (Record, bool, error) {
@@ -43,17 +43,6 @@ func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (Record, bool
 		return Record{}, false, nil
 	}
 	return record, true, nil
-}
-
-func (f *fakeRepo) FindByStorageKey(_ context.Context, owner int64, key string) (Record, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, record := range f.byID {
-		if record.OwnerID == owner && record.StorageKey == key {
-			return record, true, nil
-		}
-	}
-	return Record{}, false, nil
 }
 
 func (f *fakeRepo) List(_ context.Context, owner int64, offset, limit int) ([]Record, int64, error) {

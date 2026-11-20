@@ -29,7 +29,8 @@ func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) (
 		return nil, 0, err
 	}
 	var records []models.ExampleRecord
-	err := r.mdbCtx(ctx).Where("owner_id = ?", owner).Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
+	err := r.mdbCtx(ctx).Select("id", "title", "created_at", "updated_at").Where("owner_id = ?", owner).
+		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
 	return records, total, err
 }
 

@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 	"github.com/gtkit/gin-api/internal/models"
-	"gorm.io/driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -27,7 +28,7 @@ func newMockRepo(t *testing.T) (*Repository, sqlmock.Sqlmock) {
 			t.Error(err)
 		}
 	})
-	db, err := gorm.Open(mysql.New(mysql.Config{Conn: conn, SkipInitializeWithVersion: true}), &gorm.Config{DisableAutomaticPing: true})
+	db, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: conn, SkipInitializeWithVersion: true}), &gorm.Config{DisableAutomaticPing: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,27 +67,27 @@ func TestCreateDuplicateKeyIsIdempotent(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO `files`").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	if err := repo.Create(t.Context(), record); err != nil {
+	stored, err := repo.Create(t.Context(), record)
+	if err != nil || stored.ID != record.ID {
 		t.Fatalf("Create() = %v", err)
 	}
 
 	// 重复键：INSERT 失败后按 (owner, storage_key) 查到已有记录 → 幂等成功。
 	mock.ExpectBegin()
-	mock.ExpectExec("INSERT INTO `files`").WillReturnError(errors.New("Error 1062: Duplicate entry"))
+	mock.ExpectExec("INSERT INTO `files`").WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"})
 	mock.ExpectRollback()
 	mock.ExpectQuery("SELECT .* FROM `files` WHERE \\(owner_id = \\? AND storage_key = \\?\\)").
 		WithArgs(int64(7), "user-7/a.txt", 1).WillReturnRows(fileRows())
-	if err := repo.Create(t.Context(), record); err != nil {
-		t.Fatalf("duplicate Create() = %v, want nil (idempotent)", err)
+	stored, err = repo.Create(t.Context(), record)
+	if err != nil || stored.ID != "f-1" {
+		t.Fatalf("duplicate Create() = (%+v, %v), want existing record", stored, err)
 	}
 
-	// 真实故障：INSERT 失败且查无记录 → 原错误上抛，不伪装成功。
+	// 真实故障：非重复 INSERT 失败直接上抛，不再额外查询存储键。
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO `files`").WillReturnError(errors.New("connection refused"))
 	mock.ExpectRollback()
-	mock.ExpectQuery("SELECT .* FROM `files` WHERE \\(owner_id = \\? AND storage_key = \\?\\)").
-		WithArgs(int64(7), "user-7/a.txt", 1).WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	if err := repo.Create(t.Context(), record); err == nil {
+	if _, err := repo.Create(t.Context(), record); err == nil {
 		t.Fatal("failed Create() = nil, want original error")
 	}
 }

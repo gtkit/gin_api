@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
@@ -73,7 +74,15 @@ func (g *RequestIDGenerator) Next() (string, error) {
 		// Add 回绕到 0 说明已用满 2^64；继续发号会重复。
 		return "", ErrRequestIDExhausted
 	}
-	return fmt.Sprintf("%s%016x", g.prefix, n), nil
+	var id [RequestIDLength]byte
+	prefixLen := copy(id[:], g.prefix)
+	encoded := strconv.AppendUint(id[:prefixLen], n, 16)
+	suffixLen := len(encoded) - prefixLen
+	copy(id[RequestIDLength-suffixLen:], encoded[prefixLen:])
+	for i := prefixLen; i < RequestIDLength-suffixLen; i++ {
+		id[i] = '0'
+	}
+	return string(id[:]), nil
 }
 
 // RequestID 为每个请求分配内部 ID，并写入请求头、响应头与两个 context。

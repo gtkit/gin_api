@@ -41,8 +41,11 @@ func (m *memory) List(_ context.Context, owner int64, _, _ int) ([]Record, int64
 	return out, int64(len(out)), nil
 }
 func (m *memory) Create(_ context.Context, owner int64, value Record) error {
+	if m.fail != nil {
+		return m.fail
+	}
 	m.records[value.ID] = stored{owner, value}
-	return m.fail
+	return nil
 }
 func (m *memory) Update(ctx context.Context, owner int64, value Record) (bool, error) {
 	_, ok, err := m.Find(ctx, owner, value.ID)
@@ -55,6 +58,9 @@ func (m *memory) Update(ctx context.Context, owner int64, value Record) (bool, e
 	return ok, m.fail
 }
 func (m *memory) Delete(ctx context.Context, owner int64, id string) (bool, error) {
+	if m.fail != nil {
+		return false, m.fail
+	}
 	_, ok, err := m.Find(ctx, owner, id)
 	if err != nil {
 		return false, err
@@ -62,7 +68,7 @@ func (m *memory) Delete(ctx context.Context, owner int64, id string) (bool, erro
 	if ok {
 		delete(m.records, id)
 	}
-	return ok, m.fail
+	return ok, nil
 }
 func (m *memory) DeleteMany(ctx context.Context, owner int64, ids []string) (int64, error) {
 	var count int64
@@ -149,6 +155,9 @@ func TestOwnerScopedRecordLifecycle(t *testing.T) {
 	if record.Title != "first" || !validID(record.ID) {
 		t.Fatalf("invalid created record: %+v", record)
 	}
+	if store.txCalls != 0 {
+		t.Fatalf("create entered transaction manager %d times", store.txCalls)
+	}
 	if _, err := callGet(service, t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-owner get: %v", err)
 	}
@@ -166,8 +175,14 @@ func TestOwnerScopedRecordLifecycle(t *testing.T) {
 	if err != nil || updated.Title != "second" {
 		t.Fatalf("update: %+v %v", updated, err)
 	}
+	if store.txCalls != 2 {
+		t.Fatalf("update transaction calls = %d, want 2", store.txCalls)
+	}
 	if err := callDelete(service, t.Context(), 7, record.ID); err != nil {
 		t.Fatal(err)
+	}
+	if store.txCalls != 2 {
+		t.Fatalf("delete changed transaction calls to %d", store.txCalls)
 	}
 	if _, err := callGet(service, t.Context(), 7, record.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted record: %v", err)
