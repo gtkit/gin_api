@@ -12,7 +12,7 @@
 
 -- +goose Up
 CREATE TABLE `files` (
-  `id` char(36) NOT NULL COMMENT '主键编码（uuid v7）',
+  `id` char(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '主键编码（uuid v7）',
   `owner_id` bigint NOT NULL COMMENT '归属用户ID',
   `file_name` varchar(255) NOT NULL COMMENT '清理后的原始文件名',
   `storage_key` varchar(512) NOT NULL COMMENT '存储对象键',

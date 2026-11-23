@@ -24,14 +24,20 @@ func (r *Repository) Find(ctx context.Context, owner int64, id string) (models.E
 }
 
 func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) ([]models.ExampleRecord, int64, error) {
+	var records []models.ExampleRecord
+	err := r.mdbCtx(ctx).Select("id", "title", "created_at", "updated_at").Where("owner_id = ?", owner).
+		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(records) < limit && (len(records) > 0 || offset == 0) {
+		return records, int64(offset + len(records)), nil
+	}
 	var total int64
 	if err := r.mdbCtx(ctx).Model(&models.ExampleRecord{}).Where("owner_id = ?", owner).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	var records []models.ExampleRecord
-	err := r.mdbCtx(ctx).Select("id", "title", "created_at", "updated_at").Where("owner_id = ?", owner).
-		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
-	return records, total, err
+	return records, total, nil
 }
 
 func (r *Repository) Create(ctx context.Context, record models.ExampleRecord) error {

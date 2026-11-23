@@ -39,15 +39,21 @@ func (r *Repository) findByStorageKey(ctx context.Context, owner int64, key stri
 
 func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) ([]models.File, int64, error) {
 	limit = min(max(limit, 1), maxListLimit)
-	var total int64
-	if err := r.mdbCtx(ctx).Model(&models.File{}).Where("owner_id = ?", owner).Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
 	var records []models.File
 	err := r.mdbCtx(ctx).Select("id", "owner_id", "storage_key", "file_name", "size", "driver", "bucket", "checksum", "mime_type", "created_at", "updated_at").
 		Where("owner_id = ?", owner).
 		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
-	return records, total, err
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(records) < limit && (len(records) > 0 || offset == 0) {
+		return records, int64(offset + len(records)), nil
+	}
+	var total int64
+	if err := r.mdbCtx(ctx).Model(&models.File{}).Where("owner_id = ?", owner).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
 }
 
 // Create 写入记录；同一 (owner_id, storage_key) 的重复写入按幂等成功处理，

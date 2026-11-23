@@ -2,6 +2,7 @@ package file
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -96,13 +97,41 @@ func TestListClampsLimit(t *testing.T) {
 	t.Parallel()
 
 	repo, mock := newMockRepo(t)
-	mock.ExpectQuery("SELECT count\\(\\*\\) FROM `files` WHERE owner_id = \\?").
-		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT .* FROM `files` WHERE owner_id = \\?").
 		WithArgs(int64(7), 100).WillReturnRows(fileRows())
 	records, total, err := repo.List(t.Context(), 7, 0, 500)
 	if err != nil || total != 1 || len(records) != 1 {
 		t.Fatalf("List() = (%d records, total %d, %v)", len(records), total, err)
+	}
+}
+
+func TestListCountsWhenOffsetPageIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery("SELECT .* FROM `files` WHERE owner_id = \\?").
+		WithArgs(int64(7), 100, 100).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery("SELECT count\\(\\*\\) FROM `files` WHERE owner_id = \\?").
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	if records, total, err := repo.List(t.Context(), 7, 100, 100); err != nil || len(records) != 0 || total != 1 {
+		t.Fatalf("empty deep page = (%d records, %d total, %v), want (0, 1, nil)", len(records), total, err)
+	}
+}
+
+func TestListCountsFullPage(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newMockRepo(t)
+	rows := sqlmock.NewRows([]string{"id", "owner_id", "storage_key", "driver", "created_at"})
+	for i := range 100 {
+		rows.AddRow("f-"+strconv.Itoa(i), int64(7), "user-7/file"+strconv.Itoa(i), "local", time.Now())
+	}
+	mock.ExpectQuery("SELECT .* FROM `files` WHERE owner_id = \\?").
+		WithArgs(int64(7), 100).WillReturnRows(rows)
+	mock.ExpectQuery("SELECT count\\(\\*\\) FROM `files` WHERE owner_id = \\?").
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(100))
+	if records, total, err := repo.List(t.Context(), 7, 0, 100); err != nil || len(records) != 100 || total != 100 {
+		t.Fatalf("full page = (%d records, %d total, %v), want (100, 100, nil)", len(records), total, err)
 	}
 }
 

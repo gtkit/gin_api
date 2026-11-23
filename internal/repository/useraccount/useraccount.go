@@ -12,6 +12,7 @@ package useraccount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -71,17 +72,22 @@ func (r *Repository) ValidateUser(ctx context.Context, userID int64) (bool, erro
 		return false, nil
 	}
 
-	var exists int64
+	var probe struct {
+		ID int64
+	}
 	err := r.mdbCtx(ctx).
 		Model(&models.User{}).
+		Select("id").
 		Where("id = ?", userID).
 		Where("status = ?", models.UserStatusNormal).
-		Limit(1).
-		Count(&exists).Error
+		Take(&probe).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("validate user %d: %w", userID, err)
 	}
-	return exists > 0, nil
+	return true, nil
 }
 
 // ValidateSession uses the same primary database as credential updates.
@@ -89,12 +95,21 @@ func (r *Repository) ValidateSession(ctx context.Context, userID, version int64)
 	if userID <= 0 || version < 0 {
 		return false, nil
 	}
-	var exists int64
-	err := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).Limit(1).Count(&exists).Error
+	var probe struct {
+		ID int64
+	}
+	err := r.mdbCtx(ctx).
+		Model(&models.User{}).
+		Select("id").
+		Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).
+		Take(&probe).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("validate authentication session: %w", err)
 	}
-	return exists > 0, nil
+	return true, nil
 }
 
 // ValidateVIP 报告用户具备有效会员资格：账号可用、vip_status 为 active，
