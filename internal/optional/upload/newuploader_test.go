@@ -39,7 +39,11 @@ func TestNewUploaderRequiresExplicitSafety(t *testing.T) {
 
 	server := miniredis.RunT(t)
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	tests := []struct {
 		name   string
@@ -76,7 +80,11 @@ func TestNewUploaderChunkSessionsLiveInRedis(t *testing.T) {
 
 	server := miniredis.RunT(t)
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	uploader, err := NewUploader(validUploaderOptions(t, client),
 		// 测试用小分片；生产默认 5MB 下限不变。
@@ -139,7 +147,11 @@ func TestNewUploaderChunkSessionsLiveInRedis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
-	defer func() { _ = rc.Close() }()
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("rc.Close(): %v", err)
+		}
+	}()
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
@@ -156,7 +168,11 @@ func TestNewUploaderSweepsStaleAssembleFiles(t *testing.T) {
 
 	server := miniredis.RunT(t)
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	o := validUploaderOptions(t, client)
 	uploader, err := NewUploader(o,
@@ -190,7 +206,11 @@ func TestNewUploaderCallerCanReplaceBackgroundErrorSink(t *testing.T) {
 
 	server := miniredis.RunT(t)
 	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("client.Close(): %v", err)
+		}
+	})
 
 	var captured []string
 	uploader, err := NewUploader(validUploaderOptions(t, client),

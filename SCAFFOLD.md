@@ -322,7 +322,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 
 | gtkit 模块 | 当前用途与主要入口 |
 |---|---|
-| `logger/v2` | `internal/platform/logging/` 的日志实例与排空，`internal/pkg/log/` 为项目门面 |
+| `logger/v2` | `internal/platform/logging/` 的日志实例与排空 |
 | `gojwt` | `internal/pkg/jwtauth/` 的签发、验签、claims 与 PEM 工具；切换 `auth.mode` 不会自动替换验签器 |
 | `ormx` | `internal/platform/mysql/open.go` 的 MySQL 装配及仓储分页 |
 | `redisx` | `internal/platform/redis/open.go` 的 Redis 装配；Redis 是否必需由已启用能力决定 |
@@ -389,6 +389,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | JWT 密钥轮换 | `internal/pkg/jwtauth` | 令牌带 kid；未知 kid 直接拒绝（无回退遍历）；退役公钥仍可验签 |
 | 请求体契约 | `internal/middleware/requestbody.go` | `JSONBody`/`FormBody`/`MultipartBody`/`NoBody` 四个中间件：类型不符 415、无 body 却带 400、超限 413；路由级上限只能比全局更严 |
 | 全局请求体上限 | `internal/middleware/maxbody.go` | 兜底 404/405 等不进任何路由组的路径；声明长度与 chunked 两条路径都覆盖 |
+| 并发准入 | `internal/middleware/admission.go` | `/api/v1` 默认限制在途业务请求数；达到上限立即返回 503，不排队，handler 返回或 panic 展开时释放槽位 |
 | 有界 body 日志 | `internal/middleware/logger.go` | 默认关闭；开启时前缀有界、脱敏 |
 | 配置解码与诊断 | `internal/platform/config` | 已知字段按类型和业务约束校验；未知键忽略，doctor 仅报告键名并返回降级状态，不输出值 |
 | 配置环境变量覆盖 | `internal/platform/config/load.go` | YAML 之后加载 `APP_` 前缀变量，双下划线分层（`APP_DATABASE__PASSWORD` → `database.password`）；未知键按相同诊断规则处理，APP_ROOT 保留给资源定位 |
@@ -606,6 +607,7 @@ telemetry:
 | 迁移专用凭据 | 配 `database.migrate_username`；不配则回退运行凭据并告警 |
 | Laravel 存量 token 兼容 | 配 `jwt.laravel.enabled`；终态应删除，见下节清单 |
 | 本地认证（`auth.mode: local`） | 注册/登录/刷新/登出四个端点，bcrypt 口令、刷新令牌轮换与重用检测、登出撤销。见下方「认证：两种模式二选一」 |
+| 服务间请求签名（`internal/middleware/signature.go` + `internal/pkg/apisign`） | 默认不挂载。为服务间路由注入 `middleware.Signature`，使用 HMAC-SHA256、时间戳和 Redis nonce 防重放；只对需要该防线的路由接线，避免普通用户请求增加一次签名计算和 Redis 写入。配置 `signature.clients` 时 appSecret 必须由部署注入，误配会使签名调用返回认证失败。 |
 | 指标（OTel） | 默认 **no-op**：不开导出时每次记录都是空操作。已埋点：HTTP 请求量/时延/状态、限流判定（按策略与拒绝原因）、worker 实际执行次数/耗时、DB 连接池、认证事件。执行指标覆盖 OneShot 和队列处理尝试，具体口径见 `docs/observability.md`。配 `telemetry.enabled` 即经内置 OTLP exporter 导出，见下方「接指标导出」 |
 | pprof | 配 `pprof.enabled`；**所有环境**都只允许字面回环 IP，绑定失败即启动失败（pprof 无鉴权，谁能连上谁就拿到堆栈与内存快照）；远程排障走 SSH 端口转发 |
 | 限流 | 配 `ratelimit.policies` + `ratelimit.key_hmac_secret`，并在模块的 `stageRateLimits(deps.RateLimit, "/route", "策略ID"...)` 引用它（它返回 `(preAuth, postAuth)` 两组，须分别挂在认证前后） |
@@ -657,13 +659,13 @@ telemetry:
 | `internal/pkg/paging` | 纯分页类型（查询入参 `Query` 与结果元信息 `Paging`），不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import）；`Query.Sort` 须经数据访问层白名单映射后才进 SQL |
 | `internal/pkg/cache` | 进程内缓存工具：singleflight 防击穿、TTL 抖动防雪崩、容量上限 + LRU 防无界。供派生项目按需 import，母版自身不构造实例（GET 响应缓存走的是 `httpcache`，两者不是一回事） |
 | `internal/pkg/console` | 带颜色的命令行输出 helper（`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）。ANSI 转义自实现，不依赖第三方着色库；不做 TTY 检测，重定向到文件时同样写入转义序列 |
-| `internal/pkg/log` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
+| `internal/platform/logging` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
 | `internal/pkg/metrics` | OTel 记录点封装，默认 no-op（见上表「指标（OTel）」） |
 | `internal/pkg/jwtauth` | JWT 签发/验签与多密钥轮换（见上文「JWT 密钥轮换操作手册」） |
 | `internal/pkg/credential` / `internal/pkg/tokenstore` | 本地认证模式的口令哈希与刷新令牌存储（见「认证：两种模式二选一」；切到 `external` 后可整体删除） |
 | `internal/pkg/mail` / `internal/pkg/sms` | 邮件与短信客户端，由 `internal/platform/notification/mail` / `internal/platform/notification/sms` 的 Owner 构造；`internal/pkg/news` 借用发送能力（见上文「告警扇出的对外副作用」） |
 
-配置里的 `application` / `ssl` / `cors` / `log` / `database` / `redis` / `env` 是进程与连接的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。
+配置里的 `application` / `ssl` / `cors` / `log` / `database` / `database_connections` / `redis` / `redis_connections` / `signature` / `env` 是进程、连接与服务间签名的基础配置，取值说明以 `config/env.yml.example` 的逐字段注释为准。`database_connections` 与 `redis_connections` 用于按名称装配额外连接，`signature` 仅在服务间签名路由接线时生效，appSecret 必须由部署注入，不写入示例明文。
 
 ### 接入文件上传 / 对象存储
 

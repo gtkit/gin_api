@@ -6,7 +6,7 @@
 
 ## 目录模块化依赖
 
-- **`bootstrap/resources.go: processLogs`**：把 robot/mail/sms/notification/logger 全部作为字段展开存储。`dispatch.Owner` 已经承担渠道聚合职责，`processLogs` 只需持有 `dispatch.Owner` 和 `logging.Owner`，现在展开四个子渠道字段，新增渠道时需要同时追加字段和 Close 调用，有遗漏风险。
+- **`internal/bootstrap/resources.go: processLogs`**：把 robot/mail/sms/notification/logger 全部作为字段展开存储。`dispatch.Owner` 已经承担渠道聚合职责，`processLogs` 只需持有 `dispatch.Owner` 和 `logging.Owner`，现在展开四个子渠道字段，新增渠道时需要同时追加字段和 Close 调用，有遗漏风险。
 
 ---
 
@@ -61,7 +61,7 @@
 
 ## JWT 安全
 
-- **pem 文件权限未在启动路径校验**：`diagnostics/keyperm_unix.go` 有 pem 权限诊断，但它属于 `doctor` 命令，不在 `server` 启动路径上强制执行。配置文件本身已校验 `0o022`，但私钥 pem 文件权限没有同等保护。建议在 `SCAFFOLD.md` 中明确要求（如 `0400`），或在启动期添加警告。
+- **pem 文件权限未在启动路径校验**：`internal/diagnostics/keyperm_unix.go` 有 pem 权限诊断，但它属于 `doctor` 命令，不在 `server` 启动路径上强制执行。配置文件本身已校验 `0o022`，但私钥 pem 文件权限没有同等保护。建议在 `SCAFFOLD.md` 中明确要求（如 `0400`），或在启动期添加警告。
 
 ---
 
@@ -73,5 +73,5 @@
 
 ## 过度设计
 
-- **`router/init.go: NewRateLimitStager`**：pre/post 分阶段逻辑约 60 行 + 3 个闭包，对初期只需 IP 限流的新项目不直观。建议在 `SCAFFOLD.md` 中说明默认只需 IP 级策略，用户级策略的使用时机。
+- **`internal/router/init.go: NewRateLimitStager`**：pre/post 分阶段逻辑约 60 行 + 3 个闭包，对初期只需 IP 限流的新项目不直观。建议在 `SCAFFOLD.md` 中说明默认只需 IP 级策略，用户级策略的使用时机。
 - **`go.mod` 依赖过重**：LLM、SMS、uploader 等可选能力作为编译依赖引入，建议在 `SCAFFOLD.md` 增加"可选能力与对应依赖"表格及精简方法。

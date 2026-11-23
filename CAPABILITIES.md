@@ -264,7 +264,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 
 | gtkit 模块 | 当前用途与主要入口 |
 |---|---|
-| `logger/v2` | `internal/platform/logging/` 的日志实例与排空，`internal/pkg/log/` 为项目门面 |
+| `logger/v2` | `internal/platform/logging/` 的日志实例与排空 |
 | `gojwt` | `internal/pkg/jwtauth/` 的签发、验签、claims 与 PEM 工具；切换 `auth.mode` 不会自动替换验签器 |
 | `ormx` | `internal/platform/mysql/open.go` 的 MySQL 装配及仓储分页 |
 | `redisx` | `internal/platform/redis/open.go` 的 Redis 装配；Redis 是否必需由已启用能力决定 |
@@ -599,7 +599,7 @@ telemetry:
 | `internal/pkg/paging` | 纯分页类型（查询入参 `Query` 与结果元信息 `Paging`），不依赖 gorm，任何层可 import。执行分页查询的是 `gtkit/ormx/paginator`（依赖 gorm，application/dto/models 禁止 import）；`Query.Sort` 须经数据访问层白名单映射后才进 SQL |
 | `internal/pkg/cache` | 进程内缓存工具：singleflight 防击穿、TTL 抖动防雪崩、容量上限 + LRU 防无界。供使用方项目按需 import，本项目自身不构造实例（GET 响应缓存走的是 `httpcache`，两者不是一回事） |
 | `internal/pkg/console` | 带颜色的命令行输出 helper（`Success`/`Error`/`Warning`/`Exit`/`ExitIf`）。ANSI 转义自实现，不依赖第三方着色库；不做 TTY 检测，重定向到文件时同样写入转义序列 |
-| `internal/pkg/log` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
+| `internal/platform/logging` | 进程级日志初始化：主实例（不缓冲）+ access 实例（缓冲）。application 层禁止 import 任何 logger 包，须定义 port 由 runtime 注入 |
 | `internal/pkg/metrics` | OTel 记录点封装，默认 no-op（见上表「指标（OTel）」） |
 | `internal/pkg/jwtauth` | JWT 签发/验签与多密钥轮换（见上文「JWT 密钥轮换操作手册」） |
 | `internal/pkg/credential` / `internal/pkg/tokenstore` | 本地认证模式的口令哈希与刷新令牌存储（见「认证：两种模式二选一」；切到 `external` 后可整体删除） |

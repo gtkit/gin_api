@@ -1,6 +1,6 @@
 # 授权接入约定
 
-`middleware.Auth` 验证身份并写入 `shared/auth.Principal`；`middleware.Authorize` 判断操作权限。业务模块必须显式选择自己的 `Authorizer`，通过已有 `shared/auth.Authorizer` 接口接入。已有 `bootstrap/authorizers.go` 展示了查询权威角色源的实现，不新增权限引擎、不默认放行管理员。
+`middleware.Auth` 验证身份并写入 `shared/auth.Principal`；`middleware.Authorize` 判断操作权限。业务模块必须显式选择自己的 `Authorizer`，通过已有 `shared/auth.Authorizer` 接口接入。已有 `internal/bootstrap/authorizers.go` 展示了查询权威角色源的实现，不新增权限引擎、不默认放行管理员。
 
 JWT 中的角色只随身份传播，不能替代当前权限源。角色被撤销后，后续授权查询立即按当前结果拒绝；权限源错误返回 503，拒绝访问返回 403。身份缺失返回 401。不得把数据库或权限源错误当作允许。
 

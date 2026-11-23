@@ -27,6 +27,22 @@ docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler.g
 docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
 docs/review-remediation-plan-2026-10-23.md:internal/bootstrap/worker_scheduler_shutdown_test.go # taskqueue maintainers — 历史接线测试已合并到注释模板
 docs/review-remediation-plan-2026-10-23.md:internal/platform/config/tasks.go # taskqueue maintainers — 历史审查路径，配置已迁入 internal/optional/taskqueue/config.go
+CAPABILITIES.md:v2/config/env/env.yml # config maintainers — APP_ROOT 的兼容候选路径，仅在部署根包含 v2 配置时存在
+CHANGELOG.md:internal/repository/aiconversation/README.md # ai maintainers — 历史变更记录引用的可选 AI 模块说明已删除
+SCAFFOLD.md:v2/config/env/env.yml # config maintainers — APP_ROOT 的兼容候选路径，仅在部署根包含 v2 配置时存在
+docs/capacity-optimization-plan-2026-10-26.md:.cache/capacity-optimization-20261026/ # performance maintainers — 本机压测产物目录，按约定不入库
+docs/ci-security.md:.cache/security/govulncheck.json # security maintainers — 本地安全扫描输出，运行 security-source 时生成
+docs/load-cancellation-contract-plan-2026-10-27.md:.cache/load-cancellation-repair-20261027/ # cancellation maintainers — 历史验证产物目录，按约定不入库
+docs/load-cancellation-contract-plan-2026-10-27.md:.cache/load-cancellation-repair-20261027/delivery.json # cancellation maintainers — 历史验证产物文件，按约定不入库
+docs/metrics-load-contract-repair-2026-10-27.md:.cache/metrics-load-repair-20261027/ # metrics maintainers — 历史验证产物目录，按约定不入库
+docs/metrics-load-contract-repair-2026-10-27.md:.cache/metrics-load-repair-20261027/delivery.json # metrics maintainers — 历史验证产物文件，按约定不入库
+docs/notification-channels-plan.md:docs/acceptance-remediation-plan-2026-10-22.md # notification maintainers — 历史计划文档已归档并从仓库移除
+docs/readiness-test-lint-repair-2026-10-27.md:.cache/readiness-lint-repair-20261027/ # readiness maintainers — 历史验证产物目录，按约定不入库
+docs/readiness-test-lint-repair-2026-10-27.md:.cache/readiness-lint-repair-20261027/delivery.json # readiness maintainers — 历史验证产物文件，按约定不入库
+docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/cancellation_test.go # ratelimit maintainers — 历史审查路径，相关测试已迁移或删除
+docs/review-remediation-plan-2026-10-23.md:docs/confirmed-review-defects-plan-2026-10-23.md # review maintainers — 历史计划文档已归档并从仓库移除
+docs/review-remediation-plan-2026-10-23.md:ratelimit-internal-migration-plan-2026-10-27.md # ratelimit maintainers — 历史迁移计划已归档并从仓库移除
+docs/testing.md:v2/config/env/env.yml # config maintainers — APP_ROOT 的兼容候选路径，仅在部署根包含 v2 配置时存在
 docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/redis.go # ratelimit maintainers — 保留历史审查与执行证据，2026-10-27 已迁入 internal/pkg/ratelimit/redis.go
 docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/README.md # ratelimit maintainers — 保留历史文件清单，2026-10-27 已迁入 internal/pkg/ratelimit/README.md
 docs/review-remediation-plan-2026-10-23.md:pkg/ratelimit/health.go # ratelimit maintainers — 保留历史审查与执行证据，2026-10-27 已迁入 internal/pkg/ratelimit/health.go

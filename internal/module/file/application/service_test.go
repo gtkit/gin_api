@@ -115,7 +115,11 @@ func readBack(t *testing.T, up *gouploader.Uploader, key string) []byte {
 	if err != nil {
 		t.Fatalf("Get(%q) = %v", key, err)
 	}
-	defer func() { _ = rc.Close() }()
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("rc.Close(): %v", err)
+		}
+	}()
 	data, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +269,9 @@ func TestDownloadAndDelete(t *testing.T) {
 		t.Fatalf("Download() = %v", err)
 	}
 	data, err := io.ReadAll(rc)
-	_ = rc.Close()
+	if err := rc.Close(); err != nil {
+		t.Errorf("rc.Close(): %v", err)
+	}
 	if err != nil || !bytes.Equal(data, []byte(payload)) || got.ID != record.ID {
 		t.Fatalf("Download() = (%q, %v)", data, err)
 	}

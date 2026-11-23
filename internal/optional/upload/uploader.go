@@ -170,7 +170,12 @@ func NewUploader(o UploaderOptions, extra ...gouploader.Option) (*gouploader.Upl
 	uploader, err := gouploader.New(opts...)
 	if err != nil {
 		// 构造失败时会话存储的后台清理协程已启动，就地关闭避免泄漏。
-		_ = chunkStore.Close()
+		if closeErr := chunkStore.Close(); closeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("upload: assemble uploader: %w", err),
+				fmt.Errorf("upload: close chunk store: %w", closeErr),
+			)
+		}
 		return nil, fmt.Errorf("upload: assemble uploader: %w", err)
 	}
 	return uploader, nil

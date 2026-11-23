@@ -45,7 +45,7 @@ type services struct {
 	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
 	accounts account.Assembly
 	// optionalServices 承载 optional 构建的业务模块产物（默认构建为空载体）。
-	optionalServices
+	optionalServices //nolint:unused // embedded only by optional builds
 }
 
 // buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。

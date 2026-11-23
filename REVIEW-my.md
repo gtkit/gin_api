@@ -28,7 +28,7 @@
 
 **发现的小问题：**
 
-- `bootstrap/resources.go` 的 `processLogs` 结构体把 robot/mail/sms/notification/logger 全部硬编码为字段。当前通知渠道数量尚少，但一旦新增渠道，这里需要手动追加字段和 Close 调用，有遗漏风险。notification 的 `dispatch.Owner` 已经承担了渠道聚合职责，`processLogs` 可以只持有 `dispatch.Owner` 和 `logging.Owner`，而不是把四个子渠道都展开存储。
+- `internal/bootstrap/resources.go` 的 `processLogs` 结构体把 robot/mail/sms/notification/logger 全部硬编码为字段。当前通知渠道数量尚少，但一旦新增渠道，这里需要手动追加字段和 Close 调用，有遗漏风险。notification 的 `dispatch.Owner` 已经承担了渠道聚合职责，`processLogs` 可以只持有 `dispatch.Owner` 和 `logging.Owner`，而不是把四个子渠道都展开存储。
 
 ### 2.2 配置多环境与密钥安全
 
@@ -208,7 +208,7 @@
 
 **发现的小问题：**
 
-- JWT 私钥文件路径通过配置文件指定（`jwt.active.private_key_path`），配置文件在生产环境需要 `0600` 权限（代码已校验），但 pem 文件本身的权限没有在启动期校验。`diagnostics/keyperm_unix.go` 文件存在，说明有独立的权限诊断，但它是 `doctor` 命令的一部分，不在 `server` 启动路径上强制执行。建议在 `SCAFFOLD.md` 中明确 pem 文件权限要求，或在启动期添加警告。
+- JWT 私钥文件路径通过配置文件指定（`jwt.active.private_key_path`），配置文件在生产环境需要 `0600` 权限（代码已校验），但 pem 文件本身的权限没有在启动期校验。`internal/diagnostics/keyperm_unix.go` 文件存在，说明有独立的权限诊断，但它是 `doctor` 命令的一部分，不在 `server` 启动路径上强制执行。建议在 `SCAFFOLD.md` 中明确 pem 文件权限要求，或在启动期添加警告。
 
 ### 2.14 连接泄漏风险
 
@@ -273,7 +273,7 @@
 
 | # | 位置 | 问题 | 建议 |
 |---|------|------|------|
-| 1 | `bootstrap/resources.go: processLogs` | 四个通知渠道字段展开存储，新增渠道时有遗漏风险 | 只保留 `dispatch.Owner` 和 `logging.Owner`，关闭顺序由 dispatch 内部管理 |
+| 1 | `internal/bootstrap/resources.go: processLogs` | 四个通知渠道字段展开存储，新增渠道时有遗漏风险 | 只保留 `dispatch.Owner` 和 `logging.Owner`，关闭顺序由 dispatch 内部管理 |
 | 2 | `bootstrap/app.go: gracefulShutdown` | 函数体 ~120 行，9 个步骤内联 | 提取为 `drainProducers`、`drainHTTP`、`drainConsumers` 等命名方法 |
 | 3 | `cmd/server.go: printBanner` | 颜色渐变约 70 行 + 理论注释，对业务项目无价值 | 收缩为单色或简单双色，约 15 行 |
 
@@ -291,7 +291,7 @@
 | 6 | `README.md` | `GOPRIVATE` 配置只在 `gonew` 步骤前提了一次 | 在快速开始第 0 步补充全局 `GOPRIVATE` 配置说明 |
 | 7 | `SCAFFOLD.md` | 各 `gtkit/*` 包对应能力没有汇总 | 增加"可选能力与对应依赖"表格，方便精简 |
 | 8 | `internal/platform/mysql/open.go` | `WithPrepareStmt(true)` 在连接池代理场景下可能出错 | 在配置说明中注明 ProxySQL/PgBouncer 兼容性限制 |
-| 9 | `router/init.go` | `NewRateLimitStager` 的分阶段逻辑对新项目不直观 | 在 `SCAFFOLD.md` 中说明默认只需 IP 级策略，用户级策略的使用时机 |
+| 9 | `internal/router/init.go` | `NewRateLimitStager` 的分阶段逻辑对新项目不直观 | 在 `SCAFFOLD.md` 中说明默认只需 IP 级策略，用户级策略的使用时机 |
 
 ### P4：长期运营
 

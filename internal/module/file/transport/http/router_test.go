@@ -296,7 +296,11 @@ func TestChunkProtocolHTTPContract(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/files/"+record.ID+"/download", nil)
 	response := httptest.NewRecorder()
 	engine.ServeHTTP(response, request)
-	if body, _ := io.ReadAll(response.Body); !bytes.Equal(body, []byte(payload)) {
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, []byte(payload)) {
 		t.Fatalf("merged download = %q", body)
 	}
 }

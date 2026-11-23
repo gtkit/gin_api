@@ -32,7 +32,9 @@ func CanonicalString(method, path, query, body, appID, timestamp, nonce string) 
 // Sign 用 appSecret 对 canonical 串做 HMAC-SHA256，返回小写十六进制摘要。
 func Sign(secret, canonical string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(canonical))
+	if _, err := mac.Write([]byte(canonical)); err != nil {
+		return ""
+	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
