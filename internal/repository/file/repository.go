@@ -39,11 +39,21 @@ func (r *Repository) findByStorageKey(ctx context.Context, owner int64, key stri
 
 func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) ([]models.File, int64, error) {
 	limit = min(max(limit, 1), maxListLimit)
+	query := r.mdbCtx(ctx).Select("id", "owner_id", "storage_key", "file_name", "size", "driver", "bucket", "checksum", "mime_type", "created_at", "updated_at")
+	if offset >= maxListLimit {
+		// Use the covering index for discarded rows. The join fetches the payload
+		// for the selected IDs in the same statement snapshot.
+		page := r.mdbCtx(ctx).Model(&models.File{}).
+			Select("id AS page_id", "created_at AS page_created_at").Where("owner_id = ?", owner).
+			Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit)
+		query = query.Joins("JOIN (?) AS file_page ON file_page.page_id = files.id", page).
+			Order("file_page.page_created_at DESC").Order("file_page.page_id DESC")
+	} else {
+		query = query.Where("owner_id = ?", owner).
+			Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit)
+	}
 	var records []models.File
-	err := r.mdbCtx(ctx).Select("id", "owner_id", "storage_key", "file_name", "size", "driver", "bucket", "checksum", "mime_type", "created_at", "updated_at").
-		Where("owner_id = ?", owner).
-		Order("created_at DESC").Order("id DESC").Offset(offset).Limit(limit).Find(&records).Error
-	if err != nil {
+	if err := query.Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
 	if len(records) < limit && (len(records) > 0 || offset == 0) {

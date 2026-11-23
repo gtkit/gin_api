@@ -2,6 +2,7 @@ package file
 
 import (
 	"errors"
+	"regexp"
 	"strconv"
 	"testing"
 	"time"
@@ -40,6 +41,11 @@ func fileRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"id", "owner_id", "storage_key", "driver", "created_at"}).
 		AddRow("f-1", int64(7), "user-7/a.txt", "local", time.Now())
 }
+
+const deepPageQuery = "FROM `files` JOIN (SELECT id AS page_id,created_at AS page_created_at FROM `files` " +
+	"WHERE owner_id = ? AND `files`.`deleted_at` IS NULL ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?) " +
+	"AS file_page ON file_page.page_id = files.id WHERE `files`.`deleted_at` IS NULL " +
+	"ORDER BY file_page.page_created_at DESC,file_page.page_id DESC"
 
 func TestFindScopesOwnerAndMissingIsCommaOK(t *testing.T) {
 	t.Parallel()
@@ -109,12 +115,35 @@ func TestListCountsWhenOffsetPageIsEmpty(t *testing.T) {
 	t.Parallel()
 
 	repo, mock := newMockRepo(t)
-	mock.ExpectQuery("SELECT .* FROM `files` WHERE owner_id = \\?").
+	mock.ExpectQuery(regexp.QuoteMeta(deepPageQuery)).
 		WithArgs(int64(7), 100, 100).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery("SELECT count\\(\\*\\) FROM `files` WHERE owner_id = \\?").
 		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	if records, total, err := repo.List(t.Context(), 7, 100, 100); err != nil || len(records) != 0 || total != 1 {
 		t.Fatalf("empty deep page = (%d records, %d total, %v), want (0, 1, nil)", len(records), total, err)
+	}
+}
+
+func TestListDerivesTotalFromShortDeepPage(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newMockRepo(t)
+	mock.ExpectQuery(regexp.QuoteMeta(deepPageQuery)).
+		WithArgs(int64(7), 20, 100).WillReturnRows(fileRows())
+	records, total, err := repo.List(t.Context(), 7, 100, 20)
+	if err != nil || total != 101 || len(records) != 1 || records[0].StorageKey != "user-7/a.txt" {
+		t.Fatalf("short deep page = (%+v, %d total, %v)", records, total, err)
+	}
+}
+
+func TestListPreservesDeepPageQueryError(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newMockRepo(t)
+	failure := errors.New("database unavailable")
+	mock.ExpectQuery(regexp.QuoteMeta(deepPageQuery)).WithArgs(int64(7), 20, 100).WillReturnError(failure)
+	if records, total, err := repo.List(t.Context(), 7, 100, 20); records != nil || total != 0 || !errors.Is(err, failure) {
+		t.Fatalf("failed deep page = (%+v, %d total, %v)", records, total, err)
 	}
 }
 
