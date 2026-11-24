@@ -28,6 +28,7 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrForbidden, Status: goerr.StatusPermission()},
 	resp.ErrMapping{Target: application.ErrInvalid, Status: goerr.StatusValidateParams()},
 	resp.ErrMapping{Target: application.ErrDriverMismatch, Status: goerr.StatusConflict(), Message: "文件存储于其他存储驱动，当前部署不可读写"},
+	resp.ErrMapping{Target: application.ErrDependencyUnavailable, Status: goerr.StatusDependencyUnavailable()},
 	resp.ErrMapping{Target: gouploader.ErrSessionNotFound, Status: goerr.StatusNotFound(), Message: "上传会话不存在"},
 	resp.ErrMapping{Target: gouploader.ErrSessionExpired, Status: goerr.StatusNotFound(), Message: "上传会话已过期"},
 	resp.ErrMapping{Target: gouploader.ErrUnauthorized, Status: goerr.StatusPermission(), Message: "无权访问该上传会话"},

@@ -22,10 +22,11 @@ import (
 )
 
 var (
-	ErrInvalid        = errors.New("invalid file input")
-	ErrNotFound       = errors.New("file not found")
-	ErrForbidden      = errors.New("authenticated owner required")
-	ErrDriverMismatch = errors.New("file stored on a different storage driver")
+	ErrInvalid               = errors.New("invalid file input")
+	ErrNotFound              = errors.New("file not found")
+	ErrForbidden             = errors.New("authenticated owner required")
+	ErrDriverMismatch        = errors.New("file stored on a different storage driver")
+	ErrDependencyUnavailable = errors.New("file data dependency unavailable")
 )
 
 // Record 是文件记录的应用层视图，直接作为 API 响应载荷。

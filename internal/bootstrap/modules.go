@@ -166,7 +166,7 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 	// 引用了未注册策略、或在不保证身份的路由上引用身份作用域策略，
 	// 若被静默跳过/丢弃，配置漏项、拼写错误或作用域误配都会让保护
 	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
-	_, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
+	businessRateLimits, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -187,7 +187,7 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 				RateLimit: preIdentityRateLimits,
 			})
 		}
-		registerOptionalModules(v1, svc, auth, inf)
+		registerOptionalModules(v1, svc, auth, inf, businessRateLimits)
 	}
 
 	engine, err := router.New(cfg.Env, opt)

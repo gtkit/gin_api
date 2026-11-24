@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +26,8 @@ type OptionalConfig struct {
 type UploadConfig struct {
 	// Enabled creates an uploader; false by default, never registers public routes.
 	Enabled bool `mapstructure:"enabled"`
+	// RateLimitEnabled applies the list and merge quotas and merge admission.
+	RateLimitEnabled bool `mapstructure:"rate_limit_enabled"`
 	// Dir stores completed files for the local driver; required for local, no default.
 	Dir string `mapstructure:"dir"`
 	// ChunkDir stores temporary upload data; required when enabled, no default.
@@ -37,6 +40,8 @@ type UploadConfig struct {
 	RedisDB int `mapstructure:"redis_db"`
 	// RequestTimeout bounds upload/merge routes in seconds; 0 uses 300s.
 	RequestTimeout int `mapstructure:"request_timeout"`
+	// ListDBTimeoutMS bounds the file listing database operation; zero uses the request context.
+	ListDBTimeoutMS int `mapstructure:"list_db_timeout_ms"`
 	// Storage selects the single active storage driver and its connection params.
 	Storage upload.StorageConfig `mapstructure:"storage"`
 }
@@ -63,6 +68,9 @@ func (c *Config) validateOptional() error {
 
 func (c *Config) validateUpload() error {
 	if !c.Upload.Enabled {
+		if c.Upload.RateLimitEnabled {
+			return errors.New("upload.rate_limit_enabled requires upload.enabled")
+		}
 		return nil
 	}
 	var errs []error
@@ -77,6 +85,9 @@ func (c *Config) validateUpload() error {
 	}
 	if c.Upload.RequestTimeout < 0 {
 		errs = append(errs, fmt.Errorf("upload.request_timeout %d must not be negative", c.Upload.RequestTimeout))
+	}
+	if timeout := c.Upload.ListDBTimeoutMS; timeout < 0 || int64(timeout) > math.MaxInt64/int64(time.Millisecond) {
+		errs = append(errs, errors.New("upload.list_db_timeout_ms must be nonnegative and fit in time.Duration"))
 	}
 	// 会话存储必须有 Redis，且逻辑库真的在 redis.dbs 里：
 	// 不校验的话资源层取不到该库的客户端，装配期才失败。

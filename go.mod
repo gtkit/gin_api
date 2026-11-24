@@ -27,7 +27,7 @@ require (
 	github.com/gtkit/migratex v0.4.0
 	github.com/gtkit/msgbot v1.4.0
 	github.com/gtkit/ormx v1.6.1
-	github.com/gtkit/redisx v1.4.0
+	github.com/gtkit/redisx v1.5.1
 	github.com/gtkit/smsx v1.1.0
 	github.com/gtkit/smsx/providers/aliyun v1.1.0
 	github.com/gtkit/tools/mailx v0.0.0-20260730133614-5f1552d9b037

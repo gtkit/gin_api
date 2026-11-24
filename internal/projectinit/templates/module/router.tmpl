@@ -7,6 +7,7 @@ import (
 
     "{{.Module}}/internal/middleware"
     "{{.Module}}/internal/module/{{.Name}}/application"
+    "{{.Module}}/internal/router"
     sharedauth "{{.Module}}/internal/shared/auth"
 )
 
@@ -23,6 +24,8 @@ type Deps struct {
     Service    *application.Service
     Auth       gin.HandlerFunc
     Authorizer sharedauth.Authorizer
+    RateLimit router.RateLimitStager
+    ListPolicies []string
 }
 
 // Register mounts authenticated CRUD. The caller supplies its existing auth middleware.
@@ -31,8 +34,19 @@ func Register(parent *gin.RouterGroup, deps Deps) {
         panic("record service, authentication and authorization required")
     }
     handler := NewHandler(deps.Service)
-    group := parent.Group("/{{.Name}}", middleware.NoStore(), middleware.Timeout({{.Name}}Deadline, {{.Name}}WriteGrace), deps.Auth, middleware.Authorize(deps.Authorizer, "{{.Name}}.access"))
-    group.GET("", middleware.NoBody(), handler.List)
+    authorize := middleware.Authorize(deps.Authorizer, "{{.Name}}.access")
+    root := parent.Group("/{{.Name}}", middleware.NoStore(), middleware.Timeout({{.Name}}Deadline, {{.Name}}WriteGrace))
+    var beforeAuth, afterAuth []gin.HandlerFunc
+    if len(deps.ListPolicies) != 0 {
+        if deps.RateLimit == nil {
+            panic("list policies require a rate limit stager")
+        }
+        beforeAuth, afterAuth = deps.RateLimit("/{{.Name}}", deps.ListPolicies...)
+    }
+    list := append(beforeAuth, deps.Auth)
+    list = append(list, afterAuth...)
+    root.GET("", append(list, authorize, middleware.NoBody(), handler.List)...)
+    group := root.Group("", deps.Auth, authorize)
     group.GET("/:id", middleware.NoBody(), handler.Get)
     group.POST("", middleware.JSONBody({{.Name}}BodyLimit), handler.Create)
     group.PUT("/:id", middleware.JSONBody({{.Name}}BodyLimit), handler.Update)

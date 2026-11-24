@@ -82,6 +82,15 @@ func buildRedisOptions(cfg config.RedisConfig) []redisx.Option {
 	if cfg.MinIdleConns > 0 {
 		opts = append(opts, redisx.WithMinIdleConns(cfg.MinIdleConns))
 	}
+	if cfg.MaxActiveConns > 0 {
+		opts = append(opts, redisx.WithMaxActiveConns(cfg.MaxActiveConns))
+	}
+	if cfg.PoolTimeoutMS > 0 {
+		opts = append(opts, redisx.WithPoolTimeout(time.Duration(cfg.PoolTimeoutMS)*time.Millisecond))
+	}
+	if cfg.PipelinePoolSize != 0 {
+		opts = append(opts, redisx.WithPipelinePoolSize(cfg.PipelinePoolSize))
+	}
 	if cfg.DialTimeoutMS > 0 {
 		opts = append(opts, redisx.WithDialTimeout(time.Duration(cfg.DialTimeoutMS)*time.Millisecond))
 	}

@@ -246,11 +246,14 @@ type RedisConfig struct {
 	//
 	// 单位统一用毫秒而不是秒：Redis 的合理超时普遍在百毫秒量级，
 	// 用秒做单位会让"最小可表达值"就已经过大。
-	PoolSize       int `mapstructure:"pool_size"`
-	MinIdleConns   int `mapstructure:"min_idle_conns"`
-	DialTimeoutMS  int `mapstructure:"dial_timeout_ms"`
-	ReadTimeoutMS  int `mapstructure:"read_timeout_ms"`
-	WriteTimeoutMS int `mapstructure:"write_timeout_ms"`
+	PoolSize         int `mapstructure:"pool_size"`
+	MinIdleConns     int `mapstructure:"min_idle_conns"`
+	MaxActiveConns   int `mapstructure:"max_active_conns"`
+	PoolTimeoutMS    int `mapstructure:"pool_timeout_ms"`
+	PipelinePoolSize int `mapstructure:"pipeline_pool_size"`
+	DialTimeoutMS    int `mapstructure:"dial_timeout_ms"`
+	ReadTimeoutMS    int `mapstructure:"read_timeout_ms"`
+	WriteTimeoutMS   int `mapstructure:"write_timeout_ms"`
 }
 
 // RateLimitConfig 是限流的进程级配置。

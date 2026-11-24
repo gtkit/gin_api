@@ -41,6 +41,26 @@ func TestRecordRejectsMissingPermission(t *testing.T) {
     if response.Code!=http.StatusForbidden || store.record.ID!="" {t.Fatalf("denied operation reached repository: status=%d",response.Code)}
 }
 
+func TestRecordListRateLimitRunsBeforeAuth(t *testing.T) {
+    store := &recordStore{}
+    service, err := application.New(store, store)
+    if err != nil { t.Fatal(err) }
+    engine := gin.New()
+    Register(engine.Group("/api/v1", middleware.ErrorHandler()), Deps{
+        Service: service,
+        Auth: func(*gin.Context) { t.Error("rate-limited request reached auth") },
+        Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) { return true, nil }),
+        ListPolicies: []string{"list.ip"},
+        RateLimit: func(_ string, ids ...string) ([]gin.HandlerFunc, []gin.HandlerFunc) {
+            if len(ids) != 1 || ids[0] != "list.ip" { t.Fatalf("unexpected policy IDs %v", ids) }
+            return []gin.HandlerFunc{func(c *gin.Context) { c.AbortWithStatus(http.StatusTooManyRequests) }}, nil
+        },
+    })
+    response := httptest.NewRecorder()
+    engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/{{.Name}}", nil))
+    if response.Code != http.StatusTooManyRequests { t.Fatalf("list status = %d", response.Code) }
+}
+
 func TestRecordHTTPContract(t *testing.T) {
     store:=&recordStore{}
     service,err:=application.New(store,store); if err!=nil {t.Fatal(err)}

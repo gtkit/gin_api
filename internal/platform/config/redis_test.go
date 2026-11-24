@@ -1,8 +1,11 @@
 package config
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestValidateRedisConfig 覆盖 Redis 配置的必填项、取值范围与**交叉**约束。
@@ -49,8 +52,11 @@ func TestValidateRedisConfig(t *testing.T) {
 			mutate: func(c *RedisConfig) { c.PoolSize, c.MinIdleConns = 0, 0 },
 		},
 		{
-			name:   "consistent pool settings accepted",
-			mutate: func(c *RedisConfig) { c.PoolSize, c.MinIdleConns = 20, 5 },
+			name: "consistent pool settings accepted",
+			mutate: func(c *RedisConfig) {
+				c.PoolSize, c.MinIdleConns, c.MaxActiveConns = 8, 1, 8
+				c.PoolTimeoutMS, c.PipelinePoolSize = 20, -1
+			},
 		},
 		{
 			name:     "min idle above pool size rejected",
@@ -69,6 +75,36 @@ func TestValidateRedisConfig(t *testing.T) {
 			mutate:   func(c *RedisConfig) { c.MinIdleConns = -1 },
 			wantErr:  true,
 			wantHint: "redis.min_idle_conns",
+		},
+		{
+			name:     "negative max active rejected",
+			mutate:   func(c *RedisConfig) { c.MaxActiveConns = -1 },
+			wantErr:  true,
+			wantHint: "redis.max_active_conns",
+		},
+		{
+			name:     "active cap requires explicit pool size",
+			mutate:   func(c *RedisConfig) { c.MaxActiveConns = 8 },
+			wantErr:  true,
+			wantHint: "requires an explicit positive redis.pool_size",
+		},
+		{
+			name:     "active cap below pool size rejected",
+			mutate:   func(c *RedisConfig) { c.PoolSize, c.MaxActiveConns = 8, 7 },
+			wantErr:  true,
+			wantHint: "must not be smaller than redis.pool_size",
+		},
+		{
+			name:     "negative pool wait rejected",
+			mutate:   func(c *RedisConfig) { c.PoolTimeoutMS = -1 },
+			wantErr:  true,
+			wantHint: "redis.pool_timeout_ms",
+		},
+		{
+			name:     "invalid pipeline pool sentinel rejected",
+			mutate:   func(c *RedisConfig) { c.PipelinePoolSize = -2 },
+			wantErr:  true,
+			wantHint: "redis.pipeline_pool_size",
 		},
 		{
 			name:     "negative dial timeout rejected",
@@ -112,6 +148,70 @@ func TestValidateRedisConfig(t *testing.T) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantHint)
 			}
 		})
+	}
+}
+
+func TestRedisPoolLimitsRejectOverflow(t *testing.T) {
+	t.Parallel()
+	if strconv.IntSize <= 32 {
+		t.Skip("int already bounds these conversions on 32-bit")
+	}
+	poolCount := int64(math.MaxInt32) + 1
+	timeoutMS := math.MaxInt64/int64(time.Millisecond) + 1
+	for _, tc := range []struct {
+		key string
+		cfg RedisConfig
+	}{
+		{"pool_size", RedisConfig{PoolSize: int(poolCount)}},
+		{"min_idle_conns", RedisConfig{MinIdleConns: int(poolCount)}},
+		{"max_active_conns", RedisConfig{PoolSize: 8, MaxActiveConns: int(poolCount)}},
+		{"pipeline_pool_size", RedisConfig{PipelinePoolSize: int(poolCount)}},
+		{"pool_timeout_ms", RedisConfig{PoolTimeoutMS: int(timeoutMS)}},
+		{"dial_timeout_ms", RedisConfig{DialTimeoutMS: int(timeoutMS)}},
+		{"read_timeout_ms", RedisConfig{ReadTimeoutMS: int(timeoutMS)}},
+		{"write_timeout_ms", RedisConfig{WriteTimeoutMS: int(timeoutMS)}},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			err := validateRedisConfig(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "redis."+tc.key+" must") {
+				t.Fatalf("want overflow rejection for %s, got %v", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestRedisPoolLimitsDecodeDefaultAndNamedConnections(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("APP_REDIS__POOL_SIZE", "8")
+	t.Setenv("APP_REDIS__MAX_ACTIVE_CONNS", "8")
+	t.Setenv("APP_REDIS__POOL_TIMEOUT_MS", "20")
+	t.Setenv("APP_REDIS__PIPELINE_POOL_SIZE", "-1")
+
+	const extra = `
+redis_connections:
+  jobs:
+    addr: 127.0.0.1:6380
+    dbs: [2]
+    pool_size: 2
+    max_active_conns: 3
+    pool_timeout_ms: 40
+    pipeline_pool_size: 4
+`
+	cfg, err := loadFromReader(strings.NewReader(minimalConfigYAML() + extra))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, named := cfg.Redis, cfg.RedisConnections["jobs"]
+	if def.PoolSize != 8 || def.MaxActiveConns != 8 || def.PoolTimeoutMS != 20 || def.PipelinePoolSize != -1 {
+		t.Fatal("default Redis connection did not decode configured pool limits")
+	}
+	if named.PoolSize != 2 || named.MaxActiveConns != 3 || named.PoolTimeoutMS != 40 || named.PipelinePoolSize != 4 {
+		t.Fatal("named Redis connection did not decode its independent pool limits")
+	}
+	invalid := strings.Replace(extra, "max_active_conns: 3", "max_active_conns: 1", 1)
+	_, err = loadFromReader(strings.NewReader(minimalConfigYAML() + invalid))
+	if err == nil || !strings.Contains(err.Error(), "redis_connections.jobs: redis.max_active_conns") {
+		t.Fatalf("want named Redis pool validation error, got %v", err)
 	}
 }
 

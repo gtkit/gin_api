@@ -93,9 +93,27 @@ JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 | `log.path` | 主日志路径，拒绝空串和纯空白；生产绝对路径必须位于绝对 `APP_ROOT` 下 | 必填，无配置默认值；消费时去除首尾空白 |
 | `database.maxlifeseconds` | 连接最大存活时间，单位秒；必须非负，负值只返回一条该字段诊断 | 省略/0 使用原有默认 1800 秒，正数按配置使用 |
 
-校验只检查配置，不修改原值；多项错误仍一次聚合返回。连接池与 Redis 规则保持原样：
+校验只检查配置，不修改原值，多项错误一次聚合返回。
 `maxopenconn` 省略/0 使用默认 25，`maxidleconn` 省略/0 使用默认 10 并钳制到生效的打开上限；
 两项显式为正数时要求 idle 不超过 open。Redis 库号按启用的消费方校验，不统一强制 DB1、DB2。
+
+## Redis 连接预算
+
+`redis` 和 `redis_connections.<name>` 使用同样的池字段。请保留对应能力实际使用的 `dbs`。以下是每个逻辑 DB 客户端的预发配置示例。
+
+```yaml
+redis:
+  pool_size: 8
+  min_idle_conns: 1
+  max_active_conns: 8
+  pool_timeout_ms: 20
+  pipeline_pool_size: -1
+```
+
+- `pool_size` 是主池的基础大小。显式设置正的 `max_active_conns` 时，需要显式设置正的 `pool_size`，并满足 `min_idle_conns ≤ pool_size ≤ max_active_conns`。省略或置 0 沿用默认行为，继承的空闲目标会按显式小池钳制。
+- `pool_timeout_ms` 是单次等待连接的预算。命令重试可能再次等待，可用调用方 deadline 限制整个操作。
+- `pipeline_pool_size: -1` 关闭独立池，Pipeline 仍通过主池执行。正值为独立池的大小，0 继承底层配置。
+- 按物理 Redis 实例汇总峰值。将滚动期最多副本数乘以每副本的实际客户端预算，包括自动初始化的默认 DB 0、主池、独立 Pipeline 池和实际订阅连接。再为其他应用和运维留余量，实例总量由 Redis `maxclients` 或托管平台配额限制。例如 6 个副本各有 2 个实际 DB、每个主池 8 条，主池预算是 96 条。
 
 ## 访问日志刷新间隔
 
@@ -196,6 +214,12 @@ go run . doctor
 默认只校验配置和文件元数据；`doctor --deep --check-timeout 3s` 才分别建连检查 MySQL、Redis，并在单项预算内释放连接，不初始化 JWT。未配置的可选 Redis 记为 skipped。
 
 Redis 的地址无默认值。启用本地认证、任何 Redis 存储限流、Redis 响应缓存或任务队列时必须提供 `redis.addr`（host:port）和非空、非负、不重复的 `redis.dbs`；库号还须包含对应能力使用的 DB。无上述能力时，两项可省略或留空，启动和探针均不连接 Redis。
+
+## 文件接口与响应缓存保护
+
+optional 构建可用 `upload.rate_limit_enabled` 为文件列表和分片合并启用限流。将 [可选配置示例](optional.yml.example) 中的四项策略追加到已有 `ratelimit.policies`，合并每实例允许 4 个在途请求。文件列表的 MySQL 操作可用 `upload.list_db_timeout_ms` 单独设预算，预发起点为 250 毫秒。零值沿用路由预算。超时返回 504，启用独立预算后明确的 MySQL 连接失败返回 503。
+
+公开只读路由用 `httpcache.RouteHandlers(cache, ttl)` 把缓存与回源准入挂在源站 handler 前。启用 Redis 缓存后，`cache.max_inflight_origins` 为正时启用 Redis 读故障短路及实例级回源上限。预发起点为 8。缓存命中和可复用的同键结果不占回源名额。使用旧式单中间件挂载时，保护开启后该上限保守应用到整个已挂载请求。
 
 ## JWT 标准密钥
 

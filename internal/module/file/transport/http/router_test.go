@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -83,34 +86,12 @@ func newTestRouter(t *testing.T, allow bool) *gin.Engine {
 	return newTestRouterWithHooks(t, allow, nil, nil)
 }
 
-func newTestRouterWithHooks(t *testing.T, allow bool, authCalls, authorizeCalls *int) *gin.Engine {
+func newTestRouterWithHooks(t *testing.T, allow bool, authCalls, authorizeCalls *int, configure ...func(*Deps)) *gin.Engine {
 	t.Helper()
 
-	up, err := gouploader.New(
-		gouploader.WithLocalStorage(t.TempDir()),
-		gouploader.WithChunkTempDir(t.TempDir()),
-		gouploader.WithMaxFileSize(1<<20),
-		gouploader.WithAllowedTypes(".txt"),
-		gouploader.WithChunkSize(5, 1, 1<<20),
-		gouploader.WithUserIDFn(func(ctx context.Context) string {
-			if info, ok := gouploader.UploadInfoFromContext(ctx); ok {
-				return info.UserID
-			}
-			return ""
-		}),
-		gouploader.WithRequireUserID(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(up.Close)
-	service, err := application.New(up, &memRepo{byID: map[string]application.Record{}}, "local", "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	engine := gin.New()
-	Register(engine.Group("/api/v1", middleware.ErrorHandler()), Deps{
-		Service: service,
+	deps := Deps{
+		Service: newTestFileService(t, &memRepo{byID: map[string]application.Record{}}),
 		Auth: func(c *gin.Context) {
 			if authCalls != nil {
 				(*authCalls)++
@@ -132,8 +113,201 @@ func newTestRouterWithHooks(t *testing.T, allow bool, authCalls, authorizeCalls 
 		MaxUploadBytes: 2 << 20,
 		MaxChunkBytes:  2 << 20,
 		RequestTimeout: 30 * time.Second,
-	})
+	}
+	for _, apply := range configure {
+		apply(&deps)
+	}
+	Register(engine.Group("/api/v1", middleware.ErrorHandler()), deps)
 	return engine
+}
+
+func newTestFileService(t *testing.T, repo application.Repository) *application.Service {
+	t.Helper()
+	up, err := gouploader.New(
+		gouploader.WithLocalStorage(t.TempDir()),
+		gouploader.WithChunkTempDir(t.TempDir()),
+		gouploader.WithMaxFileSize(1<<20),
+		gouploader.WithAllowedTypes(".txt"),
+		gouploader.WithChunkSize(5, 1, 1<<20),
+		gouploader.WithUserIDFn(func(ctx context.Context) string {
+			if info, ok := gouploader.UploadInfoFromContext(ctx); ok {
+				return info.UserID
+			}
+			return ""
+		}),
+		gouploader.WithRequireUserID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(up.Close)
+	service, err := application.New(up, repo, "local", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func TestFilePilotRateLimitOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path string
+		deny               string
+		wantStatus         int
+		want               []string
+	}{
+		{"list before auth", http.MethodGet, "/api/v1/files", "ip", 429, []string{"ip"}},
+		{"failed auth", http.MethodGet, "/api/v1/files", "auth", 401, []string{"ip", "auth"}},
+		{"list user quota", http.MethodGet, "/api/v1/files", "user", 429, []string{"ip", "auth", "user"}},
+		{"list complete", http.MethodGet, "/api/v1/files", "", 200, []string{"ip", "auth", "user", "authorize"}},
+		{"merge admission", http.MethodPost, "/api/v1/upload/merge/some-id", "admit", 503, []string{"ip", "auth", "user", "authorize", "admit"}},
+		{"another merge uses same policy", http.MethodPost, "/api/v1/upload/merge/other-id", "ip", 429, []string{"ip"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			stage := func(name string, status int) gin.HandlerFunc {
+				return func(c *gin.Context) {
+					calls = append(calls, name)
+					if tc.deny == name {
+						c.AbortWithStatusJSON(status, gin.H{"code": status})
+					}
+				}
+			}
+			engine := newTestRouterWithHooks(t, true, nil, nil, func(deps *Deps) {
+				deps.RateLimit = func(route string, ids ...string) ([]gin.HandlerFunc, []gin.HandlerFunc) {
+					want := []string{"files.list.ip", "files.list.user"}
+					if route == "/upload/merge/:upload_id" {
+						want = []string{"upload.merge.ip", "upload.merge.user"}
+					}
+					if !slices.Equal(ids, want) {
+						t.Fatalf("route %q registered policies %v, want %v", route, ids, want)
+					}
+					return []gin.HandlerFunc{stage("ip", 429)}, []gin.HandlerFunc{stage("user", 429)}
+				}
+				auth := deps.Auth
+				deps.Auth = func(c *gin.Context) {
+					stage("auth", 401)(c)
+					if !c.IsAborted() {
+						auth(c)
+					}
+				}
+				deps.Authorizer = sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
+					calls = append(calls, "authorize")
+					return true, nil
+				})
+				deps.MergeAdmission = stage("admit", 503)
+			})
+			status, _ := doJSON(t, engine, tc.method, tc.path, "", nil)
+			if status != tc.wantStatus || !slices.Equal(calls, tc.want) {
+				t.Fatalf("status=%d, calls=%v, want %d, %v", status, calls, tc.wantStatus, tc.want)
+			}
+		})
+	}
+}
+
+type failingListRepository struct {
+	memRepo
+	err error
+}
+
+func (p *failingListRepository) List(context.Context, int64, int, int) ([]application.Record, int64, error) {
+	return nil, 0, p.err
+}
+
+func TestFileListDependencyErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"unavailable", errors.Join(application.ErrDependencyUnavailable, errors.New("private cause")), 503},
+		{"deadline", context.DeadlineExceeded, 504},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newTestFileService(t, &failingListRepository{err: tc.err})
+			engine := newTestRouterWithHooks(t, true, nil, nil, func(deps *Deps) { deps.Service = service })
+			status, body := doJSON(t, engine, http.MethodGet, "/api/v1/files", "", nil)
+			if status != tc.want || body.Code == 0 || strings.Contains(body.Msg, "private cause") {
+				t.Fatalf("list returned status=%d envelope=%+v", status, body)
+			}
+		})
+	}
+}
+
+type blockingMergeRepository struct {
+	memRepo
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingMergeRepository) Create(ctx context.Context, record application.Record) (application.Record, error) {
+	p.started <- struct{}{}
+	select {
+	case <-p.release:
+		return p.memRepo.Create(ctx, record)
+	case <-ctx.Done():
+		return application.Record{}, ctx.Err()
+	}
+}
+
+func TestMergeCapacityDoesNotBlockFileList(t *testing.T) {
+	const limit = 4
+	repo := &blockingMergeRepository{
+		byID:    map[string]application.Record{},
+		started: make(chan struct{}, limit+1),
+		release: make(chan struct{}),
+	}
+	service := newTestFileService(t, repo)
+	engine := newTestRouterWithHooks(t, true, nil, nil, func(deps *Deps) {
+		deps.Service = service
+		deps.MergeAdmission = middleware.Admission(limit, nil)
+	})
+
+	uploads := make([]string, limit)
+	for i := range uploads {
+		payload := fmt.Sprintf("row-%d", i)
+		status, body := doJSON(t, engine, http.MethodPost, "/api/v1/upload/init",
+			fmt.Sprintf(`{"file_name":"file-%d.txt","file_size":5,"chunk_size":5}`, i), nil)
+		var session struct {
+			UploadID string `json:"upload_id"`
+		}
+		if err := json.Unmarshal(body.Data, &session); status != http.StatusOK || err != nil || session.UploadID == "" {
+			t.Fatalf("init status=%d data=%s err=%v", status, body.Data, err)
+		}
+		uploads[i] = session.UploadID
+		status, _ = doMultipart(t, engine, "/api/v1/upload/chunk", "part", []byte(payload),
+			map[string]string{"upload_id": session.UploadID, "chunk_index": "0"}, nil)
+		if status != http.StatusOK {
+			t.Fatalf("chunk status=%d", status)
+		}
+	}
+
+	var merging sync.WaitGroup
+	defer func() { close(repo.release); merging.Wait() }()
+	for _, id := range uploads {
+		merging.Go(func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/upload/merge/"+id, nil)
+			engine.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("accepted merge status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	timeout := time.NewTimer(3 * time.Second)
+	defer timeout.Stop()
+	for range limit {
+		select {
+		case <-repo.started:
+		case <-timeout.C:
+			t.Fatal("all four merge requests did not reach persistence")
+		}
+	}
+	if status, _ := doJSON(t, engine, http.MethodPost, "/api/v1/upload/merge/another-session", "", nil); status != http.StatusServiceUnavailable {
+		t.Fatalf("merge with full quota status=%d", status)
+	}
+	if status, _ := doJSON(t, engine, http.MethodGet, "/api/v1/files", "", nil); status != http.StatusOK {
+		t.Fatalf("list with full merge quota status=%d", status)
+	}
 }
 
 func TestUploadRejectsWrongContentTypeBeforeAuthentication(t *testing.T) {

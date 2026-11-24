@@ -8,6 +8,7 @@ import (
 	"github.com/gtkit/gin-api/internal/middleware"
 	"github.com/gtkit/gin-api/internal/module/file/application"
 	"github.com/gtkit/gin-api/internal/optional/upload"
+	"github.com/gtkit/gin-api/internal/router"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 )
 
@@ -24,6 +25,8 @@ type Deps struct {
 	MaxChunkBytes int64
 	// RequestTimeout 是上传/合并/下载路由的超时；非正时按 300s。
 	RequestTimeout time.Duration
+	RateLimit      router.RateLimitStager
+	MergeAdmission gin.HandlerFunc
 }
 
 // Register 在给定路由组上注册上传协议与文件管理路由。
@@ -42,17 +45,34 @@ func Register(parent *gin.RouterGroup, deps Deps) {
 	authorize := middleware.Authorize(deps.Authorizer, "file.access")
 	uploadTimeout := middleware.Timeout(deps.RequestTimeout, time.Second)
 
+	list := []gin.HandlerFunc{middleware.NoBody()}
+	merge := []gin.HandlerFunc{middleware.NoBody(), uploadTimeout}
+	var listAfterAuth, mergeAfterAuth []gin.HandlerFunc
+	if deps.RateLimit != nil {
+		var listBeforeAuth, mergeBeforeAuth []gin.HandlerFunc
+		listBeforeAuth, listAfterAuth = deps.RateLimit("/files", "files.list.ip", "files.list.user")
+		mergeBeforeAuth, mergeAfterAuth = deps.RateLimit("/upload/merge/:upload_id", "upload.merge.ip", "upload.merge.user")
+		list = append(list, listBeforeAuth...)
+		merge = append(merge, mergeBeforeAuth...)
+	}
+	list = append(append(list, deps.Auth), listAfterAuth...)
+	merge = append(append(merge, deps.Auth), mergeAfterAuth...)
+	merge = append(merge, authorize)
+	if deps.MergeAdmission != nil {
+		merge = append(merge, deps.MergeAdmission)
+	}
+
 	up := parent.Group("/upload", middleware.NoStore())
 	up.POST("", middleware.MultipartBody(deps.MaxUploadBytes), uploadTimeout, deps.Auth, authorize, handler.Upload)
 	up.POST("/init", middleware.JSONBody(8192), uploadTimeout, deps.Auth, authorize, handler.ChunkInit)
 	up.POST("/chunk", middleware.MultipartBody(deps.MaxChunkBytes), uploadTimeout, deps.Auth, authorize, handler.UploadChunk)
 	up.POST("/resume", middleware.JSONBody(8192), uploadTimeout, deps.Auth, authorize, handler.Resume)
-	up.POST("/merge/:upload_id", middleware.NoBody(), uploadTimeout, deps.Auth, authorize, handler.Merge)
+	up.POST("/merge/:upload_id", append(merge, handler.Merge)...)
 	up.GET("/status/:upload_id", middleware.NoBody(), deps.Auth, authorize, handler.Status)
 	up.DELETE("/:upload_id", middleware.NoBody(), deps.Auth, authorize, handler.Abort)
 
 	files := parent.Group("/files", middleware.NoStore())
-	files.GET("", middleware.NoBody(), deps.Auth, authorize, handler.List)
+	files.GET("", append(list, authorize, handler.List)...)
 	files.GET("/:id", middleware.NoBody(), deps.Auth, authorize, handler.Get)
 	files.DELETE("/:id", middleware.NoBody(), deps.Auth, authorize, handler.Delete)
 	files.GET("/:id/download", middleware.NoBody(), upload.FileHeaders(deps.Policy), uploadTimeout, deps.Auth, authorize, handler.Download)

@@ -28,7 +28,7 @@ auditlog:
 	if !cfg.TaskQueueEnabled() || !cfg.AuditLog.Enabled || cfg.Outbound.Defaults.Timeout.String() != "3s" || len(cfg.IgnoredKeys()) != 0 {
 		t.Fatalf("optional config was not decoded: ignored=%v", cfg.IgnoredKeys())
 	}
-	for _, block := range []string{"upload:\n  enabled: true\n", "tasks:\n  enabled: true\n  redis_db: 99\n", "outbound:\n  clients:\n    broken:\n      base_url: invalid\n"} {
+	for _, block := range []string{"upload:\n  enabled: true\n", "upload:\n  rate_limit_enabled: true\n", "tasks:\n  enabled: true\n  redis_db: 99\n", "outbound:\n  clients:\n    broken:\n      base_url: invalid\n"} {
 		if _, err := loadFromReader(strings.NewReader(minimalConfigYAML() + "\n" + block)); err == nil {
 			t.Fatalf("invalid optional config accepted: %s", block)
 		}

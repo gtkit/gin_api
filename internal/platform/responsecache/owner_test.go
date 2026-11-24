@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/core"
+	"github.com/gtkit/gin-api/internal/pkg/httpcache"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/testutil"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -39,6 +42,66 @@ func TestRedisFailureDegrades(t *testing.T) {
 	p := mustOpen(t, Options{Config: &config.Config{Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis}}, Redis: cacheRedisProvider{configured: true}})
 	if p.store != nil || p.Enabled() || !p.waiting {
 		t.Fatal("optional Redis failure did not keep a waiting cache")
+	}
+}
+
+func TestProtectedCacheBoundsOriginsWithoutRejectingHits(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(map[bool]string{false: "startup without Redis", true: "cache hit"}[ready], func(t *testing.T) {
+			provider := new(lateRedis)
+			if ready {
+				testutil.RequireLoopback(t)
+				server := miniredis.RunT(t)
+				client := redis.NewClient(&redis.Options{Addr: server.Addr(), ContextTimeoutEnabled: true})
+				t.Cleanup(func() {
+					if err := client.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				provider.current.Store(client)
+			}
+			owner := mustOpen(t, Options{Config: &config.Config{
+				App:   config.AppConfig{Name: "cache-protection-test"},
+				Cache: config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis, MaxInflightOrigins: 1},
+			}, Redis: provider})
+			engine := gin.New()
+			entered, release := make(chan struct{}), make(chan struct{})
+			handler := func(c *gin.Context) {
+				if c.Param("key") == "blocked" {
+					close(entered)
+					<-release
+				}
+				c.String(http.StatusOK, "origin-"+c.Param("key"))
+			}
+			engine.GET("/public/:key", append(httpcache.RouteHandlers(owner, time.Second), handler)...)
+			call := func(key string) *httptest.ResponseRecorder {
+				r := httptest.NewRecorder()
+				engine.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/public/"+key, nil))
+				return r
+			}
+			if ready && call("warm").Code != http.StatusOK {
+				t.Fatal("could not warm cache")
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = call("blocked")
+			}()
+			defer func() { close(release); <-done }()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("blocked origin did not start")
+			}
+			if r := call("cold"); r.Code != http.StatusServiceUnavailable {
+				t.Fatalf("cold path with no slots: %d", r.Code)
+			}
+			if ready {
+				if r := call("warm"); r.Code != http.StatusOK || r.Body.String() != "origin-warm" {
+					t.Fatalf("hit with no origin slots: %d %s", r.Code, r.Body.String())
+				}
+			}
+		})
 	}
 }
 

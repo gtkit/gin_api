@@ -25,6 +25,8 @@ type CacheConfig struct {
 	TTL time.Duration `mapstructure:"ttl"`
 	// MaxBodyBytes 是可缓存响应体的上限，超过即不缓存。
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
+	// MaxInflightOrigins enables Redis failure protection and caps simultaneous origin requests.
+	MaxInflightOrigins int `mapstructure:"max_inflight_origins"`
 	// MaxBytes 仅 memory 后端使用：本地缓存的总容量上限（字节）。
 	//
 	// 必填且必须有界。无界的本地缓存在键空间随请求变化时会一直涨——
@@ -94,6 +96,9 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 				cfg.RedisDB, redis.DBs))
 		}
 	case CacheStoreMemory:
+		if cfg.MaxInflightOrigins > 0 {
+			errs = append(errs, errors.New("cache.max_inflight_origins requires the redis store"))
+		}
 		// memory 后端必须有容量上限。无界的本地缓存在键空间随请求变化时
 		// 会一直涨，那不是命中率问题，是一次必然发生的 OOM。
 		if cfg.MaxBytes <= 0 {
@@ -110,5 +115,6 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 	}
 
 	errs = append(errs, mustNonNegative("cache.ttl", cfg.TTL))
+	errs = append(errs, mustNonNegative("cache.max_inflight_origins", cfg.MaxInflightOrigins))
 	return errors.Join(errs...)
 }

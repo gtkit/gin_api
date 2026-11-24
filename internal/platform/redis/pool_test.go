@@ -2,6 +2,7 @@ package redis
 
 import (
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -44,5 +45,19 @@ func TestPoolOptionUsesInheritedDefaults(t *testing.T) {
 		if actual.MinIdleConns != tc.want {
 			t.Errorf("pool=%d idle=%d inherited=%d: got %d want %d", tc.pool, tc.idle, tc.inherited, actual.MinIdleConns, tc.want)
 		}
+	}
+}
+
+func TestPoolLimitsOmittedUsesSDKDefaults(t *testing.T) {
+	t.Parallel()
+	// Distinct values make accidental zero-value overrides observable.
+	want := redisx.Config{MaxActiveConns: 12, PoolTimeout: time.Second, PipelinePoolSize: 5}
+	actual := want
+	for _, option := range buildRedisOptions(config.RedisConfig{}) {
+		option(&actual)
+	}
+	if actual.MaxActiveConns != want.MaxActiveConns || actual.PoolTimeout != want.PoolTimeout ||
+		actual.PipelinePoolSize != want.PipelinePoolSize {
+		t.Fatalf("omitted settings overrode the SDK defaults")
 	}
 }

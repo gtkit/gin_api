@@ -463,11 +463,20 @@ func validateRedisCapabilities(c Config) error {
 func validateRedisPool(redis RedisConfig) []error {
 	var errs []error
 
-	if redis.PoolSize < 0 {
-		errs = append(errs, fmt.Errorf("redis.pool_size must not be negative, got %d", redis.PoolSize))
-	}
-	if redis.MinIdleConns < 0 {
-		errs = append(errs, fmt.Errorf("redis.min_idle_conns must not be negative, got %d", redis.MinIdleConns))
+	for _, tc := range []struct {
+		key   string
+		value int
+	}{
+		{"redis.pool_size", redis.PoolSize},
+		{"redis.min_idle_conns", redis.MinIdleConns},
+		{"redis.max_active_conns", redis.MaxActiveConns},
+	} {
+		switch {
+		case tc.value < 0:
+			errs = append(errs, fmt.Errorf("%s must not be negative, got %d", tc.key, tc.value))
+		case tc.value > math.MaxInt32:
+			errs = append(errs, fmt.Errorf("%s must not exceed %d, got %d", tc.key, math.MaxInt32, tc.value))
+		}
 	}
 	if redis.PoolSize > 0 && redis.MinIdleConns > redis.PoolSize {
 		errs = append(errs, fmt.Errorf(
@@ -475,17 +484,35 @@ func validateRedisPool(redis RedisConfig) []error {
 				"the pool can never reach the idle target and will retry connections forever",
 			redis.MinIdleConns, redis.PoolSize))
 	}
+	if redis.MaxActiveConns > 0 {
+		switch {
+		case redis.PoolSize <= 0:
+			errs = append(errs, errors.New("redis.max_active_conns requires an explicit positive redis.pool_size"))
+		case redis.MaxActiveConns < redis.PoolSize:
+			errs = append(errs, fmt.Errorf("redis.max_active_conns (%d) must not be smaller than redis.pool_size (%d)",
+				redis.MaxActiveConns, redis.PoolSize))
+		}
+	}
+	if redis.PipelinePoolSize < -1 || redis.PipelinePoolSize > math.MaxInt32 {
+		errs = append(errs, fmt.Errorf("redis.pipeline_pool_size must be between -1 and %d, got %d",
+			math.MaxInt32, redis.PipelinePoolSize))
+	}
 
+	const maxMillis = math.MaxInt64 / int64(time.Millisecond)
 	for _, tc := range []struct {
 		key   string
 		value int
 	}{
+		{"redis.pool_timeout_ms", redis.PoolTimeoutMS},
 		{"redis.dial_timeout_ms", redis.DialTimeoutMS},
 		{"redis.read_timeout_ms", redis.ReadTimeoutMS},
 		{"redis.write_timeout_ms", redis.WriteTimeoutMS},
 	} {
-		if tc.value < 0 {
+		switch {
+		case tc.value < 0:
 			errs = append(errs, fmt.Errorf("%s must not be negative, got %d", tc.key, tc.value))
+		case int64(tc.value) > maxMillis:
+			errs = append(errs, fmt.Errorf("%s must not exceed %d, got %d", tc.key, maxMillis, tc.value))
 		}
 	}
 

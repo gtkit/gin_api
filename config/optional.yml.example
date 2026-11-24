@@ -40,6 +40,14 @@ outbound:
 upload:
   # Creates the uploader and mounts the file module routes; false by default.
   enabled: false
+  # Opt into list/merge quotas and four concurrent merges per instance.
+  # Append the following entries to the deployment's existing ratelimit.policies.
+  # Use the configured HMAC key and include DB 0 in redis.dbs.
+  # - {id: files.list.ip, rate: 20, burst: 40, scope: ip, store: local, failure_mode: fail_closed, max_keys: 100000}
+  # - {id: files.list.user, rate: 5, burst: 10, scope: user, store: redis, failure_mode: local_fallback, max_keys: 100000}
+  # - {id: upload.merge.ip, rate: 4, burst: 8, scope: ip, store: local, failure_mode: fail_closed, max_keys: 100000}
+  # - {id: upload.merge.user, rate: 1, burst: 2, scope: user, store: local, failure_mode: fail_closed, max_keys: 100000}
+  rate_limit_enabled: false
   # Completed-file directory for the local driver; required for local, no default.
   dir: ""
   # Temporary chunk directory; no default, required when enabled. Deployment supplies the path.
@@ -52,6 +60,9 @@ upload:
   redis_db: 0
   # Upload/merge route timeout in seconds; 0 uses 300, negative values rejected.
   request_timeout: 300
+  # File listing database budget in milliseconds; 0 uses the request deadline.
+  # Use 250 as the preproduction starting point.
+  list_db_timeout_ms: 0
   storage:
     # Single active driver: local | s3. Empty means local.
     driver: local

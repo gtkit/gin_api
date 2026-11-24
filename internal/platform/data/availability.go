@@ -213,6 +213,22 @@ func (t *AvailabilityTracker) Observe(err error) {
 	t.onFailureLocked()
 }
 
+// ObserveWhileHealthy records ordinary calls separately from recovery probes.
+// In-flight ordinary calls cannot report recovery after the circuit opens.
+func (t *AvailabilityTracker) ObserveWhileHealthy(err error) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state != AvailabilityHealthy {
+		return false
+	}
+	if err == nil {
+		t.onSuccessLocked()
+	} else {
+		t.onFailureLocked()
+	}
+	return t.state == AvailabilityDegraded
+}
+
 func (t *AvailabilityTracker) onSuccessLocked() {
 	t.failures = 0
 
@@ -286,7 +302,8 @@ func (t *AvailabilityTracker) MaybeProbe(ctx context.Context) (bool, error) {
 	}
 
 	t.mu.Lock()
-	if t.state != AvailabilityDegraded || t.probeInFlight || t.now().Before(t.nextProbeAt) {
+	if (t.state != AvailabilityDegraded && t.state != AvailabilityProbing) ||
+		t.probeInFlight || t.now().Before(t.nextProbeAt) {
 		t.mu.Unlock()
 		return false, nil
 	}

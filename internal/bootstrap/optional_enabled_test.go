@@ -5,15 +5,35 @@ package bootstrap
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	fileapp "github.com/gtkit/gin-api/internal/module/file/application"
 	"github.com/gtkit/gin-api/internal/optional/outbound"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
 	redisowner "github.com/gtkit/gin-api/internal/platform/redis"
 	"gorm.io/gorm"
 )
+
+func TestFilePilotRequiresRegisteredPoliciesOnlyWhenEnabled(t *testing.T) {
+	cfg := jwtTestConfig(t)
+	cfg.Env, cfg.App.Name = "test", "file-pilot"
+	cfg.Upload.Enabled = true
+	inf := infra{cfg: cfg, resources: &data.Resources{}}
+	installMetricsFixture(t, &inf)
+	svc := services{file: &fileapp.Service{}}
+	auth := func(*gin.Context) {}
+	if _, err := buildEngine(inf, svc, auth, nil); err != nil {
+		t.Fatalf("disabled pilot required policies: %v", err)
+	}
+	cfg.Upload.RateLimitEnabled = true
+	if _, err := buildEngine(inf, svc, auth, nil); err == nil || !strings.Contains(err.Error(), "files.list.user") || !strings.Contains(err.Error(), "upload.merge.user") {
+		t.Fatalf("enabled pilot did not reject missing policies: %v", err)
+	}
+}
 
 func TestOptionalCapabilityCombinations(t *testing.T) {
 	server := miniredis.RunT(t)

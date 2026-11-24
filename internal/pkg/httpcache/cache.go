@@ -68,11 +68,17 @@ func New(cfg config.CacheConfig, client *redis.Client, keyPrefix string) (*Stage
 		// 一次挂了缓存的 GET 会比路由预算多挂 6s。读取 1s：缓存读慢于它
 		// 已失去加速意义，超时的结果只是穿透执行 handler（无害路径）；
 		// 写回 2s：发生在响应写出之后，是对大 payload 的让步。
-		stager.store = persist.NewRedisStore(client,
-			persist.WithKeyPrefix(keyPrefix+":httpcache:"),
-			persist.WithReadTimeout(time.Second),
-			persist.WithWriteTimeout(2*time.Second),
-		)
+		prefix := keyPrefix + ":httpcache:"
+		if cfg.MaxInflightOrigins > 0 {
+			store, err := newResilientRedisStore(client, prefix)
+			if err != nil {
+				return nil, err
+			}
+			stager.store = store
+		} else {
+			stager.store = persist.NewRedisStore(client, persist.WithKeyPrefix(prefix),
+				persist.WithReadTimeout(time.Second), persist.WithWriteTimeout(2*time.Second))
+		}
 
 	case config.CacheStoreMemory:
 		if cfg.MaxBytes <= 0 {

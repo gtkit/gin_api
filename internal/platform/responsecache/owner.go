@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/core"
 	"github.com/gtkit/gin-api/internal/pkg/httpcache"
+	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/logger/v2"
@@ -40,6 +41,7 @@ type Owner struct {
 	redis     data.RedisClientProvider
 	factory   Factory
 	prefix    string
+	origins   chan struct{}
 	waiting   bool
 	closed    bool
 	initErr   error
@@ -79,6 +81,9 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 	owner.prefix = snapshot.EffectiveRedisPrefix()
 	var client *redis.Client
 	if cfg.Enabled && strings.TrimSpace(cfg.Store) == config.CacheStoreRedis {
+		if cfg.MaxInflightOrigins > 0 {
+			owner.origins = make(chan struct{}, cfg.MaxInflightOrigins)
+		}
 		if options.Redis == nil || !options.Redis.Configured() {
 			return nil, errors.New("response cache requires configured Redis")
 		}
@@ -194,6 +199,38 @@ func (p *Owner) Enabled() bool {
 // 不覆盖实际请求处理；未恢复时继续透传，稳定运行时不再竞争 Owner 写锁。
 // 恢复构造和该挂载点的首次处理器构造仍受同一写锁保护。
 func (p *Owner) Middleware(ttl time.Duration) gin.HandlerFunc {
+	cached := p.cacheMiddleware(ttl)
+	if p != nil && p.origins != nil {
+		// A legacy single-handler mount has no post-cache stage. Bound it
+		// conservatively using the same slots as protected route mounts.
+		return p.withOriginSlot(cached)
+	}
+	return cached
+}
+
+// RouteHandlers is the route mount with admission after cache replay/coalescing.
+func (p *Owner) RouteHandlers(ttl time.Duration) []gin.HandlerFunc {
+	cached := p.cacheMiddleware(ttl)
+	if p == nil || p.origins == nil {
+		return []gin.HandlerFunc{cached}
+	}
+	return []gin.HandlerFunc{cached, p.withOriginSlot(passthrough)}
+}
+
+func (p *Owner) withOriginSlot(next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		select {
+		case p.origins <- struct{}{}:
+			defer func() { <-p.origins }()
+			next(c)
+		default:
+			c.Abort()
+			resp.CapacityUnavailable(c)
+		}
+	}
+}
+
+func (p *Owner) cacheMiddleware(ttl time.Duration) gin.HandlerFunc {
 	if p == nil {
 		return passthrough
 	}
