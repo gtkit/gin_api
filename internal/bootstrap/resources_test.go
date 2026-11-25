@@ -227,7 +227,7 @@ func TestOptionalRedisRecoveryReachesMountedCacheAndSharedLimiter(t *testing.T) 
 		if err := resources.InstrumentTracing("recovery"); err != nil {
 			t.Fatal(err)
 		}
-		if err := owner.ConfigureTracing(); err != nil {
+		if err := owner.StartRecovery(); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()

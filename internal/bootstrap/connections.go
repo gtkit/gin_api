@@ -78,6 +78,25 @@ func (r *Runtime) instrumentConnections() error {
 	return nil
 }
 
+func (r *Runtime) startConnectionRecovery() error {
+	if err := startRedisRecovery(r.owners.redis); err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.owners.redisConnections)) {
+		if err := startRedisRecovery(r.owners.redisConnections[name]); err != nil {
+			return fmt.Errorf("redis[%s]: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func startRedisRecovery(owner redisOwner) error {
+	if recoverable, ok := owner.(interface{ StartRecovery() error }); ok {
+		return recoverable.StartRecovery()
+	}
+	return nil
+}
+
 func registerNamedConnectionMetrics(inf *infra, cleanup *providerCleanup) error {
 	if inf.connections == nil {
 		return nil
@@ -94,7 +113,7 @@ func registerNamedConnectionMetrics(inf *infra, cleanup *providerCleanup) error 
 	}
 	for _, name := range slices.Sorted(maps.Keys(inf.connections.redisConnections)) {
 		owner := inf.connections.redisConnections[name]
-		stop, err := inf.recorder.RegisterRedisPoolStats(slices.Sorted(maps.Keys(owner.PoolStats())), func(db int) metrics.RedisPoolStats {
+		stop, err := inf.recorder.RegisterRedisPoolStats(inf.cfg.RedisConnections[name].PoolDatabases(), func(db int) metrics.RedisPoolStats {
 			client := owner.Client(db)
 			if client == nil {
 				return metrics.RedisPoolStats{}

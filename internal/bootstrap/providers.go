@@ -70,10 +70,13 @@ func newProvidersWithBudget(
 			inf.cfg.Telemetry.Endpoint, inf.cfg.Telemetry.Metrics, inf.cfg.Telemetry.Traces)
 	}
 
-	// 2a'. telemetry.New 之后安装数据层追踪，失败即终止装配。
-	//      可恢复 Redis Owner 也在此获知 tracing 就绪；恢复候选须先完成埋点再发布。
-	if err := runtime.instrumentConnections(); err != nil {
-		return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
+	if inf.cfg.Telemetry.Enabled && inf.cfg.Telemetry.Traces {
+		if err := runtime.instrumentConnections(); err != nil {
+			return nil, fmt.Errorf("instrument data-layer tracing: %w", err)
+		}
+	}
+	if err := runtime.startConnectionRecovery(); err != nil {
+		return nil, fmt.Errorf("start connection recovery: %w", err)
 	}
 
 	// 2b. 指标仪表。必须先于中间件与路由：两者都要在装配期拿到它。
@@ -94,7 +97,7 @@ func newProvidersWithBudget(
 	} else {
 		cleanup.push("runtime metrics", cleanupMetrics, func(context.Context) error { return unregister() })
 	}
-	if unregister, redisErr := recorder.RegisterRedisPoolStats(inf.cfg.Redis.DBs, func(db int) metrics.RedisPoolStats {
+	if unregister, redisErr := recorder.RegisterRedisPoolStats(inf.cfg.Redis.PoolDatabases(), func(db int) metrics.RedisPoolStats {
 		client := inf.resources.Rdb(db)
 		if client == nil {
 			return metrics.RedisPoolStats{}

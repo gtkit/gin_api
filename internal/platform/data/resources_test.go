@@ -59,6 +59,8 @@ type recoveringRedisHandle struct {
 
 func (h *recoveringRedisHandle) ConfigureTracing() error { h.tracingCalls++; return nil }
 
+func (*recoveringRedisHandle) StartRecovery() error { return nil }
+
 func TestResourcesRetainsOwnerBeforeFirstRedisConnection(t *testing.T) {
 	database, _ := newSQLMockOrmxClient(t)
 	handle := &recoveringRedisHandle{fakeRedisHandle: &fakeRedisHandle{healthErr: errors.New("offline")}}

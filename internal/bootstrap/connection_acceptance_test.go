@@ -4,9 +4,12 @@ package bootstrap_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,12 +18,74 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/gtkit/gin-api/internal/platform/mysql"
 	"github.com/gtkit/gin-api/internal/platform/redis"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	gormmysql "gorm.io/driver/mysql"
+	gormlogger "gorm.io/gorm/logger"
 )
 
-func requireLocalConnection(t *testing.T, host string) {
+func TestConnectionAcceptanceMySQLTLS(t *testing.T) {
+	if os.Getenv("MYSQL_ITEST_TLS") != "1" {
+		t.Skip("set MYSQL_ITEST_TLS=1 to exercise the local MySQL TLS handshake")
+	}
+	ca := os.Getenv("MYSQL_ITEST_TLS_CA_FILE")
+	local, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLocalConnection(t, local.Database.Host)
+	for _, tt := range []struct {
+		name string
+		open func(context.Context, config.DatabaseConfig, config.DBCredentials, gormlogger.Interface) (mysql.Client, error)
+	}{
+		{"server", mysql.OpenDB},
+		{"migration", mysql.OpenMigrationDB},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cfg := local.Database
+			cfg.TLS = config.ClientTLSConfig{Enabled: true, ServerName: "unmatched.invalid", CAFile: ca}
+			client, err := tt.open(ctx, cfg, cfg.RuntimeCredentials(), nil)
+			if client != nil {
+				_ = client.Close()
+				t.Fatal("server with unmatched certificate was accepted")
+			}
+			if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
+				t.Fatalf("expected TLS certificate verification failure, got %v", err)
+			}
+			cfg.TLS.ServerName = os.Getenv("MYSQL_ITEST_TLS_SERVER_NAME")
+			if cfg.TLS.ServerName == "" {
+				t.Logf("certificate failed verification; positive TLS check needs a matching certificate SAN: %v", err)
+				return
+			}
+			if _, ok := errors.AsType[x509.HostnameError](err); !ok {
+				t.Fatalf("expected certificate hostname verification failure, got %v", err)
+			}
+			client, err = tt.open(ctx, cfg, cfg.RuntimeCredentials(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			client.SQLDB().SetMaxIdleConns(0)
+			for range 2 {
+				var status, cipher string
+				if err := client.SQLDB().QueryRowContext(ctx, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").Scan(&status, &cipher); err != nil || cipher == "" {
+					t.Fatalf("session TLS cipher=%q err=%v", cipher, err)
+				}
+			}
+		})
+	}
+}
+
+func requireLocalConnection(t testing.TB, host string) {
 	t.Helper()
 	if host == "localhost" {
 		return
@@ -28,6 +93,72 @@ func requireLocalConnection(t *testing.T, host string) {
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		t.Fatal("connection acceptance requires a loopback dependency")
+	}
+}
+
+func BenchmarkDataTracingConnections(b *testing.B) {
+	cfg, err := config.Load()
+	if err != nil {
+		b.Fatal(err)
+	}
+	requireLocalConnection(b, cfg.Database.Host)
+	host, _, err := net.SplitHostPort(cfg.Redis.Addr)
+	if err != nil {
+		b.Fatal(err)
+	}
+	requireLocalConnection(b, host)
+	for _, enabled := range []bool{false, true} {
+		b.Run(strconv.FormatBool(enabled), func(b *testing.B) {
+			db, err := mysql.OpenDB(b.Context(), cfg.Database, cfg.Database.RuntimeCredentials(), nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					b.Error(err)
+				}
+			})
+			redisDB, err := redis.OpenRedis(b.Context(), cfg.Redis)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() {
+				if err := redisDB.Close(); err != nil {
+					b.Error(err)
+				}
+			})
+			if enabled {
+				previous := otel.GetTracerProvider()
+				provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+				otel.SetTracerProvider(provider)
+				b.Cleanup(func() {
+					otel.SetTracerProvider(previous)
+					if err := provider.Shutdown(context.Background()); err != nil {
+						b.Error(err)
+					}
+				})
+				if err := data.InstrumentDatabaseTracing(db.DB(), cfg.Database.Name); err != nil {
+					b.Fatal(err)
+				}
+				if err := data.InstrumentRedisClient(redisDB.DefaultClient()); err != nil {
+					b.Fatal(err)
+				}
+			}
+			request := func() {
+				var value int
+				if err := db.DB().WithContext(b.Context()).Raw("SELECT 1").Scan(&value).Error; err != nil {
+					b.Fatal(err)
+				}
+				if err := redisDB.DefaultClient().Ping(b.Context()).Err(); err != nil {
+					b.Fatal(err)
+				}
+			}
+			request() // Warm the connection and statement cache before timing.
+			b.ReportAllocs()
+			for b.Loop() {
+				request()
+			}
+		})
 	}
 }
 

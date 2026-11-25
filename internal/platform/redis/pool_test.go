@@ -8,6 +8,32 @@ import (
 	"github.com/gtkit/redisx"
 )
 
+func TestCappedPoolUsesEachLogicalDatabase(t *testing.T) {
+	srv := miniredis.RunT(t)
+	client, err := OpenRedis(t.Context(), config.RedisConfig{Addr: srv.Addr(), DBs: []int{3}, MaxActiveConns: 2, PoolSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if client.DefaultClient().Options().DB != 0 || len(client.PoolStats()) != 2 {
+		t.Fatal("expected one pool per DB, including DB 0")
+	}
+	db3, ok := client.GetClient(3)
+	if !ok || db3.Options().MaxActiveConns != 2 || db3.Options().PoolSize != 1 {
+		t.Fatal("DB 3 did not inherit the explicit pool settings")
+	}
+	if err := db3.Set(t.Context(), "pool-test", "db-3", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if srv.DB(0).Exists("pool-test") || !srv.DB(3).Exists("pool-test") {
+		t.Fatal("logical database isolation was lost")
+	}
+}
+
 func TestSmallPoolKeepsValidInheritedIdleTarget(t *testing.T) {
 	for _, tc := range []struct {
 		pool, idle, wantPool, wantIdle int

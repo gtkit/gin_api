@@ -31,6 +31,7 @@ func TestGinRecoveryReturnsSharedEnvelope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			instance, records := newNativeTestLogger(t, "info")
 			engine := gin.New()
 			engine.Use(GinRecovery(tt.includeStack))
 			engine.GET("/panic", func(c *gin.Context) {
@@ -58,6 +59,15 @@ func TestGinRecoveryReturnsSharedEnvelope(t *testing.T) {
 			if strings.Contains(body, "boom") {
 				t.Fatalf("panic detail should not leak to client, got %s", body)
 			}
+			instance.Sync()
+			logs := records()
+			if len(logs) != 1 {
+				t.Fatalf("recovery records = %d, want 1", len(logs))
+			}
+			stack, _ := logs[0]["stacktrace"].(string)
+			if (stack != "") != tt.includeStack || strings.Contains(stack, "boom") {
+				t.Fatalf("unexpected stack for includeStack=%v: %q", tt.includeStack, stack)
+			}
 		})
 	}
 }
@@ -75,7 +85,7 @@ func TestRecoveryNativeRequestContext(t *testing.T) {
 			c.String(http.StatusAccepted, "partial")
 			panic("private panic")
 		}},
-		{"disconnected", recoveryLogCodeClientClosedConn, "WARN", http.StatusOK, func(*gin.Context) { panic(http.ErrAbortHandler) }},
+		{"disconnected", recoveryLogCodeClientClosedConn, "WARN", http.StatusOK, func(*gin.Context) { panic(fmt.Errorf("private panic: %w", http.ErrAbortHandler)) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			instance, records := newNativeTestLogger(t, "info")
@@ -88,7 +98,7 @@ func TestRecoveryNativeRequestContext(t *testing.T) {
 			entered := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 			release := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
 			done := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
-			engine.GET("/panic", func(c *gin.Context) {
+			engine.GET("/panic/:id", func(c *gin.Context) {
 				slot := 0
 				if c.Query("slot") == "second" {
 					slot = 1
@@ -99,8 +109,9 @@ func TestRecoveryNativeRequestContext(t *testing.T) {
 			})
 			responses := [2]*httptest.ResponseRecorder{httptest.NewRecorder(), httptest.NewRecorder()}
 			for i, slot := range []string{"first", "second"} {
-				request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/panic?slot="+slot, nil)
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/panic/private-path?auth=private-query&slot="+slot, nil)
 				request.Header.Set(RequestIDHeader, "forged-request-id")
+				request.Header.Set("X-Arbitrary", "private-header")
 				go func() {
 					engine.ServeHTTP(responses[i], request)
 					close(done[i])
@@ -130,6 +141,14 @@ func TestRecoveryNativeRequestContext(t *testing.T) {
 			for i, record := range logs {
 				if record["request_id"] != ids[1-i] || record["level"] != tc.level || record["recovery_code"] != float64(tc.code) {
 					t.Fatalf("unexpected recovery record: %v", record)
+				}
+				if record["method"] != http.MethodGet || record["route"] != "/panic/:id" || record["response_started"] != (tc.name == "started") {
+					t.Fatalf("unexpected recovery fields: %v", record)
+				}
+				for _, marker := range []string{"private-path", "private-query", "private-header", "private panic", "forged-request-id"} {
+					if strings.Contains(fmt.Sprint(record), marker) || strings.Contains(responses[1-i].Body.String(), marker) {
+						t.Errorf("private marker reached logs or response: %q", marker)
+					}
 				}
 			}
 		})
@@ -178,58 +197,6 @@ func TestGinRecoveryDoesNotRewriteStartedResponse(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "10010001") {
 		t.Fatalf("started response should not be rewritten, got %s", recorder.Body.String())
-	}
-}
-
-func TestDumpRequestWithoutSensitiveHeadersMasksSecrets(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/panic?debug=true", strings.NewReader("ignored"))
-	req.Header.Set("Authorization", "Bearer super-secret-token")
-	req.Header.Set("Cookie", "session=top-secret")
-	req.Header.Set("Proxy-Authorization", "Basic hidden")
-	req.Header.Set("X-Trace-Id", "trace-123")
-
-	dump, err := dumpRequestWithoutSensitiveHeaders(req)
-	if err != nil {
-		t.Fatalf("dumpRequestWithoutSensitiveHeaders error = %v", err)
-	}
-
-	if strings.Contains(dump, "super-secret-token") || strings.Contains(dump, "top-secret") || strings.Contains(dump, "hidden") {
-		t.Fatalf("expected sensitive headers to be masked, got %s", dump)
-	}
-	if !strings.Contains(dump, "Authorization: *") {
-		t.Fatalf("expected Authorization header to be masked, got %s", dump)
-	}
-	if !strings.Contains(dump, "Cookie: *") {
-		t.Fatalf("expected Cookie header to be masked, got %s", dump)
-	}
-	if !strings.Contains(dump, "Proxy-Authorization: *") {
-		t.Fatalf("expected Proxy-Authorization header to be masked, got %s", dump)
-	}
-	if !strings.Contains(dump, "X-Trace-Id: trace-123") {
-		t.Fatalf("expected non-sensitive headers to remain, got %s", dump)
-	}
-}
-
-func TestDumpRequestRedactsAppTokenAndQuery(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/sse?App-Token=secret-query-token&page=2", nil)
-	req.Header.Set("App-Token", "secret-header-token")
-
-	dump, err := dumpRequestWithoutSensitiveHeaders(req)
-	if err != nil {
-		t.Fatalf("dumpRequestWithoutSensitiveHeaders error = %v", err)
-	}
-
-	if strings.Contains(dump, "secret-header-token") {
-		t.Fatalf("App-Token header value leaked, got %s", dump)
-	}
-	if strings.Contains(dump, "secret-query-token") {
-		t.Fatalf("App-Token query value leaked, got %s", dump)
-	}
-	if !strings.Contains(dump, "App-Token: *") {
-		t.Fatalf("expected App-Token header to be masked, got %s", dump)
-	}
-	if !strings.Contains(dump, "page=2") {
-		t.Fatalf("expected benign query param to be retained, got %s", dump)
 	}
 }
 

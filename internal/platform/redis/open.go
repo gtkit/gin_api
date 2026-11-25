@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
@@ -41,8 +42,27 @@ func ProbeRedis(ctx context.Context, cfg config.RedisConfig) error {
 // 不可达时本函数无法交出一个"稍后能自愈"的客户端，探测失败即关闭并返回 nil。
 // 消费方要区分"未配置"与"已配置但不可达"，用 Resources.RedisConfigured()
 // 而不是客户端指针的非空性——见那里的注释。
-func OpenRedis(ctx context.Context, cfg config.RedisConfig) (*redisx.Client, error) {
-	client, err := redisx.NewClientContext(ctx, buildRedisOptions(cfg)...)
+func OpenRedis(ctx context.Context, cfg config.RedisConfig) (Client, error) {
+	var host string
+	if cfg.TLS.Enabled {
+		var err error
+		host, _, err = net.SplitHostPort(cfg.Addr)
+		if err != nil {
+			return nil, fmt.Errorf("parse redis TLS endpoint: %w", err)
+		}
+	}
+	tlsConfig, err := cfg.TLS.ClientConfig(host)
+	if err != nil {
+		return nil, fmt.Errorf("configure redis TLS: %w", err)
+	}
+	if cfg.MaxActiveConns != 0 {
+		return openCappedRedis(ctx, cfg, tlsConfig)
+	}
+	options := buildRedisOptions(cfg)
+	if tlsConfig != nil {
+		options = append(options, redisx.WithTLSConfig(tlsConfig))
+	}
+	client, err := redisx.NewClientContext(ctx, options...)
 	if err != nil {
 		return nil, fmt.Errorf("init redis client: %w", err)
 	}

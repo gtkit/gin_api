@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
+	"uuid"
 
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/ormx"
 	gormlogger "gorm.io/gorm/logger"
@@ -27,8 +30,8 @@ func OpenDB(
 	dbCfg config.DatabaseConfig,
 	creds config.DBCredentials,
 	gormLogger gormlogger.Interface,
-) (*ormx.Client, error) {
-	return openDB(ctx, serverOpenOptions(dbCfg, creds), gormLogger)
+) (Client, error) {
+	return openDB(ctx, dbCfg, serverOpenOptions(dbCfg, creds), gormLogger)
 }
 
 // OpenMigrationDB 为**迁移**建立连接：除驱动级 I/O deadline 外与 OpenDB 完全一致。
@@ -53,11 +56,28 @@ func OpenMigrationDB(
 	dbCfg config.DatabaseConfig,
 	creds config.DBCredentials,
 	gormLogger gormlogger.Interface,
-) (*ormx.Client, error) {
-	return openDB(ctx, migrationOpenOptions(dbCfg, creds), gormLogger)
+) (Client, error) {
+	return openDB(ctx, dbCfg, migrationOpenOptions(dbCfg, creds), gormLogger)
 }
 
-func openDB(ctx context.Context, opts []ormx.Option, gormLogger gormlogger.Interface) (*ormx.Client, error) {
+func openDB(ctx context.Context, dbCfg config.DatabaseConfig, opts []ormx.Option, gormLogger gormlogger.Interface) (Client, error) {
+	tlsConfig, err := dbCfg.TLS.ClientConfig(dbCfg.Host)
+	if err != nil {
+		return nil, fmt.Errorf("configure mysql TLS: %w", err)
+	}
+	var registration string
+	if tlsConfig != nil {
+		registration = "gin-api-" + uuid.New().String()
+		if err := mysqlDriver.RegisterTLSConfig(registration, tlsConfig); err != nil {
+			return nil, fmt.Errorf("register mysql TLS: %w", err)
+		}
+		defer func() {
+			if registration != "" {
+				mysqlDriver.DeregisterTLSConfig(registration)
+			}
+		}()
+		opts = append(opts, ormx.WithTLSConfig(registration))
+	}
 	if gormLogger != nil {
 		opts = append(opts, ormx.WithGormLogger(gormLogger))
 	}
@@ -68,7 +88,27 @@ func openDB(ctx context.Context, opts []ormx.Option, gormLogger gormlogger.Inter
 	if err := ctx.Err(); err != nil {
 		return nil, closeAndWrap(client.Close, err)
 	}
+	if registration != "" {
+		owning := &tlsClient{Client: client, registration: registration}
+		registration = "" // The live pool now owns the registry entry.
+		return owning, nil
+	}
 	return client, nil
+}
+
+type tlsClient struct {
+	*ormx.Client
+	registration string
+	closeOnce    sync.Once
+	closeErr     error
+}
+
+func (c *tlsClient) Close() error {
+	c.closeOnce.Do(func() {
+		defer mysqlDriver.DeregisterTLSConfig(c.registration)
+		c.closeErr = c.Client.Close()
+	})
+	return c.closeErr
 }
 
 // serverIOTimeoutCap 是服务进程路径的驱动 I/O deadline 上限。

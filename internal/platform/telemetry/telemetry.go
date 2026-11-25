@@ -1,11 +1,7 @@
 // Package telemetry 装配 OpenTelemetry 的导出侧。
 //
-// 埋点与导出是两件事，本包只管后者。项目里的记录点（metrics.Recorder、
-// otelgin 中间件）无条件存在，关闭导出时它们走 OTel 的全局 no-op provider，
-// 每次记录都是空操作。
-//
-// 这样分是有原因的：把埋点也做成条件的，打开导出那天才会发现某条关键路径
-// 压根没埋——而那一天通常正是出事要查的时候。
+// Metrics and traces are configured independently before the router and data
+// clients are assembled. The application recorder owns HTTP duration.
 package telemetry
 
 import (
@@ -17,10 +13,12 @@ import (
 
 	"github.com/gtkit/gin-api/internal/platform/config"
 
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -85,7 +83,7 @@ func (p *Provider) initMetrics(ctx context.Context, cfg config.TelemetryConfig, 
 		return fmt.Errorf("telemetry: build metric exporter: %w", err)
 	}
 
-	p.meter = sdkmetric.NewMeterProvider(
+	p.meter = newMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(
 			exporter, sdkmetric.WithInterval(cfg.EffectiveExportInterval()),
@@ -93,6 +91,17 @@ func (p *Provider) initMetrics(ctx context.Context, cfg config.TelemetryConfig, 
 	)
 	otel.SetMeterProvider(p.meter)
 	return nil
+}
+
+func newMeterProvider(opts ...sdkmetric.Option) *sdkmetric.MeterProvider {
+	// The outer application recorder owns this stream. Keep the other otelgin instruments.
+	duration := sdkmetric.Instrument{
+		Name:  "http.server.request.duration",
+		Scope: instrumentation.Scope{Name: otelgin.ScopeName},
+	}
+	return sdkmetric.NewMeterProvider(append(opts, sdkmetric.WithView(
+		sdkmetric.NewView(duration, sdkmetric.Stream{Aggregation: sdkmetric.AggregationDrop{}}),
+	))...)
 }
 
 func (p *Provider) initTraces(ctx context.Context, cfg config.TelemetryConfig, res *resource.Resource) error {

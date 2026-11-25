@@ -22,7 +22,6 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/redis"
 	"github.com/gtkit/gin-api/internal/platform/responsecache"
 	"github.com/gtkit/logger/v2"
-	gormlogger "gorm.io/gorm/logger"
 )
 
 const runtimeStartupTimeout = 30 * time.Second
@@ -74,13 +73,7 @@ func defaultRuntimeFactories() runtimeFactories {
 			opts := mysql.Options{Config: cfg}
 			if migration {
 				opts.SelectCredentials = migrationCredentials
-				opts.Open = func(ctx context.Context, c config.DatabaseConfig, creds config.DBCredentials, log gormlogger.Interface) (mysql.Client, error) {
-					client, err := mysql.OpenMigrationDB(ctx, c, creds, log)
-					if client == nil {
-						return nil, err
-					}
-					return client, err
-				}
+				opts.Open = mysql.OpenMigrationDB
 			}
 			owner, err := mysql.Open(ctx, opts)
 			if owner == nil {

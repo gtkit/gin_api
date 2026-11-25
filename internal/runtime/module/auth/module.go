@@ -14,6 +14,7 @@ import (
 	"github.com/gtkit/gin-api/internal/pkg/tokenstore"
 	"github.com/gtkit/gin-api/internal/platform/config"
 	"github.com/gtkit/gin-api/internal/repository/authcredential"
+	"github.com/gtkit/gin-api/internal/repository/useraccount"
 )
 
 // Deps 是装配本地认证所需的进程级依赖。
@@ -104,21 +105,24 @@ func New(ctx context.Context, deps Deps) (Assembly, error) {
 
 	credentials := authcredential.New(deps.DB)
 	var sessions authapp.SessionRepository
+	var sessionValidator authapp.SessionValidator
 	if deps.Config.SessionLifecycle {
 		credentials = authcredential.NewWithSessionVersion(deps.DB)
 		sessions = credentialRepo{repo: credentials}
+		sessionValidator = useraccount.New(deps.DB)
 	}
 	service, err := authapp.NewService(authapp.Options{
-		Credentials:    credentialRepo{repo: credentials},
-		Sessions:       sessions,
-		Hasher:         newPasswordHasher(hasher, deps.Config, deps.Metrics),
-		AccessIssuer:   deps.Issuer,
-		RefreshStore:   refreshStore{store: refresh},
-		RevocationList: revocation,
-		Auditor:        authAuditor{},
-		Events:         eventRecorder{recorder: deps.Metrics},
-		AccessTTL:      deps.AccessTTL,
-		Accounts:       deps.Accounts,
+		Credentials:      credentialRepo{repo: credentials},
+		Sessions:         sessions,
+		SessionValidator: sessionValidator,
+		Hasher:           newPasswordHasher(hasher, deps.Config, deps.Metrics),
+		AccessIssuer:     deps.Issuer,
+		RefreshStore:     refreshStore{store: refresh},
+		RevocationList:   revocation,
+		Auditor:          authAuditor{},
+		Events:           eventRecorder{recorder: deps.Metrics},
+		AccessTTL:        deps.AccessTTL,
+		Accounts:         deps.Accounts,
 	})
 	if err != nil {
 		return Assembly{}, fmt.Errorf("auth: build service: %w", err)

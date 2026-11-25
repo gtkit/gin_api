@@ -54,6 +54,11 @@ type SessionRepository interface {
 	RevokeSessions(context.Context, int64, int64) (bool, error)
 }
 
+// SessionValidator checks that the account is active and the session version is current.
+type SessionValidator interface {
+	ValidateSession(ctx context.Context, userID, version int64) (bool, error)
+}
+
 // SessionAccessIssuer signs the same version whose credential was verified.
 type SessionAccessIssuer interface {
 	IssueForSession(context.Context, int64, int64, ...string) (string, error)

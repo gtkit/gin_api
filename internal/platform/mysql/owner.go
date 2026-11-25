@@ -59,13 +59,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 		return nil, fmt.Errorf("mysql configuration is required: %w", core.ErrComponentState)
 	}
 	if options.Open == nil {
-		options.Open = func(ctx context.Context, cfg config.DatabaseConfig, creds config.DBCredentials, logger gormlogger.Interface) (Client, error) {
-			client, err := OpenDB(ctx, cfg, creds, logger)
-			if client == nil {
-				return nil, err
-			}
-			return client, err
-		}
+		options.Open = OpenDB
 	}
 	if options.SelectCredentials == nil {
 		options.SelectCredentials = func(c config.DatabaseConfig) config.DBCredentials { return c.RuntimeCredentials() }

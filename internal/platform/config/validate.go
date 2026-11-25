@@ -337,6 +337,9 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 
 	errs = append(errs,
 		mustNonNegative("database.maxidletimeseconds", database.MaxIdleTimeSeconds))
+	if err := database.TLS.validate(); err != nil {
+		errs = append(errs, fmt.Errorf("database: %w", err))
+	}
 	if database.PrepareStmtMaxSize < 0 {
 		errs = append(errs, fmt.Errorf(
 			"database.prepare_stmt_max_size must be nonnegative (0 uses default %d)",
@@ -412,6 +415,12 @@ func validateRedisConfig(redis RedisConfig) error {
 	if redis.Addr != "" {
 		errs = append(errs, mustHostPort("redis.addr", redis.Addr))
 	}
+	if err := redis.TLS.validate(); err != nil {
+		errs = append(errs, fmt.Errorf("redis: %w", err))
+	}
+	if redis.TLS.Enabled && redis.Addr == "" {
+		errs = append(errs, errors.New("redis.addr is required with TLS enabled"))
+	}
 
 	if redis.Addr != "" && len(redis.DBs) == 0 {
 		errs = append(errs, errors.New("redis.dbs must not be empty"))
@@ -469,6 +478,18 @@ func validateRedisPool(redis RedisConfig) []error {
 
 	if redis.PoolSize < 0 {
 		errs = append(errs, fmt.Errorf("redis.pool_size must not be negative, got %d", redis.PoolSize))
+	}
+	if redis.MaxActiveConns < 0 || redis.MaxActiveConns > math.MaxInt32 {
+		errs = append(errs, fmt.Errorf("redis.max_active_conns must be between 0 and %d", math.MaxInt32))
+	}
+	if redis.MaxActiveConns > 0 {
+		poolSize := redis.CappedPoolSize()
+		if poolSize > redis.MaxActiveConns {
+			errs = append(errs, errors.New("redis.pool_size must not exceed redis.max_active_conns"))
+		}
+		if redis.PoolSize == 0 && redis.MinIdleConns > poolSize {
+			errs = append(errs, errors.New("redis.min_idle_conns must not exceed the inherited redis.pool_size"))
+		}
 	}
 	if redis.MinIdleConns < 0 {
 		errs = append(errs, fmt.Errorf("redis.min_idle_conns must not be negative, got %d", redis.MinIdleConns))

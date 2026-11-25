@@ -59,7 +59,7 @@ func ResourcesFromClients(
 		return nil, errors.New("resources: mysql client is required")
 	}
 	var redisState *AvailabilityTracker
-	_, recoverable := redis.(interface{ ConfigureTracing() error })
+	_, recoverable := redis.(interface{ StartRecovery() error })
 	if redis != nil && len(redis.PoolStats()) == 0 && redisConfigured && recoverable {
 		tracker, err := newRecoverableDegradedTracker("redis", DefaultAvailabilityPolicy(), redis.HealthCheck)
 		if err != nil {

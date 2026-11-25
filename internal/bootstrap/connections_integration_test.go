@@ -89,7 +89,7 @@ func TestNamedRedisUsesRealLocalServer(t *testing.T) {
 	f := newLifecycleFixture(t)
 	cfg := f.components[0].cfg
 	cfg.RedisConnections = map[string]config.RedisConfig{
-		"live": {Addr: options.Addr, Password: options.Password, DBs: []int{options.DB}},
+		"live": {Addr: options.Addr, Password: options.Password, DBs: []int{options.DB}, MaxActiveConns: 2},
 	}
 	factories := f.factories()
 	openRedis := defaultRuntimeFactories().redis
@@ -114,6 +114,9 @@ func TestNamedRedisUsesRealLocalServer(t *testing.T) {
 	connection, err := runtime.Redis("live", options.DB)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if connection.Options().MaxActiveConns != 2 {
+		t.Fatal("named connection did not apply its hard pool limit")
 	}
 	key := testutil.UniqueKeyPrefix(t, connection) + "named"
 	if err := connection.Set(t.Context(), key, "value", time.Minute).Err(); err != nil {

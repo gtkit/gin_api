@@ -1,11 +1,9 @@
 package middleware
 
 import (
+	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
-	"net/http/httputil"
-	"runtime/debug"
 	"syscall"
 
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
@@ -29,29 +27,16 @@ const (
 	recoveryLogCodeResponseStarted  = int32(10010018)
 )
 
-var (
-	// recoveryPublicMessage 使用项目统一错误体系里的默认文案，避免把 panic 细节泄露给客户端。
-	recoveryPublicMessage = "服务器内部错误"
+const recoveryPublicMessage = "服务器内部错误"
 
-	// 这些 header 常常包含凭证或会话信息，写入日志前必须脱敏。
-	// App-Token 是本项目实际认证头（见 middleware/auth.go），必须在列。
-	recoverySensitiveHeaders = []string{
-		"Authorization",
-		"Cookie",
-		"Proxy-Authorization",
-		"App-Token",
-	}
-)
-
-// GinRecovery recover 掉请求链路中的 panic，并按场景做三件事：
-// 1. 统一记录结构化日志，方便排查。
-// 2. 对普通 panic 返回项目统一的 500 响应。
-// 3. 对连接已断开或响应已开始写出的场景，只记录日志，不再强行改写响应。
-//
-// 刻意不接告警（不用 H 系列）：请求级异常接入告警会在一次流量异常里形成
-// 告警风暴，淹没真正的进程级事件。告警执行点收口在 bootstrap
-// （worker 异常/降级与进程退出错误），本中间件只走日志与指标。
+// GinRecovery records a bounded diagnostic and preserves any committed response.
 func GinRecovery(includeStack bool) gin.HandlerFunc {
+	stackLevel := zap.FatalLevel + 1
+	if includeStack {
+		stackLevel = zap.WarnLevel
+	}
+	stackOption := zap.AddStacktrace(stackLevel)
+
 	return func(c *gin.Context) {
 		defer func() {
 			recovered := recover()
@@ -59,158 +44,63 @@ func GinRecovery(includeStack bool) gin.HandlerFunc {
 				return
 			}
 
-			// Step 1: 把任意 panic 值统一转换成 error，后续日志和分类逻辑都基于它处理。
-			panicErr := normalizeRecoveredPanic(recovered)
-
-			// Step 2: 尝试生成脱敏后的请求转储。
-			// 请求 dump 失败不影响 recovery 主流程，只把失败原因带进日志里。
-			requestDump, dumpErr := dumpRequestWithoutSensitiveHeaders(c.Request)
-
-			// Step 3: 处理客户端连接已断开的场景。
-			// 这类错误通常发生在服务端写响应时，客户端已经提前关闭连接；
-			// 此时继续写 JSON 没有意义，直接记录日志并终止当前上下文即可。
-			if isBrokenConnectionError(panicErr) {
-				logger.WarnCtx(requestCtx(c), "[Recovery] client connection closed",
-					buildRecoveryLogFields(
-						c,
-						panicErr,
-						recovered,
-						requestDump,
-						dumpErr,
-						recoveryLogCodeClientClosedConn,
-						includeStack,
-					)...,
-				)
-				c.Abort()
-
-				return
+			err, _ := recovered.(error)
+			started := c.Writer != nil && c.Writer.Written()
+			level, code := zap.ErrorLevel, recoveryLogCodePanicRecovered
+			class, message := "panic", "[Recovery] panic recovered"
+			switch {
+			case isBrokenConnectionError(err):
+				level, code = zap.WarnLevel, recoveryLogCodeClientClosedConn
+				class, message = "client_disconnected", "[Recovery] client connection closed"
+			case started:
+				code = recoveryLogCodeResponseStarted
+				class, message = "response_started", "[Recovery] panic recovered after response started"
 			}
 
-			// Step 4: 如果响应已经开始写出，就不能再安全地改成统一 JSON 结构了。
-			// 比如 SSE / 流式响应 / 已经写出部分 body 的接口，这时只能记录日志并中止后续处理。
-			if c.Writer != nil && c.Writer.Written() {
-				logger.ErrorCtx(requestCtx(c), "[Recovery] panic recovered after response started",
-					buildRecoveryLogFields(
-						c,
-						panicErr,
-						recovered,
-						requestDump,
-						dumpErr,
-						recoveryLogCodeResponseStarted,
-						includeStack,
-					)...,
-				)
-				c.Abort()
+			fields := []zap.Field{
+				zap.Int32("recovery_code", code),
+				zap.String("error_class", class),
+				zap.String("method", recoveryMethod(c.Request)),
+				zap.String("route", c.FullPath()),
+				zap.Bool("response_started", started),
+			}
+			id := logger.RequestIDFromContext(requestCtx(c))
+			if len(id) == RequestIDLength {
+				var decoded [RequestIDLength / 2]byte
+				if _, err := hex.Decode(decoded[:], []byte(id)); err == nil {
+					fields = append(fields, zap.String("request_id", id))
+				}
+			}
+			logger.Default().Zap().WithOptions(stackOption).Log(level, message, fields...)
 
+			if code == recoveryLogCodePanicRecovered {
+				abortWithRecoveryResponse(c)
 				return
 			}
-
-			// Step 5: 普通 panic 记录完整上下文，并返回统一的 500 响应。
-			logger.ErrorCtx(requestCtx(c), "[Recovery] panic recovered",
-				buildRecoveryLogFields(
-					c,
-					panicErr,
-					recovered,
-					requestDump,
-					dumpErr,
-					recoveryLogCodePanicRecovered,
-					includeStack,
-				)...,
-			)
-			abortWithRecoveryResponse(c)
+			c.Abort()
 		}()
 
 		c.Next()
 	}
 }
 
-// normalizeRecoveredPanic 把 recover 出来的任意值收敛成 error。
-// 这样可以保证日志字段和错误分类逻辑始终处理同一种类型。
-func normalizeRecoveredPanic(recovered any) error {
-	switch value := recovered.(type) {
-	case nil:
-		return errors.New("panic recovered with nil value")
-	case error:
-		return value
-	case string:
-		return errors.New(value)
+func recoveryMethod(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return r.Method
 	default:
-		return fmt.Errorf("panic recovered: %v", value)
+		return ""
 	}
 }
 
-// isBrokenConnectionError 判断 panic 是否由客户端断连引起。
-// 这里采用 Gin 官方 recovery 的判定方式：EPIPE、ECONNRESET、ErrAbortHandler。
 func isBrokenConnectionError(err error) bool {
 	return errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, http.ErrAbortHandler)
-}
-
-// dumpRequestWithoutSensitiveHeaders 生成不带 body 的请求转储，并脱敏敏感头。
-// recovery 日志需要足够的请求上下文，但不能把 token / cookie 原样写入日志。
-func dumpRequestWithoutSensitiveHeaders(r *http.Request) (string, error) {
-	if r == nil {
-		return "", nil
-	}
-
-	// 先克隆请求和 header，避免直接修改原始请求对象，影响后续逻辑。
-	// r.Clone 深拷贝 URL，故可安全改写克隆体的 RawQuery 而不影响原请求。
-	clonedRequest := r.Clone(r.Context())
-	clonedRequest.Header = r.Header.Clone()
-
-	// 逐个覆盖敏感 header，保留 key，隐藏 value，方便排查时知道请求携带了哪些凭证类型。
-	for _, headerName := range recoverySensitiveHeaders {
-		if clonedRequest.Header.Get(headerName) == "" {
-			continue
-		}
-		clonedRequest.Header.Set(headerName, "*")
-	}
-
-	// 脱敏请求行里误传的 query token，避免凭据泄漏；query 不是受支持的认证载体。
-	// 复用访问日志同一套脱敏规则，避免 DumpRequest 把 query 凭证写进日志。
-	// 注意：DumpRequest 优先用 RequestURI 拼请求行，故清空它，强制回退到已脱敏的 URL。
-	if clonedRequest.URL != nil && clonedRequest.URL.RawQuery != "" {
-		clonedRequest.URL.RawQuery = redactQuery(clonedRequest.URL.RawQuery)
-		clonedRequest.RequestURI = ""
-	}
-
-	httpRequest, err := httputil.DumpRequest(clonedRequest, false)
-	if err != nil {
-		return "", err
-	}
-
-	return string(httpRequest), nil
-}
-
-// buildRecoveryLogFields 统一拼装 recovery 日志字段，避免三条分支各自散落一套字段定义。
-func buildRecoveryLogFields(
-	c *gin.Context,
-	panicErr error,
-	recovered any,
-	requestDump string,
-	dumpErr error,
-	recoveryCode int32,
-	includeStack bool,
-) []zap.Field {
-	fields := []zap.Field{
-		zap.Int32("recovery_code", recoveryCode),
-		zap.String("path", requestPath(c)),
-		zap.Error(panicErr),
-		zap.Any("panic_value", recovered),
-	}
-
-	if requestDump != "" {
-		fields = append(fields, zap.String("request", requestDump))
-	}
-	if dumpErr != nil {
-		fields = append(fields, zap.NamedError("request_dump_error", dumpErr))
-	}
-	if includeStack {
-		fields = append(fields, zap.String("stack", string(debug.Stack())))
-	}
-
-	return fields
 }
 
 // abortWithRecoveryResponse 返回项目统一错误结构，避免 recovery 自己拼一套特殊 JSON。

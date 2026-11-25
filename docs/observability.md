@@ -98,11 +98,9 @@ LongRunning 的整个存活时间也不作为一次任务耗时。自定义循�
 
 ## 埋点与导出是两件事
 
-`internal/platform/telemetry` 只管导出。记录点（`metrics.Recorder`、otelgin 中间件）
-**无条件存在**，关闭导出时走 OTel 的全局 no-op provider，每次记录都是空操作。
-
-把埋点也做成条件的，打开导出那天才会发现某条关键路径压根没埋——
-而那一天通常正是出事要查的时候。
+`metrics.Recorder` 始终装配。使用默认全局 provider 且指标未开启时，记录为空操作。
+启用 trace 才挂载 otelgin 中间件和 MySQL、Redis 追踪插件。连接池指标受 metrics
+开关独立控制，可选 Redis 恢复也可在关闭 trace 时运行。
 
 ```yaml
 telemetry:

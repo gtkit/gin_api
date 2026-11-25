@@ -4,14 +4,25 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/middleware"
+	"github.com/gtkit/gin-api/internal/pkg/metrics"
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestDisabledLeavesGlobalsUntouched 钉住关闭态与"没有本包"完全等价。
@@ -163,5 +174,99 @@ func snapshotGlobals() func() {
 		otel.SetMeterProvider(meter)
 		otel.SetTracerProvider(tracer)
 		otel.SetTextMapPropagator(prop)
+	}
+}
+
+func TestHTTPDurationViewKeepsOneEndToEndObservation(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		measure, trace bool
+	}{
+		{name: "disabled"},
+		{name: "metrics only", measure: true},
+		{name: "traces only", trace: true},
+		{name: "metrics and traces", measure: true, trace: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			var meterProvider metric.MeterProvider = metricnoop.NewMeterProvider()
+			if tt.measure {
+				provider := newMeterProvider(sdkmetric.WithReader(reader))
+				t.Cleanup(func() {
+					if err := provider.Shutdown(context.Background()); err != nil {
+						t.Error(err)
+					}
+				})
+				meterProvider = provider
+			}
+			spans := tracetest.NewSpanRecorder()
+			tracer := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+			t.Cleanup(func() {
+				if err := tracer.Shutdown(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+			recorder, err := metrics.New(meterProvider.Meter("application-test"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := gin.New()
+			engine.Use(middleware.Metrics(recorder))
+			if tt.trace {
+				engine.Use(otelgin.Middleware("test", otelgin.WithMeterProvider(meterProvider), otelgin.WithTracerProvider(tracer)))
+			}
+			engine.Use(middleware.GinRecovery(false))
+			engine.POST("/success", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+			engine.POST("/reject", func(c *gin.Context) { c.AbortWithStatus(http.StatusUnauthorized) })
+			engine.POST("/panic", func(*gin.Context) { panic("test") })
+			engine.POST("/stream", func(c *gin.Context) {
+				c.String(http.StatusAccepted, "begin")
+				c.Writer.Flush()
+				_, _ = c.Writer.WriteString("end")
+			})
+			cases := map[string]int{"/success": 200, "/reject": 401, "/panic": 500, "/stream": 202}
+			for path, status := range cases {
+				w := httptest.NewRecorder()
+				engine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader("body")))
+				if w.Code != status {
+					t.Fatalf("%s: status %d, want %d", path, w.Code, status)
+				}
+			}
+			if tt.trace && len(spans.Ended()) != len(cases) || !tt.trace && len(spans.Ended()) != 0 {
+				t.Fatalf("ended spans = %d", len(spans.Ended()))
+			}
+			if !tt.measure {
+				return
+			}
+			var data metricdata.ResourceMetrics
+			if err := reader.Collect(t.Context(), &data); err != nil {
+				t.Fatal(err)
+			}
+			var count uint64
+			bodyMetrics := map[string]bool{}
+			for _, scope := range data.ScopeMetrics {
+				for _, m := range scope.Metrics {
+					switch m.Name {
+					case "http.server.request.duration":
+						if scope.Scope.Name != "application-test" || m.Unit != "s" {
+							t.Fatalf("duration from unexpected scope or unit: %s %s", scope.Scope.Name, m.Unit)
+						}
+						for _, point := range m.Data.(metricdata.Histogram[float64]).DataPoints {
+							count += point.Count
+						}
+					case "http.server.request.body.size", "http.server.response.body.size":
+						if scope.Scope.Name == otelgin.ScopeName {
+							bodyMetrics[m.Name] = true
+						}
+					}
+				}
+			}
+			if count != uint64(len(cases)) {
+				t.Fatalf("duration sample count = %d, want %d", count, len(cases))
+			}
+			if tt.trace && len(bodyMetrics) != 2 || !tt.trace && len(bodyMetrics) != 0 {
+				t.Fatalf("otelgin byte instruments = %v", bodyMetrics)
+			}
+		})
 	}
 }

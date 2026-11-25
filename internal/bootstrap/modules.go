@@ -148,6 +148,7 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 		AllowedOrigins:          cfg.CORS.AllowedOrigins,
 		LogRequestBody:          cfg.Log.AccessRequestBody,
 		LogResponseBody:         cfg.Log.AccessResponseBody,
+		RecoveryStack:           cfg.Log.RecoveryStack,
 		MaxBodyBytes:            cfg.App.MaxBodyBytes,
 		ServerReadTimeout:       httpConfig.ReadTimeout,
 		ServerReadHeaderTimeout: httpConfig.ReadHeaderTimeout,

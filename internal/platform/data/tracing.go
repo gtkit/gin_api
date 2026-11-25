@@ -11,18 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// InstrumentTracing 给本进程的数据层连接挂链路追踪埋点：GORM 一次，已初始化的
-// 每个 Redis DB 客户端各一次。挂载由连接句柄的属主（本类型）完成——句柄不外流，
-// 埋点也不该由拿不到句柄的层代做。
-//
-// 挂载无条件、不设开关：是否产生真实导出由 telemetry 配置门控，未开启导出时
-// 全局 TracerProvider 是 no-op，每个 span 都是空操作（docs/observability.md
-// 「埋点与导出是两件事」）。因此调用时机必须晚于 telemetry.New——otelgorm 在
-// 构造期就从全局 TracerProvider 取 tracer，与「telemetry.New 必须先于
-// metrics.New」受同一条约束管辖。
-//
-// 任何一步失败都返回错误、由装配链上抛而不降级：埋点缺失是静默的观测盲区，
-// 等到需要看链路的那天才会被发现，比启动失败难查得多。
+// InstrumentTracing installs data tracing during assembly, after telemetry initializes.
 func (r *Resources) InstrumentTracing(dbName string) error {
 	if r == nil || r.Mdb() == nil {
 		return errors.New("instrument tracing: mysql connection is not initialized")
@@ -38,7 +27,7 @@ func InstrumentDatabaseTracing(db *gorm.DB, dbName string) error {
 	if db == nil {
 		return errors.New("instrument gorm tracing: database is not initialized")
 	}
-	if err := instrumentGorm(db, dbName, nil); err != nil {
+	if err := instrumentGorm(db, dbName, nil); err != nil && !errors.Is(err, gorm.ErrRegistered) {
 		return fmt.Errorf("instrument gorm tracing: %w", err)
 	}
 	return nil

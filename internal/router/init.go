@@ -24,6 +24,7 @@ type Options struct {
 	AllowedOrigins []string
 	// LogRequestBody 和 LogResponseBody 控制访问日志的正文采集。
 	LogRequestBody, LogResponseBody bool
+	RecoveryStack                   bool
 	// MaxBodyBytes 是整个请求链共享的正文上限。
 	MaxBodyBytes int64
 	// ServerReadTimeout and ServerReadHeaderTimeout protect the server limit on ordinary routes.

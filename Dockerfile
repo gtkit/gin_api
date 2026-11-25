@@ -58,16 +58,16 @@ WORKDIR /app
 # 僵尸回收，进而破坏优雅关停），而 exec form 不做 ARG/ENV 变量展开——路径无法跟随 APP_NAME。
 # 宿主机侧的可执行文件路径由外部冻结的部署脚本决定，与容器内路径互不牵连。
 ARG APP_NAME
-COPY --from=builder /out/${APP_NAME} /app/bin/server
+COPY --from=builder --chown=0:0 --chmod=0555 /out/${APP_NAME} /app/bin/server
 # 只带入配置参照模板与说明，真实 env.yml/pem 由部署挂载（.dockerignore 已兜底排除）。
-COPY --from=builder /src/config/env.yml.example /app/config/env.yml.example
-COPY --from=builder /src/config/README.md /app/config/README.md
+COPY --from=builder --chown=0:0 --chmod=0444 /src/config/env.yml.example /app/config/env.yml.example
+COPY --from=builder --chown=0:0 --chmod=0444 /src/config/README.md /app/config/README.md
 # 迁移文件必须进镜像：migratex 从文件系统读取 database/migrations，
 # 镜像内没有它就跑不了 migrate up。
-COPY --from=builder /src/database/migrations /app/database/migrations
+COPY --from=builder --chown=0:0 /src/database/migrations /app/database/migrations
 
-RUN mkdir -p /app/config/env /app/config/pem /app/logs \
-    && chown -R app:app /app
+RUN mkdir -p /app/config/env /app/config/pem \
+    && install -d -m 0750 -o app -g app /app/logs /app/data
 
 ENV APP_ROOT=/app
 

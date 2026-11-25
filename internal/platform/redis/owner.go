@@ -60,7 +60,7 @@ const (
 	recoveryTimeout  = 10 * time.Second
 )
 
-// Open retains optional failures for recovery after ConfigureTracing. Required
+// Open retains optional failures until StartRecovery is called. Required
 // failures and invalid component results still abort startup.
 func Open(ctx context.Context, options Options) (result *Owner, err error) {
 	owner := &Owner{instrument: data.InstrumentRedisClient}
@@ -81,13 +81,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 		return nil, fmt.Errorf("redis configuration is required: %w", core.ErrComponentState)
 	}
 	if options.Open == nil {
-		options.Open = func(ctx context.Context, c config.RedisConfig) (Client, error) {
-			client, err := OpenRedis(ctx, c)
-			if client == nil {
-				return nil, err
-			}
-			return client, err
-		}
+		options.Open = OpenRedis
 	}
 	required := options.Required != nil && options.Required(cfg)
 	owner.configured = strings.TrimSpace(cfg.Redis.Addr) != ""
@@ -108,7 +102,7 @@ func Open(ctx context.Context, options Options) (result *Owner, err error) {
 		}
 		owner.lastErr = openErr
 		owner.recoverable = true
-		logger.Warnf("redis is configured but unreachable at startup; optional recovery starts after tracing is ready: %v", openErr)
+		logger.Warnf("redis is configured but unreachable at startup; optional recovery will retry: %v", openErr)
 		return owner, nil
 	}
 	owner.client = client
@@ -156,8 +150,7 @@ func closeClient(client Client) (err error) {
 	return client.Close()
 }
 
-// ConfigureTracing must follow telemetry initialization. It instruments existing
-// clients once and registers the sole recovery task before releasing the lock.
+// ConfigureTracing instruments current clients once before request handling and recovery.
 func (p *Owner) ConfigureTracing() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -170,6 +163,9 @@ func (p *Owner) ConfigureTracing() error {
 	if p.tracingConfigured {
 		return nil
 	}
+	if p.recoveryDone != nil {
+		return fmt.Errorf("configure redis tracing after recovery started: %w", core.ErrComponentState)
+	}
 	if p.client != nil {
 		if err := p.instrumentCandidate(p.client); err != nil {
 			p.terminalErr = err
@@ -177,7 +173,20 @@ func (p *Owner) ConfigureTracing() error {
 		}
 	}
 	p.tracingConfigured = true
-	if p.recoverable {
+	return nil
+}
+
+// StartRecovery starts the optional retry loop once, independently of tracing.
+func (p *Owner) StartRecovery() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return fmt.Errorf("start redis recovery after close: %w", core.ErrComponentState)
+	}
+	if p.terminalErr != nil {
+		return p.terminalErr
+	}
+	if p.recoverable && p.recoveryDone == nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		p.recoveryCancel = cancel
 		p.recoveryDone = make(chan struct{})
@@ -244,8 +253,10 @@ func (p *Owner) recoverClient(ctx context.Context) {
 		cancel()
 		p.mu.Lock()
 		if !p.closed && err == nil {
-			err = p.instrumentCandidate(candidate)
-			terminal = err != nil
+			if p.tracingConfigured {
+				err = p.instrumentCandidate(candidate)
+				terminal = err != nil
+			}
 			if err == nil {
 				p.client, p.lastErr = candidate, nil
 				p.mu.Unlock()

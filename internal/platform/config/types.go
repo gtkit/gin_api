@@ -105,11 +105,12 @@ type ProxyConfig struct {
 }
 
 type DatabaseConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     string `mapstructure:"port"`
-	Name     string `mapstructure:"name"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
+	Host     string          `mapstructure:"host"`
+	Port     string          `mapstructure:"port"`
+	Name     string          `mapstructure:"name"`
+	Username string          `mapstructure:"username"`
+	Password string          `mapstructure:"password"`
+	TLS      ClientTLSConfig `mapstructure:"tls"`
 	// MigrateUsername / MigratePassword 是可选的迁移专用凭据。
 	//
 	// 启用开关是**非空的 MigrateUsername**，不是单独的布尔字段：布尔开关会产生
@@ -229,13 +230,16 @@ type LogConfig struct {
 	// AccessResponseBody 控制是否在 HTTP 访问日志中记录响应体。默认 false（不记录）。
 	// 与 AccessRequestBody 独立；开启后响应体同样经脱敏。
 	AccessResponseBody bool `mapstructure:"access_response_body"`
+	// RecoveryStack enables stack frames for recovered HTTP panics.
+	RecoveryStack bool `mapstructure:"recovery_stack"`
 }
 
 type RedisConfig struct {
 	// Addr 为 Redis host:port，无默认值；没有 Redis 消费能力时允许留空。
 	// 本地认证、Redis 限流、Redis 响应缓存或队列启用时必须配置。
-	Addr     string `mapstructure:"addr"`
-	Password string `mapstructure:"password"`
+	Addr     string          `mapstructure:"addr"`
+	Password string          `mapstructure:"password"`
+	TLS      ClientTLSConfig `mapstructure:"tls"`
 	// DBs 为需要初始化的逻辑库号；配置地址时必填且非负、不重复。
 	// 无 Redis 消费能力且地址为空时可省略；须包含各启用能力使用的库号。
 	DBs []int `mapstructure:"dbs"`
@@ -249,6 +253,7 @@ type RedisConfig struct {
 	// 单位统一用毫秒而不是秒：Redis 的合理超时普遍在百毫秒量级，
 	// 用秒做单位会让"最小可表达值"就已经过大。
 	PoolSize       int `mapstructure:"pool_size"`
+	MaxActiveConns int `mapstructure:"max_active_conns"`
 	MinIdleConns   int `mapstructure:"min_idle_conns"`
 	DialTimeoutMS  int `mapstructure:"dial_timeout_ms"`
 	ReadTimeoutMS  int `mapstructure:"read_timeout_ms"`

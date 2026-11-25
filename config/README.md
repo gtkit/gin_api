@@ -86,6 +86,12 @@ JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 
 `application.http_shutdown_timeout` 单独控制 HTTP 排空期限，默认为 10 秒。部署终止宽限需容纳摘流等待、HTTP 排空和后台资源关闭。文件传输路由使用其独立的读体预算，服务仍用读头超时约束请求头。
 
+Redis 的 `pool_size` 是普通池初始容量，`max_active_conns` 为正时才设普通池硬上限。显式配置的池容量与空闲目标须满足 `min_idle_conns <= pool_size <= max_active_conns`。默认为 0，保留未设上限的连接模式。每个实例按实际初始化的逻辑库计数，包括 SDK 隐含的 0 号库。go-redis v9.23.0 的独立 pipeline 池默认另计最多 10 个连接，发布订阅客户端或独立队列客户端按实际使用单独计数。共享同一客户端时只计一次。将同一 Redis 服务端上各实例各逻辑库的普通池和独立池预算相加，再乘发布期间最大并存副本数。MySQL 按同一服务端上所有默认和具名连接的 `maxopenconn` 求和，再乘并存副本数，并预留迁移、诊断和运维连接。用服务端实际峰值、池等待、超时和路由 P99 签收。
+
+MySQL 和 Redis 默认及具名连接均可设置 `tls.enabled: true`，要求至少 TLS 1.2 并验证服务端证书。留空的 `tls.server_name` 使用连接地址中的主机名或 IP；使用代理时填写证书 SAN 中用于验证的名称。`tls.ca_file` 留空使用系统信任库，设置时使用该 PEM 文件中的 CA。使用只读挂载提供 CA；轮换时先部署同时包含新旧 CA 的文件并重启连接所有者，确认全部服务端使用新链后再移除旧 CA。server、doctor 和 migrate 使用相同的连接校验。
+
+恢复日志使用 `error_class`、`request_id`、方法、路由模板及响应是否已开始。需要调用帧时可启用 `log.recovery_stack`。`/app/bin`、`/app/config` 和 `/app/database` 由镜像 root 拥有。启用只读根文件系统时，按运行 UID 挂载可写的 `/app/logs` 和临时目录 `/tmp`；启用上传时，将 `/app/data` 作为可写数据挂载，并把 `upload.dir`、`upload.chunk_dir` 配在其下。分片旁的 `.staging` 暂存目录也需要写权限。
+
 ## 核心字段校验
 
 | 字段 | 用途与约束 | 默认或回落规则 |

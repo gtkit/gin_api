@@ -10,6 +10,8 @@ Prometheus 抓取同机 127.0.0.1:9464/metrics 并加载 prometheus-rules.yml。
 
 告警覆盖错误率、p99、准入拒绝、密码容量、MySQL 使用率和 Redis 超时。1%/1 秒/90% 等是示例阈值，不是已经测得的 SLO。加载前按业务预算校准，再执行 `promtool check rules monitoring/prometheus-rules.yml` 并演练触发/恢复。内存看板展示 Go runtime 使用量，不是 RSS；RSS/容器限额应从宿主或容器监控取得，尚无该证据时不设置伪精确内存告警。
 
+HTTP 延迟告警和看板沿用 `http_server_request_duration_seconds_bucket` 及应用 recorder 的秒单位和桶边界。启用 trace 与 metrics 时，otelgin 仍记录 span 和 HTTP 字节数，耗时只由应用 recorder 记录，包含鉴权拒绝、panic 恢复和流式响应结束。滚动发布期间，先按部署版本或可用的 instrumentation scope 标签比对；只在所有旧副本退出且最长查询窗口过去后合并延迟序列。耗时样本去重期间使用客户端延迟做前后比较。
+
 ## 负载基线
 
 复用 `scripts/load-api.go`，不另建压测框架。它限速、限制并发和响应体、拒绝默认非 loopback 目标，报告包括生成器丢弃、传输错误及调度起点延迟。报告只写参数和统计，不回显 URL、请求正文、认证头、场景路径或本机目录。

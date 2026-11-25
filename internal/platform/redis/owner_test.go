@@ -31,12 +31,12 @@ func TestOpenCancellationPrecedesFactory(t *testing.T) {
 
 func newRecoveryClient() *ownedRedis {
 	return &ownedRedis{clients: map[int]*goredis.Client{
-		0: goredis.NewClient(&goredis.Options{Addr: "unused", DB: 0}),
-		3: goredis.NewClient(&goredis.Options{Addr: "unused", DB: 3}),
+		0: goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0", DB: 0, Protocol: 2}),
+		3: goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:0", DB: 3, Protocol: 2}),
 	}}
 }
 
-func TestOptionalRecoveryWaitsForTracingAndPublishesOnce(t *testing.T) {
+func TestOptionalRecoveryWaitsForStartAndInstrumentsOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var calls atomic.Int32
 		client := newRecoveryClient()
@@ -62,12 +62,15 @@ func TestOptionalRecoveryWaitsForTracingAndPublishesOnce(t *testing.T) {
 		}
 		time.Sleep(20 * time.Second)
 		if calls.Load() != 1 {
-			t.Fatal("recovery started before tracing")
+			t.Fatal("recovery started before activation")
 		}
 		hooks := map[*goredis.Client]int{}
 		p.instrument = func(c *goredis.Client) error { hooks[c]++; return nil }
 		for range 2 {
 			if err := p.ConfigureTracing(); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.StartRecovery(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -121,7 +124,7 @@ func TestRecoveryCloseWaitsForLateCandidateAndKeepsFinalError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := p.ConfigureTracing(); err != nil {
+		if err := p.StartRecovery(); err != nil {
 			t.Fatal(err)
 		}
 		<-entered
@@ -191,6 +194,9 @@ func TestRecoveryContractFailuresStopRetrying(t *testing.T) {
 					return nil
 				}
 				if err := p.ConfigureTracing(); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.StartRecovery(); err != nil {
 					t.Fatal(err)
 				}
 				synctest.Wait()
@@ -294,6 +300,9 @@ func TestRecoveryOutcomeLogs(t *testing.T) {
 				}
 				p.instrument = func(*goredis.Client) error { return nil }
 				if err := p.ConfigureTracing(); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.StartRecovery(); err != nil {
 					t.Fatal(err)
 				}
 				synctest.Sleep(recoveryInterval)
@@ -471,4 +480,36 @@ func TestConnectionLogsUseActualDatabases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOptionalRecoveryWithoutTracing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := newRecoveryClient()
+		var attempts atomic.Int32
+		owner, err := Open(t.Context(), Options{
+			Config: &config.Config{Redis: config.RedisConfig{Addr: "unused"}},
+			Open: func(context.Context, config.RedisConfig) (Client, error) {
+				if attempts.Add(1) == 1 {
+					return nil, errors.New("offline")
+				}
+				return client, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner.instrument = func(*goredis.Client) error { return errors.New("tracing must stay disabled") }
+		for range 2 {
+			if err := owner.StartRecovery(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		synctest.Sleep(recoveryInterval)
+		if attempts.Load() != 2 || owner.Client(3) != client.clients[3] || len(owner.PoolStats()) != 2 {
+			t.Fatal("recovery did not publish healthy clients and their pool statistics")
+		}
+		if err := owner.Close(t.Context()); err != nil || client.closes.Load() != 1 {
+			t.Fatalf("close=%v, calls=%d", err, client.closes.Load())
+		}
+	})
 }

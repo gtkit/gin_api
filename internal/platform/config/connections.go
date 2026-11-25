@@ -1,14 +1,32 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 )
 
 // DefaultConnection names the existing database and Redis configuration.
 const DefaultConnection = "default"
+
+// CappedPoolSize is the initial size of a pool with a positive hard limit.
+func (c RedisConfig) CappedPoolSize() int {
+	const redisxPoolSize = 10
+	return cmp.Or(c.PoolSize, min(redisxPoolSize, c.MaxActiveConns))
+}
+
+// PoolDatabases includes DB 0, which Redis initializes even when it isn't declared for borrowing.
+func (c RedisConfig) PoolDatabases() []int {
+	if strings.TrimSpace(c.Addr) == "" {
+		return nil
+	}
+	dbs := append([]int{0}, c.DBs...)
+	slices.Sort(dbs)
+	return slices.Compact(dbs)
+}
 
 func (c *Config) validateNamedConnections() error {
 	var errs []error

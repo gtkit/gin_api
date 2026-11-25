@@ -87,22 +87,24 @@ type Service struct {
 	accounts AccountLimiter
 
 	// now 可注入，测试用它确定性地驱动撤销记录的存活时间。
-	now            func() time.Time
-	sessions       SessionRepository
-	sessionAccess  SessionAccessIssuer
-	sessionRefresh SessionRefreshStore
+	now              func() time.Time
+	sessions         SessionRepository
+	sessionValidator SessionValidator
+	sessionAccess    SessionAccessIssuer
+	sessionRefresh   SessionRefreshStore
 }
 
 // Options 是 Service 的依赖。
 type Options struct {
 	// Sessions enables authenticated password changes and account-wide invalidation.
-	Sessions       SessionRepository
-	Credentials    CredentialRepository
-	Hasher         PasswordHasher
-	AccessIssuer   AccessIssuer
-	RefreshStore   RefreshStore
-	RevocationList RevocationList
-	Auditor        Auditor
+	Sessions         SessionRepository
+	SessionValidator SessionValidator
+	Credentials      CredentialRepository
+	Hasher           PasswordHasher
+	AccessIssuer     AccessIssuer
+	RefreshStore     RefreshStore
+	RevocationList   RevocationList
+	Auditor          Auditor
 	// Events 记录指标；为 nil 时不记录。
 	Events    EventRecorder
 	AccessTTL time.Duration
@@ -131,6 +133,9 @@ func NewService(opts Options) (*Service, error) {
 	var sessionAccess SessionAccessIssuer
 	var sessionRefresh SessionRefreshStore
 	if opts.Sessions != nil {
+		if opts.SessionValidator == nil {
+			return nil, errors.New("auth: session validator is required")
+		}
 		var ok bool
 		sessionAccess, ok = opts.AccessIssuer.(SessionAccessIssuer)
 		if !ok {
@@ -143,19 +148,20 @@ func NewService(opts Options) (*Service, error) {
 	}
 
 	return &Service{
-		creds:          opts.Credentials,
-		hasher:         opts.Hasher,
-		access:         opts.AccessIssuer,
-		refresh:        opts.RefreshStore,
-		revoked:        opts.RevocationList,
-		auditor:        opts.Auditor,
-		events:         opts.Events,
-		accessTTL:      opts.AccessTTL,
-		accounts:       opts.Accounts,
-		now:            time.Now,
-		sessions:       opts.Sessions,
-		sessionAccess:  sessionAccess,
-		sessionRefresh: sessionRefresh,
+		creds:            opts.Credentials,
+		hasher:           opts.Hasher,
+		access:           opts.AccessIssuer,
+		refresh:          opts.RefreshStore,
+		revoked:          opts.RevocationList,
+		auditor:          opts.Auditor,
+		events:           opts.Events,
+		accessTTL:        opts.AccessTTL,
+		accounts:         opts.Accounts,
+		now:              time.Now,
+		sessions:         opts.Sessions,
+		sessionValidator: opts.SessionValidator,
+		sessionAccess:    sessionAccess,
+		sessionRefresh:   sessionRefresh,
 	}, nil
 }
 
@@ -306,11 +312,11 @@ func (s *Service) Refresh(ctx context.Context, request RefreshRequest) (TokenPai
 		return TokenPair{}, s.refreshRejected(ctx, request.RefreshToken, err)
 	}
 	if s.sessions != nil {
-		credential, found, err := s.sessions.FindByID(ctx, uid)
+		current, err := s.sessionValidator.ValidateSession(ctx, uid, version)
 		if err != nil {
 			return TokenPair{}, fmt.Errorf("auth: verify refresh session: %w", err)
 		}
-		if !found || !credential.Active || credential.AuthVersion != version {
+		if !current {
 			return TokenPair{}, ErrRefreshRejected
 		}
 	}

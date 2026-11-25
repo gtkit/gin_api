@@ -23,12 +23,15 @@ func callLogoutAll(svc *Service, ctx context.Context, uid, version int64) error 
 
 type sessionCredentials struct {
 	*fakeCreds
-	writeErr error
+	writeErr        error
+	credentialReads int
+	sessionChecks   int
 }
 
 func (r *sessionCredentials) FindByID(ctx context.Context, uid int64) (Credential, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.credentialReads++
 	if err := ctx.Err(); err != nil {
 		return Credential{}, false, err
 	}
@@ -38,6 +41,24 @@ func (r *sessionCredentials) FindByID(ctx context.Context, uid int64) (Credentia
 		}
 	}
 	return Credential{}, false, r.findErr
+}
+
+func (r *sessionCredentials) ValidateSession(ctx context.Context, uid, version int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionChecks++
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if r.findErr != nil {
+		return false, r.findErr
+	}
+	for _, cred := range r.byPhone {
+		if cred.UserID == uid && cred.Active && cred.AuthVersion == version {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *sessionCredentials) ChangePassword(ctx context.Context, uid, version int64, old, next string) (bool, error) {
@@ -104,7 +125,7 @@ func newSessionService(t *testing.T) (*Service, *sessionCredentials, *sessionIss
 	issuer := &sessionIssuer{}
 	refresh := &sessionRefresh{consumeUID: 7}
 	svc, err := NewService(Options{
-		Credentials: creds, Sessions: creds, Hasher: &fakeHasher{},
+		Credentials: creds, Sessions: creds, SessionValidator: creds, Hasher: &fakeHasher{},
 		AccessIssuer: issuer, RefreshStore: refresh, RevocationList: newFakeRevocation(), AccessTTL: time.Hour,
 	})
 	if err != nil {
@@ -235,5 +256,49 @@ func TestSessionLifecycleFailures(t *testing.T) {
 	}
 	if err := callLogoutAll(newHarness(t).svc, t.Context(), 7, 0); !errors.Is(err, ErrLifecycleDisabled) {
 		t.Fatalf("disabled service accepted lifecycle operation: %v", err)
+	}
+}
+
+func TestRefreshValidatesSessionWithoutReadingCredentials(t *testing.T) {
+	failure := errors.New("primary unavailable")
+	for _, tt := range []struct {
+		name    string
+		uid     int64
+		version int64
+		active  bool
+		dbErr   error
+		wantErr error
+	}{
+		{name: "valid", uid: 7, active: true},
+		{name: "disabled", uid: 7, wantErr: ErrRefreshRejected},
+		{name: "stale version", uid: 7, version: 1, active: true, wantErr: ErrRefreshRejected},
+		{name: "unknown account", uid: 8, active: true, wantErr: ErrRefreshRejected},
+		{name: "primary failure", uid: 7, active: true, dbErr: failure, wantErr: failure},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, creds, issuer, refresh := newSessionService(t)
+			cred := creds.byPhone["account"]
+			cred.Active = tt.active
+			creds.byPhone["account"] = cred
+			creds.findErr = tt.dbErr
+			refresh.consumeUID = tt.uid
+			refresh.version = tt.version
+			_, err := callRefresh(svc, t.Context(), "refresh")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("refresh error = %v, want %v", err, tt.wantErr)
+			}
+			if creds.credentialReads != 0 || creds.sessionChecks != 1 {
+				t.Fatalf("credential reads = %d, session checks = %d", creds.credentialReads, creds.sessionChecks)
+			}
+			if tt.wantErr != nil && (issuer.issued != 0 || refresh.consumeCalls != 0) {
+				t.Fatalf("failed validation issued %d or consumed %d", issuer.issued, refresh.consumeCalls)
+			}
+			if tt.dbErr != nil {
+				creds.findErr = nil
+				if _, err := callRefresh(svc, t.Context(), "refresh"); err != nil || refresh.consumeCalls != 1 {
+					t.Fatalf("retry after primary recovery: consumes=%d err=%v", refresh.consumeCalls, err)
+				}
+			}
+		})
 	}
 }

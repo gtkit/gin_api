@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -29,7 +30,9 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		mock.ExpectClose()
+		for range conn.Stats().OpenConnections {
+			mock.ExpectClose()
+		}
 		if err := conn.Close(); err != nil {
 			t.Error(err)
 		}
@@ -51,8 +54,7 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := openAPIEngineWithDB(t, config.AuthModeLocal, true, db)
-	request := func(route, body, access string, want int) *httptest.ResponseRecorder {
-		t.Helper()
+	send := func(route, body, access string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/"+route, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if access != "" {
@@ -60,6 +62,11 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, req)
+		return rec
+	}
+	request := func(route, body, access string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := send(route, body, access)
 		if rec.Code != want {
 			t.Fatalf("%s HTTP %d, want %d", route, rec.Code, want)
 		}
@@ -86,16 +93,29 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 	}
 	first, second := login("fixture-a", 7), login("fixture-b", 8)
 	ownerBody := `{"refresh_token":"` + second.RefreshToken + `"}`
+	mock.MatchExpectationsInOrder(false)
 	expectSession(7)
-	request("logout", ownerBody, first.AccessToken, http.StatusOK)
+	expectSession(8)
+	var logout, refresh *httptest.ResponseRecorder
+	var wg sync.WaitGroup
+	wg.Go(func() { logout = send("logout", ownerBody, first.AccessToken) })
+	wg.Go(func() { refresh = send("refresh", ownerBody, "") })
+	wg.Wait()
+	mock.MatchExpectationsInOrder(true)
+	if logout.Code != http.StatusOK || refresh.Code != http.StatusOK {
+		t.Fatalf("concurrent logout of A=%d, refresh of B=%d", logout.Code, refresh.Code)
+	}
+	var successor struct{ Data dto.TokenResponse }
+	if err := json.Unmarshal(refresh.Body.Bytes(), &successor); err != nil || successor.Data.RefreshToken == "" {
+		t.Fatalf("decode B's rotated token: %v", err)
+	}
 	expectSession(7)
 	request("logout", `{}`, first.AccessToken, http.StatusUnauthorized)
-	mock.ExpectQuery("SELECT `id`,`password`,`status`,`auth_version` FROM `users`").WithArgs(8, 1).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "password", "status", "auth_version"}).AddRow(8, hash, 1, 0))
+	expectSession(8)
 	request("refresh", ownerBody, "", http.StatusOK)
 	expectSession(8)
 	request("logout", ownerBody, second.AccessToken, http.StatusOK)
-	request("refresh", ownerBody, "", http.StatusUnauthorized)
+	request("refresh", `{"refresh_token":"`+successor.Data.RefreshToken+`"}`, "", http.StatusUnauthorized)
 }
 
 func (m changedPasswordHash) Match(value driver.Value) bool {
@@ -213,10 +233,17 @@ func TestSessionLifecycleHTTP(t *testing.T) {
 	}
 	sessionRead(0, 0)
 	request("logout-all", "", old.AccessToken, 401)
-	credentialRead(newHash, 1, false)
+	sessionRead(0, 0)
 	request("refresh", `{"refresh_token":"`+old.RefreshToken+`"}`, "", 401)
 	credentialRead(newHash, 1, true)
 	current := decodeToken(request("login", `{"phone":"account","password":"new-password"}`, "", 200))
+
+	mock.ExpectQuery("SELECT `id` FROM `users`").WithArgs(7, 1, 1, 1).
+		WillReturnError(errors.New("private database error"))
+	refreshBody := `{"refresh_token":"` + current.RefreshToken + `"}`
+	request("refresh", refreshBody, "", 500)
+	sessionRead(1, 1)
+	current = decodeToken(request("refresh", refreshBody, "", 200))
 
 	// A database outage must not be presented as an expired credential.
 	mock.ExpectQuery("SELECT `id` FROM `users`").WillReturnError(errors.New("private database error"))
@@ -229,6 +256,6 @@ func TestSessionLifecycleHTTP(t *testing.T) {
 	request("logout-all", "", current.AccessToken, 200)
 	sessionRead(1, 0)
 	request("logout-all", "", current.AccessToken, 401)
-	credentialRead(newHash, 2, false)
+	sessionRead(1, 0)
 	request("refresh", `{"refresh_token":"`+current.RefreshToken+`"}`, "", 401)
 }

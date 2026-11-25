@@ -22,6 +22,31 @@ func TestValidateRedisConfig(t *testing.T) {
 		wantHint string
 	}{
 		{name: "valid minimal config", mutate: func(*RedisConfig) {}},
+		{name: "hard limit with inherited pool", mutate: func(c *RedisConfig) { c.MaxActiveConns = 1 }},
+		{
+			name:     "negative hard limit rejected",
+			mutate:   func(c *RedisConfig) { c.MaxActiveConns = -1 },
+			wantErr:  true,
+			wantHint: "redis.max_active_conns",
+		},
+		{
+			name:     "pool above hard limit rejected",
+			mutate:   func(c *RedisConfig) { c.MaxActiveConns, c.PoolSize = 1, 2 },
+			wantErr:  true,
+			wantHint: "redis.max_active_conns",
+		},
+		{
+			name:     "idle above inherited pool rejected",
+			mutate:   func(c *RedisConfig) { c.MaxActiveConns, c.MinIdleConns = 20, 11 },
+			wantErr:  true,
+			wantHint: "redis.min_idle_conns",
+		},
+		{
+			name:     "certificate settings require enabled TLS",
+			mutate:   func(c *RedisConfig) { c.TLS.ServerName = "redis.test" },
+			wantErr:  true,
+			wantHint: "tls.enabled",
+		},
 		{
 			name:   "addr may be omitted without consumers",
 			mutate: func(c *RedisConfig) { c.Addr = "" },
