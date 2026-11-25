@@ -302,11 +302,11 @@ func TestDriverMismatchRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := switched.Download(t.Context(), 7, record.ID); !errors.Is(err, ErrDriverMismatch) {
-		t.Fatalf("Download() = %v, want ErrDriverMismatch", err)
+	if _, _, err := switched.Download(t.Context(), 7, record.ID); !errors.Is(err, ErrStorageLocationMismatch) {
+		t.Fatalf("Download() = %v, want ErrStorageLocationMismatch", err)
 	}
-	if err := switched.Delete(t.Context(), 7, record.ID); !errors.Is(err, ErrDriverMismatch) {
-		t.Fatalf("Delete() = %v, want ErrDriverMismatch", err)
+	if err := switched.Delete(t.Context(), 7, record.ID); !errors.Is(err, ErrStorageLocationMismatch) {
+		t.Fatalf("Delete() = %v, want ErrStorageLocationMismatch", err)
 	}
 }
 

@@ -158,12 +158,12 @@ func (r *fakeRefresh) Consume(_ context.Context, _ string) (int64, string, error
 	return r.consumeUID, "rotated-refresh", nil
 }
 
-func (r *fakeRefresh) RevokeFamilyOfToken(_ context.Context, token string) error {
+func (r *fakeRefresh) RevokeFamilyOfToken(_ context.Context, _ int64, token string) (bool, error) {
 	if r.revokeErr != nil {
-		return r.revokeErr
+		return false, r.revokeErr
 	}
 	r.revoked = append(r.revoked, token)
-	return nil
+	return true, nil
 }
 
 type fakeRevocation struct {
@@ -265,7 +265,7 @@ func callRefresh(svc *Service, ctx context.Context, refreshToken string) (TokenP
 }
 
 func callLogout(svc *Service, ctx context.Context, tokenID string, expiresAt time.Time, refreshToken string) error {
-	return svc.Logout(ctx, LogoutRequest{TokenID: tokenID, ExpiresAt: expiresAt, RefreshToken: refreshToken})
+	return svc.Logout(ctx, LogoutRequest{UserID: 7, TokenID: tokenID, ExpiresAt: expiresAt, RefreshToken: refreshToken})
 }
 
 // --- 用例 ---

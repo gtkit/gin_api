@@ -135,6 +135,9 @@ func bindErrResponse(c *gin.Context, err error) {
 	if payloadTooLargeFromBind(c, err) {
 		return
 	}
+	if deferRequestAbort(c, err) {
+		return
+	}
 	// 短路顺序不能调换：翻译器未就绪时不得走 verify.StructErr——
 	// validator 首次校验即缓存字段名，早调用会让消息漏出 Go 字段名。
 	if validationErrors, ok := errors.AsType[validator.ValidationErrors](err); ok && validationTranslationReady.Load() {
@@ -166,14 +169,21 @@ func MapErr(c *gin.Context, err error, mapper *ErrMapper) {
 	// 纯错误树判定：errors.Is 对聚合错误任一成员命中即真，
 	// `errors.Join(Canceled, dbFailure)` 会被当成单纯的取消交给终态中间件，
 	// 那条真实故障就此消失（既不回 500，也不进错误率）。
-	if errx.IsPureAbort(err) {
-		if c != nil {
-			c.Error(err).Type = gin.ErrorTypePrivate
-			c.Abort()
-		}
+	if deferRequestAbort(c, err) {
 		return
 	}
 	Err(c, goerr.New(err, goerr.StatusInternalServer()))
+}
+
+func deferRequestAbort(c *gin.Context, err error) bool {
+	if !errx.IsPureAbort(err) {
+		return false
+	}
+	if c != nil {
+		c.Error(err).Type = gin.ErrorTypePrivate
+		c.Abort()
+	}
+	return true
 }
 
 // ErrWithData 返回统一错误响应，并把额外元数据放在 data 中。

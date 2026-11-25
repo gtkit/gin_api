@@ -130,7 +130,7 @@ func TestAssembleExternalIdentityWithoutRedis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workers, err := buildWorkers(&inf)
+	workers, err := buildWorkers(&inf, svc)
 	if err != nil {
 		t.Fatal(err)
 	}

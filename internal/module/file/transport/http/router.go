@@ -24,6 +24,10 @@ type Deps struct {
 	MaxUploadBytes int64
 	// MaxChunkBytes 是分片请求体上限（库默认单片上限 20MB + 表单开销）。
 	MaxChunkBytes int64
+	// Payload limits exclude multipart framing.
+	MaxUploadFileBytes int64
+	MaxChunkFileBytes  int64
+	StagingDir         string
 	// RequestTimeout 是上传/合并/下载路由的超时；非正时按 300s。
 	RequestTimeout time.Duration
 	RateLimit      router.RateLimitStager
@@ -43,6 +47,13 @@ func Register(parent *gin.RouterGroup, deps Deps) {
 		deps.RequestTimeout = 300 * time.Second
 	}
 	handler := NewHandler(deps.Service)
+	if deps.MaxUploadFileBytes > 0 {
+		handler.uploadBytes = deps.MaxUploadFileBytes
+	}
+	if deps.MaxChunkFileBytes > 0 {
+		handler.chunkBytes = deps.MaxChunkFileBytes
+	}
+	handler.stagingDir = deps.StagingDir
 	authorize := middleware.Authorize(deps.Authorizer, "file.access")
 	uploadTimeout := middleware.Timeout(deps.RequestTimeout, time.Second)
 

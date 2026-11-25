@@ -85,7 +85,7 @@ type RefreshStore interface {
 	Peek(ctx context.Context, token string) (uid int64, err error)
 	// Consume 消费并轮换；检测到重用时撤销整族。
 	Consume(ctx context.Context, token string) (uid int64, newToken string, err error)
-	RevokeFamilyOfToken(ctx context.Context, token string) error
+	RevokeFamilyOfToken(ctx context.Context, owner int64, token string) (bool, error)
 }
 
 // RevocationList 记录被撤销的访问令牌。

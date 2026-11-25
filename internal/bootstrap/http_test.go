@@ -9,6 +9,19 @@ import (
 	"github.com/gtkit/gin-api/internal/platform/config"
 )
 
+func TestHTTPShutdownTimeoutIsIndependentOfReadTimeout(t *testing.T) {
+	cfg := &config.Config{}
+	if got := newHTTPConfig(cfg).ShutdownTimeout; got != 10*time.Second {
+		t.Fatalf("default shutdown timeout = %s", got)
+	}
+	cfg.App.ReadTimeoutFullSeconds = 33
+	cfg.App.HTTPShutdownTimeoutSeconds = 97
+	got := newHTTPConfig(cfg)
+	if got.ShutdownTimeout != 97*time.Second || got.ReadTimeout != 33*time.Second {
+		t.Fatalf("HTTP timeouts = %#v", got)
+	}
+}
+
 func TestNewHTTPConfigResolvesTLSFilesFromProjectRoot(t *testing.T) {
 	cfg := newHTTPConfig(&config.Config{
 		App: config.AppConfig{

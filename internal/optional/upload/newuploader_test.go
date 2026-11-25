@@ -18,7 +18,7 @@ import (
 )
 
 // validUploaderOptions 给出本地驱动的最小合法装配参数。
-func validUploaderOptions(t *testing.T, client goredis.UniversalClient) UploaderOptions {
+func validUploaderOptions(t *testing.T, client *goredis.Client) UploaderOptions {
 	t.Helper()
 
 	root := t.TempDir()

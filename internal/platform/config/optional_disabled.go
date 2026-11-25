@@ -7,4 +7,5 @@ package config
 type OptionalConfig struct{}
 
 func (*Config) TaskQueueEnabled() bool  { return false }
+func (*Config) UploadEnabled() bool     { return false }
 func (*Config) validateOptional() error { return nil }

@@ -26,6 +26,9 @@ type Options struct {
 	LogRequestBody, LogResponseBody bool
 	// MaxBodyBytes 是整个请求链共享的正文上限。
 	MaxBodyBytes int64
+	// ServerReadTimeout and ServerReadHeaderTimeout protect the server limit on ordinary routes.
+	ServerReadTimeout       time.Duration
+	ServerReadHeaderTimeout time.Duration
 	// MaxInflightRequests 是业务组同时处理上限；0 用 128，负数拒绝装配。
 	MaxInflightRequests int
 	// RequestIDFactory 可替换请求 ID 构造函数；nil 使用默认安全随机源。
@@ -105,7 +108,8 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 	registerSystemRoutes(engine, opt)
 
 	admit := middleware.Admission(opt.MaxInflightRequests, opt.Metrics)
-	v1 := engine.Group("/api/v1", admit, middleware.Timeout(30*time.Second, 2*time.Second))
+	v1 := engine.Group("/api/v1", admit, middleware.PreserveServerReadDeadline(opt.ServerReadTimeout, opt.ServerReadHeaderTimeout),
+		middleware.Timeout(30*time.Second, 2*time.Second))
 	if opt.RegisterModules != nil {
 		opt.RegisterModules(v1)
 	}

@@ -22,6 +22,7 @@ type RefreshRequest struct {
 
 // LogoutRequest describes the authenticated token pair to revoke.
 type LogoutRequest struct {
+	UserID       int64
 	TokenID      string
 	ExpiresAt    time.Time
 	RefreshToken string

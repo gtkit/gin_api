@@ -92,7 +92,7 @@ type UploaderOptions struct {
 	// AllowedTypes 是允许的扩展名白名单，必须非空。
 	AllowedTypes []string
 	// Redis 是分片会话存储客户端，归调用方所有（Close 不关闭它）。
-	Redis goredis.UniversalClient
+	Redis *goredis.Client
 	// KeyPrefix 是项目 Redis 命名空间；会话键在其下追加 "gu:"。
 	KeyPrefix string
 }
@@ -112,6 +112,10 @@ type UploaderOptions struct {
 // Redis 会话存储的后台错误（孤儿数据清理等）同样接入本仓日志。
 // 返回的 Uploader.Close 会级联关闭注入的会话存储。
 func NewUploader(o UploaderOptions, extra ...gouploader.Option) (*gouploader.Uploader, error) {
+	return newUploader(o, nil, extra...)
+}
+
+func newUploader(o UploaderOptions, recovery *RecoverySessions, extra ...gouploader.Option) (*gouploader.Uploader, error) {
 	if strings.TrimSpace(o.ChunkDir) == "" {
 		return nil, errors.New("upload: chunk dir is required")
 	}
@@ -160,6 +164,18 @@ func NewUploader(o UploaderOptions, extra ...gouploader.Option) (*gouploader.Upl
 			logger.Errorf("upload: gouploader background error: %v", err)
 		}),
 	}
+	var storage gouploader.Storage
+	if recovery != nil {
+		recovery.Store = chunkStore
+		opts = append(opts, gouploader.WithChunkStore(recovery))
+		if o.Storage.EffectiveDriver() == DriverS3 {
+			opts = append(opts, gouploader.WithStorageResolver(gouploader.StorageResolverFunc(
+				func(context.Context, gouploader.ObjectScope) (gouploader.Storage, error) {
+					return registeredStorage{Storage: storage}, nil
+				},
+			)))
+		}
+	}
 	if o.Storage.EffectiveDriver() == DriverLocal {
 		// 本地代理合并走预分配装配文件：会话过期/中断后的 *.assembling
 		// 残留由 sweeper 周期回收。云驱动不产生装配残留（分片数据在
@@ -173,6 +189,7 @@ func NewUploader(o UploaderOptions, extra ...gouploader.Option) (*gouploader.Upl
 		_ = chunkStore.Close()
 		return nil, fmt.Errorf("upload: assemble uploader: %w", err)
 	}
+	storage = uploader.Storage()
 	return uploader, nil
 }
 

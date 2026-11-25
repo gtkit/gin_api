@@ -181,8 +181,9 @@ func TestDeleteScopesOwner(t *testing.T) {
 func TestListAfterScopesAndBoundsEverySeek(t *testing.T) {
 	r, m := newMockRepo(t)
 	at := time.Now()
-	order := " AND `files`.`deleted_at` IS NULL ORDER BY created_at DESC,id DESC LIMIT ?"
-	m.ExpectQuery(regexp.QuoteMeta("WHERE owner_id = ?"+order)).WithArgs(7, 101).WillReturnRows(fileRows())
+	order := " AND `files`.`deleted_at` IS NULL ORDER BY owner_id DESC,created_at DESC,id DESC LIMIT ?"
+	m.ExpectQuery(regexp.QuoteMeta("FROM files FORCE INDEX (idx_files_owner) WHERE owner_id = ?"+order)).
+		WithArgs(7, 101).WillReturnRows(fileRows())
 	if _, err := r.ListAfter(t.Context(), 7, time.Time{}, "", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,9 @@ func TestListAfterScopesAndBoundsEverySeek(t *testing.T) {
 	if _, err := r.ListAfter(t.Context(), 7, at, "last", 1); err != nil {
 		t.Fatal(err)
 	}
-	m.ExpectQuery(regexp.QuoteMeta("WHERE owner_id = ? AND (created_at IS NULL AND id < ?)"+order)).WithArgs(7, "last", 2).WillReturnRows(fileRows())
+	nullOrder := " AND `files`.`deleted_at` IS NULL ORDER BY owner_id DESC,id DESC LIMIT ?"
+	m.ExpectQuery(regexp.QuoteMeta("WHERE owner_id = ? AND (created_at IS NULL AND id < ?)"+nullOrder)).
+		WithArgs(7, "last", 2).WillReturnRows(fileRows())
 	if _, err := r.ListAfter(t.Context(), 7, time.Time{}, "last", 1); err != nil {
 		t.Fatal(err)
 	}

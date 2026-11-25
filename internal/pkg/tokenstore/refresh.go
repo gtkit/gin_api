@@ -100,8 +100,19 @@ type RefreshStore struct {
 	// issueSHA 是签发脚本的缓存（与 sha 同款 NOSCRIPT 重载策略）。
 	issueSHA atomic.Pointer[string]
 	// peekSHA 是只读判定脚本的缓存（同款策略）。
-	peekSHA atomic.Pointer[string]
+	peekSHA   atomic.Pointer[string]
+	revokeSHA atomic.Pointer[string]
 }
+
+// Both keys share a family hash slot. Keep the UID comparison as strings so
+// that callers with distinct int64 user IDs cannot collide through Lua numbers.
+const revokeOwnedFamilyScript = `
+if redis.call('HGET', KEYS[1], 'uid') ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[2], '1', 'PX', ARGV[2], 'NX')
+return 1
+`
 
 // issueScript 原子写入一条刷新令牌记录并设置 TTL（local-authentication spec）。
 //
@@ -262,6 +273,10 @@ func NewRefreshStore(
 	if err != nil {
 		return nil, fmt.Errorf("tokenstore: load peek script: %w", err)
 	}
+	revokeSHA, err := client.ScriptLoad(ctx, revokeOwnedFamilyScript).Result()
+	if err != nil {
+		return nil, fmt.Errorf("tokenstore: load family revocation script: %w", err)
+	}
 
 	s := &RefreshStore{
 		client: client, prefix: prefix, ttl: ttl,
@@ -272,6 +287,7 @@ func NewRefreshStore(
 	s.sha.Store(&sha)
 	s.issueSHA.Store(&issueSHA)
 	s.peekSHA.Store(&peekSHA)
+	s.revokeSHA.Store(&revokeSHA)
 	return s, nil
 }
 
@@ -581,13 +597,31 @@ func (s *RefreshStore) RevokeFamily(ctx context.Context, family string) error {
 	return nil
 }
 
-// RevokeFamilyOfToken 撤销令牌所属的族。登出时调用。
-func (s *RefreshStore) RevokeFamilyOfToken(ctx context.Context, token string) error {
-	family, _, err := splitToken(token)
+// RevokeFamilyOfToken revokes the family only when the full token belongs to
+// owner. A consumed token can still identify its family while its record lives.
+func (s *RefreshStore) RevokeFamilyOfToken(ctx context.Context, owner int64, token string) (bool, error) {
+	family, secret, err := splitToken(token)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.RevokeFamily(ctx, family)
+	if owner <= 0 {
+		return false, nil
+	}
+	keys := []string{s.recordKey(family, secret), s.familyKey(family)}
+	args := []any{strconv.FormatInt(owner, 10), max(1, s.ttl.Milliseconds())}
+	matched, err := s.client.EvalSha(ctx, *s.revokeSHA.Load(), keys, args...).Int64()
+	if err != nil && isNoScript(err) {
+		sha, loadErr := s.client.ScriptLoad(ctx, revokeOwnedFamilyScript).Result()
+		if loadErr != nil {
+			return false, fmt.Errorf("tokenstore: reload family revocation script: %w", loadErr)
+		}
+		s.revokeSHA.Store(&sha)
+		matched, err = s.client.EvalSha(ctx, sha, keys, args...).Int64()
+	}
+	if err != nil {
+		return false, fmt.Errorf("tokenstore: revoke owned token family: %w", err)
+	}
+	return matched == 1, nil
 }
 
 // recordKey 是令牌记录的键。

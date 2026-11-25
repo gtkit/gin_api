@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,6 +90,7 @@ func (stubIssuer) Issue(context.Context, int64, ...string) (string, error) { ret
 
 type stubRefresh struct {
 	consumeErr error
+	revoke     func(int64) (bool, error)
 }
 
 func (stubRefresh) Issue(context.Context, int64) (string, error) { return "refresh", nil }
@@ -108,7 +110,12 @@ func (s stubRefresh) Consume(context.Context, string) (int64, string, error) {
 	return 7, "rotated", nil
 }
 
-func (stubRefresh) RevokeFamilyOfToken(context.Context, string) error { return nil }
+func (s stubRefresh) RevokeFamilyOfToken(_ context.Context, owner int64, _ string) (bool, error) {
+	if s.revoke != nil {
+		return s.revoke(owner)
+	}
+	return true, nil
+}
 
 type stubRevocation struct{}
 
@@ -334,6 +341,7 @@ func TestLogoutSucceedsWithATokenIdentity(t *testing.T) {
 
 	h := newTestHandler(t, stubCreds{}, stubRefresh{})
 	rec := doRequest(t, h.Logout, `{"refresh_token":"fam.secret"}`, func(c *gin.Context) {
+		ginc.SetUserID(c, 7)
 		ginc.SetTokenIdentity(c, ginc.TokenIdentity{
 			TokenID:   "jti-1",
 			ExpiresAt: time.Now().Add(10 * time.Minute),
@@ -342,5 +350,40 @@ func TestLogoutSucceedsWithATokenIdentity(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLogoutUsesAuthenticatedOwnerAndAllowsRetry(t *testing.T) {
+	t.Parallel()
+
+	failing := true
+	calls := 0
+	h := newTestHandler(t, stubCreds{}, stubRefresh{revoke: func(owner int64) (bool, error) {
+		calls++
+		if owner != 42 {
+			t.Fatalf("revocation owner = %d, want 42", owner)
+		}
+		if failing {
+			return false, errors.New("private Redis error")
+		}
+		return false, nil
+	}})
+	request := func(withOwner bool) *httptest.ResponseRecorder {
+		return doRequest(t, h.Logout, `{"refresh_token":"fixture"}`, func(c *gin.Context) {
+			if withOwner {
+				ginc.SetUserID(c, 42)
+			}
+			ginc.SetTokenIdentity(c, ginc.TokenIdentity{TokenID: "jti", ExpiresAt: time.Now().Add(time.Hour)})
+		})
+	}
+	if rec := request(false); rec.Code != http.StatusUnauthorized || calls != 0 {
+		t.Fatalf("missing principal: status=%d revocation calls=%d", rec.Code, calls)
+	}
+	if rec := request(true); rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "private Redis error") {
+		t.Fatalf("dependency failure: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	failing = false
+	if rec := request(true); rec.Code != http.StatusOK || calls != 2 {
+		t.Fatalf("retry: status=%d revocation calls=%d", rec.Code, calls)
 	}
 }

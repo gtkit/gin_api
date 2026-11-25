@@ -14,6 +14,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/module/file/application"
+	"github.com/gtkit/gin-api/internal/optional/upload"
 	filerepo "github.com/gtkit/gin-api/internal/repository/file"
 	"github.com/gtkit/gouploader"
 	"gorm.io/gorm"
@@ -24,6 +25,20 @@ func New(up *gouploader.Uploader, db *gorm.DB, driver, bucket string, listTimeou
 		return nil, errors.New("file database is required")
 	}
 	return application.New(up, adapter{repo: filerepo.New(db), listTimeout: listTimeout}, driver, bucket)
+}
+
+func NewRecoverable(up *gouploader.Uploader, sessions *upload.RecoverySessions, db *gorm.DB,
+	driver, bucket string, listTimeout time.Duration, maxBytes int64, allowed []string) (*application.Service, error) {
+	if up == nil || db == nil || sessions == nil {
+		return nil, errors.New("recoverable file database, uploader and sessions are required")
+	}
+	repo := filerepo.New(db)
+	return application.New(up, adapter{repo: repo, listTimeout: listTimeout}, driver, bucket, application.OperationOptions{
+		Repository: repo, Namespace: sessions.Namespace(), MaxFileBytes: maxBytes, AllowedTypes: allowed, Session: sessions.Lookup,
+		Merge: func(ctx context.Context, id string, register func(context.Context, string) error) (*gouploader.UploadResult, error) {
+			return up.ChunkService().Merge(upload.WithWriteRegistration(ctx, register), id)
+		},
+	})
 }
 
 type adapter struct {

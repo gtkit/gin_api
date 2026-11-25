@@ -54,3 +54,28 @@ func TestOptionalExampleCoversConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadValidatesItsRedisAddressAndDatabase(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{}
+	cfg.Upload.Enabled = true
+	cfg.Upload.RedisDB = 2
+	cfg.Upload.Dir = "files"
+	cfg.Upload.ChunkDir = "chunks"
+	cfg.Upload.MaxFileSize = 1 << 20
+	cfg.Upload.AllowedTypes = []string{".txt"}
+
+	cfg.Redis.DBs = []int{2}
+	if err := cfg.validateUpload(); err == nil || !strings.Contains(err.Error(), "redis.addr") {
+		t.Fatalf("missing Redis address: %v", err)
+	}
+	cfg.Redis = RedisConfig{Addr: "127.0.0.1:6379", DBs: []int{0}}
+	if err := cfg.validateUpload(); err == nil || !strings.Contains(err.Error(), "upload.redis_db") {
+		t.Fatalf("unconfigured Redis logical DB: %v", err)
+	}
+	cfg.Redis.DBs = append(cfg.Redis.DBs, 2)
+	if err := cfg.validateUpload(); err != nil {
+		t.Fatal(err)
+	}
+}

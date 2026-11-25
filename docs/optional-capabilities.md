@@ -13,6 +13,16 @@
 
 `bootstrap/optional_enabled.go` 只聚合现有构造函数，资源关闭仍进入 providerCleanup，启动中途失败按取得逆序撤销。tasks 与 upload 启用都让 Redis 成为必需资源（upload.redis_db 必须在 redis.dbs 内）。审计 worker 在 HTTP drain 后停止；上传关闭沿用 SDK Close，级联关闭注入的 Redis 会话存储（不关借用的客户端）；这些所有权不转交给业务服务。代理路径的分片数据仍在 chunk_dir 本地磁盘，多实例部署需共享挂载或粘性路由。
 
+### 文件操作与请求预算
+
+启用新版上传前先应用 `file_operations` 迁移，再排空旧版写实例。新会话绑定其存储位置，旧版未完成会话应先在旧位置完成，否则重新初始化。Redis 保存会话，`chunk_dir` 保存代理分片。需要副本接管时也要共享对应持久卷。local 最终对象目录同样要能被接管副本访问。
+
+删除先隐藏文件。对象回收暂时失败时，DELETE 可返回 503 且 GET 返回 404。原账号可重试，删除完成后保留 7 天成功重放窗口。恢复只在物理位置和内容证据可核验时发布上传，待核对记录保留供排查。完成操作的写入尝试明细在 7 天后分批清理，主记录仍保存来源与合并防复活信息。存在未决操作时保留迁移和新版恢复 worker。
+
+普通上传的请求上限为 `min(application.max_body_bytes, upload.max_file_size + 1 MiB)`，代理分片为 `min(application.max_body_bytes, 21 MiB)`。全局未设置时使用 10 MiB。普通文件还受 `upload.max_file_size` 约束，单个分片还受实际会话和 SDK 20 MiB 限制。multipart 头、字段和边界需要占用请求预算。较大请求在 `chunk_dir` 同级的 `.staging` 路径暂存，按实例的传输并发上限和最大文件预算规划磁盘。
+
+连续翻页可先请求 `GET /api/v1/files?cursor=&page_size=50`，再原样带回 `next_cursor`。空游标响应表示已读完。游标只适用于签发它的账号，历史 NULL 时间按数据库排序继续读取。需要精确总数时使用 `?page=1&page_size=50`。
+
 审计开关启用时，迁移命令的模型列表包含审计表，便于显式生成 DDL；没有自动迁移。默认构建和关闭开关均不登记它。示例业务模块也不因 optional 标签被自动注册。
 
 直接在原项目验证：

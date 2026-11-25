@@ -86,6 +86,10 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 	if cfg.App.ReadTimeoutFullSeconds > 0 {
 		readTimeout = time.Duration(cfg.App.ReadTimeoutFullSeconds) * time.Second
 	}
+	shutdownTimeout := defaultShutdownTimeout
+	if cfg.App.HTTPShutdownTimeoutSeconds > 0 {
+		shutdownTimeout = time.Duration(cfg.App.HTTPShutdownTimeoutSeconds) * time.Second
+	}
 
 	return HTTPConfig{
 		Host:              cfg.App.Host,
@@ -98,7 +102,7 @@ func newHTTPConfig(cfg *config.Config) HTTPConfig {
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      serverWriteTimeout,
 		IdleTimeout:       defaultIdleTimeout,
-		ShutdownTimeout:   defaultShutdownTimeout,
+		ShutdownTimeout:   shutdownTimeout,
 	}
 }
 

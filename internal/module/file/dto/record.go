@@ -20,7 +20,7 @@ type ListRequest struct {
 	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100"`
 }
 
-// ChunkForm 是分片上传的表单字段（file part 单独经 FormFile 读取）。
+// ChunkForm 是分片上传的表单元数据。
 type ChunkForm struct {
 	UploadID   string `form:"upload_id" binding:"required"`
 	ChunkIndex int    `form:"chunk_index" binding:"min=0"`

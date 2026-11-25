@@ -23,6 +23,81 @@ type changedPasswordHash struct {
 	value  *string
 }
 
+func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
+	conn, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		mock.ExpectClose()
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: conn, SkipInitializeWithVersion: true}),
+		&gorm.Config{DisableAutomaticPing: true, Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher, err := credential.NewHasher(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := hasher.Hash("fixture-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := openAPIEngineWithDB(t, config.AuthModeLocal, true, db)
+	request := func(route, body, access string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/"+route, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if access != "" {
+			req.Header.Set("Authorization", "Bearer "+access)
+		}
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("%s HTTP %d, want %d", route, rec.Code, want)
+		}
+		return rec
+	}
+	login := func(name string, uid int64) dto.TokenResponse {
+		t.Helper()
+		mock.ExpectQuery("SELECT `id`,`password`,`status`,`auth_version` FROM `users`").WithArgs(name, 1).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "password", "status", "auth_version"}).AddRow(uid, hash, 1, 0))
+		rec := request("login", `{"phone":"`+name+`","password":"fixture-password"}`, "", http.StatusOK)
+		var envelope struct{ Data dto.TokenResponse }
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Data.AccessToken == "" || envelope.Data.RefreshToken == "" {
+			t.Fatal("login returned an incomplete token pair")
+		}
+		return envelope.Data
+	}
+	expectSession := func(uid int64) {
+		t.Helper()
+		mock.ExpectQuery("SELECT `id` FROM `users`").WithArgs(uid, 1, 0, 1).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uid))
+	}
+	first, second := login("fixture-a", 7), login("fixture-b", 8)
+	ownerBody := `{"refresh_token":"` + second.RefreshToken + `"}`
+	expectSession(7)
+	request("logout", ownerBody, first.AccessToken, http.StatusOK)
+	expectSession(7)
+	request("logout", `{}`, first.AccessToken, http.StatusUnauthorized)
+	mock.ExpectQuery("SELECT `id`,`password`,`status`,`auth_version` FROM `users`").WithArgs(8, 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "password", "status", "auth_version"}).AddRow(8, hash, 1, 0))
+	request("refresh", ownerBody, "", http.StatusOK)
+	expectSession(8)
+	request("logout", ownerBody, second.AccessToken, http.StatusOK)
+	request("refresh", ownerBody, "", http.StatusUnauthorized)
+}
+
 func (m changedPasswordHash) Match(value driver.Value) bool {
 	hash, ok := value.(string)
 	if !ok || m.hasher.Compare(hash, "new-password") != nil {

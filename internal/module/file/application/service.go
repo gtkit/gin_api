@@ -24,11 +24,11 @@ import (
 )
 
 var (
-	ErrInvalid               = errors.New("invalid file input")
-	ErrNotFound              = errors.New("file not found")
-	ErrForbidden             = errors.New("authenticated owner required")
-	ErrDriverMismatch        = errors.New("file stored on a different storage driver")
-	ErrDependencyUnavailable = errors.New("file data dependency unavailable")
+	ErrInvalid                 = errors.New("invalid file input")
+	ErrNotFound                = errors.New("file not found")
+	ErrForbidden               = errors.New("authenticated owner required")
+	ErrStorageLocationMismatch = errors.New("file stored at a different storage location")
+	ErrDependencyUnavailable   = errors.New("file data dependency unavailable")
 )
 
 // Record 是文件记录的应用层视图，直接作为 API 响应载荷。
@@ -63,22 +63,32 @@ type Repository interface {
 }
 
 type Service struct {
-	up     *gouploader.Uploader
-	repo   Repository
-	driver string
-	bucket string
+	up         *gouploader.Uploader
+	repo       Repository
+	driver     string
+	bucket     string
+	operations *OperationOptions
 }
 
 // New 装配文件服务。driver/bucket 是当前部署的存储位置，写入每条记录
-// 用于溯源；driver 切换后历史记录据此拒绝跨驱动读写。
-func New(up *gouploader.Uploader, repo Repository, driver, bucket string) (*Service, error) {
+// 用于溯源；历史记录据此拒绝跨存储位置读写。
+func New(up *gouploader.Uploader, repo Repository, driver, bucket string, options ...OperationOptions) (*Service, error) {
 	if up == nil || repo == nil {
 		return nil, errors.New("file uploader and repository required")
 	}
 	if driver == "" {
 		return nil, errors.New("file storage driver required")
 	}
-	return &Service{up: up, repo: repo, driver: driver, bucket: bucket}, nil
+	service := &Service{up: up, repo: repo, driver: driver, bucket: bucket}
+	if len(options) != 0 {
+		opt := options[0]
+		if opt.Repository == nil || opt.Namespace == "" || opt.Session == nil || opt.Merge == nil ||
+			opt.MaxFileBytes <= 0 || len(opt.AllowedTypes) == 0 {
+			return nil, errors.New("complete file recovery configuration is required")
+		}
+		service.operations = &opt
+	}
+	return service, nil
 }
 
 // Upload 处理普通单文件上传：流式写入当前驱动并建立归属记录。
@@ -86,6 +96,13 @@ func (s *Service) Upload(ctx context.Context, owner int64, fileName string, read
 	ctx, err := s.uploadContext(ctx, owner)
 	if err != nil {
 		return Record{}, err
+	}
+	if s.operations != nil {
+		source, ok := reader.(io.ReadSeeker)
+		if !ok {
+			return Record{}, ErrInvalid
+		}
+		return s.uploadRecoverable(ctx, owner, fileName, source)
 	}
 	result, err := s.up.UploadService().Upload(ctx, fileName, reader, size, "", "")
 	if err != nil {
@@ -108,6 +125,11 @@ func (s *Service) UploadChunk(ctx context.Context, owner int64, uploadID string,
 	ctx, err := s.uploadContext(ctx, owner)
 	if err != nil {
 		return nil, err
+	}
+	if s.operations != nil {
+		if err := s.requireChunkLocation(ctx, owner, uploadID); err != nil {
+			return nil, err
+		}
 	}
 	return s.up.ChunkService().UploadChunk(ctx, uploadID, chunkIndex, reader, size, checksum)
 }
@@ -136,15 +158,25 @@ func (s *Service) Abort(ctx context.Context, owner int64, uploadID string) error
 	if err != nil {
 		return err
 	}
+	if s.operations != nil {
+		if err := s.requireChunkLocation(ctx, owner, uploadID); err != nil {
+			if errors.Is(err, gouploader.ErrSessionNotFound) || errors.Is(err, gouploader.ErrSessionExpired) {
+				return nil
+			}
+			return err
+		}
+	}
 	return s.up.ChunkService().Abort(ctx, uploadID)
 }
 
-// Merge 合并分片并建立归属记录。重复合并由库返回缓存结果，
-// 记录侧经 (owner, storage_key) 幂等，返回的都是同一条记录。
+// Merge publishes the owner-scoped file after the registered object is complete.
 func (s *Service) Merge(ctx context.Context, owner int64, uploadID string) (Record, error) {
 	ctx, err := s.uploadContext(ctx, owner)
 	if err != nil {
 		return Record{}, err
+	}
+	if s.operations != nil {
+		return s.mergeRecoverable(ctx, owner, uploadID)
 	}
 	result, err := s.up.ChunkService().Merge(ctx, uploadID)
 	if err != nil {
@@ -249,15 +281,17 @@ func (s *Service) ListAfter(ctx context.Context, owner int64, cursor string, siz
 	return page, nil
 }
 
-// Delete 先删存储对象、成功后软删记录；存储删除失败保留记录并返回错误，
-// 避免记录指向已不存在的对象。
+// Delete hides the owner-scoped file before deleting its object when recovery is wired.
 func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
+	if s.operations != nil {
+		return s.deleteRecoverable(ctx, owner, id)
+	}
 	record, err := s.Get(ctx, owner, id)
 	if err != nil {
 		return err
 	}
-	if record.Driver != s.driver {
-		return ErrDriverMismatch
+	if !s.matchesStorageLocation(record) {
+		return ErrStorageLocationMismatch
 	}
 	if err := s.up.Storage().Delete(ctx, record.StorageKey); err != nil {
 		return fmt.Errorf("delete storage object: %w", err)
@@ -278,14 +312,29 @@ func (s *Service) Download(ctx context.Context, owner int64, id string) (Record,
 	if err != nil {
 		return Record{}, nil, err
 	}
-	if record.Driver != s.driver {
-		return Record{}, nil, ErrDriverMismatch
+	if !s.matchesStorageLocation(record) {
+		return Record{}, nil, ErrStorageLocationMismatch
+	}
+	if s.operations != nil {
+		if err := s.checkPublishedLocation(ctx, owner, id); err != nil {
+			return Record{}, nil, err
+		}
 	}
 	rc, err := s.up.Storage().Get(ctx, record.StorageKey)
 	if err != nil {
 		return Record{}, nil, fmt.Errorf("open storage object: %w", err)
 	}
 	return record, rc, nil
+}
+
+func (s *Service) matchesStorageLocation(record Record) bool {
+	if record.Driver != s.driver || record.Bucket != s.bucket {
+		return false
+	}
+	if s.driver == "local" {
+		return record.Bucket == ""
+	}
+	return record.Bucket != ""
 }
 
 // uploadContext 校验身份并注入 UploadInfo：库侧 WithUserIDFn 从中解析

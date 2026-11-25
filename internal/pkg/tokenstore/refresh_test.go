@@ -162,12 +162,118 @@ func TestLogoutRevokesFamily(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if err := store.RevokeFamilyOfToken(ctx, token); err != nil {
-		t.Fatalf("RevokeFamilyOfToken: %v", err)
+	if revoked, err := store.RevokeFamilyOfToken(ctx, 9, token); err != nil || !revoked {
+		t.Fatalf("RevokeFamilyOfToken: revoked = %v, err = %v", revoked, err)
 	}
 
 	if _, _, err := store.Consume(ctx, token); !errors.Is(err, ErrFamilyRevoked) {
 		t.Fatalf("using a token after logout = %v, want ErrFamilyRevoked", err)
+	}
+}
+
+func TestLogoutFamilyOwnershipAndTTL(t *testing.T) {
+	t.Parallel()
+
+	store, srv := newTestStore(t, time.Hour)
+	ctx := t.Context()
+	const owner = 1 << 53
+	issue := func(uid int64) string {
+		t.Helper()
+		token, err := store.Issue(ctx, uid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	owned := issue(owner)
+	otherFamily := issue(owner)
+	otherOwner := issue(owner + 1)
+	if matched, err := store.RevokeFamilyOfToken(ctx, owner, otherOwner); err != nil || matched {
+		t.Fatalf("different owner: matched=%t err=%v", matched, err)
+	}
+	family, _, err := splitToken(owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched, err := store.RevokeFamilyOfToken(ctx, owner, family+".missing"); err != nil || matched {
+		t.Fatalf("missing record: matched=%t err=%v", matched, err)
+	}
+	_, successor, err := store.Consume(ctx, owned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := store.client.(*redis.Client)
+	if err := client.ScriptFlush(ctx).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if matched, err := store.RevokeFamilyOfToken(ctx, owner, owned); err != nil || !matched {
+		t.Fatalf("consumed record after script cache removal: matched=%t err=%v", matched, err)
+	}
+	key := store.familyKey(family)
+	if ttl := srv.TTL(key); ttl != time.Hour {
+		t.Fatalf("revocation TTL = %s, want 1h", ttl)
+	}
+	srv.FastForward(time.Minute)
+	if matched, err := store.RevokeFamilyOfToken(ctx, owner, owned); err != nil || !matched {
+		t.Fatalf("repeat: matched=%t err=%v", matched, err)
+	}
+	if ttl := srv.TTL(key); ttl != 59*time.Minute {
+		t.Fatalf("repeated logout extended TTL: %s", ttl)
+	}
+	if _, err := store.Peek(ctx, successor); !errors.Is(err, ErrFamilyRevoked) {
+		t.Fatalf("owned successor after logout: %v", err)
+	}
+	for _, token := range []string{otherFamily, otherOwner} {
+		if _, err := store.Peek(ctx, token); err != nil {
+			t.Fatalf("independent family was affected: %v", err)
+		}
+	}
+	srv.FastForward(time.Hour)
+	if matched, err := store.RevokeFamilyOfToken(ctx, owner, owned); err != nil || matched {
+		t.Fatalf("expired record: matched=%t err=%v", matched, err)
+	}
+}
+
+func TestLogoutAndRotationLeaveNoUsableRefreshSuccessor(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newTestStore(t, time.Hour)
+	ctx := t.Context()
+	for range 12 {
+		token, err := store.Issue(ctx, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var successor string
+		var rotateErr, revokeErr error
+		var matched bool
+		wg.Go(func() {
+			<-start
+			_, successor, rotateErr = store.Consume(ctx, token)
+		})
+		wg.Go(func() {
+			<-start
+			matched, revokeErr = store.RevokeFamilyOfToken(ctx, 7, token)
+		})
+		close(start)
+		wg.Wait()
+
+		if revokeErr != nil || !matched {
+			t.Fatalf("concurrent logout: matched=%t err=%v", matched, revokeErr)
+		}
+		if rotateErr != nil && !errors.Is(rotateErr, ErrFamilyRevoked) {
+			t.Fatalf("concurrent rotation: %v", rotateErr)
+		}
+		for _, refresh := range []string{token, successor} {
+			if refresh == "" {
+				continue
+			}
+			if _, err := store.Peek(ctx, refresh); !errors.Is(err, ErrFamilyRevoked) {
+				t.Fatalf("refresh after completed logout: %v", err)
+			}
+		}
 	}
 }
 

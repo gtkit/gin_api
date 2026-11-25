@@ -69,6 +69,8 @@ type AppConfig struct {
 	//
 	// <=0 时兜底为 DefaultDrainWait。取值应不小于 LB 的探测间隔。
 	DrainWaitSeconds int `mapstructure:"drain_wait_seconds"`
+	// HTTPShutdownTimeoutSeconds bounds HTTP draining after the listener is closed.
+	HTTPShutdownTimeoutSeconds int `mapstructure:"http_shutdown_timeout"`
 }
 
 // DefaultDrainWait 是未配置 drain_wait_seconds 时的等待时长。

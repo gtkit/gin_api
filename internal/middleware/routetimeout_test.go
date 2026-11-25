@@ -10,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	resp "github.com/gtkit/gin-api/internal/pkg/response"
 	"github.com/gtkit/gin-api/internal/testutil"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +40,173 @@ func newTimeoutEngine(t *testing.T, timeoutMW gin.HandlerFunc, handler gin.Handl
 
 func cooperativePolicy(deadline, grace time.Duration) gin.HandlerFunc {
 	return Timeout(deadline, grace)
+}
+
+func TestSlowRequestBodyReturns504OnHTTP1(t *testing.T) {
+	testutil.RequireLoopback(t)
+	engine := newTimeoutEngine(t, Timeout(120*time.Millisecond, time.Second), func(c *gin.Context) {
+		if _, err := io.Copy(io.Discard, c.Request.Body); err != nil {
+			resp.BindStructErr(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	server := httptest.NewServer(engine)
+	t.Cleanup(server.Close)
+	conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buffered := bufio.NewReader(conn)
+	request := func(body string, want int) {
+		t.Helper()
+		if _, err := io.WriteString(conn, "POST /probe HTTP/1.1\r\nHost: local\r\nContent-Length: 2\r\n\r\n"+body); err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.ReadResponse(buffered, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			t.Fatal(err)
+		}
+		if err := res.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != want {
+			t.Fatalf("response %d, want %d", res.StatusCode, want)
+		}
+	}
+	request("ok", http.StatusNoContent)
+	time.Sleep(150 * time.Millisecond)
+	request("ok", http.StatusNoContent)
+	request("x", http.StatusGatewayTimeout)
+}
+
+func TestHTTP2BodyDeadlineIsPerStream(t *testing.T) {
+	testutil.RequireLoopback(t)
+	started := make(chan struct{})
+	engine := gin.New()
+	engine.Use(ErrorHandler())
+	engine.POST("/slow", Timeout(220*time.Millisecond, time.Second), func(c *gin.Context) {
+		close(started)
+		if _, err := io.Copy(io.Discard, c.Request.Body); err != nil {
+			resp.BindStructErr(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	engine.GET("/fast", Timeout(time.Second, time.Second), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	server := httptest.NewUnstartedServer(engine)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	client := server.Client()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	slow, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/slow", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slowResult *http.Response
+	var slowErr error
+	var wg sync.WaitGroup
+	wg.Go(func() { slowResult, slowErr = client.Do(slow) })
+	defer wg.Wait()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	var reused bool
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused }}
+	fast, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodGet, server.URL+"/fast", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastResult, err := client.Do(fast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fastResult.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if fastResult.ProtoMajor != 2 || !reused || fastResult.StatusCode != http.StatusNoContent {
+		t.Fatalf("fast sibling: protocol=%s reused=%t status=%d", fastResult.Proto, reused, fastResult.StatusCode)
+	}
+	wg.Wait()
+	if slowErr != nil {
+		t.Fatal(slowErr)
+	}
+	if err := slowResult.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if slowResult.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("slow stream status=%d", slowResult.StatusCode)
+	}
+}
+
+func TestExplicitTransferCanReadBeyondServerFallback(t *testing.T) {
+	testutil.RequireLoopback(t)
+	engine := gin.New()
+	engine.Use(ErrorHandler())
+	handler := func(c *gin.Context) {
+		if _, err := io.Copy(io.Discard, c.Request.Body); err != nil {
+			resp.BindStructErr(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+	engine.POST("/ordinary", PreserveServerReadDeadline(100*time.Millisecond, 25*time.Millisecond),
+		Timeout(time.Second, time.Second), handler)
+	engine.POST("/transfer", Timeout(time.Second, time.Second), handler)
+	server := httptest.NewUnstartedServer(engine)
+	server.Config.ReadTimeout = 100 * time.Millisecond
+	server.Config.ReadHeaderTimeout = 25 * time.Millisecond
+	server.Start()
+	t.Cleanup(server.Close)
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/ordinary", http.StatusGatewayTimeout},
+		{"/transfer", http.StatusNoContent},
+	} {
+		conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: local\r\nContent-Length: 1\r\n\r\n", tc.path); err != nil {
+			t.Fatal(err)
+		}
+		if tc.path == "/transfer" {
+			time.Sleep(180 * time.Millisecond)
+			if _, err := io.WriteString(conn, "x"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := res.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != tc.want {
+			t.Fatalf("%s status=%d want=%d", tc.path, res.StatusCode, tc.want)
+		}
+	}
 }
 
 type deadlineRecorder struct {

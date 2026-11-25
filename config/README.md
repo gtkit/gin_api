@@ -84,6 +84,8 @@ config/
 请求读取超时使用 `application.read_header_timeout` 和 `application.read_timeout`；
 JWT 密钥路径放在 `jwt.active` 或 `jwt.previous` 的密钥配置中。
 
+`application.http_shutdown_timeout` 单独控制 HTTP 排空期限，默认为 10 秒。部署终止宽限需容纳摘流等待、HTTP 排空和后台资源关闭。文件传输路由使用其独立的读体预算，服务仍用读头超时约束请求头。
+
 ## 核心字段校验
 
 | 字段 | 用途与约束 | 默认或回落规则 |

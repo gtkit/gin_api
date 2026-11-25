@@ -41,6 +41,9 @@ var (
 	// 区分它们只会让攻击者知道自己手里的令牌处于哪种状态。
 	ErrRefreshRejected = errors.New("auth: refresh token rejected")
 
+	// ErrLogoutUnavailable reports a failure to persist logout revocations.
+	ErrLogoutUnavailable = errors.New("auth: logout storage unavailable")
+
 	// ErrPasswordTooLong 表示口令超出可处理的长度。
 	ErrPasswordTooLong = errors.New("auth: password is too long")
 
@@ -365,36 +368,32 @@ func (s *Service) refreshRejected(ctx context.Context, refreshToken string, err 
 // tokenID 是访问令牌的 jti，expiresAt 是它的过期时刻。refreshToken 可以为空
 // ——客户端只带了访问令牌时仍然应当能登出，只是那条刷新链要等自然过期。
 func (s *Service) Logout(ctx context.Context, request LogoutRequest) error {
+	if request.UserID <= 0 {
+		return ErrSessionExpired
+	}
 	// **先撤刷新族、后撤访问令牌**（local-authentication spec）。
 	//
 	// 部分成功的残留必须取危害更小的一侧：反过来先撤访问令牌，族撤销一旦
 	// 失败，同一个 access token 已进不了登出端点（401），重试被自己撤掉的
 	// 令牌挡死，而长寿命的刷新链还活着、仍可换发新令牌；本序的残留只是
 	// 一个短 TTL 的访问令牌——无法续期，且重试登出自然可行。
+	var familyRevoked bool
 	if request.RefreshToken != "" {
-		if err := s.refresh.RevokeFamilyOfToken(ctx, request.RefreshToken); err != nil {
-			return fmt.Errorf("auth: revoke refresh family: %w (the access token is still "+
-				"valid, retry logout)", err)
+		revoked, err := s.refresh.RevokeFamilyOfToken(ctx, request.UserID, request.RefreshToken)
+		if err != nil {
+			return fmt.Errorf("auth: revoke refresh family: %w: %w", ErrLogoutUnavailable, err)
 		}
+		familyRevoked = revoked
 	}
-
 	if err := s.revoked.Revoke(ctx, request.TokenID, request.ExpiresAt); err != nil {
-		// 刷新链已死，残留的访问令牌在自身 TTL 内到期且无法续期——
-		// 仍然报错：登出没有完整生效，不能表现成成功。
-		if request.RefreshToken != "" {
-			return fmt.Errorf("auth: the refresh family was revoked but the access token is "+
-				"still live until it expires: %w", err)
-		}
-		return fmt.Errorf("auth: revoke access token: %w", err)
+		return fmt.Errorf("auth: revoke access token: %w: %w", ErrLogoutUnavailable, err)
 	}
-
-	if request.RefreshToken == "" {
-		s.audit(ctx, "logout: access token revoked, no refresh token supplied")
-		return nil
+	if familyRevoked {
+		s.audit(ctx, "logout: refresh family and access token revoked")
+		s.event(ctx, EventLogout)
+	} else {
+		s.audit(ctx, "logout: access token revoked")
 	}
-
-	s.audit(ctx, "logout: refresh family and access token revoked")
-	s.event(ctx, EventLogout)
 	return nil
 }
 

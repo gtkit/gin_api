@@ -23,10 +23,12 @@ import (
 )
 
 type optionalInfra struct {
-	outbound      *outbound.Downstreams
-	tasksProducer *taskqueue.Producer
-	uploader      *gouploader.Uploader
-	auditRecorder *auditlog.Recorder
+	outbound         *outbound.Downstreams
+	tasksProducer    *taskqueue.Producer
+	uploader         *gouploader.Uploader
+	uploadSessions   *upload.RecoverySessions
+	uploadStagingDir string
+	auditRecorder    *auditlog.Recorder
 }
 
 // optionalServices 承载 optional 构建的业务模块产物。
@@ -41,9 +43,9 @@ func buildOptionalServices(svc *services, inf infra) error {
 	if !inf.cfg.Upload.Enabled || inf.uploader == nil {
 		return nil
 	}
-	fileService, err := fileruntime.New(inf.uploader, inf.mysqlDB,
+	fileService, err := fileruntime.NewRecoverable(inf.uploader, inf.uploadSessions, inf.mysqlDB,
 		inf.cfg.Upload.Storage.EffectiveDriver(), inf.cfg.Upload.Storage.BucketName(),
-		time.Duration(inf.cfg.Upload.ListDBTimeoutMS)*time.Millisecond)
+		time.Duration(inf.cfg.Upload.ListDBTimeoutMS)*time.Millisecond, inf.cfg.Upload.MaxFileSize, inf.cfg.Upload.AllowedTypes)
 	if err != nil {
 		return fmt.Errorf("build file module: %w", err)
 	}
@@ -57,6 +59,10 @@ func registerOptionalModules(v1, transfers *gin.RouterGroup, svc services, auth 
 	if svc.file == nil {
 		return
 	}
+	globalLimit := inf.cfg.App.MaxBodyBytes
+	if globalLimit <= 0 {
+		globalLimit = middleware.DefaultMaxBytesLimitConfig.MaxBytes
+	}
 	deps := filehttp.Deps{
 		Service:        svc.file,
 		TransferGroup:  transfers,
@@ -67,10 +73,13 @@ func registerOptionalModules(v1, transfers *gin.RouterGroup, svc services, auth 
 		}),
 		Policy: upload.DefaultPolicy(),
 		// 请求体上限 = 文件大小上限 + 1MB multipart 表单开销。
-		MaxUploadBytes: inf.cfg.Upload.MaxFileSize + 1<<20,
+		MaxUploadBytes: min(globalLimit, inf.cfg.Upload.MaxFileSize+1<<20),
 		// 库默认单片上限 20MB + 1MB 表单开销。
-		MaxChunkBytes:  21 << 20,
-		RequestTimeout: inf.cfg.Upload.EffectiveRequestTimeout(),
+		MaxChunkBytes:      min(globalLimit, 21<<20),
+		MaxUploadFileBytes: min(globalLimit, inf.cfg.Upload.MaxFileSize),
+		MaxChunkFileBytes:  min(globalLimit, 20<<20, inf.cfg.Upload.MaxFileSize),
+		StagingDir:         inf.uploadStagingDir,
+		RequestTimeout:     inf.cfg.Upload.EffectiveRequestTimeout(),
 	}
 	if inf.cfg.Upload.RateLimitEnabled {
 		deps.RateLimit = rateLimits

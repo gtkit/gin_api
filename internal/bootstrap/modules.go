@@ -141,16 +141,19 @@ func buildMiddlewares(svc services, runtime *Runtime) (gin.HandlerFunc, error) {
 // 新增模块在 RegisterModules 中追加 Register 调用。
 func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.ProcessStatus) (*gin.Engine, error) {
 	cfg := inf.cfg
+	httpConfig := newHTTPConfig(cfg)
 
 	opt := router.Options{
-		AccessLogger:        inf.accessLogger,
-		AllowedOrigins:      cfg.CORS.AllowedOrigins,
-		LogRequestBody:      cfg.Log.AccessRequestBody,
-		LogResponseBody:     cfg.Log.AccessResponseBody,
-		MaxBodyBytes:        cfg.App.MaxBodyBytes,
-		MaxInflightRequests: cfg.App.EffectiveMaxInflightRequests(),
-		TracingEnabled:      cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
-		ServiceName:         cfg.App.Name,
+		AccessLogger:            inf.accessLogger,
+		AllowedOrigins:          cfg.CORS.AllowedOrigins,
+		LogRequestBody:          cfg.Log.AccessRequestBody,
+		LogResponseBody:         cfg.Log.AccessResponseBody,
+		MaxBodyBytes:            cfg.App.MaxBodyBytes,
+		ServerReadTimeout:       httpConfig.ReadTimeout,
+		ServerReadHeaderTimeout: httpConfig.ReadHeaderTimeout,
+		MaxInflightRequests:     cfg.App.EffectiveMaxInflightRequests(),
+		TracingEnabled:          cfg.Telemetry.Enabled && cfg.Telemetry.Traces,
+		ServiceName:             cfg.App.Name,
 		// 默认空 = 不信任任何代理。必须显式传递：Gin 不设置时的默认是信任所有代理。
 		TrustedProxies:  cfg.Proxy.TrustedProxies,
 		RemoteIPHeaders: cfg.Proxy.RemoteIPHeaders,
@@ -216,11 +219,12 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 //
 // 返回 error 是因为 worker 的声明（类别/生命周期/组合/重名）在注册期即校验：
 // 非法声明是编码错误，启动时零成本可判，留到运行期只能靠观察行为反推。
-func buildWorkers(inf *infra) (*WorkerManager, error) {
+func buildWorkers(inf *infra, svc services) (*WorkerManager, error) {
 	workers, err := optionalWorkers(inf)
 	if err != nil {
 		return nil, err
 	}
+	workers = append(workers, fileRecoveryWorkers(svc)...)
 
 	manager, err := NewWorkerManager(DefaultWorkerBudget(), workers...)
 	if err != nil {

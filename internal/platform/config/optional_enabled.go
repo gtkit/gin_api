@@ -62,6 +62,9 @@ type AuditLogConfig struct {
 
 func (c *Config) TaskQueueEnabled() bool { return c != nil && c.Tasks.Enabled }
 
+// UploadEnabled reports whether file upload and its Redis sessions are enabled.
+func (c *Config) UploadEnabled() bool { return c != nil && c.Upload.Enabled }
+
 func (c *Config) validateOptional() error {
 	return errors.Join(c.Tasks.Validate(c.Redis.Addr, c.Redis.DBs), c.Outbound.Validate(), c.validateUpload())
 }

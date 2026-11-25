@@ -312,8 +312,12 @@ func validateAppConfig(app AppConfig) error {
 	errs = append(errs,
 		mustNonNegative("application.read_header_timeout", app.ReadHeaderTimeoutSeconds),
 		mustNonNegative("application.read_timeout", app.ReadTimeoutFullSeconds),
+		mustNonNegative("application.http_shutdown_timeout", app.HTTPShutdownTimeoutSeconds),
 		mustNonNegative("application.max_inflight_requests", app.MaxInflightRequests),
 	)
+	if int64(app.HTTPShutdownTimeoutSeconds) > math.MaxInt64/int64(time.Second) {
+		errs = append(errs, errors.New("application.http_shutdown_timeout overflows time.Duration"))
+	}
 	errs = append(errs, mustTimezone("application.timezone", app.Timezone))
 
 	return errors.Join(errs...)

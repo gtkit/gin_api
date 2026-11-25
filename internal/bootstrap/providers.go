@@ -156,7 +156,7 @@ func newProvidersWithBudget(
 
 	// 6. Worker 与关停协调器。必须先于路由装配：readiness 要读它们的状态，
 	//    而 worker 声明非法属装配错误，应在任何路由注册之前就失败。
-	workers, err := buildWorkers(&inf)
+	workers, err := buildWorkers(&inf, svc)
 	if err != nil {
 		return nil, fmt.Errorf("build workers: %w", err)
 	}

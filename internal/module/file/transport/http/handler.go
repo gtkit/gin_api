@@ -2,6 +2,7 @@
 package http
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -27,7 +28,7 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrNotFound, Status: goerr.StatusFileNotFound(), Message: "文件不存在"},
 	resp.ErrMapping{Target: application.ErrForbidden, Status: goerr.StatusPermission()},
 	resp.ErrMapping{Target: application.ErrInvalid, Status: goerr.StatusValidateParams()},
-	resp.ErrMapping{Target: application.ErrDriverMismatch, Status: goerr.StatusConflict(), Message: "文件存储于其他存储驱动，当前部署不可读写"},
+	resp.ErrMapping{Target: application.ErrStorageLocationMismatch, Status: goerr.StatusConflict(), Message: "文件存储位置与当前部署不匹配"},
 	resp.ErrMapping{Target: application.ErrDependencyUnavailable, Status: goerr.StatusDependencyUnavailable()},
 	resp.ErrMapping{Target: gouploader.ErrSessionNotFound, Status: goerr.StatusNotFound(), Message: "上传会话不存在"},
 	resp.ErrMapping{Target: gouploader.ErrSessionExpired, Status: goerr.StatusNotFound(), Message: "上传会话已过期"},
@@ -47,32 +48,31 @@ var errMapper = resp.NewErrMapper(
 
 // Handler 是上传协议与文件管理端点。
 type Handler struct {
-	service *application.Service
+	service     *application.Service
+	uploadBytes int64
+	chunkBytes  int64
+	stagingDir  string
 }
 
 // NewHandler 构造 Handler。
 func NewHandler(service *application.Service) *Handler {
-	return &Handler{service: service}
+	return &Handler{service: service, uploadBytes: 10 << 20, chunkBytes: 20 << 20}
 }
 
 // Upload 普通单文件上传（multipart，流式落盘并建立归属记录）。
 func (h *Handler) Upload(c *gin.Context) {
-	header, err := c.FormFile("file")
+	form, err := readTransferForm(c.Request, h.uploadBytes, h.stagingDir, false)
 	if err != nil {
-		resp.BindStructErr(c, err)
+		transferFormError(c, err)
 		return
 	}
-	file, err := header.Open()
+	defer closeTransferForm(form)
+	file, err := form.payload.Reader()
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			logger.Errorf("upload: close multipart file: %v", err)
-		}
-	}()
-	record, err := h.service.Upload(c.Request.Context(), ginc.UserIDFromContext(c), header.Filename, file, header.Size)
+	record, err := h.service.UploadPrepared(c.Request.Context(), ginc.UserIDFromContext(c), form.name, file, form.size, form.checksum)
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
@@ -97,32 +97,37 @@ func (h *Handler) ChunkInit(c *gin.Context) {
 
 // UploadChunk 上传单个分片（multipart，chunkIndex 0-based）。
 func (h *Handler) UploadChunk(c *gin.Context) {
-	var form dto.ChunkForm
-	if err := ginx.BindBody(c, &form); err != nil {
-		resp.BindStructErr(c, err)
-		return
-	}
-	header, err := c.FormFile("file")
+	form, err := readTransferForm(c.Request, h.chunkBytes, h.stagingDir, true)
 	if err != nil {
-		resp.BindStructErr(c, err)
+		transferFormError(c, err)
 		return
 	}
-	file, err := header.Open()
+	defer closeTransferForm(form)
+	file, err := form.payload.Reader()
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			logger.Errorf("upload: close chunk file: %v", err)
-		}
-	}()
-	result, err := h.service.UploadChunk(c.Request.Context(), ginc.UserIDFromContext(c), form.UploadID, form.ChunkIndex, file, header.Size, form.Checksum)
+	result, err := h.service.UploadChunk(c.Request.Context(), ginc.UserIDFromContext(c), form.chunk.UploadID, form.chunk.ChunkIndex, file, form.size, form.chunk.Checksum)
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
 	resp.Ok(c, result)
+}
+
+func transferFormError(c *gin.Context, err error) {
+	if errors.Is(err, application.ErrDependencyUnavailable) {
+		resp.MapErr(c, err, errMapper)
+		return
+	}
+	resp.BindStructErr(c, err)
+}
+
+func closeTransferForm(form *transferForm) {
+	if err := form.payload.Close(); err != nil {
+		logger.Errorf("upload: close staged payload: %v", err)
+	}
 }
 
 // Resume 按整文件哈希找回未完成会话（断点续传）。
@@ -232,7 +237,10 @@ func (h *Handler) Download(c *gin.Context) {
 	c.Header("Content-Length", strconv.FormatInt(record.Size, 10))
 	c.Status(http.StatusOK)
 	if _, err := io.Copy(c.Writer, stream); err != nil {
-		// 响应已开始写出，只能记录；客户端断开是常见原因。
+		if !c.Writer.Written() {
+			c.Writer.Header().Del("Content-Length")
+			c.Writer.Header().Del("Content-Disposition")
+		}
 		c.Error(err).Type = gin.ErrorTypePrivate
 	}
 }

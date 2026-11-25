@@ -39,5 +39,5 @@ func RedisRequired(cfg *config.Config) bool {
 	//
 	// 判据（人工审查，非自动门禁）：被推导为 optional 的资源，其消费方都必须
 	// 能在空句柄下完成装配。任何消费方在空句柄下返回错误，就说明这张表少了一行。
-	return cfg.TaskQueueEnabled()
+	return cfg.TaskQueueEnabled() || cfg.UploadEnabled()
 }

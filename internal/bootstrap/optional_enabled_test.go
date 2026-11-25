@@ -3,10 +3,14 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
@@ -115,5 +119,87 @@ func TestOptionalFailureRetainsCleanupOwnership(t *testing.T) {
 	}
 	if len(cleanup.steps) != 0 {
 		t.Fatal("cleanup ownership retained after rollback")
+	}
+}
+
+func TestUploadRequiresRedisAndReadinessRecovers(t *testing.T) {
+	server := miniredis.RunT(t)
+	cfg := jwtTestConfig(t)
+	cfg.Auth.Mode = config.AuthModeExternal
+	cfg.App.Name = "upload-readiness"
+	cfg.Redis = config.RedisConfig{Addr: server.Addr(), DBs: []int{0, 2}}
+	cfg.Upload.Enabled = true
+	cfg.Upload.RedisDB = 2
+
+	server.SetError("ERR redis maintenance")
+	openRedis := defaultRuntimeFactories().redis
+	if owner, err := openRedis(t.Context(), cfg); err == nil || owner != nil {
+		t.Fatalf("required Redis failure: owner exists=%t, err=%v", owner != nil, err)
+	}
+	cfg.Upload.Enabled = false
+	optional, err := openRedis(t.Context(), cfg)
+	if err != nil || optional == nil {
+		t.Fatalf("optional Redis failure blocked startup: %v", err)
+	}
+	if err := optional.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Upload.Enabled = true
+	server.SetError("")
+	owner, err := openRedis(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Second)
+		defer cancel()
+		if err := owner.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	db := &gorm.DB{}
+	resources, err := data.ResourcesFromClients(&lifecycleComponent{db: db}, owner, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inf := infra{cfg: cfg, resources: resources, mysqlDB: db}
+	installMetricsFixture(t, &inf)
+	engine, err := buildEngine(inf, services{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := func() int {
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+		return w.Code
+	}
+	waitReady := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(4 * time.Second)
+		for {
+			got := ready()
+			if got == want {
+				return
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatalf("readiness status=%d, want %d", got, want)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	waitReady(http.StatusOK)
+	server.SetError("ERR redis maintenance")
+	waitReady(http.StatusServiceUnavailable)
+	server.SetError("")
+	waitReady(http.StatusOK)
+
+	cfg.Upload.RedisDB = 7
+	cleanup := &providerCleanup{}
+	if err := buildUploader(&inf, cleanup); err == nil || !strings.Contains(err.Error(), "upload.redis_db 7") {
+		t.Fatalf("missing configured client: %v", err)
+	}
+	if inf.uploader != nil || len(cleanup.steps) != 0 {
+		t.Fatal("an uploader was started without its Redis client")
 	}
 }

@@ -5,6 +5,8 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/gtkit/gin-api/internal/optional/upload"
 )
@@ -14,19 +16,29 @@ import (
 // Redis 客户端归 resources 所有，不在此关闭。
 func buildUploader(inf *infra, cleanup *providerCleanup) error {
 	cfg := inf.cfg.Upload
-	uploader, err := upload.NewUploader(upload.UploaderOptions{
+	client := inf.resources.Rdb(cfg.RedisDB)
+	if client == nil {
+		return fmt.Errorf("upload.redis_db %d: Redis client is unavailable", cfg.RedisDB)
+	}
+	stagingDir := filepath.Clean(cfg.ChunkDir) + ".staging"
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return fmt.Errorf("prepare upload staging directory: %w", err)
+	}
+	uploader, sessions, err := upload.NewRecoveryUploader(upload.UploaderOptions{
 		Storage:      cfg.Storage,
 		Dir:          cfg.Dir,
 		ChunkDir:     cfg.ChunkDir,
 		MaxFileSize:  cfg.MaxFileSize,
 		AllowedTypes: cfg.AllowedTypes,
-		Redis:        inf.resources.Rdb(cfg.RedisDB),
+		Redis:        client,
 		KeyPrefix:    inf.cfg.EffectiveRedisPrefix(),
 	})
 	if err != nil {
 		return fmt.Errorf("build uploader: %w", err)
 	}
 	inf.uploader = uploader
+	inf.uploadSessions = sessions
+	inf.uploadStagingDir = stagingDir
 	cleanup.push("uploader", cleanupExtensions, func(context.Context) error {
 		uploader.Close()
 		return nil

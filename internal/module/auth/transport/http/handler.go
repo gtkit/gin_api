@@ -28,6 +28,7 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrInvalidPassword, Status: goerr.StatusValidateParams(), Message: "密码须为 8 至 72 个字符且不超过 72 字节"},
 	resp.ErrMapping{Target: application.ErrLifecycleDisabled, Status: goerr.StatusServiceUnavailable(), Message: "会话管理未启用"},
 	resp.ErrMapping{Target: application.ErrBusy, Status: goerr.StatusServiceUnavailable(), Message: "服务繁忙，请稍后重试"},
+	resp.ErrMapping{Target: application.ErrLogoutUnavailable, Status: goerr.StatusDependencyUnavailable()},
 	resp.ErrMapping{
 		Target: application.ErrInvalidCredentials,
 		Status: goerr.StatusAuth(), Message: "手机号或密码错误",
@@ -170,7 +171,8 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	identity, ok := ginc.TokenIdentityFromContext(c)
-	if !ok || identity.TokenID == "" || identity.ExpiresAt.IsZero() {
+	userID := ginc.UserIDFromContext(c)
+	if !ok || userID <= 0 || identity.TokenID == "" || identity.ExpiresAt.IsZero() {
 		// 拿不到令牌标识就无法撤销。报错而不是回成功——回成功会让用户
 		// 以为自己已经登出，而那个令牌仍然可用直到自然过期。
 		resp.Err(c, goerr.New(errUnrevocableToken, goerr.StatusAuth()))
@@ -178,6 +180,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	if err := h.service.Logout(c.Request.Context(), application.LogoutRequest{
+		UserID:       userID,
 		TokenID:      identity.TokenID,
 		ExpiresAt:    identity.ExpiresAt,
 		RefreshToken: req.RefreshToken,

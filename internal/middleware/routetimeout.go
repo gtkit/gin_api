@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gtkit/gin-api/internal/pkg/errx"
@@ -67,6 +69,10 @@ func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 		c.Request = c.Request.WithContext(ctx)
 
 		deadline, _ := ctx.Deadline()
+		if hasBody(c.Request) {
+			setRequestReadDeadline(c, deadline)
+			c.Request.Body = deadlineBody{ReadCloser: c.Request.Body, ctx: ctx}
+		}
 		deadline = deadline.Add(policy.writeGrace)
 		if previous, ok := routeWriteLimit(c); ok && previous.Before(deadline) {
 			deadline = previous
@@ -83,6 +89,56 @@ func cooperativeTimeout(policy timeoutBudget) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+const earliestServerReadDeadlineKey = "route.server.read.floor"
+const routeReadLimitKey = "route.read.limit"
+
+// PreserveServerReadDeadline protects the earlier net/http deadline on normal
+// routes. Header arrival time is unavailable to Gin, so use the earliest time
+// the server's full-request deadline can expire after accepting the headers.
+func PreserveServerReadDeadline(read, header time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if hasBody(c.Request) && read > 0 {
+			c.Set(earliestServerReadDeadlineKey, time.Now().Add(max(0, read-header)))
+		}
+		c.Next()
+	}
+}
+
+func setRequestReadDeadline(c *gin.Context, deadline time.Time) {
+	if value, ok := c.Get(earliestServerReadDeadlineKey); ok && !deadline.Before(value.(time.Time)) {
+		return
+	}
+	if value, ok := c.Get(routeReadLimitKey); ok && !deadline.Before(value.(time.Time)) {
+		return
+	}
+	if err := http.NewResponseController(c.Writer).SetReadDeadline(deadline); err != nil {
+		if !errors.Is(err, http.ErrNotSupported) {
+			logger.Warn("read deadline operation failed", zap.Error(err))
+		}
+		return
+	}
+	c.Set(routeReadLimitKey, deadline)
+}
+
+type deadlineBody struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (b deadlineBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return n, context.DeadlineExceeded
+	}
+	if err != nil && b.ctx.Err() != nil {
+		return n, b.ctx.Err()
+	}
+	return n, err
 }
 
 // streamingTimeout 施加**可续期**的写空闲超时，不设总时长上限。

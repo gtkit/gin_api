@@ -149,6 +149,76 @@ func newTestFileService(t *testing.T, repo application.Repository) *application.
 	return service
 }
 
+type locationTestStorage struct {
+	gouploader.Storage
+	reads, deletes int
+}
+
+func (s *locationTestStorage) Get(context.Context, string) (io.ReadCloser, error) {
+	s.reads++
+	return io.NopCloser(strings.NewReader("b")), nil
+}
+
+func (s *locationTestStorage) Delete(context.Context, string) error {
+	s.deletes++
+	return nil
+}
+
+func TestFileStorageLocationCheckedBeforeObjectIO(t *testing.T) {
+	const id = "019abe00-c4eb-7a20-885f-30d224a39e73"
+	for _, tc := range []struct {
+		name, driver, recordBucket, configuredBucket string
+		otherOwner                                   bool
+		status                                       int
+	}{
+		{name: "same object key in other bucket", driver: "s3", recordBucket: "first", configuredBucket: "second", status: http.StatusConflict},
+		{name: "legacy empty s3 bucket", driver: "s3", configuredBucket: "second", status: http.StatusConflict},
+		{name: "empty s3 location on both sides", driver: "s3", status: http.StatusConflict},
+		{name: "invalid local bucket", driver: "local", recordBucket: "first", configuredBucket: "first", status: http.StatusConflict},
+		{name: "foreign owner masks location", driver: "s3", recordBucket: "first", configuredBucket: "second", otherOwner: true, status: http.StatusNotFound},
+		{name: "valid s3 location", driver: "s3", recordBucket: "first", configuredBucket: "first", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := &locationTestStorage{}
+			up, err := gouploader.New(gouploader.WithStorage(storage), gouploader.WithChunkTempDir(t.TempDir()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(up.Close)
+			repo := &memRepo{byID: map[string]application.Record{
+				id: {ID: id, OwnerID: 7, Driver: tc.driver, Bucket: tc.recordBucket, StorageKey: "same.txt", FileName: "same.txt", Size: 1},
+			}}
+			service, err := application.New(up, repo, tc.driver, tc.configuredBucket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := newTestRouterWithHooks(t, true, nil, nil, func(deps *Deps) { deps.Service = service })
+			request := func(method, suffix string) {
+				t.Helper()
+				req := httptest.NewRequest(method, "/api/v1/files/"+id+suffix, nil)
+				if tc.otherOwner {
+					req.Header.Set("X-Test-Owner", "other")
+				}
+				rec := httptest.NewRecorder()
+				engine.ServeHTTP(rec, req)
+				if rec.Code != tc.status {
+					t.Fatalf("%s status=%d want=%d", method, rec.Code, tc.status)
+				}
+			}
+			request(http.MethodGet, "/download")
+			request(http.MethodDelete, "")
+			_, present, err := repo.Find(t.Context(), 7, id)
+			wantCalls := 0
+			if tc.status == http.StatusOK {
+				wantCalls = 1
+			}
+			if err != nil || present != (wantCalls == 0) || storage.reads != wantCalls || storage.deletes != wantCalls {
+				t.Fatalf("object calls: get=%d delete=%d, record present=%t, err=%v", storage.reads, storage.deletes, present, err)
+			}
+		})
+	}
+}
+
 func TestFilePilotRateLimitOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path string

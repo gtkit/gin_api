@@ -13,6 +13,7 @@ type optionalServices struct{} //nolint:unused // Keeps services shared with opt
 
 func buildOptionalProviders(*infra, *providerCleanup) error { return nil }
 func optionalWorkers(*infra) ([]Worker, error)              { return nil, nil }
+func fileRecoveryWorkers(services) []Worker                 { return nil }
 func buildOptionalServices(*services, infra) error          { return nil }
 func registerOptionalModules(*gin.RouterGroup, *gin.RouterGroup, services, gin.HandlerFunc, infra, router.RateLimitStager) {
 }

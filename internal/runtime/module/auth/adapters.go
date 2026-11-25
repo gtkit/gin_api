@@ -226,14 +226,12 @@ func (s refreshStore) Consume(ctx context.Context, token string) (int64, string,
 	}
 }
 
-func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, token string) error {
-	err := s.store.RevokeFamilyOfToken(ctx, token)
+func (s refreshStore) RevokeFamilyOfToken(ctx context.Context, owner int64, token string) (bool, error) {
+	revoked, err := s.store.RevokeFamilyOfToken(ctx, owner, token)
 	if errors.Is(err, tokenstore.ErrMalformedToken) {
-		// 客户端给了一个畸形的刷新令牌。它本来就不对应任何令牌族，
-		// 登出的访问令牌部分已经生效，这里当作完成而不是报错。
-		return nil
+		return false, nil
 	}
-	return err
+	return revoked, err
 }
 
 func (s refreshStore) IssueForSession(ctx context.Context, uid, version int64) (string, error) {

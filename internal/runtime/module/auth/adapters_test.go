@@ -385,9 +385,9 @@ func TestLogoutToleratesAMalformedRefreshToken(t *testing.T) {
 		t.Fatalf("NewRefreshStore: %v", err)
 	}
 
-	if err := (refreshStore{store: store}).RevokeFamilyOfToken(
-		context.Background(), "no-separator"); err != nil {
-		t.Fatalf("logging out with a malformed refresh token failed: %v", err)
+	if revoked, err := (refreshStore{store: store}).RevokeFamilyOfToken(
+		context.Background(), 7, "no-separator"); err != nil || revoked {
+		t.Fatalf("malformed refresh: revoked = %v, err = %v", revoked, err)
 	}
 }
 

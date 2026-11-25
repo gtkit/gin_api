@@ -401,8 +401,8 @@ func TestRevokeFamilyOfMalformedTokenReportsIt(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeStore(t, &fakeRefreshClient{})
-	err := store.RevokeFamilyOfToken(context.Background(), "no-separator")
-	if !errors.Is(err, ErrMalformedToken) {
+	revoked, err := store.RevokeFamilyOfToken(context.Background(), 7, "no-separator")
+	if revoked || !errors.Is(err, ErrMalformedToken) {
 		t.Fatalf("RevokeFamilyOfToken = %v, want ErrMalformedToken", err)
 	}
 }

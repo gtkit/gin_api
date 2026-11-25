@@ -69,16 +69,22 @@ func (r *Repository) List(ctx context.Context, owner int64, offset, limit int) (
 
 // ListAfter reads one extra row to determine if another owner-scoped page exists.
 func (r *Repository) ListAfter(ctx context.Context, owner int64, at time.Time, id string, size int) ([]models.File, error) {
-	query := r.mdbCtx(ctx).Where("owner_id = ?", owner)
-	if id != "" {
-		if at.IsZero() {
-			query = query.Where("created_at IS NULL AND id < ?", id)
-		} else {
+	// MySQL 8.0 can choose the owner/storage uniqueness index for a large
+	// account, then sort the entire matching range before applying LIMIT.
+	// Include the fixed owner prefix in ORDER BY so MySQL 8.0.22 can use
+	// index order even when the owner is supplied as a prepared parameter.
+	query := r.mdbCtx(ctx).Model(&models.File{}).
+		Table("files FORCE INDEX (idx_files_owner)").Where("owner_id = ?", owner).Order("owner_id DESC")
+	if id != "" && at.IsZero() {
+		query = query.Where("created_at IS NULL AND id < ?", id)
+	} else {
+		query = query.Order("created_at DESC")
+		if id != "" {
 			query = query.Where("(created_at < ? OR (created_at = ? AND id < ?) OR created_at IS NULL)", at, at, id)
 		}
 	}
 	var records []models.File
-	err := query.Order("created_at DESC").Order("id DESC").Limit(min(max(size, 1), maxListLimit) + 1).Find(&records).Error
+	err := query.Order("id DESC").Limit(min(max(size, 1), maxListLimit) + 1).Find(&records).Error
 	return records, err
 }
 
