@@ -10,7 +10,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/ginx"
 	"github.com/gtkit/goerr"
-	"github.com/gtkit/gouploader"
 	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/module/file/application"
@@ -19,7 +18,7 @@ import (
 	resp "github.com/gtkit/gin-api/internal/pkg/response"
 )
 
-// errMapper 把文件领域错误与上传引擎哨兵映射为对客状态码。
+// errMapper 把文件领域错误映射为对客状态码。
 //
 // 选 Status 时看的是它的 HTTP 码：会话越权是 403（StatusPermission），
 // 会话不存在/过期是 404，类型/大小/参数拒绝走 4xx 校验族，
@@ -30,20 +29,15 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrInvalid, Status: goerr.StatusValidateParams()},
 	resp.ErrMapping{Target: application.ErrStorageLocationMismatch, Status: goerr.StatusConflict(), Message: "文件存储位置与当前部署不匹配"},
 	resp.ErrMapping{Target: application.ErrDependencyUnavailable, Status: goerr.StatusDependencyUnavailable()},
-	resp.ErrMapping{Target: gouploader.ErrSessionNotFound, Status: goerr.StatusNotFound(), Message: "上传会话不存在"},
-	resp.ErrMapping{Target: gouploader.ErrSessionExpired, Status: goerr.StatusNotFound(), Message: "上传会话已过期"},
-	resp.ErrMapping{Target: gouploader.ErrUnauthorized, Status: goerr.StatusPermission(), Message: "无权访问该上传会话"},
-	resp.ErrMapping{Target: gouploader.ErrFileTypeNotAllow, Status: goerr.StatusFileTypeNotAllowed()},
-	resp.ErrMapping{Target: gouploader.ErrFileTooLarge, Status: goerr.StatusFileTooLarge()},
-	resp.ErrMapping{Target: gouploader.ErrChecksumMismatch, Status: goerr.StatusFileChecksumMismatch()},
-	resp.ErrMapping{Target: gouploader.ErrChunkHashMismatch, Status: goerr.StatusFileChecksumMismatch()},
-	resp.ErrMapping{Target: gouploader.ErrChunkIndexOutRange, Status: goerr.StatusValidateParams()},
-	resp.ErrMapping{Target: gouploader.ErrMergeIncomplete, Status: goerr.StatusValidateParams(), Message: "分片未传齐"},
-	resp.ErrMapping{Target: gouploader.ErrMergeInProgress, Status: goerr.StatusConflict(), Message: "合并进行中，请稍后重试"},
-	resp.ErrMapping{Target: gouploader.ErrInvalidParam, Status: goerr.StatusValidateParams()},
-	resp.ErrMapping{Target: gouploader.ErrStorageWrite, Status: goerr.StatusFileStorageUnavailable()},
-	resp.ErrMapping{Target: gouploader.ErrStorageRead, Status: goerr.StatusFileStorageUnavailable()},
-	resp.ErrMapping{Target: gouploader.ErrStorageDelete, Status: goerr.StatusFileStorageUnavailable()},
+	resp.ErrMapping{Target: application.ErrSessionNotFound, Status: goerr.StatusNotFound(), Message: "上传会话不存在"},
+	resp.ErrMapping{Target: application.ErrSessionExpired, Status: goerr.StatusNotFound(), Message: "上传会话已过期"},
+	resp.ErrMapping{Target: application.ErrSessionOwner, Status: goerr.StatusPermission(), Message: "无权访问该上传会话"},
+	resp.ErrMapping{Target: application.ErrFileTypeNotAllowed, Status: goerr.StatusFileTypeNotAllowed()},
+	resp.ErrMapping{Target: application.ErrFileTooLarge, Status: goerr.StatusFileTooLarge()},
+	resp.ErrMapping{Target: application.ErrChecksumMismatch, Status: goerr.StatusFileChecksumMismatch()},
+	resp.ErrMapping{Target: application.ErrMergeIncomplete, Status: goerr.StatusValidateParams(), Message: "分片未传齐"},
+	resp.ErrMapping{Target: application.ErrMergeInProgress, Status: goerr.StatusConflict(), Message: "合并进行中，请稍后重试"},
+	resp.ErrMapping{Target: application.ErrStorageUnavailable, Status: goerr.StatusFileStorageUnavailable()},
 )
 
 // Handler 是上传协议与文件管理端点。
@@ -87,12 +81,12 @@ func (h *Handler) ChunkInit(c *gin.Context) {
 		resp.BindStructErr(c, err)
 		return
 	}
-	result, err := h.service.ChunkInit(c.Request.Context(), ginc.UserIDFromContext(c), &request)
+	result, err := h.service.ChunkInit(c.Request.Context(), ginc.UserIDFromContext(c), (*application.ChunkInitRequest)(&request))
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	resp.Ok(c, result)
+	resp.Ok(c, (*dto.ChunkInitResponse)(result))
 }
 
 // UploadChunk 上传单个分片（multipart，chunkIndex 0-based）。
@@ -113,7 +107,7 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	resp.Ok(c, result)
+	resp.Ok(c, (*dto.ChunkUploadResponse)(result))
 }
 
 func transferFormError(c *gin.Context, err error) {
@@ -137,12 +131,12 @@ func (h *Handler) Resume(c *gin.Context) {
 		resp.BindStructErr(c, err)
 		return
 	}
-	result, err := h.service.Resume(c.Request.Context(), ginc.UserIDFromContext(c), &request)
+	result, err := h.service.Resume(c.Request.Context(), ginc.UserIDFromContext(c), (*application.ResumeRequest)(&request))
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	resp.Ok(c, result)
+	resp.Ok(c, (*dto.ResumeResponse)(result))
 }
 
 // Merge 合并分片并建立归属记录（重复合并幂等）。
@@ -162,7 +156,7 @@ func (h *Handler) Status(c *gin.Context) {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	resp.Ok(c, result)
+	resp.Ok(c, (*dto.ChunkStatusResponse)(result))
 }
 
 // Abort 中止会话并清理分片数据。

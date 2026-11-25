@@ -33,6 +33,7 @@ type Page struct {
 // Repository scopes every operation to an authenticated owner.
 type Repository interface {
 	Find(context.Context, int64, string) (Record, bool, error)
+	FindForUpdate(context.Context, int64, string) (Record, bool, error)
 	List(context.Context, int64, int, int) ([]Record, int64, error)
 	Create(context.Context, int64, Record) error
 	Update(context.Context, int64, Record) (bool, error)
@@ -135,8 +136,7 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (Record, er
 	}
 	now := time.Now().UTC()
 	record := Record{ID: uuid.NewV7().String(), Title: value, CreatedAt: now, UpdatedAt: now}
-	err = s.tx.Do(ctx, func(ctx context.Context) error { return s.repo.Create(ctx, request.OwnerID, record) })
-	if err != nil {
+	if err := s.repo.Create(ctx, request.OwnerID, record); err != nil {
 		return Record{}, err
 	}
 	return record, nil
@@ -155,10 +155,16 @@ func (s *Service) Update(ctx context.Context, request UpdateRequest) (Record, er
 	}
 	var record Record
 	err = s.tx.Do(ctx, func(ctx context.Context) error {
-		var err error
-		record, err = s.Get(ctx, GetRequest{OwnerID: request.OwnerID, ID: request.ID})
+		current, found, err := s.repo.FindForUpdate(ctx, request.OwnerID, request.ID)
 		if err != nil {
 			return err
+		}
+		if !found {
+			return ErrNotFound
+		}
+		record = current
+		if record.Title == value {
+			return nil
 		}
 		record.Title, record.UpdatedAt = value, time.Now().UTC()
 		changed, err := s.repo.Update(ctx, request.OwnerID, record)
@@ -180,13 +186,11 @@ func (s *Service) Delete(ctx context.Context, request DeleteRequest) error {
 	if !validID(request.ID) {
 		return ErrInvalid
 	}
-	return s.tx.Do(ctx, func(ctx context.Context) error {
-		changed, err := s.repo.Delete(ctx, request.OwnerID, request.ID)
-		if err == nil && !changed {
-			return ErrNotFound
-		}
-		return err
-	})
+	changed, err := s.repo.Delete(ctx, request.OwnerID, request.ID)
+	if err == nil && !changed {
+		return ErrNotFound
+	}
+	return err
 }
 
 // DeleteMany is all-or-nothing, including when any requested record belongs to another owner.

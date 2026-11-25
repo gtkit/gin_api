@@ -17,8 +17,6 @@ import (
 
 	"github.com/gtkit/gin-api/internal/models"
 	"github.com/gtkit/gin-api/internal/pkg/errx"
-	"github.com/gtkit/gouploader"
-	"github.com/gtkit/gouploader/chunkstore"
 )
 
 // OperationRepository is the transaction boundary for a file and its journal.
@@ -44,8 +42,7 @@ type OperationOptions struct {
 	Namespace    string
 	MaxFileBytes int64
 	AllowedTypes []string
-	Session      func(context.Context, string) (*chunkstore.Session, bool, error)
-	Merge        func(context.Context, string, func(context.Context, string) error) (*gouploader.UploadResult, error)
+	Session      func(context.Context, string) (ChunkSession, bool, error)
 }
 
 func (s *Service) newOperation(ctx context.Context, owner int64, kind, key string) models.FileOperation {
@@ -95,13 +92,13 @@ func (s *Service) UploadPrepared(ctx context.Context, owner int64, name string, 
 	}
 	ext := filepath.Ext(name)
 	if !slices.ContainsFunc(s.operations.AllowedTypes, func(allowed string) bool { return strings.EqualFold(allowed, ext) }) {
-		return Record{}, gouploader.ErrFileTypeNotAllow
+		return Record{}, ErrFileTypeNotAllowed
 	}
 	if size < 0 || !validSHA256(checksum) {
 		return Record{}, ErrInvalid
 	}
 	if size > s.operations.MaxFileBytes {
-		return Record{}, gouploader.ErrFileTooLarge
+		return Record{}, ErrFileTooLarge
 	}
 
 	repo := s.operations.Repository
@@ -116,7 +113,7 @@ func (s *Service) UploadPrepared(ctx context.Context, owner int64, name string, 
 		return Record{}, operationError("register upload object", err)
 	}
 	op.StorageKey = key
-	if err := s.up.Storage().Save(ctx, key, contextReader{ctx, source}, size); err != nil {
+	if err := s.transfer.Save(ctx, owner, key, contextReader{ctx, source}, size); err != nil {
 		return Record{}, operationError("save upload object", err)
 	}
 	return s.publish(ctx, op)
@@ -124,7 +121,7 @@ func (s *Service) UploadPrepared(ctx context.Context, owner int64, name string, 
 
 func (s *Service) mergeRecoverable(ctx context.Context, owner int64, uploadID string) (Record, error) {
 	if !validID(uploadID) {
-		return Record{}, gouploader.ErrSessionNotFound
+		return Record{}, ErrSessionNotFound
 	}
 	repo := s.operations.Repository
 	existing, err := repo.FindOperation(ctx, owner, models.FileMergeOperation, uploadID)
@@ -140,7 +137,7 @@ func (s *Service) mergeRecoverable(ctx context.Context, owner int64, uploadID st
 		return Record{}, err
 	}
 	if session.UserID != strconv.FormatInt(owner, 10) {
-		return Record{}, gouploader.ErrUnauthorized
+		return Record{}, ErrSessionOwner
 	}
 	// Legacy completed sessions can only replay an already committed file.
 	if session.Merged {
@@ -156,8 +153,8 @@ func (s *Service) mergeRecoverable(ctx context.Context, owner int64, uploadID st
 	if !bound || s.driver == "local" && (!session.Assemble || session.StorageKey == "") {
 		return Record{}, ErrStorageLocationMismatch
 	}
-	if len(session.Uploaded) != session.TotalChunks {
-		return Record{}, gouploader.ErrMergeIncomplete
+	if session.UploadedCount != session.TotalChunks {
+		return Record{}, ErrMergeIncomplete
 	}
 
 	op := s.newOperation(ctx, owner, models.FileMergeOperation, uploadID)
@@ -182,7 +179,7 @@ func (s *Service) mergeRecoverable(ctx context.Context, owner int64, uploadID st
 			return Record{}, err
 		}
 	}
-	merged, err := s.operations.Merge(ctx, uploadID, register)
+	merged, err := s.transfer.Merge(ctx, owner, uploadID, register)
 	if err != nil {
 		return Record{}, err
 	}
@@ -195,14 +192,14 @@ func (s *Service) mergeRecoverable(ctx context.Context, owner int64, uploadID st
 
 func (s *Service) requireChunkLocation(ctx context.Context, owner int64, uploadID string) error {
 	if !validID(uploadID) {
-		return gouploader.ErrSessionNotFound
+		return ErrSessionNotFound
 	}
 	session, bound, err := s.operations.Session(ctx, uploadID)
 	if err != nil {
 		return err
 	}
 	if session.UserID != strconv.FormatInt(owner, 10) {
-		return gouploader.ErrUnauthorized
+		return ErrSessionOwner
 	}
 	if !bound {
 		return ErrStorageLocationMismatch
@@ -220,7 +217,7 @@ func (s *Service) replayMerge(ctx context.Context, op models.FileOperation) (Rec
 	case models.FileOperationReview:
 		return Record{}, ErrDependencyUnavailable
 	default:
-		return Record{}, gouploader.ErrMergeInProgress
+		return Record{}, ErrMergeInProgress
 	}
 }
 
@@ -315,11 +312,11 @@ func (s *Service) finishDeletion(ctx context.Context, op models.FileOperation) e
 	if err != nil || referenced {
 		return s.deferOperation(ctx, op, "reference_check", err)
 	}
-	if err := s.up.Storage().Delete(ctx, op.StorageKey); err != nil {
+	if err := s.transfer.Delete(ctx, op.StorageKey); err != nil {
 		return s.deferOperation(ctx, op, "delete_object", err)
 	}
 	if s.driver == "s3" {
-		exists, err := s.up.Storage().Exists(ctx, op.StorageKey)
+		exists, err := s.transfer.Exists(ctx, op.StorageKey)
 		if err != nil || exists {
 			return s.deferOperation(ctx, op, "verify_object_absence", err)
 		}
@@ -380,11 +377,11 @@ func (s *Service) recoverOperation(ctx context.Context, op models.FileOperation)
 		err := repo.SetOperationState(ctx, op, models.FileOperationReview, "unverified_write", time.Now().UTC())
 		return operationError("file operation "+op.ID+" requires review", err)
 	}
-	exists, err := s.up.Storage().Exists(ctx, op.StorageKey)
+	exists, err := s.transfer.Exists(ctx, op.StorageKey)
 	if err != nil || !exists {
 		return s.deferOperation(ctx, op, "missing_or_unknown_object", err)
 	}
-	stream, err := s.up.Storage().Get(ctx, op.StorageKey)
+	stream, err := s.transfer.Get(ctx, op.StorageKey)
 	if err != nil {
 		return s.deferOperation(ctx, op, "read_object", err)
 	}
@@ -435,7 +432,7 @@ func uploadDigest(ctx context.Context, reader io.Reader, limit int64) (int64, st
 		return 0, "", err
 	}
 	if size > limit {
-		return 0, "", gouploader.ErrFileTooLarge
+		return 0, "", ErrFileTooLarge
 	}
 	return size, hex.EncodeToString(h.Sum(nil)), nil
 }

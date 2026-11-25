@@ -34,6 +34,7 @@ func RenderModule(modulePath, name string) (map[string][]byte, error) {
 	data.Type = strings.ReplaceAll(data.Type, " ", "")
 	targets := map[string]string{
 		"model":        "internal/models/" + name + ".go",
+		"commands":     "internal/module/" + name + "/application/commands.go",
 		"service":      "internal/module/" + name + "/application/service.go",
 		"service_test": "internal/module/" + name + "/application/service_test.go",
 		"dto":          "internal/module/" + name + "/dto/record.go",

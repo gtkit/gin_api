@@ -1,4 +1,4 @@
-package application
+package application_test
 
 import (
 	"bytes"
@@ -14,18 +14,20 @@ import (
 	"testing"
 	"time"
 
+	app "github.com/gtkit/gin-api/internal/module/file/application"
+	runtimefile "github.com/gtkit/gin-api/internal/runtime/module/file"
 	"github.com/gtkit/gouploader"
 )
 
 // fakeRepo 是内存版归属仓储，复刻唯一键 (owner, storage_key) 的幂等语义。
 type fakeRepo struct {
 	mu   sync.Mutex
-	byID map[string]Record
+	byID map[string]app.Record
 }
 
-func newFakeRepo() *fakeRepo { return &fakeRepo{byID: map[string]Record{}} }
+func newFakeRepo() *fakeRepo { return &fakeRepo{byID: map[string]app.Record{}} }
 
-func (f *fakeRepo) Create(_ context.Context, record Record) (Record, error) {
+func (f *fakeRepo) Create(_ context.Context, record app.Record) (app.Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, existing := range f.byID {
@@ -37,26 +39,26 @@ func (f *fakeRepo) Create(_ context.Context, record Record) (Record, error) {
 	return record, nil
 }
 
-func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (Record, bool, error) {
+func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (app.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	record, ok := f.byID[id]
 	if !ok || record.OwnerID != owner {
-		return Record{}, false, nil
+		return app.Record{}, false, nil
 	}
 	return record, true, nil
 }
 
-func (f *fakeRepo) List(_ context.Context, owner int64, offset, limit int) ([]Record, int64, error) {
+func (f *fakeRepo) List(_ context.Context, owner int64, offset, limit int) ([]app.Record, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var owned []Record
+	var owned []app.Record
 	for _, record := range f.byID {
 		if record.OwnerID == owner {
 			owned = append(owned, record)
 		}
 	}
-	slices.SortFunc(owned, func(a, b Record) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	slices.SortFunc(owned, func(a, b app.Record) int { return b.CreatedAt.Compare(a.CreatedAt) })
 	total := int64(len(owned))
 	if offset >= len(owned) {
 		return nil, total, nil
@@ -81,7 +83,7 @@ func (f *fakeRepo) len() int {
 	return len(f.byID)
 }
 
-func newTestService(t *testing.T, repo Repository, driver string) (*Service, *gouploader.Uploader) {
+func newTestService(t *testing.T, repo app.Repository, driver string) (*app.Service, *gouploader.Uploader) {
 	t.Helper()
 
 	up, err := gouploader.New(
@@ -103,7 +105,7 @@ func newTestService(t *testing.T, repo Repository, driver string) (*Service, *go
 		t.Fatal(err)
 	}
 	t.Cleanup(up.Close)
-	svc, err := New(up, repo, driver, "")
+	svc, err := app.New(runtimefile.NewTransfer(up), repo, driver, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,10 +157,10 @@ func TestUploadRejectsAnonymousAndDisallowedType(t *testing.T) {
 
 	repo := newFakeRepo()
 	svc, _ := newTestService(t, repo, "local")
-	if _, err := svc.Upload(t.Context(), 0, "a.txt", strings.NewReader("x"), 1); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("anonymous Upload() = %v, want ErrForbidden", err)
+	if _, err := svc.Upload(t.Context(), 0, "a.txt", strings.NewReader("x"), 1); !errors.Is(err, app.ErrForbidden) {
+		t.Fatalf("anonymous Upload() = %v, want app.ErrForbidden", err)
 	}
-	if _, err := svc.Upload(t.Context(), 7, "a.exe", strings.NewReader("x"), 1); !errors.Is(err, gouploader.ErrFileTypeNotAllow) {
+	if _, err := svc.Upload(t.Context(), 7, "a.exe", strings.NewReader("x"), 1); !errors.Is(err, app.ErrFileTypeNotAllowed) {
 		t.Fatalf("disallowed Upload() = %v, want ErrFileTypeNotAllow", err)
 	}
 	if repo.len() != 0 {
@@ -175,7 +177,7 @@ func TestChunkFlowResumeAndMergeIdempotent(t *testing.T) {
 	sum := sha256.Sum256([]byte(payload))
 	fileHash := hex.EncodeToString(sum[:])
 
-	init, err := svc.ChunkInit(t.Context(), 7, &gouploader.ChunkInitRequest{
+	init, err := svc.ChunkInit(t.Context(), 7, &app.ChunkInitRequest{
 		FileName: "a.txt", FileSize: int64(len(payload)), ChunkSize: 5, FileHash: fileHash,
 	})
 	if err != nil {
@@ -187,7 +189,7 @@ func TestChunkFlowResumeAndMergeIdempotent(t *testing.T) {
 			t.Fatalf("UploadChunk(%d) = %v", i, err)
 		}
 	}
-	resume, err := svc.Resume(t.Context(), 7, &gouploader.ResumeRequest{FileHash: fileHash})
+	resume, err := svc.Resume(t.Context(), 7, &app.ResumeRequest{FileHash: fileHash})
 	if err != nil {
 		t.Fatalf("Resume() = %v", err)
 	}
@@ -216,19 +218,74 @@ func TestChunkFlowResumeAndMergeIdempotent(t *testing.T) {
 func TestSessionOwnershipEnforced(t *testing.T) {
 	t.Parallel()
 
-	svc, _ := newTestService(t, newFakeRepo(), "local")
-	init, err := svc.ChunkInit(t.Context(), 7, &gouploader.ChunkInitRequest{FileName: "a.txt", FileSize: 12, ChunkSize: 5})
+	repo := newFakeRepo()
+	svc, _ := newTestService(t, repo, "local")
+	init, err := svc.ChunkInit(t.Context(), 7, &app.ChunkInitRequest{FileName: "a.txt", FileSize: 12, ChunkSize: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.UploadChunk(t.Context(), 8, init.UploadID, 0, strings.NewReader("hello"), 5, ""); !errors.Is(err, gouploader.ErrUnauthorized) {
+	if _, err := svc.UploadChunk(t.Context(), 8, init.UploadID, 0, strings.NewReader("hello"), 5, ""); !errors.Is(err, app.ErrSessionOwner) {
 		t.Fatalf("cross-owner UploadChunk() = %v, want ErrUnauthorized", err)
 	}
-	if _, err := svc.Status(t.Context(), 8, init.UploadID); !errors.Is(err, gouploader.ErrUnauthorized) {
+	if _, err := svc.Status(t.Context(), 8, init.UploadID); !errors.Is(err, app.ErrSessionOwner) {
 		t.Fatalf("cross-owner Status() = %v, want ErrUnauthorized", err)
 	}
-	if _, err := svc.Merge(t.Context(), 8, init.UploadID); !errors.Is(err, gouploader.ErrUnauthorized) {
+	if _, err := svc.Merge(t.Context(), 8, init.UploadID); !errors.Is(err, app.ErrSessionOwner) {
 		t.Fatalf("cross-owner Merge() = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestConcurrentChunkWritesAndMergeKeepOtherAccountOut(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	svc, _ := newTestService(t, repo, "local")
+	ctx := t.Context()
+	created, err := svc.ChunkInit(ctx, 7, &app.ChunkInitRequest{FileName: "a.txt", FileSize: 12, ChunkSize: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var ownerErr, foreignErr error
+	wg.Go(func() {
+		<-start
+		_, ownerErr = svc.UploadChunk(ctx, 7, created.UploadID, 0, strings.NewReader("hello"), 5, "")
+	})
+	wg.Go(func() {
+		<-start
+		_, foreignErr = svc.UploadChunk(ctx, 8, created.UploadID, 1, strings.NewReader("other"), 5, "")
+	})
+	close(start)
+	wg.Wait()
+	if ownerErr != nil || !errors.Is(foreignErr, app.ErrSessionOwner) {
+		t.Fatalf("owner error=%v, foreign error=%v", ownerErr, foreignErr)
+	}
+	status, err := svc.Status(ctx, 7, created.UploadID)
+	if err != nil || !slices.Equal(status.UploadedChunks, []int{0}) || !slices.Equal(status.MissingChunks, []int{1, 2}) {
+		t.Fatalf("cross-account write changed upload progress: %+v %v", status, err)
+	}
+	for i, part := range []string{" uplo", "ad"} {
+		if _, err := svc.UploadChunk(ctx, 7, created.UploadID, i+1, strings.NewReader(part), int64(len(part)), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start = make(chan struct{})
+	var published app.Record
+	wg.Go(func() {
+		<-start
+		published, ownerErr = svc.Merge(ctx, 7, created.UploadID)
+	})
+	wg.Go(func() {
+		<-start
+		_, foreignErr = svc.Merge(ctx, 8, created.UploadID)
+	})
+	close(start)
+	wg.Wait()
+	if ownerErr != nil || !errors.Is(foreignErr, app.ErrSessionOwner) || published.OwnerID != 7 || repo.len() != 1 {
+		t.Fatalf("merge owner=%d, published=%d, owner error=%v, foreign error=%v", published.OwnerID, repo.len(), ownerErr, foreignErr)
+	}
+	if _, err := svc.Get(ctx, 8, published.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("foreign account read the newly published file: %v", err)
 	}
 }
 
@@ -241,14 +298,14 @@ func TestFileOwnershipEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Get(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross-owner Get() = %v, want ErrNotFound", err)
+	if _, err := svc.Get(t.Context(), 8, record.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("cross-owner Get() = %v, want app.ErrNotFound", err)
 	}
-	if _, _, err := svc.Download(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross-owner Download() = %v, want ErrNotFound", err)
+	if _, _, err := svc.Download(t.Context(), 8, record.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("cross-owner Download() = %v, want app.ErrNotFound", err)
 	}
-	if err := svc.Delete(t.Context(), 8, record.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("cross-owner Delete() = %v, want ErrNotFound", err)
+	if err := svc.Delete(t.Context(), 8, record.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("cross-owner Delete() = %v, want app.ErrNotFound", err)
 	}
 	page, err := svc.List(t.Context(), 8, 1, 20)
 	if err != nil || len(page.Items) != 0 {
@@ -283,8 +340,8 @@ func TestDownloadAndDelete(t *testing.T) {
 	if exists, err := up.Storage().Exists(t.Context(), record.StorageKey); err != nil || exists {
 		t.Fatalf("object still exists after delete: (%v, %v)", exists, err)
 	}
-	if _, err := svc.Get(t.Context(), 7, record.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
+	if _, err := svc.Get(t.Context(), 7, record.ID); !errors.Is(err, app.ErrNotFound) {
+		t.Fatalf("Get after delete = %v, want app.ErrNotFound", err)
 	}
 }
 
@@ -298,15 +355,15 @@ func TestDriverMismatchRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 同一仓储换成另一驱动标签的部署：历史记录不得跨驱动读写。
-	switched, err := New(up, repo, "aliyun", "other-bucket")
+	switched, err := app.New(runtimefile.NewTransfer(up), repo, "aliyun", "other-bucket")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := switched.Download(t.Context(), 7, record.ID); !errors.Is(err, ErrStorageLocationMismatch) {
-		t.Fatalf("Download() = %v, want ErrStorageLocationMismatch", err)
+	if _, _, err := switched.Download(t.Context(), 7, record.ID); !errors.Is(err, app.ErrStorageLocationMismatch) {
+		t.Fatalf("Download() = %v, want app.ErrStorageLocationMismatch", err)
 	}
-	if err := switched.Delete(t.Context(), 7, record.ID); !errors.Is(err, ErrStorageLocationMismatch) {
-		t.Fatalf("Delete() = %v, want ErrStorageLocationMismatch", err)
+	if err := switched.Delete(t.Context(), 7, record.ID); !errors.Is(err, app.ErrStorageLocationMismatch) {
+		t.Fatalf("Delete() = %v, want app.ErrStorageLocationMismatch", err)
 	}
 }
 
@@ -326,20 +383,20 @@ func TestListPagination(t *testing.T) {
 	if len(page.Items) != 2 || page.Paging.TotalCount != 3 || page.Paging.TotalPage != 2 {
 		t.Fatalf("List() = %+v", page.Paging)
 	}
-	if _, err := svc.List(t.Context(), 7, 1, 101); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("oversized List() = %v, want ErrInvalid", err)
+	if _, err := svc.List(t.Context(), 7, 1, 101); !errors.Is(err, app.ErrInvalid) {
+		t.Fatalf("oversized List() = %v, want app.ErrInvalid", err)
 	}
 }
 
-func (m *fakeRepo) ListAfter(_ context.Context, owner int64, at time.Time, id string, size int) ([]Record, error) {
+func (m *fakeRepo) ListAfter(_ context.Context, owner int64, at time.Time, id string, size int) ([]app.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var rows []Record
+	var rows []app.Record
 	for _, r := range m.byID {
 		if r.OwnerID == owner && (id == "" || r.CreatedAt.Before(at) || (r.CreatedAt.Equal(at) && r.ID < id)) {
 			rows = append(rows, r)
 		}
 	}
-	slices.SortFunc(rows, func(a, b Record) int { return cmp.Or(b.CreatedAt.Compare(a.CreatedAt), cmp.Compare(b.ID, a.ID)) })
+	slices.SortFunc(rows, func(a, b app.Record) int { return cmp.Or(b.CreatedAt.Compare(a.CreatedAt), cmp.Compare(b.ID, a.ID)) })
 	return rows[:min(len(rows), size+1)], nil
 }

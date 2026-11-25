@@ -1,4 +1,4 @@
-package application
+package application_test
 
 import (
 	"context"
@@ -8,10 +8,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/gtkit/gin-api/internal/models"
-	"github.com/gtkit/gouploader"
-	"github.com/gtkit/gouploader/chunkstore"
+	app "github.com/gtkit/gin-api/internal/module/file/application"
+	runtimefile "github.com/gtkit/gin-api/internal/runtime/module/file"
 )
 
 // A fenced journal fixture lets two application instances share one committed
@@ -76,7 +77,7 @@ func (j *journalFixture) PublishOperation(ctx context.Context, op models.FileOpe
 	if j.failPublish || current.Generation != op.Generation || current.State != models.FileOperationWorking {
 		return errors.New("publication rejected")
 	}
-	_, err := j.files.Create(ctx, Record{
+	_, err := j.files.Create(ctx, app.Record{
 		ID: f.ID, OwnerID: f.OwnerID, StorageKey: f.StorageKey, Driver: f.Driver, Bucket: f.Bucket,
 		Size: f.Size, Checksum: f.Checksum, FileName: f.FileName,
 	})
@@ -159,22 +160,19 @@ func TestUploadRecoveryPublishesOnlyOnceAfterCommitFailure(t *testing.T) {
 	repo := newFakeRepo()
 	journal := &journalFixture{files: repo, ops: map[string]models.FileOperation{}, failPublish: true}
 	_, up := newTestService(t, repo, "local")
-	opt := OperationOptions{Repository: journal, Namespace: "local-volume", MaxFileBytes: 1024, AllowedTypes: []string{".txt"},
-		Session: func(context.Context, string) (*chunkstore.Session, bool, error) { return nil, false, nil },
-		Merge: func(context.Context, string, func(context.Context, string) error) (*gouploader.UploadResult, error) {
-			return nil, errors.New("unexpected merge")
-		},
+	opt := app.OperationOptions{Repository: journal, Namespace: "local-volume", MaxFileBytes: 1024, AllowedTypes: []string{".txt"},
+		Session: unexpectedSession,
 	}
-	instance := func() *Service {
+	instance := func() *app.Service {
 		t.Helper()
-		service, err := New(up, repo, "local", "", opt)
+		service, err := app.New(runtimefile.NewTransfer(up), repo, "local", "", opt)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return service
 	}
 	const content = "durable content"
-	if _, err := instance().Upload(ctx, 7, "a.txt", strings.NewReader(content), int64(len(content))); !errors.Is(err, ErrDependencyUnavailable) {
+	if _, err := instance().Upload(ctx, 7, "a.txt", strings.NewReader(content), int64(len(content))); !errors.Is(err, app.ErrDependencyUnavailable) {
 		t.Fatalf("upload returned %v after publication failure", err)
 	}
 	var op models.FileOperation
@@ -190,7 +188,7 @@ func TestUploadRecoveryPublishesOnlyOnceAfterCommitFailure(t *testing.T) {
 	journal.failPublish, journal.forceDue = false, true
 	first, second := instance(), instance()
 	var wg sync.WaitGroup
-	for _, s := range []*Service{first, second} {
+	for _, s := range []*app.Service{first, second} {
 		wg.Go(func() {
 			if err := s.RecoverOperations(ctx); err != nil {
 				t.Error(err)
@@ -201,17 +199,17 @@ func TestUploadRecoveryPublishesOnlyOnceAfterCommitFailure(t *testing.T) {
 	if journal.publications != 1 {
 		t.Fatalf("file published %d times", journal.publications)
 	}
-	if _, _, err := second.Download(ctx, 8, op.FileID); !errors.Is(err, ErrNotFound) {
+	if _, _, err := second.Download(ctx, 8, op.FileID); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("cross-owner download = %v", err)
 	}
-	if err := second.Delete(ctx, 8, op.FileID); !errors.Is(err, ErrNotFound) {
+	if err := second.Delete(ctx, 8, op.FileID); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("cross-owner delete = %v", err)
 	}
 	journal.failCompletion = true
-	if err := first.Delete(ctx, 7, op.FileID); !errors.Is(err, ErrDependencyUnavailable) {
+	if err := first.Delete(ctx, 7, op.FileID); !errors.Is(err, app.ErrDependencyUnavailable) {
 		t.Fatalf("delete after failed completion = %v", err)
 	}
-	if _, err := first.Get(ctx, 7, op.FileID); !errors.Is(err, ErrNotFound) {
+	if _, err := first.Get(ctx, 7, op.FileID); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("file is still visible after logical delete: %v", err)
 	}
 	if exists, err := up.Storage().Exists(ctx, op.StorageKey); err != nil || exists {
@@ -232,14 +230,21 @@ func TestRecoveryDoesNotPublishUnverifiedObject(t *testing.T) {
 	repo := newFakeRepo()
 	_, up := newTestService(t, repo, "local")
 	journal := &journalFixture{files: repo, ops: map[string]models.FileOperation{}, forceDue: true}
-	service := &Service{up: up, repo: repo, driver: "local", operations: &OperationOptions{Repository: journal, Namespace: "local"}}
-	op := service.newOperation(ctx, 7, models.FileMergeOperation, "known-session")
-	op.StorageKey, op.Size = "unfinished", 3
-	journal.ops[op.ID] = op
+	service, err := app.New(runtimefile.NewTransfer(up), repo, "local", "", app.OperationOptions{
+		Repository: journal, Namespace: "local", MaxFileBytes: 1024, AllowedTypes: []string{".txt"}, Session: unexpectedSession,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewV7().String()
+	op := models.FileOperation{ID: id, FileID: id, OwnerID: 7, Kind: models.FileMergeOperation,
+		BusinessKey: "known-session", Driver: "local", Namespace: "local", State: models.FileOperationWorking,
+		Generation: 1, StorageKey: "unfinished", Size: 3}
+	journal.ops[id] = op
 	if err := up.Storage().Save(ctx, op.StorageKey, strings.NewReader("abc"), 3); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.RecoverOperations(ctx); !errors.Is(err, ErrDependencyUnavailable) {
+	if err := service.RecoverOperations(ctx); !errors.Is(err, app.ErrDependencyUnavailable) {
 		t.Fatalf("unverified object did not produce a review diagnostic: %v", err)
 	}
 	if journal.ops[op.ID].State != models.FileOperationReview || repo.len() != 0 {
@@ -253,4 +258,8 @@ func TestRecoveryDoesNotPublishUnverifiedObject(t *testing.T) {
 	if err := errors.Join(err, stream.Close()); err != nil || string(content) != "abc" {
 		t.Fatalf("quarantined object: size=%d err=%v", len(content), err)
 	}
+}
+
+func unexpectedSession(context.Context, string) (app.ChunkSession, bool, error) {
+	return app.ChunkSession{}, false, errors.New("unexpected upload session lookup")
 }

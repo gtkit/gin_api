@@ -25,6 +25,13 @@ type changedPasswordHash struct {
 }
 
 func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
+	for _, route := range []string{"logout", "logout-all"} {
+		t.Run(route, func(t *testing.T) { checkLogoutPreservesOtherAccount(t, route) })
+	}
+}
+
+func checkLogoutPreservesOtherAccount(t *testing.T, route string) {
+	t.Helper()
 	conn, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -86,20 +93,40 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 		}
 		return envelope.Data
 	}
-	expectSession := func(uid int64) {
+	expectSession := func(uid int64, live bool) {
 		t.Helper()
+		rows := sqlmock.NewRows([]string{"id"})
+		if live {
+			rows.AddRow(uid)
+		}
 		mock.ExpectQuery("SELECT `id` FROM `users`").WithArgs(uid, 1, 0, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uid))
+			WillReturnRows(rows)
 	}
 	first, second := login("fixture-a", 7), login("fixture-b", 8)
 	ownerBody := `{"refresh_token":"` + second.RefreshToken + `"}`
 	mock.MatchExpectationsInOrder(false)
-	expectSession(7)
-	expectSession(8)
+	expectSession(7, true)
+	expectSession(8, true)
+	logoutBody := ownerBody
+	if route == "logout-all" {
+		logoutBody = ""
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE `users` SET `auth_version`=auth_version \\+ 1,.*WHERE.*id = \\? AND status = \\? AND auth_version = \\?").
+			WithArgs(sqlmock.AnyArg(), 7, 1, 0).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+	}
 	var logout, refresh *httptest.ResponseRecorder
 	var wg sync.WaitGroup
-	wg.Go(func() { logout = send("logout", ownerBody, first.AccessToken) })
-	wg.Go(func() { refresh = send("refresh", ownerBody, "") })
+	start := make(chan struct{})
+	wg.Go(func() {
+		<-start
+		logout = send(route, logoutBody, first.AccessToken)
+	})
+	wg.Go(func() {
+		<-start
+		refresh = send("refresh", ownerBody, "")
+	})
+	close(start)
 	wg.Wait()
 	mock.MatchExpectationsInOrder(true)
 	if logout.Code != http.StatusOK || refresh.Code != http.StatusOK {
@@ -109,11 +136,15 @@ func TestLogoutKeepsOtherAccountSignedIn(t *testing.T) {
 	if err := json.Unmarshal(refresh.Body.Bytes(), &successor); err != nil || successor.Data.RefreshToken == "" {
 		t.Fatalf("decode B's rotated token: %v", err)
 	}
-	expectSession(7)
+	expectSession(7, route == "logout")
 	request("logout", `{}`, first.AccessToken, http.StatusUnauthorized)
-	expectSession(8)
+	if route == "logout-all" {
+		expectSession(7, false)
+		request("refresh", `{"refresh_token":"`+first.RefreshToken+`"}`, "", http.StatusUnauthorized)
+	}
+	expectSession(8, true)
 	request("refresh", ownerBody, "", http.StatusOK)
-	expectSession(8)
+	expectSession(8, true)
 	request("logout", ownerBody, second.AccessToken, http.StatusOK)
 	request("refresh", `{"refresh_token":"`+successor.Data.RefreshToken+`"}`, "", http.StatusUnauthorized)
 }

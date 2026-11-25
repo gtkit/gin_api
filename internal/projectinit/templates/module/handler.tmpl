@@ -41,7 +41,7 @@ func (h *Handler) List(c *gin.Context) {
         resp.BindStructErr(c, err)
         return
     }
-    result, err := h.service.List(c.Request.Context(), ginc.UserIDFromContext(c), query.Page, query.PageSize)
+    result, err := h.service.List(c.Request.Context(), application.ListRequest{OwnerID: ginc.UserIDFromContext(c), Page: query.Page, Size: query.PageSize})
     if err != nil {
         resp.MapErr(c, err, errMapper)
         return
@@ -51,7 +51,7 @@ func (h *Handler) List(c *gin.Context) {
 
 // Get 返回单条记录。
 func (h *Handler) Get(c *gin.Context) {
-    result, err := h.service.Get(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id"))
+    result, err := h.service.Get(c.Request.Context(), application.GetRequest{OwnerID: ginc.UserIDFromContext(c), ID: c.Param("id")})
     if err != nil {
         resp.MapErr(c, err, errMapper)
         return
@@ -66,7 +66,7 @@ func (h *Handler) Create(c *gin.Context) {
         resp.BindStructErr(c, err)
         return
     }
-    result, err := h.service.Create(c.Request.Context(), ginc.UserIDFromContext(c), request.Title)
+    result, err := h.service.Create(c.Request.Context(), application.CreateRequest{OwnerID: ginc.UserIDFromContext(c), Title: request.Title})
     if err != nil {
         resp.MapErr(c, err, errMapper)
         return
@@ -81,7 +81,7 @@ func (h *Handler) Update(c *gin.Context) {
         resp.BindStructErr(c, err)
         return
     }
-    result, err := h.service.Update(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id"), request.Title)
+    result, err := h.service.Update(c.Request.Context(), application.UpdateRequest{OwnerID: ginc.UserIDFromContext(c), ID: c.Param("id"), Title: request.Title})
     if err != nil {
         resp.MapErr(c, err, errMapper)
         return
@@ -96,7 +96,7 @@ func (h *Handler) DeleteMany(c *gin.Context) {
         resp.BindStructErr(c, err)
         return
     }
-    if err := h.service.DeleteMany(c.Request.Context(), ginc.UserIDFromContext(c), request.IDs); err != nil {
+    if err := h.service.DeleteMany(c.Request.Context(), application.DeleteManyRequest{OwnerID: ginc.UserIDFromContext(c), IDs: request.IDs}); err != nil {
         resp.MapErr(c, err, errMapper)
         return
     }
@@ -105,7 +105,7 @@ func (h *Handler) DeleteMany(c *gin.Context) {
 
 // Delete 删除单条记录。
 func (h *Handler) Delete(c *gin.Context) {
-    if err := h.service.Delete(c.Request.Context(), ginc.UserIDFromContext(c), c.Param("id")); err != nil {
+    if err := h.service.Delete(c.Request.Context(), application.DeleteRequest{OwnerID: ginc.UserIDFromContext(c), ID: c.Param("id")}); err != nil {
         resp.MapErr(c, err, errMapper)
         return
     }

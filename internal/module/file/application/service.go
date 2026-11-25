@@ -1,9 +1,4 @@
 // Package application implements owner-scoped file upload and download.
-//
-// 上传引擎是 gouploader（传输无关、无 Gin）：协议类型直接复用其定义，
-// 文件持久化经本包 Repository port，adapter 在 runtime/module/file。
-// 每次引擎调用前把请求者身份注入请求 context（UploadInfo），库侧据此
-// 校验分片会话归属；文件记录的归属校验在本包完成。
 package application
 
 import (
@@ -20,7 +15,6 @@ import (
 	"uuid"
 
 	"github.com/gtkit/gin-api/internal/pkg/paging"
-	"github.com/gtkit/gouploader"
 )
 
 var (
@@ -63,7 +57,7 @@ type Repository interface {
 }
 
 type Service struct {
-	up         *gouploader.Uploader
+	transfer   Transfer
 	repo       Repository
 	driver     string
 	bucket     string
@@ -72,17 +66,17 @@ type Service struct {
 
 // New 装配文件服务。driver/bucket 是当前部署的存储位置，写入每条记录
 // 用于溯源；历史记录据此拒绝跨存储位置读写。
-func New(up *gouploader.Uploader, repo Repository, driver, bucket string, options ...OperationOptions) (*Service, error) {
-	if up == nil || repo == nil {
+func New(transfer Transfer, repo Repository, driver, bucket string, options ...OperationOptions) (*Service, error) {
+	if transfer == nil || repo == nil {
 		return nil, errors.New("file uploader and repository required")
 	}
 	if driver == "" {
 		return nil, errors.New("file storage driver required")
 	}
-	service := &Service{up: up, repo: repo, driver: driver, bucket: bucket}
+	service := &Service{transfer: transfer, repo: repo, driver: driver, bucket: bucket}
 	if len(options) != 0 {
 		opt := options[0]
-		if opt.Repository == nil || opt.Namespace == "" || opt.Session == nil || opt.Merge == nil ||
+		if opt.Repository == nil || opt.Namespace == "" || opt.Session == nil ||
 			opt.MaxFileBytes <= 0 || len(opt.AllowedTypes) == 0 {
 			return nil, errors.New("complete file recovery configuration is required")
 		}
@@ -93,8 +87,7 @@ func New(up *gouploader.Uploader, repo Repository, driver, bucket string, option
 
 // Upload 处理普通单文件上传：流式写入当前驱动并建立归属记录。
 func (s *Service) Upload(ctx context.Context, owner int64, fileName string, reader io.Reader, size int64) (Record, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+	if err := validOwner(ctx, owner); err != nil {
 		return Record{}, err
 	}
 	if s.operations != nil {
@@ -104,7 +97,7 @@ func (s *Service) Upload(ctx context.Context, owner int64, fileName string, read
 		}
 		return s.uploadRecoverable(ctx, owner, fileName, source)
 	}
-	result, err := s.up.UploadService().Upload(ctx, fileName, reader, size, "", "")
+	result, err := s.transfer.Upload(ctx, owner, fileName, reader, size)
 	if err != nil {
 		return Record{}, err
 	}
@@ -112,18 +105,19 @@ func (s *Service) Upload(ctx context.Context, owner int64, fileName string, read
 }
 
 // ChunkInit 初始化分片会话。
-func (s *Service) ChunkInit(ctx context.Context, owner int64, req *gouploader.ChunkInitRequest) (*gouploader.ChunkInitResponse, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+func (s *Service) ChunkInit(ctx context.Context, owner int64, req *ChunkInitRequest) (*ChunkInitResult, error) {
+	if err := validOwner(ctx, owner); err != nil {
 		return nil, err
 	}
-	return s.up.ChunkService().InitUpload(ctx, req)
+	if req == nil {
+		return nil, ErrInvalid
+	}
+	return s.transfer.ChunkInit(ctx, owner, req)
 }
 
 // UploadChunk 上传单个分片（代理路径，chunkIndex 0-based）。
-func (s *Service) UploadChunk(ctx context.Context, owner int64, uploadID string, chunkIndex int, reader io.Reader, size int64, checksum string) (*gouploader.ChunkUploadResponse, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+func (s *Service) UploadChunk(ctx context.Context, owner int64, uploadID string, chunkIndex int, reader io.Reader, size int64, checksum string) (*ChunkUploadResult, error) {
+	if err := validOwner(ctx, owner); err != nil {
 		return nil, err
 	}
 	if s.operations != nil {
@@ -131,54 +125,53 @@ func (s *Service) UploadChunk(ctx context.Context, owner int64, uploadID string,
 			return nil, err
 		}
 	}
-	return s.up.ChunkService().UploadChunk(ctx, uploadID, chunkIndex, reader, size, checksum)
+	return s.transfer.UploadChunk(ctx, owner, uploadID, chunkIndex, reader, size, checksum)
 }
 
 // Status 查询分片进度。
-func (s *Service) Status(ctx context.Context, owner int64, uploadID string) (*gouploader.ChunkStatusResponse, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+func (s *Service) Status(ctx context.Context, owner int64, uploadID string) (*ChunkStatusResult, error) {
+	if err := validOwner(ctx, owner); err != nil {
 		return nil, err
 	}
-	return s.up.ChunkService().GetStatus(ctx, uploadID)
+	return s.transfer.Status(ctx, owner, uploadID)
 }
 
 // Resume 按整文件哈希找回未完成会话（断点续传）或命中已完成对象。
-func (s *Service) Resume(ctx context.Context, owner int64, req *gouploader.ResumeRequest) (*gouploader.ResumeResponse, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+func (s *Service) Resume(ctx context.Context, owner int64, req *ResumeRequest) (*ResumeResult, error) {
+	if err := validOwner(ctx, owner); err != nil {
 		return nil, err
 	}
-	return s.up.ChunkService().Resume(ctx, req)
+	if req == nil {
+		return nil, ErrInvalid
+	}
+	return s.transfer.Resume(ctx, owner, req)
 }
 
 // Abort 中止会话并清理分片数据。
 func (s *Service) Abort(ctx context.Context, owner int64, uploadID string) error {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+	if err := validOwner(ctx, owner); err != nil {
 		return err
 	}
 	if s.operations != nil {
 		if err := s.requireChunkLocation(ctx, owner, uploadID); err != nil {
-			if errors.Is(err, gouploader.ErrSessionNotFound) || errors.Is(err, gouploader.ErrSessionExpired) {
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrSessionExpired) {
 				return nil
 			}
 			return err
 		}
 	}
-	return s.up.ChunkService().Abort(ctx, uploadID)
+	return s.transfer.Abort(ctx, owner, uploadID)
 }
 
 // Merge publishes the owner-scoped file after the registered object is complete.
 func (s *Service) Merge(ctx context.Context, owner int64, uploadID string) (Record, error) {
-	ctx, err := s.uploadContext(ctx, owner)
-	if err != nil {
+	if err := validOwner(ctx, owner); err != nil {
 		return Record{}, err
 	}
 	if s.operations != nil {
 		return s.mergeRecoverable(ctx, owner, uploadID)
 	}
-	result, err := s.up.ChunkService().Merge(ctx, uploadID)
+	result, err := s.transfer.Merge(ctx, owner, uploadID, nil)
 	if err != nil {
 		return Record{}, err
 	}
@@ -293,7 +286,7 @@ func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
 	if !s.matchesStorageLocation(record) {
 		return ErrStorageLocationMismatch
 	}
-	if err := s.up.Storage().Delete(ctx, record.StorageKey); err != nil {
+	if err := s.transfer.Delete(ctx, record.StorageKey); err != nil {
 		return fmt.Errorf("delete storage object: %w", err)
 	}
 	deleted, err := s.repo.Delete(ctx, owner, id)
@@ -320,7 +313,7 @@ func (s *Service) Download(ctx context.Context, owner int64, id string) (Record,
 			return Record{}, nil, err
 		}
 	}
-	rc, err := s.up.Storage().Get(ctx, record.StorageKey)
+	rc, err := s.transfer.Get(ctx, record.StorageKey)
 	if err != nil {
 		return Record{}, nil, fmt.Errorf("open storage object: %w", err)
 	}
@@ -337,20 +330,9 @@ func (s *Service) matchesStorageLocation(record Record) bool {
 	return record.Bucket != ""
 }
 
-// uploadContext 校验身份并注入 UploadInfo：库侧 WithUserIDFn 从中解析
-// 会话创建者。owner 非正即拒绝——库不拒绝匿名 init，硬校验在此完成。
-func (s *Service) uploadContext(ctx context.Context, owner int64) (context.Context, error) {
-	if err := validOwner(ctx, owner); err != nil {
-		return nil, err
-	}
-	return gouploader.ContextWithUploadInfo(ctx, gouploader.UploadInfo{
-		UserID: strconv.FormatInt(owner, 10),
-	}), nil
-}
-
 // recordResult 把引擎结果落成归属记录并返回规范记录（幂等重放时
 // 返回已有行而不是新 ID）。
-func (s *Service) recordResult(ctx context.Context, owner int64, result *gouploader.UploadResult) (Record, error) {
+func (s *Service) recordResult(ctx context.Context, owner int64, result *ObjectResult) (Record, error) {
 	now := time.Now().UTC()
 	record := Record{
 		ID:         uuid.NewV7().String(),

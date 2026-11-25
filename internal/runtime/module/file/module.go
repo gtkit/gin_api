@@ -24,7 +24,7 @@ func New(up *gouploader.Uploader, db *gorm.DB, driver, bucket string, listTimeou
 	if db == nil {
 		return nil, errors.New("file database is required")
 	}
-	return application.New(up, adapter{repo: filerepo.New(db), listTimeout: listTimeout}, driver, bucket)
+	return application.New(NewTransfer(up), adapter{repo: filerepo.New(db), listTimeout: listTimeout}, driver, bucket)
 }
 
 func NewRecoverable(up *gouploader.Uploader, sessions *upload.RecoverySessions, db *gorm.DB,
@@ -33,11 +33,9 @@ func NewRecoverable(up *gouploader.Uploader, sessions *upload.RecoverySessions, 
 		return nil, errors.New("recoverable file database, uploader and sessions are required")
 	}
 	repo := filerepo.New(db)
-	return application.New(up, adapter{repo: repo, listTimeout: listTimeout}, driver, bucket, application.OperationOptions{
-		Repository: repo, Namespace: sessions.Namespace(), MaxFileBytes: maxBytes, AllowedTypes: allowed, Session: sessions.Lookup,
-		Merge: func(ctx context.Context, id string, register func(context.Context, string) error) (*gouploader.UploadResult, error) {
-			return up.ChunkService().Merge(upload.WithWriteRegistration(ctx, register), id)
-		},
+	return application.New(NewTransfer(up), adapter{repo: repo, listTimeout: listTimeout}, driver, bucket, application.OperationOptions{
+		Repository: repo, Namespace: sessions.Namespace(), MaxFileBytes: maxBytes, AllowedTypes: allowed,
+		Session: recoverySessionLookup(sessions),
 	})
 }
 

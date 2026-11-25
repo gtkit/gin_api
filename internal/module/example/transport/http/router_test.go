@@ -24,6 +24,9 @@ func (s *recordStore) Do(ctx context.Context, fn func(context.Context) error) er
 func (s *recordStore) Find(_ context.Context, owner int64, id string) (application.Record, bool, error) {
 	return s.record, owner == s.owner && id == s.record.ID, nil
 }
+func (s *recordStore) FindForUpdate(ctx context.Context, owner int64, id string) (application.Record, bool, error) {
+	return s.Find(ctx, owner, id)
+}
 func (s *recordStore) List(_ context.Context, owner int64, _, _ int) ([]application.Record, int64, error) {
 	if owner == s.owner && s.record.ID != "" {
 		return []application.Record{s.record}, 1, nil
@@ -35,14 +38,14 @@ func (s *recordStore) Create(_ context.Context, owner int64, record application.
 	return nil
 }
 func (s *recordStore) Update(_ context.Context, owner int64, record application.Record) (bool, error) {
-	if owner != s.owner {
+	if owner != s.owner || record.ID != s.record.ID {
 		return false, nil
 	}
 	s.record = record
 	return true, nil
 }
-func (s *recordStore) Delete(_ context.Context, owner int64, _ string) (bool, error) {
-	if owner != s.owner {
+func (s *recordStore) Delete(_ context.Context, owner int64, id string) (bool, error) {
+	if owner != s.owner || id != s.record.ID {
 		return false, nil
 	}
 	s.record = application.Record{}
@@ -133,6 +136,14 @@ func TestRecordHTTPContract(t *testing.T) {
 		if status != 404 {
 			t.Fatalf("cross-owner %s = %d", method, status)
 		}
+	}
+	status, again := call(http.MethodPut, "/"+created.ID, `{"title":"record"}`, "")
+	if status != http.StatusOK || string(again["data"]) != string(envelope["data"]) {
+		t.Fatalf("equal update did not return the stored response: %d %s", status, again)
+	}
+	status, _ = call(http.MethodDelete, "/batch", `{"ids":["`+created.ID+`"]}`, "other")
+	if status != http.StatusNotFound || store.record.ID != created.ID {
+		t.Fatalf("cross-owner batch changed the record: status=%d", status)
 	}
 	for _, input := range []struct {
 		method, path, body string

@@ -24,6 +24,7 @@ import (
 	"github.com/gtkit/gin-api/internal/module/file/application"
 	"github.com/gtkit/gin-api/internal/optional/upload"
 	"github.com/gtkit/gin-api/internal/pkg/ginc"
+	runtimefile "github.com/gtkit/gin-api/internal/runtime/module/file"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 	"github.com/gtkit/gouploader"
 )
@@ -142,7 +143,7 @@ func newTestFileService(t *testing.T, repo application.Repository) *application.
 		t.Fatal(err)
 	}
 	t.Cleanup(up.Close)
-	service, err := application.New(up, repo, "local", "")
+	service, err := application.New(runtimefile.NewTransfer(up), repo, "local", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestFileStorageLocationCheckedBeforeObjectIO(t *testing.T) {
 			repo := &memRepo{byID: map[string]application.Record{
 				id: {ID: id, OwnerID: 7, Driver: tc.driver, Bucket: tc.recordBucket, StorageKey: "same.txt", FileName: "same.txt", Size: 1},
 			}}
-			service, err := application.New(up, repo, tc.driver, tc.configuredBucket)
+			service, err := application.New(runtimefile.NewTransfer(up), repo, tc.driver, tc.configuredBucket)
 			if err != nil {
 				t.Fatal(err)
 			}

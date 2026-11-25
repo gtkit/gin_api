@@ -215,7 +215,7 @@ func storageOption(o UploaderOptions) (gouploader.Option, error) {
 	}
 }
 
-// userIDFromUploadInfo 是 WithUserIDFn 的实现：application 层在每次
+// userIDFromUploadInfo 是 WithUserIDFn 的实现：runtime 适配器在每次
 // 引擎调用前经 ContextWithUploadInfo 注入请求者身份。
 func userIDFromUploadInfo(ctx context.Context) string {
 	if info, ok := gouploader.UploadInfoFromContext(ctx); ok {

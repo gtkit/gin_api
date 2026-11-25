@@ -24,7 +24,6 @@ import (
 	"github.com/gtkit/gin-api/internal/optional/upload"
 	filerepo "github.com/gtkit/gin-api/internal/repository/file"
 	"github.com/gtkit/gouploader"
-	"github.com/gtkit/gouploader/chunkstore"
 	"github.com/redis/go-redis/v9"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -97,11 +96,8 @@ func integrationService(t *testing.T, db *gorm.DB, root string, crash bool) *app
 	}
 	return integrationServiceWithJournal(t, uploader, repo, application.OperationOptions{
 		Repository: operations, Namespace: strings.Repeat("a", 64),
-		Session: func(context.Context, string) (*chunkstore.Session, bool, error) {
-			return nil, false, errors.New("unexpected session lookup")
-		},
-		Merge: func(context.Context, string, func(context.Context, string) error) (*gouploader.UploadResult, error) {
-			return nil, errors.New("unexpected merge")
+		Session: func(context.Context, string) (application.ChunkSession, bool, error) {
+			return application.ChunkSession{}, false, errors.New("unexpected session lookup")
 		},
 	})
 }
@@ -110,7 +106,7 @@ func integrationServiceWithJournal(t *testing.T, uploader *gouploader.Uploader, 
 	t.Helper()
 	options.MaxFileBytes = 1024
 	options.AllowedTypes = []string{".txt"}
-	service, err := application.New(uploader, adapter{repo: repo}, "local", "", options)
+	service, err := application.New(NewTransfer(uploader), adapter{repo: repo}, "local", "", options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,10 +134,7 @@ func mergeFixture(t *testing.T, db *gorm.DB, root, redisAddr string, crash strin
 		journal = deleteCrashJournal{repo}
 	}
 	return integrationServiceWithJournal(t, up, repo, application.OperationOptions{
-		Repository: journal, Namespace: sessions.Namespace(), Session: sessions.Lookup,
-		Merge: func(ctx context.Context, id string, register func(context.Context, string) error) (*gouploader.UploadResult, error) {
-			return up.ChunkService().Merge(upload.WithWriteRegistration(ctx, register), id)
-		},
+		Repository: journal, Namespace: sessions.Namespace(), Session: recoverySessionLookup(sessions),
 	})
 }
 
@@ -174,7 +167,7 @@ func TestIntegrationMergeAndDeleteRecoverAcrossProcessExit(t *testing.T) {
 	}
 	svc := mergeFixture(t, db, root, redisServer.Addr(), "")
 	hash := sha256.Sum256([]byte(body))
-	init, err := svc.ChunkInit(ctx, owner, &gouploader.ChunkInitRequest{
+	init, err := svc.ChunkInit(ctx, owner, &application.ChunkInitRequest{
 		FileName: "merge.txt", FileSize: int64(len(body)), Checksum: hex.EncodeToString(hash[:]),
 	})
 	if err != nil {

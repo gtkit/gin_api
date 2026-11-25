@@ -30,6 +30,10 @@ func (a adapter) Find(ctx context.Context, owner int64, id string) (application.
 	record, found, err := a.repo.Find(ctx, owner, id)
 	return value(record), found, err
 }
+func (a adapter) FindForUpdate(ctx context.Context, owner int64, id string) (application.Record, bool, error) {
+	record, found, err := a.repo.FindForUpdate(ctx, owner, id)
+	return value(record), found, err
+}
 func (a adapter) List(ctx context.Context, owner int64, offset, limit int) ([]application.Record, int64, error) {
 	records, total, err := a.repo.List(ctx, owner, offset, limit)
 	values := make([]application.Record, 0, len(records))
