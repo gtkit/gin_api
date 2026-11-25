@@ -10,6 +10,7 @@ import (
 	"github.com/gtkit/ginx"
 	"github.com/gtkit/goerr"
 	"github.com/gtkit/gouploader"
+	"github.com/gtkit/logger/v2"
 
 	"github.com/gtkit/gin-api/internal/module/file/application"
 	"github.com/gtkit/gin-api/internal/module/file/dto"
@@ -27,6 +28,7 @@ var errMapper = resp.NewErrMapper(
 	resp.ErrMapping{Target: application.ErrForbidden, Status: goerr.StatusPermission()},
 	resp.ErrMapping{Target: application.ErrInvalid, Status: goerr.StatusValidateParams()},
 	resp.ErrMapping{Target: application.ErrDriverMismatch, Status: goerr.StatusConflict(), Message: "文件存储于其他存储驱动，当前部署不可读写"},
+	resp.ErrMapping{Target: application.ErrDependencyUnavailable, Status: goerr.StatusDependencyUnavailable()},
 	resp.ErrMapping{Target: gouploader.ErrSessionNotFound, Status: goerr.StatusNotFound(), Message: "上传会话不存在"},
 	resp.ErrMapping{Target: gouploader.ErrSessionExpired, Status: goerr.StatusNotFound(), Message: "上传会话已过期"},
 	resp.ErrMapping{Target: gouploader.ErrUnauthorized, Status: goerr.StatusPermission(), Message: "无权访问该上传会话"},
@@ -65,7 +67,11 @@ func (h *Handler) Upload(c *gin.Context) {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if err := file.Close(); err != nil {
+			logger.Errorf("upload: close multipart file: %v", err)
+		}
+	}()
 	record, err := h.service.Upload(c.Request.Context(), ginc.UserIDFromContext(c), header.Filename, file, header.Size)
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
@@ -106,7 +112,11 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	defer func() { _ = file.Close() }()
+	defer func() {
+		if err := file.Close(); err != nil {
+			logger.Errorf("upload: close chunk file: %v", err)
+		}
+	}()
 	result, err := h.service.UploadChunk(c.Request.Context(), ginc.UserIDFromContext(c), form.UploadID, form.ChunkIndex, file, header.Size, form.Checksum)
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
@@ -166,6 +176,19 @@ func (h *Handler) List(c *gin.Context) {
 		resp.BindStructErr(c, err)
 		return
 	}
+	if cursors, ok := c.GetQueryArray("cursor"); ok {
+		if len(cursors) != 1 || len(c.QueryArray("page")) != 0 {
+			resp.MapErr(c, application.ErrInvalid, errMapper)
+			return
+		}
+		page, err := h.service.ListAfter(c.Request.Context(), ginc.UserIDFromContext(c), cursors[0], query.PageSize)
+		if err != nil {
+			resp.MapErr(c, err, errMapper)
+			return
+		}
+		resp.Ok(c, page)
+		return
+	}
 	page, err := h.service.List(c.Request.Context(), ginc.UserIDFromContext(c), query.Page, query.PageSize)
 	if err != nil {
 		resp.MapErr(c, err, errMapper)
@@ -200,12 +223,16 @@ func (h *Handler) Download(c *gin.Context) {
 		resp.MapErr(c, err, errMapper)
 		return
 	}
-	defer func() { _ = stream.Close() }()
+	defer func() {
+		if err := stream.Close(); err != nil {
+			logger.Errorf("download: close storage stream: %v", err)
+		}
+	}()
 	c.Header("Content-Type", record.MIMEType)
 	c.Header("Content-Length", strconv.FormatInt(record.Size, 10))
 	c.Status(http.StatusOK)
 	if _, err := io.Copy(c.Writer, stream); err != nil {
 		// 响应已开始写出，只能记录；客户端断开是常见原因。
-		_ = c.Error(err)
+		c.Error(err).Type = gin.ErrorTypePrivate
 	}
 }

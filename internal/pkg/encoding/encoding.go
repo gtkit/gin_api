@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 var (
@@ -27,7 +28,7 @@ type Codec interface {
 	Name() string
 }
 
-var registeredCodecs = make(map[string]Codec)
+var registeredCodecs sync.Map // lowercase name -> Codec
 
 // RegisterCodec registers the provided Codec for use with all transport clients and
 // servers.
@@ -40,26 +41,28 @@ var registeredCodecs = make(map[string]Codec)
 // https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests for
 // more details.
 //
-// NOTE: this function must only be called during initialization time (i.e. in
-// an init() function), and is not thread-safe.  If multiple Compressors are
-// registered with the same name, the one registered last will take effect.
+// Re-registering a name atomically replaces its codec.
 func RegisterCodec(codec Codec) {
-	if codec == nil {
+	if codec == nil || isNilPointer(codec) {
 		panic("cannot register a nil Codec")
 	}
-	if codec.Name() == "" {
+	contentSubtype := strings.ToLower(codec.Name())
+	if contentSubtype == "" {
 		panic("cannot register Codec with empty string result for Name()")
 	}
-	contentSubtype := strings.ToLower(codec.Name())
-	registeredCodecs[contentSubtype] = codec
+	registeredCodecs.Store(contentSubtype, codec)
 }
 
 // GetCodec gets a registered Codec by content-subtype, or nil if no Codec is
 // registered for the content-subtype.
 //
-// The content-subtype is expected to be lowercase.
+// The lookup is case-insensitive.
 func GetCodec(contentSubtype string) Codec {
-	return registeredCodecs[contentSubtype]
+	v, ok := registeredCodecs.Load(strings.ToLower(contentSubtype))
+	if !ok {
+		return nil
+	}
+	return v.(Codec)
 }
 
 // Encoding definition of coding interfaces
@@ -68,52 +71,47 @@ type Encoding interface {
 	Unmarshal(data []byte, v any) error
 }
 
-// Marshal encode data
-func Marshal(e Encoding, v any) (data []byte, err error) {
+// Marshal encodes with the selected wire format. With no codec, the value
+// must explicitly implement encoding.BinaryMarshaler.
+func Marshal(e Encoding, v any) ([]byte, error) {
 	if !isPointer(v) {
-		return data, ErrNotAPointer
+		return nil, ErrNotAPointer
 	}
-	bm, ok := v.(encoding.BinaryMarshaler)
-	if ok && e == nil {
-		return bm.MarshalBinary()
+	if e != nil {
+		if isNilPointer(e) {
+			return nil, errors.New("nil encoding")
+		}
+		return e.Marshal(v)
 	}
-	
-	data, err = e.Marshal(v)
-	if err == nil {
-		return data, err
+	if m, ok := v.(encoding.BinaryMarshaler); ok {
+		return m.MarshalBinary()
 	}
-	if ok {
-		data, err = bm.MarshalBinary()
-	}
-	
-	return data, err
+	return nil, errors.New("no codec or BinaryMarshaler")
 }
 
-// Unmarshal decode data
-func Unmarshal(e Encoding, data []byte, v any) (err error) {
+// Unmarshal decodes only the selected wire format.
+func Unmarshal(e Encoding, data []byte, v any) error {
 	if !isPointer(v) {
 		return ErrNotAPointer
 	}
-	bm, ok := v.(encoding.BinaryUnmarshaler)
-	if ok && e == nil {
-		err = bm.UnmarshalBinary(data)
-		return err
+	if e != nil {
+		if isNilPointer(e) {
+			return errors.New("nil encoding")
+		}
+		return e.Unmarshal(data, v)
 	}
-	err = e.Unmarshal(data, v)
-	if err == nil {
-		return err
+	if m, ok := v.(encoding.BinaryUnmarshaler); ok {
+		return m.UnmarshalBinary(data)
 	}
-	if ok {
-		return bm.UnmarshalBinary(data)
-	}
-	return err
+	return errors.New("no codec or BinaryUnmarshaler")
 }
 
-func isPointer(data any) bool {
-	switch reflect.ValueOf(data).Kind() {
-	case reflect.Ptr, reflect.Interface:
-		return true
-	default:
-		return false
-	}
+func isPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && !rv.IsNil()
+}
+
+func isNilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }

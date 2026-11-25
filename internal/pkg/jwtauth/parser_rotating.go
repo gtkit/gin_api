@@ -82,6 +82,9 @@ func (p *Parser) ParseToken(
 		return nil, err
 	}
 
+	if len(token) > gojwt.MaxTokenBytes {
+		return nil, fmt.Errorf("%w: token exceeds %d bytes", ErrTokenInvalid, gojwt.MaxTokenBytes)
+	}
 	useCache := len(opts) == 0 && p.cache != nil
 	if useCache {
 		if cached, ok := p.cache.get(token, p.now()); ok {
@@ -100,15 +103,12 @@ func (p *Parser) ParseToken(
 	if useCache && keyed {
 		p.cache.put(token, parsed)
 	}
-	// 返回深拷贝：调用方修改返回值不能影响缓存里的条目。
-	return cloneClaims(parsed), nil
+	// parseUncached returns request-owned claims. put already cloned the cache snapshot.
+	return parsed, nil
 }
 
 // parseUncached 执行真正的验签。
 func (p *Parser) parseUncached(ctx context.Context, token string, opts ...jwtv5.ParserOption) (*claims.Claims, bool, error) {
-	if len(token) > gojwt.MaxTokenBytes {
-		return nil, false, fmt.Errorf("%w: token exceeds %d bytes", ErrTokenInvalid, gojwt.MaxTokenBytes)
-	}
 	// 此处只选键并拒绝缺失的业务字段，不信任未验签结果。最终验签和日期
 	// 解码交给 SDK，保留其纳秒精度、严格 JSON 和算法检查，避免修改全局 TimePrecision。
 	rawClaims := &claims.Claims{}

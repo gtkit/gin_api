@@ -98,3 +98,18 @@ func TestJSON4(t *testing.T) {
 	err := c.Unmarshal(nil, &obj4{})
 	assert.NoError(t, err)
 }
+
+func TestJSONPointerTargets(t *testing.T) {
+	c := codec{}
+	var msg *pluginpb.CodeGeneratorRequest
+	if err := c.Unmarshal([]byte(`{"file_to_generate":["a"]}`), &msg); err != nil || msg == nil || len(msg.FileToGenerate) != 1 {
+		t.Fatal("nested protobuf pointer", err)
+	}
+	var plain *obj
+	if err := c.Unmarshal([]byte("null"), &plain); err != nil || plain != nil {
+		t.Fatal("ordinary JSON null changed", err)
+	}
+	if err := c.Unmarshal([]byte("{}"), plain); err == nil {
+		t.Fatal("typed nil destination accepted")
+	}
+}

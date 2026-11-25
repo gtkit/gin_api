@@ -875,7 +875,7 @@ func TestLatencyStartsAtScheduledTimeAndOverflowIsExplicit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stats := loadStats{summary: loadSummary{Status: map[int]uint64{}}, buckets: make([]uint64, len(latencyBounds)+1)}
+		stats := newLoadStats(1)
 		stats.request(t.Context(), client, base, loadJob{scheduled: time.Now().Add(-4 * time.Second), scenario: loadScenario{Method: "GET", Path: "/"}}, time.Second)
 		result := latencyResult(stats.buckets)
 		if result.P99 == nil || *result.P99 != 5000 {
@@ -922,5 +922,35 @@ func TestCLIUsesRealLoopbackAndDoesNotLeakScenario(t *testing.T) {
 	}
 	if summary.Parameters.Rate != 100 || summary.Parameters.Concurrency != 2 || summary.Parameters.DurationSeconds != 0.1 || summary.GeneratorGoVersion == "" || summary.ServiceResources != "not_collected" {
 		t.Fatalf("baseline evidence omitted its measurement boundary: %+v", summary)
+	}
+}
+
+func TestLoadBusinessSuccessLatency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			_, _ = io.WriteString(w, `{"code":0}`)
+		case "/error":
+			_, _ = io.WriteString(w, `{"code":1}`)
+		default:
+			w.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newLoadStats(1)
+	for _, path := range []string{"/ok", "/error", "/busy"} {
+		s.request(t.Context(), server.Client(), base, loadJob{scheduled: time.Now(), scenario: loadScenario{Method: "GET", Path: path, ExpectedCode: new(0)}}, time.Second)
+	}
+	r := s.summary.Scenarios[0]
+	var n uint64
+	for _, v := range s.successBuckets[0] {
+		n += v
+	}
+	if r.HTTP2xx != 2 || r.Succeeded != 1 || r.Failed != 2 || n != 1 {
+		t.Fatalf("unexpected business outcomes %+v", r)
 	}
 }

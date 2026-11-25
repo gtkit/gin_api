@@ -8,12 +8,14 @@ package application
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 	"uuid"
 
@@ -22,10 +24,11 @@ import (
 )
 
 var (
-	ErrInvalid        = errors.New("invalid file input")
-	ErrNotFound       = errors.New("file not found")
-	ErrForbidden      = errors.New("authenticated owner required")
-	ErrDriverMismatch = errors.New("file stored on a different storage driver")
+	ErrInvalid               = errors.New("invalid file input")
+	ErrNotFound              = errors.New("file not found")
+	ErrForbidden             = errors.New("authenticated owner required")
+	ErrDriverMismatch        = errors.New("file stored on a different storage driver")
+	ErrDependencyUnavailable = errors.New("file data dependency unavailable")
 )
 
 // Record 是文件记录的应用层视图，直接作为 API 响应载荷。
@@ -52,9 +55,9 @@ type Page struct {
 // Repository scopes every operation to an authenticated owner.
 // Create 对同一 (owner, storage_key) 的重复写入按幂等成功处理。
 type Repository interface {
-	Create(context.Context, Record) error
+	Create(context.Context, Record) (Record, error)
 	Find(ctx context.Context, owner int64, id string) (Record, bool, error)
-	FindByStorageKey(ctx context.Context, owner int64, key string) (Record, bool, error)
+	ListAfter(ctx context.Context, owner int64, at time.Time, id string, size int) ([]Record, error)
 	List(ctx context.Context, owner int64, offset, limit int) ([]Record, int64, error)
 	Delete(ctx context.Context, owner int64, id string) (bool, error)
 }
@@ -196,6 +199,56 @@ func (s *Service) List(ctx context.Context, owner int64, page, size int) (Page, 
 	return Page{Items: records, Paging: paging.Paging{CurrentPage: page, PageSize: size, TotalCount: total, TotalPage: pages}}, nil
 }
 
+// CursorPage returns an empty next_cursor on the last page.
+type CursorPage struct {
+	Items      []Record `json:"items"`
+	NextCursor string   `json:"next_cursor"`
+}
+
+// ListAfter traverses files in descending creation time and ID order.
+// The authenticated owner is always passed independently to the repository.
+func (s *Service) ListAfter(ctx context.Context, owner int64, cursor string, size int) (CursorPage, error) {
+	if err := validOwner(ctx, owner); err != nil {
+		return CursorPage{}, err
+	}
+	if size == 0 {
+		size = 20
+	}
+	if size < 1 || size > 100 || len(cursor) > 160 {
+		return CursorPage{}, ErrInvalid
+	}
+	var at time.Time
+	var id string
+	ownerKey := strconv.FormatInt(owner, 10)
+	if cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		cursorOwner, position, found := strings.Cut(string(raw), "|")
+		stamp, fileID, hasID := strings.Cut(position, "|")
+		if err != nil || !found || cursorOwner != ownerKey || !hasID || !validID(fileID) {
+			return CursorPage{}, ErrInvalid
+		}
+		at, err = time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			return CursorPage{}, ErrInvalid
+		}
+		id = fileID
+	}
+	items, err := s.repo.ListAfter(ctx, owner, at, id, size)
+	if err != nil {
+		return CursorPage{}, err
+	}
+	if items == nil {
+		items = []Record{}
+	}
+	page := CursorPage{Items: items}
+	if len(items) > size {
+		page.Items = items[:size]
+		last := items[size-1]
+		page.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(ownerKey + "|" + last.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID))
+	}
+	return page, nil
+}
+
 // Delete 先删存储对象、成功后软删记录；存储删除失败保留记录并返回错误，
 // 避免记录指向已不存在的对象。
 func (s *Service) Delete(ctx context.Context, owner int64, id string) error {
@@ -263,15 +316,9 @@ func (s *Service) recordResult(ctx context.Context, owner int64, result *gouploa
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	if err := s.repo.Create(ctx, record); err != nil {
-		return Record{}, fmt.Errorf("record uploaded file: %w", err)
-	}
-	stored, found, err := s.repo.FindByStorageKey(ctx, owner, result.StorageKey)
+	stored, err := s.repo.Create(ctx, record)
 	if err != nil {
-		return Record{}, err
-	}
-	if !found {
-		return Record{}, errors.New("file record missing after create")
+		return Record{}, fmt.Errorf("record uploaded file: %w", err)
 	}
 	return stored, nil
 }

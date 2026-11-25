@@ -159,7 +159,7 @@ func (c *Config) Validate() error {
 	if err := c.validateOptional(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateCacheConfig(c.Cache, c.Redis); err != nil {
+	if err := validateCacheConfig(c.Cache, c.Redis, c.RedisConnections); err != nil {
 		errs = append(errs, err)
 	}
 	if err := validateTelemetryConfig(c.Telemetry); err != nil {
@@ -443,7 +443,7 @@ func validateRedisCapabilities(c Config) error {
 	}) {
 		consumers = append(consumers, "redis rate limiting")
 	}
-	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis {
+	if c.Cache.Enabled && strings.TrimSpace(c.Cache.Store) == CacheStoreRedis && (c.Cache.RedisConnection == "" || c.Cache.RedisConnection == DefaultConnection) {
 		consumers = append(consumers, "redis response cache")
 	}
 	if c.TaskQueueEnabled() {

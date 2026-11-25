@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gtkit/gin-api/internal/platform/config"
+	"github.com/gtkit/gin-api/internal/platform/data"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -202,5 +203,24 @@ func TestMigrationDoesNotOpenNamedConnections(t *testing.T) {
 		if owner.closes.Load() != 0 {
 			t.Fatal("migration acquired a named runtime connection")
 		}
+	}
+}
+
+func TestResponseCacheUsesSelectedPhysicalRedis(t *testing.T) {
+	f, factories, owners := namedConnectionFixture(t)
+	f.components[0].cfg.Cache = config.CacheConfig{Enabled: true, Store: config.CacheStoreRedis, RedisConnection: "sessions", RedisDB: 1}
+	open := factories.cache
+	factories.cache = func(ctx context.Context, cfg *config.Config, r data.RedisClientProvider) (cacheOwner, error) {
+		if r != owners["redis[sessions]"] {
+			t.Fatal("cache used wrong Redis owner")
+		}
+		return open(ctx, cfg, r)
+	}
+	rt, err := NewRuntime(t.Context(), Options{factories: &factories})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Close(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }

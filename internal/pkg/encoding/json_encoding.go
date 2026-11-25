@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
-	
-	"github.com/golang/snappy"
+
+	"github.com/klauspost/compress/snappy"
 )
 
 // JSONEncoding json format
@@ -15,17 +15,12 @@ type JSONEncoding struct{}
 
 // Marshal json encode
 func (j JSONEncoding) Marshal(v any) ([]byte, error) {
-	buf, err := json.Marshal(v)
-	return buf, err
+	return json.Marshal(v)
 }
 
 // Unmarshal json decode
 func (j JSONEncoding) Unmarshal(data []byte, value any) error {
-	err := json.Unmarshal(data, value)
-	if err != nil {
-		return err
-	}
-	return nil
+	return json.Unmarshal(data, value)
 }
 
 // JSONGzipEncoding json and gzip
@@ -37,11 +32,7 @@ func (jz JSONGzipEncoding) Marshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// var bufSizeBefore = len(buf)
-	
-	buf, err = GzipEncode(buf)
-	// log.Infof("gzip_json_compress_ratio=%d/%d=%.2f", bufSizeBefore, len(buf), float64(bufSizeBefore)/float64(len(buf)))
-	return buf, err
+	return GzipEncode(buf)
 }
 
 // Unmarshal json encode and gzip
@@ -50,57 +41,60 @@ func (jz JSONGzipEncoding) Unmarshal(data []byte, value any) error {
 	if err != nil {
 		return err
 	}
-	
-	err = json.Unmarshal(jsonData, value)
-	if err != nil {
-		return err
-	}
-	return nil
+
+	return json.Unmarshal(jsonData, value)
 }
 
-// GzipEncode encoding
+// Compressed codecs accept up to 64 MiB of plaintext per message.
+const maxPlainBytes = 64 << 20
+const maxWireBytes = 80 << 20
+
+var ErrPayloadTooLarge = errors.New("encoding: payload exceeds size limit")
+
+// GzipEncode produces a standard gzip member.
 func GzipEncode(in []byte) ([]byte, error) {
-	var (
-		buffer bytes.Buffer
-		out    []byte
-		err    error
-	)
-	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	if len(in) > maxPlainBytes {
+		return nil, ErrPayloadTooLarge
+	}
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
 	if err != nil {
 		return nil, err
 	}
-	
-	_, err = writer.Write(in)
-	if err != nil {
-		err = writer.Close()
-		if err != nil {
-			return out, err
-		}
-		return out, err
+	if _, err := w.Write(in); err != nil {
+		return nil, err
 	}
-	err = writer.Close()
-	if err != nil {
-		return out, err
+	if err := w.Close(); err != nil {
+		return nil, err
 	}
-	
-	return buffer.Bytes(), nil
+	return buf.Bytes(), nil
 }
 
-// GzipDecode decode
+// GzipDecode validates all members and bounds their combined output.
 func GzipDecode(in []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(bytes.NewReader(in))
-	if err != nil {
-		var out []byte
-		return out, err
+	return gzipDecode(in, maxPlainBytes)
+}
+
+func gzipDecode(in []byte, limit int64) ([]byte, error) {
+	if len(in) > maxWireBytes {
+		return nil, ErrPayloadTooLarge
 	}
-	defer func() {
-		err = reader.Close()
-		if err != nil {
-			fmt.Printf("reader close err: %+v", err)
-		}
-	}()
-	
-	return io.ReadAll(reader)
+	r, err := gzip.NewReader(bytes.NewReader(in))
+	if err != nil {
+		return nil, err
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	closeErr := r.Close()
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(out)) > limit {
+		return nil, ErrPayloadTooLarge
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return out, nil
 }
 
 // JSONSnappyEncoding json format and snappy compression
@@ -112,16 +106,29 @@ func (s JSONSnappyEncoding) Marshal(v any) (data []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(b) > maxPlainBytes {
+		return nil, ErrPayloadTooLarge
+	}
 	d := snappy.Encode(nil, b)
 	return d, nil
 }
 
 // Unmarshal deserialization
 func (s JSONSnappyEncoding) Unmarshal(data []byte, value any) error {
+	if len(data) > maxWireBytes {
+		return ErrPayloadTooLarge
+	}
+	size, err := snappy.DecodedLen(data)
+	if err != nil {
+		return err
+	}
+	if size > maxPlainBytes {
+		return ErrPayloadTooLarge
+	}
 	b, err := snappy.Decode(nil, data)
 	if err != nil {
 		return err
 	}
-	
+
 	return json.Unmarshal(b, value)
 }

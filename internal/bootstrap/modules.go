@@ -45,7 +45,7 @@ type services struct {
 	// accounts 独立于 auth 业务模块，提供账号状态、会员及权威角色校验。
 	accounts account.Assembly
 	// optionalServices 承载 optional 构建的业务模块产物（默认构建为空载体）。
-	optionalServices
+	optionalServices //nolint:unused // embedded only by optional builds
 }
 
 // buildServices 借用基础设施装配模块，按 module-services 标记接入生成代码。
@@ -166,7 +166,7 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 	// 引用了未注册策略、或在不保证身份的路由上引用身份作用域策略，
 	// 若被静默跳过/丢弃，配置漏项、拼写错误或作用域误配都会让保护
 	// 无提示失效——rate-limiting spec 要求这类引用在装配期失败。
-	_, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
+	businessRateLimits, preIdentityRateLimits, unresolvedRateLimits := router.NewRateLimitStager(opt)
 
 	// 各模块在 /api/v1 组上用 gin 的方式注册自己的路由。
 	// 新增模块只需在这里加一行 Register。
@@ -187,7 +187,9 @@ func buildEngine(inf infra, svc services, auth gin.HandlerFunc, status router.Pr
 				RateLimit: preIdentityRateLimits,
 			})
 		}
-		registerOptionalModules(v1, svc, auth, inf)
+	}
+	opt.RegisterFileModule = func(v1, transfers *gin.RouterGroup) {
+		registerOptionalModules(v1, transfers, svc, auth, inf, businessRateLimits)
 	}
 
 	engine, err := router.New(cfg.Env, opt)

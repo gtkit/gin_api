@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"maps"
+	"math"
 	"strconv"
 	"time"
 
@@ -56,6 +58,11 @@ func Signature(opts SignatureOptions) gin.HandlerFunc {
 	if opts.Secrets == nil {
 		panic("middleware: Signature requires a secrets map")
 	}
+	opts.Secrets = maps.Clone(opts.Secrets)
+	if opts.ValidWindow < 0 || opts.MaxSkew < 0 || opts.ValidWindow > math.MaxInt64-time.Second || opts.MaxSkew > (math.MaxInt64-time.Second-opts.ValidWindow)/2 {
+		panic("middleware: invalid signature time window")
+	}
+	pastWindow := opts.ValidWindow + opts.MaxSkew
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -68,7 +75,7 @@ func Signature(opts SignatureOptions) gin.HandlerFunc {
 		}
 
 		secret, ok := opts.Secrets[appID]
-		if !ok {
+		if !ok || secret == "" {
 			abortWith(c, goerr.New(errAppIDUnknown, goerr.StatusAppKey()))
 			return
 		}
@@ -79,19 +86,35 @@ func Signature(opts SignatureOptions) gin.HandlerFunc {
 			return
 		}
 		now := opts.Now()
-		age := now.Unix() - ts
-		if age > int64((opts.ValidWindow+opts.MaxSkew)/time.Second) {
+		if ts < now.Unix()-int64(pastWindow/time.Second) {
 			abortWith(c, goerr.New(errTimestampOutOfRange, goerr.StatusAuthExpired()))
 			return
 		}
-		if -age > int64(opts.MaxSkew/time.Second) {
+		if ts > now.Unix()+int64(opts.MaxSkew/time.Second) {
 			abortWith(c, goerr.New(errTimestampOutOfRange, goerr.StatusAuth()))
 			return
 		}
 
+		body, err := readBody(c)
+		if err != nil {
+			abortWith(c, goerr.New(err, goerr.StatusRequestFail()))
+			return
+		}
+
+		expected := apisign.SignRequest(secret, c.Request.Method, c.Request.URL.Path, c.Request.URL.Query().Encode(), body, appID, timestamp, nonce)
+		if !apisign.ConstantTimeEquals(expected, sign) {
+			abortWith(c, goerr.New(errSignatureMismatch, goerr.StatusAuth()))
+			return
+		}
+
+		ttl := time.Unix(ts+int64(pastWindow/time.Second)+1, 0).Sub(opts.Now().Truncate(time.Millisecond))
+		if ttl <= 0 {
+			abortWith(c, goerr.New(errTimestampOutOfRange, goerr.StatusAuthExpired()))
+			return
+		}
 		if opts.Nonce != nil {
-			// TTL 略长于时间戳有效期（含时钟偏移），确保窗口内的重放都能被识别。
-			recorded, err := opts.Nonce.Record(c.Request.Context(), appID, nonce, opts.ValidWindow+opts.MaxSkew)
+			// Keep the nonce through the last accepted timestamp second, including future skew.
+			recorded, err := opts.Nonce.Record(c.Request.Context(), appID, nonce, ttl)
 			if err != nil && abortOnContextError(c, err) {
 				return
 			}
@@ -104,25 +127,6 @@ func Signature(opts SignatureOptions) gin.HandlerFunc {
 				abortWith(c, goerr.New(errNonceReused, goerr.StatusAuth()))
 				return
 			}
-		}
-
-		body, err := readBody(c)
-		if err != nil {
-			abortWith(c, goerr.New(err, goerr.StatusRequestFail()))
-			return
-		}
-
-		canonical := apisign.CanonicalString(
-			c.Request.Method,
-			c.Request.URL.Path,
-			c.Request.URL.Query().Encode(),
-			string(body),
-			appID, timestamp, nonce,
-		)
-		expected := apisign.Sign(secret, canonical)
-		if !apisign.ConstantTimeEquals(expected, sign) {
-			abortWith(c, goerr.New(errSignatureMismatch, goerr.StatusAuth()))
-			return
 		}
 
 		c.Next()

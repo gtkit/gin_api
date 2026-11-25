@@ -59,31 +59,29 @@ func (w *Workers) NextID() (uint64, error) {
 
 // 获取雪花算法 随机 id
 func (w *Workers) SonwID() (uint64, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	return w.nextID()
+	return w.NextID()
 }
 
 func (w *Workers) nextID() (uint64, error) {
-	timeStamp := w.getMilliSeconds()
-	if timeStamp < w.LastStamp {
-		return 0, errors.New("time is moving backwards,waiting until")
+	if w.WorkerID < 0 || w.WorkerID > maxWorkerID || w.DataCenterID < 0 || w.DataCenterID > maxDataCenterID {
+		return 0, errors.New("snow: node IDs must be between 0 and 31")
 	}
-
+	timeStamp := w.getMilliSeconds()
+	if w.LastStamp == timeStamp && w.Sequence == maxSequence {
+		time.Sleep(time.Until(time.UnixMilli(timeStamp + 1)))
+		timeStamp = w.getMilliSeconds()
+	}
+	if timeStamp < w.LastStamp || (timeStamp == w.LastStamp && w.Sequence == maxSequence) {
+		return 0, errors.New("snow: clock moved backwards")
+	}
+	if timeStamp < twepoch || timeStamp-twepoch >= 1<<41 {
+		return 0, errors.New("snow: timestamp outside representable range")
+	}
 	if w.LastStamp == timeStamp {
-
-		w.Sequence = (w.Sequence + 1) & maxSequence
-
-		if w.Sequence == 0 {
-			for timeStamp <= w.LastStamp {
-				timeStamp = w.getMilliSeconds()
-			}
-		}
+		w.Sequence++
 	} else {
 		w.Sequence = 0
 	}
-
 	w.LastStamp = timeStamp
 	id := ((timeStamp - twepoch) << timeLeft) |
 		(w.DataCenterID << dataLeft) |

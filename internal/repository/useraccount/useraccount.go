@@ -12,6 +12,7 @@ package useraccount
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -61,8 +62,7 @@ func (r *Repository) currentTime() time.Time {
 // 那样一次数据库抖动会表现为全体用户令牌失效（401），而客户端对 401 的
 // 标准反应是清掉登录态重新登录，等于把一次可恢复的故障变成一次全站登出。
 //
-// 只 Count 不取行：判定只需要"存不存在"，把整行搬进内存没有用处，
-// 而这是每个带令牌的请求都会走的路径。
+// 只读取匹配行的主键。
 func (r *Repository) ValidateUser(ctx context.Context, userID int64) (bool, error) {
 	if userID <= 0 {
 		// 非法入参按"用户不可用"处理而不是报错：令牌里带着一个非法 ID 说明
@@ -71,17 +71,22 @@ func (r *Repository) ValidateUser(ctx context.Context, userID int64) (bool, erro
 		return false, nil
 	}
 
-	var exists int64
+	var probe struct {
+		ID int64
+	}
 	err := r.mdbCtx(ctx).
 		Model(&models.User{}).
+		Select("id").
 		Where("id = ?", userID).
 		Where("status = ?", models.UserStatusNormal).
-		Limit(1).
-		Count(&exists).Error
+		Take(&probe).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("validate user %d: %w", userID, err)
 	}
-	return exists > 0, nil
+	return true, nil
 }
 
 // ValidateSession uses the same primary database as credential updates.
@@ -89,12 +94,21 @@ func (r *Repository) ValidateSession(ctx context.Context, userID, version int64)
 	if userID <= 0 || version < 0 {
 		return false, nil
 	}
-	var exists int64
-	err := r.mdbCtx(ctx).Model(&models.User{}).Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).Limit(1).Count(&exists).Error
+	var probe struct {
+		ID int64
+	}
+	err := r.mdbCtx(ctx).
+		Model(&models.User{}).
+		Select("id").
+		Where("id = ? AND status = ? AND auth_version = ?", userID, models.UserStatusNormal, version).
+		Take(&probe).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("validate authentication session: %w", err)
 	}
-	return exists > 0, nil
+	return true, nil
 }
 
 // ValidateVIP 报告用户具备有效会员资格：账号可用、vip_status 为 active，

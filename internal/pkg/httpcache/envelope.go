@@ -96,19 +96,16 @@ func (w *envelopeWriter) Write(data []byte) (int, error) {
 		w.fail(ErrInvalidEnvelope)
 		return 0, w.err
 	}
-	limit := w.ctx.GetInt64(envelopeLimitKey)
-	if limit <= 0 {
-		limit = (config.CacheConfig{}).EffectiveMaxBodyBytes()
-	}
 	output := data
-	if int64(len(data)) > limit {
-		// This is a fresh, current-ID helper response. The cache's own size gate
-		// rejects it; do not allocate another oversized copy for validation/rewrite.
-		if !resp.IsEnvelopeWrite(w.ctx) {
+	if !resp.IsEnvelopeWrite(w.ctx) {
+		limit := w.ctx.GetInt64(envelopeLimitKey)
+		if limit <= 0 {
+			limit = (config.CacheConfig{}).EffectiveMaxBodyBytes()
+		}
+		if int64(len(data)) > limit {
 			w.fail(ErrInvalidEnvelope)
 			return 0, w.err
 		}
-	} else {
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(data, &fields); err != nil {
 			w.fail(errors.Join(ErrInvalidEnvelope, err))
@@ -125,7 +122,8 @@ func (w *envelopeWriter) Write(data []byte) (int, error) {
 			Data      json.RawMessage `json:"data"`
 			RequestID string          `json:"request_id"`
 		}
-		if err := json.Unmarshal(data, &envelope); err != nil {
+		envelope.Data = fields["data"]
+		if err := errors.Join(json.Unmarshal(fields["code"], &envelope.Code), json.Unmarshal(fields["msg"], &envelope.Message), json.Unmarshal(fields["request_id"], &envelope.RequestID)); err != nil {
 			w.fail(errors.Join(ErrInvalidEnvelope, err))
 			return 0, w.err
 		}

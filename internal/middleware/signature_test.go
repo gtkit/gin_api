@@ -19,11 +19,13 @@ const testAppSecret = "test-app-secret-0123456789abcdef"
 
 // fakeNonceStore 是内存版 nonce 去重，供测试注入，避免依赖真实 Redis。
 type fakeNonceStore struct {
+	ttl  time.Duration
 	seen map[string]bool
 	err  error
 }
 
-func (s *fakeNonceStore) Record(_ context.Context, appID, nonce string, _ time.Duration) (bool, error) {
+func (s *fakeNonceStore) Record(_ context.Context, appID, nonce string, ttl time.Duration) (bool, error) {
+	s.ttl = ttl
 	if s.err != nil {
 		return false, s.err
 	}
@@ -143,5 +145,29 @@ func TestSignatureRejectsExpiredTimestamp(t *testing.T) {
 	engine.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestSignatureRecordsOnlyAuthenticatedNoncesThroughFutureSkew(t *testing.T) {
+	store := &fakeNonceStore{}
+	engine := newSignatureEngine(store)
+	ts := time.Now().Add(50 * time.Second).Unix()
+	request := func(valid bool) int {
+		r := signReq(t, http.MethodPost, "/api/pay", "{}", "svc_a", "shared", ts)
+		if !valid {
+			r.Header.Set(headerSign, "invalid")
+		}
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, r)
+		return w.Code
+	}
+	if request(false) != http.StatusUnauthorized || len(store.seen) != 0 {
+		t.Fatal("invalid request consumed nonce")
+	}
+	if request(true) != http.StatusNoContent || store.ttl <= 6*time.Minute {
+		t.Fatal("future-dated request lost full replay protection")
+	}
+	if request(true) != http.StatusUnauthorized {
+		t.Fatal("replay accepted")
 	}
 }

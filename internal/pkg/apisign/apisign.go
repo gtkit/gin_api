@@ -36,6 +36,15 @@ func Sign(secret, canonical string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// SignRequest signs the canonical fields without materializing a second copy of the body.
+func SignRequest(secret, method, path, query string, body []byte, appID, timestamp, nonce string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(method + "\n" + path + "\n" + query + "\n"))
+	mac.Write(body)
+	mac.Write([]byte("\n" + appID + "\n" + timestamp + "\n" + nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // ConstantTimeEquals 恒定时间比较两段字符串，防时序攻击。
 //
 // 普通 == 在第一个不同字符即短路返回，响应耗时泄露了"前几位是否相同"，

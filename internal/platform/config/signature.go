@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -46,6 +47,17 @@ func validateSignatureConfig(cfg SignatureConfig) error {
 	}
 	if cfg.ValidWindowSeconds < 0 {
 		errs = append(errs, errors.New("signature.valid_window_seconds must not be negative"))
+	}
+	window, skew := int64(cfg.ValidWindowSeconds), int64(cfg.MaxSkewSeconds)
+	if window == 0 {
+		window = defaultSignatureValidWindowSeconds
+	}
+	if skew == 0 {
+		skew = defaultSignatureMaxSkewSeconds
+	}
+	const maxSeconds = math.MaxInt64/int64(time.Second) - 1
+	if window > maxSeconds || (window >= 0 && skew > (maxSeconds-window)/2) {
+		errs = append(errs, errors.New("signature timestamp and skew windows overflow the nonce lifetime"))
 	}
 	return errors.Join(errs...)
 }

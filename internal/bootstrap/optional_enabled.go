@@ -6,14 +6,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gtkit/gin-api/internal/middleware"
 	fileapp "github.com/gtkit/gin-api/internal/module/file/application"
 	filehttp "github.com/gtkit/gin-api/internal/module/file/transport/http"
 	"github.com/gtkit/gin-api/internal/optional/auditlog"
 	"github.com/gtkit/gin-api/internal/optional/outbound"
 	"github.com/gtkit/gin-api/internal/optional/taskqueue"
 	"github.com/gtkit/gin-api/internal/optional/upload"
+	"github.com/gtkit/gin-api/internal/router"
 	fileruntime "github.com/gtkit/gin-api/internal/runtime/module/file"
 	sharedauth "github.com/gtkit/gin-api/internal/shared/auth"
 	"github.com/gtkit/gouploader"
@@ -39,7 +42,8 @@ func buildOptionalServices(svc *services, inf infra) error {
 		return nil
 	}
 	fileService, err := fileruntime.New(inf.uploader, inf.mysqlDB,
-		inf.cfg.Upload.Storage.EffectiveDriver(), inf.cfg.Upload.Storage.BucketName())
+		inf.cfg.Upload.Storage.EffectiveDriver(), inf.cfg.Upload.Storage.BucketName(),
+		time.Duration(inf.cfg.Upload.ListDBTimeoutMS)*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("build file module: %w", err)
 	}
@@ -49,13 +53,15 @@ func buildOptionalServices(svc *services, inf infra) error {
 
 // registerOptionalModules 挂载 optional 业务路由。已登录即可上传，
 // 文件归属授权在 application 层按 owner_id 校验。
-func registerOptionalModules(v1 *gin.RouterGroup, svc services, auth gin.HandlerFunc, inf infra) {
+func registerOptionalModules(v1, transfers *gin.RouterGroup, svc services, auth gin.HandlerFunc, inf infra, rateLimits router.RateLimitStager) {
 	if svc.file == nil {
 		return
 	}
-	filehttp.Register(v1, filehttp.Deps{
-		Service: svc.file,
-		Auth:    auth,
+	deps := filehttp.Deps{
+		Service:        svc.file,
+		TransferGroup:  transfers,
+		MergeAdmission: middleware.Admission(4, inf.recorder),
+		Auth:           auth,
 		Authorizer: sharedauth.AuthorizerFunc(func(context.Context, sharedauth.Principal, sharedauth.AuthorizationRequest) (bool, error) {
 			return true, nil
 		}),
@@ -65,7 +71,11 @@ func registerOptionalModules(v1 *gin.RouterGroup, svc services, auth gin.Handler
 		// 库默认单片上限 20MB + 1MB 表单开销。
 		MaxChunkBytes:  21 << 20,
 		RequestTimeout: inf.cfg.Upload.EffectiveRequestTimeout(),
-	})
+	}
+	if inf.cfg.Upload.RateLimitEnabled {
+		deps.RateLimit = rateLimits
+	}
+	filehttp.Register(v1, deps)
 }
 
 func buildOptionalProviders(inf *infra, cleanup *providerCleanup) error {

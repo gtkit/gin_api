@@ -1,49 +1,33 @@
-package sign_test
+package sign
 
 import (
-	"fmt"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/url"
 	"testing"
 	"time"
-
-	"my_gin/internal/pkg/sign"
 )
 
-const (
-	key    = "AK100523687952"
-	secret = "W1WTYvJpfeH1YpUjTpeFbEx^DnpQ&35L"
-	ttl    = time.Minute * 3
-)
-
-func TestSignature_Generate(t *testing.T) {
-	path := "/echo"
-	method := "POST"
-
-	params := url.Values{}
-	params.Add("a", "a1")
-	params.Add("d", "d1")
-	params.Add("c", "c1 c2")
-	fmt.Printf("params: %#v\n", params)
-
-	authorization, date, err := sign.New(key, secret, ttl).Generate(path, method, params)
-	t.Log("authorization:", authorization)
-	t.Log("date:", date)
-	t.Log("err:", err)
-}
-
-func TestSignature_Verify(t *testing.T) {
-
-	authorization := "blog y7a326f3aWvIxdeNIgRo0P7FSDnCNSsN8gJi/4y+cZo="
-	date := "2021-04-06 16:15:26"
-
-	path := "/echo"
-	method := "post"
-	params := url.Values{}
-	params.Add("a", "a1")
-	params.Add("d", "d1")
-	params.Add("c", "c1 c2*")
-
-	ok, err := sign.New(key, secret, ttl).Verify(authorization, date, path, method, params)
-	t.Log(ok)
-	t.Log(err)
+func TestSignatureWireFormat(t *testing.T) {
+	s := New("test", "fixture", time.Minute)
+	values := url.Values{"b": {"two words"}, "a": {"1"}}
+	auth, date, err := s.Generate("/echo", "post", values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hmac.New(sha256.New, []byte("fixture"))
+	m.Write([]byte("/echo|POST|a=1&b=two words|" + date))
+	if auth != "test "+base64.StdEncoding.EncodeToString(m.Sum(nil)) {
+		t.Fatal("wire format changed")
+	}
+	if ok, err := s.Verify(auth, date, "/echo", "POST", values); !ok || err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.Verify(auth, date, "/other", "POST", values); ok {
+		t.Fatal("invalid signature accepted")
+	}
+	if ok, _ := s.Verify(auth, time.Now().Add(time.Hour).In(signatureZone).Format(time.DateTime), "/echo", "POST", values); ok {
+		t.Fatal("future date accepted")
+	}
 }

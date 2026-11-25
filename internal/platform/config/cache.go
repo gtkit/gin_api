@@ -18,8 +18,9 @@ type CacheConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// Store 是后端：redis（跨副本共享）或 memory（单副本本地）。
 	Store string `mapstructure:"store"`
-	// RedisDB 是 redis 后端使用的逻辑库号，零值为 0。
-	// 必须出现在 redis.dbs 里：资源层只打开声明过的库。
+	// RedisConnection selects a named physical Redis connection. Empty uses default.
+	RedisConnection string `mapstructure:"redis_connection"`
+	// RedisDB selects a declared logical database on the chosen connection.
 	RedisDB int `mapstructure:"redis_db"`
 	// TTL 是默认缓存时长；路由可各自覆盖。
 	TTL time.Duration `mapstructure:"ttl"`
@@ -68,7 +69,7 @@ func (c CacheConfig) EffectiveMaxBodyBytes() int64 {
 // validateCacheConfig 校验响应缓存配置。
 //
 // 关闭时不校验：母版默认不启用，强制填一组用不到的值只会被随便填。
-func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
+func validateCacheConfig(cfg CacheConfig, redis RedisConfig, named map[string]RedisConfig) error {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -77,6 +78,13 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 
 	switch strings.TrimSpace(cfg.Store) {
 	case CacheStoreRedis:
+		if cfg.RedisConnection != "" && cfg.RedisConnection != DefaultConnection {
+			var ok bool
+			redis, ok = named[cfg.RedisConnection]
+			if !ok {
+				return fmt.Errorf("cache.redis_connection %q is not configured", cfg.RedisConnection)
+			}
+		}
 		// redis 后端要求 Redis 已配置：否则启用了缓存却没有后端，
 		// 表现为"缓存开着但一次也没命中"，而没有任何一处会报错。
 		if strings.TrimSpace(redis.Addr) == "" {
@@ -94,6 +102,9 @@ func validateCacheConfig(cfg CacheConfig, redis RedisConfig) error {
 				cfg.RedisDB, redis.DBs))
 		}
 	case CacheStoreMemory:
+		if cfg.RedisConnection != "" {
+			errs = append(errs, errors.New("cache.redis_connection requires the redis store"))
+		}
 		// memory 后端必须有容量上限。无界的本地缓存在键空间随请求变化时
 		// 会一直涨，那不是命中率问题，是一次必然发生的 OOM。
 		if cfg.MaxBytes <= 0 {

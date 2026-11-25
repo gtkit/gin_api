@@ -7,12 +7,13 @@ import (
 	"github.com/gtkit/goerr"
 )
 
+var tradeWorker = NewWorkers(1, 2)
+
 // 采用雪花算法
 func tradeno() (string, error) {
-	s := NewWorkers(1, 2)
-	snowid, err := s.SonwID()
+	snowid, err := tradeWorker.SonwID()
 	if err != nil {
 		return "", goerr.Wrap(err, "获取雪花id:")
 	}
-	return strconv.Itoa(int(snowid)), nil
+	return strconv.FormatUint(snowid, 10), nil
 }

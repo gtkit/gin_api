@@ -44,7 +44,7 @@ func TestValidateCacheConfigRedisDB(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateCacheConfig(tt.cfg, redis)
+			err := validateCacheConfig(tt.cfg, redis, nil)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validateCacheConfig() = %v, want nil", err)
@@ -55,5 +55,20 @@ func TestValidateCacheConfigRedisDB(t *testing.T) {
 				t.Fatalf("validateCacheConfig() = %v, want error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateNamedCacheConnection(t *testing.T) {
+	cache := CacheConfig{Enabled: true, Store: CacheStoreRedis, RedisConnection: "responses", RedisDB: 4}
+	named := map[string]RedisConfig{"responses": {Addr: "localhost:6379", DBs: []int{4}}}
+	if err := validateCacheConfig(cache, RedisConfig{}, named); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCacheConfig(cache, RedisConfig{}, nil); err == nil {
+		t.Fatal("undeclared cache connection accepted")
+	}
+	cache.RedisDB = 5
+	if err := validateCacheConfig(cache, RedisConfig{DBs: []int{5}}, named); err == nil {
+		t.Fatal("DB validated against default Redis")
 	}
 }

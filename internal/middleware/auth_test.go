@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -242,6 +243,32 @@ func TestAuthReturns503WhenVerifierErrors(t *testing.T) {
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d (infra error must not be reported as auth failure)", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
+
+type unavailableRevocationStore struct{}
+
+func (unavailableRevocationStore) IsRevoked(context.Context, string) (bool, error) {
+	return false, errors.New("private Redis failure")
+}
+
+func TestAuthRejectsRedisRevocationFailure(t *testing.T) {
+	jwt := newTestJWT(t)
+	token, err := jwt.Issuer.Issue(t.Context(), 42, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	engine.Use(ErrorHandler(), Auth(AuthOptions{
+		Verifier: fakeUserVerifier{valid: true}, Parser: jwt.Parser, Revocation: unavailableRevocationStore{},
+	}))
+	engine.GET("/protected", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil)
+	request.Header.Set("App-Token", token)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || strings.Contains(recorder.Body.String(), "private Redis failure") {
+		t.Fatalf("failure was not safely rejected: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 

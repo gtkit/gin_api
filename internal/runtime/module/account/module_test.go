@@ -53,11 +53,15 @@ func TestAssembledPortsPreserveIdentityDecisionsAndCauses(t *testing.T) {
 		{name: "query failure", err: failure},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query := mock.ExpectQuery("SELECT count.*FROM `users`").WithArgs(int64(7), models.UserStatusNormal, 1)
+			query := mock.ExpectQuery("SELECT `id` FROM `users`").WithArgs(int64(7), models.UserStatusNormal, 1)
 			if tc.err != nil {
 				query.WillReturnError(tc.err)
 			} else {
-				query.WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(tc.count))
+				rows := sqlmock.NewRows([]string{"id"})
+				if tc.count > 0 {
+					rows.AddRow(7)
+				}
+				query.WillReturnRows(rows)
 			}
 			allowed, err := assembly.Users.ValidateUser(t.Context(), 7)
 			if allowed != (tc.count > 0) || !errors.Is(err, tc.err) {

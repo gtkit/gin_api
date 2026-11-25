@@ -8,6 +8,8 @@ groups:
         expr: sum by (service_name, service_instance_id) (rate(http_server_requests_total{http_response_status_code=~"5..",http_route!~"/health|/ready"}[5m])) / clamp_min(gin_api:http_rps:rate5m, 0.001)
       - record: gin_api:http_p99:seconds5m
         expr: histogram_quantile(0.99, sum by (service_name, service_instance_id, le) (rate(http_server_request_duration_seconds_bucket{http_route!~"/health|/ready"}[5m])))
+      - record: gin_api:http_route_2xx_p99:seconds5m
+        expr: histogram_quantile(0.99, sum by (service_name, service_instance_id, http_route, http_request_method, le) (rate(http_server_request_duration_seconds_bucket{http_response_status_code=~"2..",http_route!~"/health|/ready"}[5m])))
   - name: gin-api-alerts
     rules:
       - alert: GinAPIHighErrorRate

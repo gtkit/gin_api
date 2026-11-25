@@ -5,13 +5,13 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// map 参数获取 sign
+// MapSign generates a legacy MD5 signature.
+// Deprecated: use HMAC for new protocols.
 func MapSign(op map[string]any, appSecret string) string {
 
 	var buf bytes.Buffer
@@ -23,7 +23,6 @@ func MapSign(op map[string]any, appSecret string) string {
 	buf.WriteString(appSecret)
 
 	returnStr := buf.String()
-	fmt.Println("------------return str : ", returnStr)
 
 	s := NewMd5(returnStr)
 
@@ -33,7 +32,7 @@ func MapSign(op map[string]any, appSecret string) string {
 func sortMap(op map[string]any, t int8) string {
 	keys := make([]string, 0, len(op))
 
-	for k, _ := range op {
+	for k := range op {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

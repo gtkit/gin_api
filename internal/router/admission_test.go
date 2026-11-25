@@ -2,8 +2,10 @@ package router
 
 import (
 	"context"
+	"github.com/gtkit/gin-api/internal/middleware"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gtkit/gin-api/internal/pkg/metrics"
@@ -76,5 +78,41 @@ func TestAdmissionKeepsCanceledHandlerSlotAndProbesAvailable(t *testing.T) {
 	}
 	if rejected != 1 {
 		t.Fatalf("rejections=%d, want only the matched saturated request", rejected)
+	}
+}
+
+func TestTransferBudgetLeavesCapacityAndIndependentDeadline(t *testing.T) {
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	e := newTestEngineWith(t, Options{MaxInflightRequests: 2, RegisterFileModule: func(short, transfers *gin.RouterGroup) {
+		short.GET("/meta", func(c *gin.Context) {
+			d, ok := c.Request.Context().Deadline()
+			if !ok || time.Until(d) > 30*time.Second {
+				t.Error("short deadline missing")
+			}
+			c.Status(204)
+		})
+		transfers.GET("/blob", middleware.Timeout(time.Minute, time.Second), func(c *gin.Context) {
+			d, ok := c.Request.Context().Deadline()
+			if !ok || time.Until(d) < 45*time.Second {
+				t.Error("transfer deadline truncated")
+			}
+			close(entered)
+			<-release
+			c.Status(204)
+		})
+	}})
+	call := func(path string) int {
+		w := httptest.NewRecorder()
+		e.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/"+path, nil))
+		return w.Code
+	}
+	go func() { defer close(done); call("blob") }()
+	<-entered
+	defer func() { close(release); <-done }()
+	if got := call("blob"); got != 503 {
+		t.Fatalf("saturated transfer status %d", got)
+	}
+	if got := call("meta"); got != 204 {
+		t.Fatalf("short request status %d", got)
 	}
 }

@@ -172,7 +172,15 @@ func openRuntimeResources(ctx context.Context, cfg *config.Config, f runtimeFact
 			}
 		}
 	}
-	r.cache, err = openResource(ctx, "cache", func(ctx context.Context) (cacheOwner, error) { return f.cache(ctx, cfg, r.redis) })
+	cacheRedis := r.redis
+	if name := cfg.Cache.RedisConnection; cfg.Cache.Enabled && name != "" && name != config.DefaultConnection {
+		var ok bool
+		cacheRedis, ok = r.redisConnections[name]
+		if !ok {
+			return nil, fmt.Errorf("cache.redis_connection %q is not configured", name)
+		}
+	}
+	r.cache, err = openResource(ctx, "cache", func(ctx context.Context) (cacheOwner, error) { return f.cache(ctx, cfg, cacheRedis) })
 	if err != nil {
 		return nil, err
 	}

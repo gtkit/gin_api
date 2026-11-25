@@ -1,14 +1,11 @@
 package sign
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"gitee.com/phper95/pkg/timeutil"
-	"github.com/gtkit/goerr"
 	"net/http"
 	"net/url"
 	"strings"
@@ -57,108 +54,42 @@ func New(key, secret string, ttl time.Duration) Signature {
 	}
 }
 
-// Generate
-// path 请求的路径 (不附带 querystring)
-func (s *signature) Generate(path string, method string, params url.Values) (authorization, date string, err error) {
-	if path == "" {
-		err = goerr.Err("path required")
-		return
+var signatureZone = time.FixedZone("CST", 8*60*60)
+
+func (s *signature) digest(path, method string, params url.Values, date string) (string, error) {
+	method = strings.ToUpper(method)
+	if path == "" || !methods[method] || s.key == "" || s.secret == "" || s.ttl <= 0 {
+		return "", errors.New("invalid signature parameters")
 	}
-
-	if method == "" {
-		err = errors.New("method required")
-		return
-	}
-
-	methodName := strings.ToUpper(method)
-	if !methods[methodName] {
-		err = errors.New("method param error")
-		return
-	}
-
-	// Date
-	date = timeutil.CSTLayoutString()
-
-	// Encode() 方法中自带 sorted by key
-	sortParamsEncode, err := url.QueryUnescape(params.Encode())
+	query, err := url.QueryUnescape(params.Encode())
 	if err != nil {
-		err = goerr.Errorf("url QueryUnescape error %v", err)
-		return
+		return "", fmt.Errorf("decode signature query: %w", err)
 	}
-
-	// 加密字符串规则
-	buffer := bytes.NewBuffer(nil)
-	buffer.WriteString(path)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(methodName)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(sortParamsEncode)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(date)
-
-	// 对数据进行 sha256 加密，并进行 base64 encode
-	hash := hmac.New(sha256.New, []byte(s.secret))
-	hash.Write(buffer.Bytes())
-	digest := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-
-	authorization = fmt.Sprintf("%s %s", s.key, digest)
-	return
+	mac := hmac.New(sha256.New, []byte(s.secret))
+	mac.Write([]byte(strings.Join([]string{path, method, query, date}, delimiter)))
+	return s.key + " " + base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
-func (s *signature) Verify(authorization, date string, path string, method string, params url.Values) (ok bool, err error) {
-	if date == "" {
-		err = errors.New("date required")
-		return
-	}
-
-	if path == "" {
-		err = errors.New("path required")
-		return
-	}
-
-	if method == "" {
-		err = errors.New("method required")
-		return
-	}
-
-	methodName := strings.ToUpper(method)
-	if !methods[methodName] {
-		err = errors.New("method param error")
-		return
-	}
-
-	ts, err := timeutil.ParseCSTInLocation(date)
+func (s *signature) Generate(path, method string, params url.Values) (string, string, error) {
+	date := time.Now().In(signatureZone).Format(time.DateTime)
+	auth, err := s.digest(path, method, params, date)
 	if err != nil {
-		err = goerr.Err("date must follow '2006-01-02 15:04:05'")
-		return
+		return "", "", err
 	}
+	return auth, date, nil
+}
 
-	if timeutil.SubInLocation(ts) > float64(s.ttl/time.Second) {
-		err = goerr.Errorf("date exceeds limit %v", s.ttl)
-		return
-	}
-
-	// Encode() 方法中自带 sorted by key
-	sortParamsEncode, err := url.QueryUnescape(params.Encode())
+func (s *signature) Verify(authorization, date, path, method string, params url.Values) (bool, error) {
+	ts, err := time.ParseInLocation(time.DateTime, date, signatureZone)
 	if err != nil {
-		err = goerr.Errorf("url QueryUnescape error %v", err)
-		return
+		return false, fmt.Errorf("parse signature date: %w", err)
 	}
-	buffer := bytes.NewBuffer(nil)
-	buffer.WriteString(path)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(methodName)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(sortParamsEncode)
-	buffer.WriteString(delimiter)
-	buffer.WriteString(date)
-
-	// 对数据进行 hmac 加密，并进行 base64 encode
-	hash := hmac.New(sha256.New, []byte(s.secret))
-	hash.Write(buffer.Bytes())
-	digest := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-
-	ok = authorization == fmt.Sprintf("%s %s", s.key, digest)
-	fmt.Println("authorization", authorization, "auth", fmt.Sprintf("%s %s", s.key, digest))
-	return
+	if age := time.Since(ts); age < 0 || age > s.ttl {
+		return false, errors.New("signature date outside validity window")
+	}
+	expected, err := s.digest(path, method, params, date)
+	if err != nil {
+		return false, err
+	}
+	return hmac.Equal([]byte(authorization), []byte(expected)), nil
 }

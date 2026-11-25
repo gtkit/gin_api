@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -73,7 +74,12 @@ func (g *RequestIDGenerator) Next() (string, error) {
 		// Add 回绕到 0 说明已用满 2^64；继续发号会重复。
 		return "", ErrRequestIDExhausted
 	}
-	return fmt.Sprintf("%s%016x", g.prefix, n), nil
+	var id [RequestIDLength]byte
+	copy(id[:], g.prefix)
+	var suffix [8]byte
+	binary.BigEndian.PutUint64(suffix[:], n)
+	hex.Encode(id[RequestIDLength-16:], suffix[:])
+	return string(id[:]), nil
 }
 
 // RequestID 为每个请求分配内部 ID，并写入请求头、响应头与两个 context。

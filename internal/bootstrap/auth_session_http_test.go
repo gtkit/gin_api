@@ -96,8 +96,12 @@ func TestSessionLifecycleHTTP(t *testing.T) {
 	}
 	sessionRead := func(version, matches int64) {
 		t.Helper()
-		mock.ExpectQuery("SELECT count\\(\\*\\) FROM `users` WHERE \\(id = \\? AND status = \\? AND auth_version = \\?\\) AND `users`.`deleted_at` IS NULL LIMIT \\?").
-			WithArgs(7, 1, version, 1).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(matches))
+		rows := sqlmock.NewRows([]string{"id"})
+		if matches > 0 {
+			rows.AddRow(7)
+		}
+		mock.ExpectQuery("SELECT `id` FROM `users` WHERE \\(id = \\? AND status = \\? AND auth_version = \\?\\) AND `users`.`deleted_at` IS NULL LIMIT \\?").
+			WithArgs(7, 1, version, 1).WillReturnRows(rows)
 	}
 	decodeToken := func(response *httptest.ResponseRecorder) dto.TokenResponse {
 		t.Helper()
@@ -140,7 +144,7 @@ func TestSessionLifecycleHTTP(t *testing.T) {
 	current := decodeToken(request("login", `{"phone":"account","password":"new-password"}`, "", 200))
 
 	// A database outage must not be presented as an expired credential.
-	mock.ExpectQuery("SELECT count\\(\\*\\) FROM `users`").WillReturnError(errors.New("private database error"))
+	mock.ExpectQuery("SELECT `id` FROM `users`").WillReturnError(errors.New("private database error"))
 	request("logout-all", "", current.AccessToken, 503)
 	sessionRead(1, 1)
 	mock.ExpectBegin()

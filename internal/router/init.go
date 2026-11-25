@@ -66,6 +66,8 @@ type Options struct {
 	// 由 bootstrap 提供：模块的依赖（service、认证中间件）是进程级装配的
 	// 产物，router 包不认识它们。
 	RegisterModules func(v1 *gin.RouterGroup)
+	// RegisterFileModule mounts metadata and bounded transfers at the same URL prefix.
+	RegisterFileModule func(metadata, transfers *gin.RouterGroup)
 }
 
 // New 创建 Gin engine 并装配全局中间件、系统探针与业务路由。
@@ -102,11 +104,16 @@ func New(environment env.Env, opt Options) (*gin.Engine, error) {
 
 	registerSystemRoutes(engine, opt)
 
-	v1 := engine.Group("/api/v1", middleware.Admission(opt.MaxInflightRequests, opt.Metrics), middleware.Timeout(30*time.Second, 2*time.Second))
+	admit := middleware.Admission(opt.MaxInflightRequests, opt.Metrics)
+	v1 := engine.Group("/api/v1", admit, middleware.Timeout(30*time.Second, 2*time.Second))
 	if opt.RegisterModules != nil {
 		opt.RegisterModules(v1)
 	}
 
+	if opt.RegisterFileModule != nil {
+		transfers := engine.Group("/api/v1", middleware.Admission(min(16, max(1, opt.MaxInflightRequests/2)), opt.Metrics), admit)
+		opt.RegisterFileModule(v1, transfers)
+	}
 	return engine, nil
 }
 

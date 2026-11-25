@@ -2,6 +2,7 @@ package application
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gtkit/gouploader"
 )
@@ -23,16 +25,16 @@ type fakeRepo struct {
 
 func newFakeRepo() *fakeRepo { return &fakeRepo{byID: map[string]Record{}} }
 
-func (f *fakeRepo) Create(_ context.Context, record Record) error {
+func (f *fakeRepo) Create(_ context.Context, record Record) (Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, existing := range f.byID {
 		if existing.OwnerID == record.OwnerID && existing.StorageKey == record.StorageKey {
-			return nil
+			return existing, nil
 		}
 	}
 	f.byID[record.ID] = record
-	return nil
+	return record, nil
 }
 
 func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (Record, bool, error) {
@@ -43,17 +45,6 @@ func (f *fakeRepo) Find(_ context.Context, owner int64, id string) (Record, bool
 		return Record{}, false, nil
 	}
 	return record, true, nil
-}
-
-func (f *fakeRepo) FindByStorageKey(_ context.Context, owner int64, key string) (Record, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, record := range f.byID {
-		if record.OwnerID == owner && record.StorageKey == key {
-			return record, true, nil
-		}
-	}
-	return Record{}, false, nil
 }
 
 func (f *fakeRepo) List(_ context.Context, owner int64, offset, limit int) ([]Record, int64, error) {
@@ -126,7 +117,11 @@ func readBack(t *testing.T, up *gouploader.Uploader, key string) []byte {
 	if err != nil {
 		t.Fatalf("Get(%q) = %v", key, err)
 	}
-	defer func() { _ = rc.Close() }()
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("rc.Close(): %v", err)
+		}
+	}()
 	data, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +271,9 @@ func TestDownloadAndDelete(t *testing.T) {
 		t.Fatalf("Download() = %v", err)
 	}
 	data, err := io.ReadAll(rc)
-	_ = rc.Close()
+	if err := rc.Close(); err != nil {
+		t.Errorf("rc.Close(): %v", err)
+	}
 	if err != nil || !bytes.Equal(data, []byte(payload)) || got.ID != record.ID {
 		t.Fatalf("Download() = (%q, %v)", data, err)
 	}
@@ -332,4 +329,17 @@ func TestListPagination(t *testing.T) {
 	if _, err := svc.List(t.Context(), 7, 1, 101); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized List() = %v, want ErrInvalid", err)
 	}
+}
+
+func (m *fakeRepo) ListAfter(_ context.Context, owner int64, at time.Time, id string, size int) ([]Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var rows []Record
+	for _, r := range m.byID {
+		if r.OwnerID == owner && (id == "" || r.CreatedAt.Before(at) || (r.CreatedAt.Equal(at) && r.ID < id)) {
+			rows = append(rows, r)
+		}
+	}
+	slices.SortFunc(rows, func(a, b Record) int { return cmp.Or(b.CreatedAt.Compare(a.CreatedAt), cmp.Compare(b.ID, a.ID)) })
+	return rows[:min(len(rows), size+1)], nil
 }

@@ -23,7 +23,7 @@ type User struct {
 	Avatar   string     `gorm:"column:avatar;size:255;not null;default:'';comment:头像URL"`
 	Phone    string     `gorm:"column:phone;size:20;uniqueIndex;comment:手机号"`
 	Email    *string    `gorm:"column:email;size:100;uniqueIndex;comment:邮箱"`
-	Password string     `gorm:"column:password;size:255;not null;comment:密码"`
+	Password string     `json:"-" gorm:"column:password;size:255;not null;comment:密码"`
 	// AuthVersion is incremented atomically on password change or logout-all.
 	AuthVersion int64 `gorm:"column:auth_version;not null;default:0;comment:认证会话版本"`
 
@@ -73,7 +73,11 @@ func (user *User) MarshalBinary() ([]byte, error) {
 	return json.Marshal(user)
 }
 
-// UnmarshalBinary 实现 encoding.BinaryUnmarshaler，与 MarshalBinary 配对供 Scan 使用。
+// UnmarshalBinary reads account fields from cache. Only SQL may supply a password verifier.
 func (user *User) UnmarshalBinary(data []byte) error {
-	return json.Unmarshal(data, user)
+	if err := json.Unmarshal(data, user); err != nil {
+		return err
+	}
+	user.Password = ""
+	return nil
 }

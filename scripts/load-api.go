@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,11 +30,12 @@ const maxScenarioBytes = 1 << 20
 var latencyBounds = []time.Duration{time.Millisecond, 2 * time.Millisecond, 5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute}
 
 type loadScenario struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Weight  int               `json:"weight"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body,omitempty"`
+	Method       string            `json:"method"`
+	Path         string            `json:"path"`
+	ExpectedCode *int              `json:"expected_code,omitempty"`
+	Weight       int               `json:"weight"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Body         string            `json:"body,omitempty"`
 }
 
 type loadConfig struct {
@@ -57,7 +59,16 @@ type loadSummary struct {
 	TransportErrors    uint64         `json:"transport_errors"`
 	Status             map[int]uint64 `json:"status"`
 	ElapsedSeconds     float64        `json:"elapsed_seconds"`
-	Latency            latencySummary `json:"scheduled_latency"`
+	// Scenarios follow input order and never expose URLs, request bodies or headers.
+	Scenarios []scenarioResult `json:"scenarios"`
+	Latency   latencySummary   `json:"scheduled_latency"`
+}
+
+type scenarioResult struct {
+	HTTP2xx        uint64         `json:"http_2xx"`
+	Succeeded      uint64         `json:"succeeded"`
+	Failed         uint64         `json:"failed"`
+	SuccessLatency latencySummary `json:"success_scheduled_latency"`
 }
 
 type loadParameters struct {
@@ -77,13 +88,27 @@ type latencySummary struct {
 }
 
 type loadStats struct {
-	mu      sync.Mutex
-	summary loadSummary
-	buckets []uint64
+	mu             sync.Mutex
+	summary        loadSummary
+	buckets        []uint64
+	successBuckets [][]uint64
 }
+
+func newLoadStats(n int) *loadStats {
+	s := &loadStats{
+		summary: loadSummary{Status: make(map[int]uint64), Scenarios: make([]scenarioResult, n)},
+		buckets: make([]uint64, len(latencyBounds)+1), successBuckets: make([][]uint64, n),
+	}
+	for i := range n {
+		s.successBuckets[i] = make([]uint64, len(s.buckets))
+	}
+	return s
+}
+
 type loadJob struct {
 	scheduled time.Time
 	scenario  loadScenario
+	index     int
 }
 
 func main() {
@@ -177,7 +202,7 @@ func readScenarios(reader io.Reader) ([]loadScenario, error) {
 		return nil, errors.New("scenario file exceeds 1 MiB")
 	}
 	var scenarios []loadScenario
-	decoder := json.NewDecoder(strings.NewReader(string(b)))
+	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&scenarios); err != nil {
 		return nil, errors.New("invalid scenario JSON")
@@ -252,7 +277,7 @@ func runLoadWithClock(ctx context.Context, client *http.Client, base *url.URL, s
 	start := now()
 	runCtx, cancel := context.WithTimeout(ctx, cfg.duration)
 	defer cancel()
-	stats := loadStats{summary: loadSummary{Status: make(map[int]uint64)}, buckets: make([]uint64, len(latencyBounds)+1)}
+	stats := newLoadStats(len(scenarios))
 	jobs := make(chan loadJob)
 	var workers sync.WaitGroup
 	for range cfg.concurrency {
@@ -281,15 +306,15 @@ func runLoadWithClock(ctx context.Context, client *http.Client, base *url.URL, s
 			schedulerDropped += due - offered - 1
 			offered = due
 			index := int((offered - 1) % int64(weight))
-			scenario := scenarios[0]
-			for _, s := range scenarios {
+			scenarioIndex := 0
+			for i, s := range scenarios {
 				if index < s.Weight {
-					scenario = s
+					scenarioIndex = i
 					break
 				}
 				index -= s.Weight
 			}
-			job := loadJob{start.Add(time.Duration(offered-1) * time.Second / time.Duration(cfg.rate)), scenario}
+			job := loadJob{start.Add(time.Duration(offered-1) * time.Second / time.Duration(cfg.rate)), scenarios[scenarioIndex], scenarioIndex}
 			select {
 			case jobs <- job:
 				sent++
@@ -330,6 +355,9 @@ func runLoadWithClock(ctx context.Context, client *http.Client, base *url.URL, s
 	stats.summary.Dropped = stats.summary.SchedulerDropped + stats.summary.WorkerDropped
 	stats.summary.ElapsedSeconds = now().Sub(start).Seconds()
 	stats.summary.Latency = latencyResult(stats.buckets)
+	for i := range stats.summary.Scenarios {
+		stats.summary.Scenarios[i].SuccessLatency = latencyResult(stats.successBuckets[i])
+	}
 	return stats.summary
 }
 
@@ -338,6 +366,7 @@ func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.
 	defer cancel()
 	rel, err := url.Parse(job.scenario.Path)
 	var status int
+	var matches bool
 	if err == nil {
 		var req *http.Request
 		req, err = http.NewRequestWithContext(requestCtx, job.scenario.Method, base.ResolveReference(rel).String(), strings.NewReader(job.scenario.Body))
@@ -349,9 +378,22 @@ func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.
 			response, err = client.Do(req)
 			if response != nil {
 				status = response.StatusCode
-				n, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, (1<<20)+1))
-				closeErr := response.Body.Close()
-				err = errors.Join(err, readErr, closeErr)
+				body := io.LimitReader(response.Body, (1<<20)+1)
+				var n int64
+				var readErr error
+				matches = true
+				if expected := job.scenario.ExpectedCode; expected != nil {
+					var data []byte
+					data, readErr = io.ReadAll(body)
+					n = int64(len(data))
+					var envelope struct {
+						Code *int `json:"code"`
+					}
+					matches = readErr == nil && n <= 1<<20 && json.Unmarshal(data, &envelope) == nil && envelope.Code != nil && *envelope.Code == *expected
+				} else {
+					n, readErr = io.Copy(io.Discard, body)
+				}
+				err = errors.Join(err, readErr, response.Body.Close())
 				if n > 1<<20 {
 					err = errors.Join(err, errors.New("response body exceeds limit"))
 				}
@@ -366,6 +408,17 @@ func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.
 	if status != 0 {
 		s.summary.Status[status]++
 	}
+	i, _ := slices.BinarySearch(latencyBounds, elapsed)
+	result := &s.summary.Scenarios[job.index]
+	if status >= 200 && status < 300 {
+		result.HTTP2xx++
+	}
+	if err == nil && status >= 200 && status < 300 && matches {
+		result.Succeeded++
+		s.successBuckets[job.index][i]++
+	} else {
+		result.Failed++
+	}
 	if callerCanceled {
 		s.summary.CanceledRequests++
 		return
@@ -373,7 +426,6 @@ func (s *loadStats) request(ctx context.Context, client *http.Client, base *url.
 	if err != nil {
 		s.summary.TransportErrors++
 	}
-	i, _ := slices.BinarySearch(latencyBounds, elapsed)
 	s.buckets[i]++
 }
 
