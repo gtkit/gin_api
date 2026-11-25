@@ -1,0 +1,49 @@
+package sign_test
+
+import (
+	"fmt"
+	"net/url"
+	"testing"
+	"time"
+
+	"my_gin/internal/pkg/sign"
+)
+
+const (
+	key    = "AK100523687952"
+	secret = "W1WTYvJpfeH1YpUjTpeFbEx^DnpQ&35L"
+	ttl    = time.Minute * 3
+)
+
+func TestSignature_Generate(t *testing.T) {
+	path := "/echo"
+	method := "POST"
+
+	params := url.Values{}
+	params.Add("a", "a1")
+	params.Add("d", "d1")
+	params.Add("c", "c1 c2")
+	fmt.Printf("params: %#v\n", params)
+
+	authorization, date, err := sign.New(key, secret, ttl).Generate(path, method, params)
+	t.Log("authorization:", authorization)
+	t.Log("date:", date)
+	t.Log("err:", err)
+}
+
+func TestSignature_Verify(t *testing.T) {
+
+	authorization := "blog y7a326f3aWvIxdeNIgRo0P7FSDnCNSsN8gJi/4y+cZo="
+	date := "2021-04-06 16:15:26"
+
+	path := "/echo"
+	method := "post"
+	params := url.Values{}
+	params.Add("a", "a1")
+	params.Add("d", "d1")
+	params.Add("c", "c1 c2*")
+
+	ok, err := sign.New(key, secret, ttl).Verify(authorization, date, path, method, params)
+	t.Log(ok)
+	t.Log(err)
+}
