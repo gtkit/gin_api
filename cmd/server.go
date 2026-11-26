@@ -99,6 +99,8 @@ func printBanner(w io.Writer) error {
 // newServerCmd 构造 server 子命令——CLI 的主用途：启动 HTTP 服务与后台 worker。
 // 执行流程：先检查启动banner写出 → bootstrap.NewApp组装配置/DB/Redis/路由/worker →
 // app.Run 阻塞运行直到进程退出。任一步失败经 commandError 附前缀返回。
+//
+//	./bin/gin_api server
 func newServerCmd(opts *rootOptions) *cobra.Command {
 	// 协调器来自进程唯一的信号监督者：信号在 NewApp 之前就可能到达，
 	// 协调器因此必须比 App 更早存在。未安装监督者时（测试直接构造命令树）

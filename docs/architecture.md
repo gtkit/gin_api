@@ -162,40 +162,65 @@ application service 同样收 `Deps` struct，可选行为用 functional option
 
 ### bootstrap 的分阶段装配
 
-`internal/bootstrap/providers.go` 只负责基础设施视图与进程级装配顺序；
-`internal/bootstrap/modules.go` 集中维护模块服务、认证授权、HTTP 路由及后台任务的接线，
-两者同属 `bootstrap` 包，不增加运行时注册层或修改模块内路由职责。
+[服务命令](../cmd/server.go)先调用 `NewApp` 构造应用，成功后调用 `App.Run`。两张图分别展示正常路径上的构造顺序和启动顺序。
 
-Runtime 先读取配置并校验本地 JWT 密钥、TLS 证书，再创建日志、数据库、Redis 和缓存。
-TLS 证书保存在内存中供 HTTP 预绑定复用，不二次读取文件；预绑定仍重新检查当前有效期，
-并在日志已就绪后报告临期告警。端口预绑定仍先于 worker 启动。
+#### NewApp 构造应用
 
-当前模块仅借用 Runtime 的基础设施，`buildServices` 不创建或拥有独立客户端，
-不维护空的模块清理栈。真正创建资源的 provider 在构造成功处登记到 `providerCleanup`：
-失败时逆序回滚，成功时把清理责任交给 `App`，在 HTTP 与 worker 收尾后、关闭共享基础设施前执行。
-仍有未退出 worker 时跳过扩展与共享资源清理并返回错误，避免关闭它正在使用的客户端。
+[NewApp](../internal/bootstrap/app.go) 先建立 [Runtime](../internal/bootstrap/runtime.go)，再由 [newProvidersWithBudget](../internal/bootstrap/providers.go) 依次装配应用各阶段。
 
-`internal/bootstrap/providers.go` 的 `newProvidersWithBudget` 按七个阶段顺序编排，本函数只做顺序拼接、
-错误透传与失败回滚（`providerCleanup` 逆序撤销已登记的真实副作用），不内联任何单个模块的装配细节：
-
-```
-resolveInfra（基础设施与派生 HTTP 配置）
-  → 遥测导出 → 数据层追踪埋点 → 指标仪表          （telemetry.New / InstrumentTracing / metrics.New）
-  → 限流注册表 → 响应缓存                         （buildRateLimits / httpcache）
-  → [可选：出站客户端、任务入队端、上传、审计]       （默认注释，按模块 README 启用）
-  → buildServices（各模块 application service）
-  → buildMiddlewares（当前路由需要的认证中间件）
-  → buildWorkers（后台任务 + WorkerManager）
-  → buildEngine（路由引擎，含限流引用的 fail-closed 判定）
+```mermaid
+flowchart TD
+    config["加载配置、设置时区、校验 JWT 和可选 TLS 证书"] --> resources["打开通知与日志、MySQL、Redis、响应缓存"]
+    resources --> infra["初始化进程环境，取得基础设施句柄"]
+    infra --> metrics["初始化遥测、连接追踪与恢复，再注册指标"]
+    metrics --> extensions["构造限流策略，取得缓存，接入启用的可选组件"]
+    extensions --> services["buildServices · 构造业务服务"]
+    services --> auth["buildMiddlewares · 构造鉴权中间件"]
+    auth --> workers["buildWorkers · 构造 WorkerManager"]
+    workers --> routes["buildEngine · 注册路由与就绪探针"]
+    routes --> app["构造 HTTP Server，返回 App"]
 ```
 
-顺序是契约：遥测必须先于指标（仪表在构造时绑定全局 MeterProvider）；限流、缓存及已启用的
-可选能力必须先于 service（service 构造时接收需要的依赖）；
-worker 必须先于路由（readiness 要读 worker 状态）。
+**Worker 先于路由构造**，因为就绪探针需要读取 Worker 状态。构造中途失败时，已登记的扩展按逆序回滚，Runtime 回收已取得的资源。[阶段编排](../internal/bootstrap/providers.go) · [回滚](../internal/bootstrap/rollback.go)
 
-阶段间用 `infra`（基础设施与派生配置）和 `services`（模块产物的具名字段）传递状态。
-`buildMiddlewares` 直接返回当前路由需要的认证函数；仅按实际消费者增加状态，不提前占坑。
-`newProvidersWithBudget` 最终直接构造 `App`，不另建中转结构；指标注销只登记到 `providerCleanup`。
+#### App.Run 启动服务
+
+```mermaid
+flowchart TD
+    diag["按配置启动独立 pprof 端点"] --> bind["预绑定业务端口，HTTPS 复核证书有效期"]
+    bind --> start["准备 Worker，执行必需的一次性任务，启动后台 Worker"]
+    start --> serve["启动 HTTP 服务，进程进入 serving"]
+    serve --> stop["等待关停信号或运行错误，分阶段关闭"]
+```
+
+**先绑定业务端口，再启动 Worker，最后接收业务请求。** 端口占用时不会执行启动任务。HTTPS 预绑定复用 Runtime 已加载的证书，并重新检查有效期。必需的启动任务失败或启动期间已请求关停时，HTTP 不进入服务阶段。[App.Run](../internal/bootstrap/app.go) · [预绑定](../internal/bootstrap/listener.go) · [Worker 启动](../internal/bootstrap/workermanager.go)
+
+#### 组件索引
+
+| 组件 | 启用条件 | 装配入口 | 谁负责关闭 |
+|---|---|---|---|
+| 配置、JWT、TLS | 服务启动时加载配置和 JWT；`application.ishttps` 开启时加载证书 | [newRuntime](../internal/bootstrap/runtime.go) | 配置和密钥材料由 Runtime 持有，无独立关闭步骤 |
+| 通知与日志 | 服务启动时构造；邮件取决于 `email.host`，短信取决于 `sms.provider` | [openProcessLogs](../internal/bootstrap/resources.go) | Runtime 先关日志，再关通知分发和各通道 |
+| MySQL、Redis 连接 | 默认 MySQL 必需；默认 Redis 按 `redis.addr` 连接，依赖能力决定是否必需；具名连接按配置创建 | [openRuntimeResources](../internal/bootstrap/resources.go) · [RedisRequired](../internal/bootstrap/requirements.go) | Runtime 关闭各连接的所有者 |
+| 响应缓存 | `cache.enabled` 开启后供显式挂载的路由使用 | [responsecache.Open](../internal/platform/responsecache/owner.go) | Runtime 关闭缓存，再关底层连接 |
+| 遥测与指标 | 指标仪表总会构造；导出由 `telemetry.enabled` 及 metrics、traces 开关决定 | [newProvidersWithBudget](../internal/bootstrap/providers.go) | App 注销指标回调并关闭遥测导出 |
+| 限流 | 按 `ratelimit.policies` 构造；注册路由时校验引用 | [buildRateLimits](../internal/bootstrap/ratelimit.go) | App 关闭策略注册表 |
+| 账号与本地认证 | 账号校验源总会构造；`auth.mode: local` 时构造本地认证服务 | [buildServices](../internal/bootstrap/services.go) · [account.New](../internal/runtime/module/account/module.go) · [auth.New](../internal/runtime/module/auth/module.go) | 借用 Runtime 的连接 |
+| 鉴权中间件 | 业务路由装配时构造，按配置注入令牌解析和会话校验 | [buildMiddlewares](../internal/bootstrap/auth_middleware.go) | 随路由释放 |
+| Worker | 始终构造管理器，具体任务由启用的能力提供 | [buildWorkers](../internal/bootstrap/workers.go) | App 调用 WorkerManager 分阶段停止任务 |
+| 路由与 HTTP 服务 | 服务启动时构造路由和 Server；通过 Worker 启动检查后接收请求 | [buildEngine](../internal/bootstrap/routes.go) · [newHTTPServer](../internal/bootstrap/http.go) | App 停止 HTTP 并等待在途请求 |
+| pprof | `pprof.enabled` | [startPprofServer](../internal/bootstrap/pprof.go) | App 关闭独立端点 |
+
+以下四项还需要构建标签 `-tags optional`。[可选能力接线](../internal/bootstrap/optional_enabled.go) · [配置示例](../config/optional.yml.example)
+
+| 可选组件 | 运行条件 | 装配入口 | 谁负责关闭 |
+|---|---|---|---|
+| 出站 HTTP | `outbound.clients` 非空 | [buildOutbound](../internal/bootstrap/outbound.go) | App 关闭出站客户端 |
+| 任务队列 | `tasks.enabled` 构造入队端；消费者还需注册处理器，调度器还需启用调度并声明周期任务 | [buildTaskQueueProducer / buildTaskQueueWorkers](../internal/bootstrap/taskqueue.go) | WorkerManager 停止消费者和调度器，App 关闭入队端 |
+| 上传与文件 | `upload.enabled` | [buildUploader](../internal/bootstrap/upload.go) · [文件服务与恢复任务接线图](optional-capabilities.md#上传与文件恢复的接线) | WorkerManager 停止恢复任务，App 关闭上传器 |
+| 写操作审计 | `auditlog.enabled`，需要 MySQL | [buildAuditLog](../internal/bootstrap/auditlog.go) | WorkerManager 在 HTTP 排空后停止审计消费者 |
+
+阶段间通过 `infra` 传递基础设施，通过 `services` 传递模块产物。`buildMiddlewares` 返回路由使用的鉴权函数。
 
 新增模块时，在 `services` 增加实际需要的产物字段，`buildServices` 调用模块装配入口，
 `buildEngine` 的 `RegisterModules` 注册路由。需要可选认证或具名授权的模块在 `buildEngine` 中显式构造并注入，

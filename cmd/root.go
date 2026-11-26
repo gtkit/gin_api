@@ -47,6 +47,9 @@ func ExecuteWithBuildInfo(info BuildInfo) error {
 // NewRootCmd 构造 root cobra 命令，显式挂载服务、迁移、密钥和诊断命令。
 // 项目初始化命令由 scaffold 构建标签控制。
 // SilenceUsage/SilenceErrors 关闭 cobra 默认的用法与错误输出，错误统一交给调用方处理。
+//
+//	./bin/gin_api --help
+//	./bin/gin_api --version
 func NewRootCmd(signals *signalSupervisor) *cobra.Command {
 	return newRootCmd(signals, BuildInfo{})
 }

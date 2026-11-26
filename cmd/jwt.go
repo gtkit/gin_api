@@ -18,7 +18,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newJWTCmd 构造 jwt 子命令树。
+// newJWTCmd 注册 JWT 密钥管理命令。用 generate 生成新密钥对，用 reencode 转换已有密钥对的编码。
+//
+//	./bin/gin_api jwt --help
 func newJWTCmd(_ *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "jwt",
@@ -41,7 +43,11 @@ func newJWTCmd(_ *rootOptions) *cobra.Command {
 	return cmd
 }
 
-// newJWTGenerateCmd 构造 `jwt generate`。
+// newJWTGenerateCmd 注册 jwt generate，生成新的 Ed25519 密钥对，已有目标文件会导致命令失败。
+// 默认使用配置中 jwt.active 的 kid 和公私钥路径。指定输出目录时，目录必须已存在，并须显式提供 kid。
+//
+//	./bin/gin_api jwt generate
+//	./bin/gin_api jwt generate --kid next-key --out-dir ./keys
 func newJWTGenerateCmd() *cobra.Command {
 	var (
 		kid    string

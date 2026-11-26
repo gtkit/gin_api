@@ -14,7 +14,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// addProjectCommand 为开发期构建挂载项目初始化命令。
+// addProjectCommand 在 scaffold 构建中注册项目初始化、业务模块生成和 Go 客户端生成命令。
+//
+//	go run -tags scaffold . project --help
 func addProjectCommand(root *cobra.Command) {
 	cmd := &cobra.Command{
 		Use:   "project",
@@ -24,6 +26,11 @@ func addProjectCommand(root *cobra.Command) {
 	root.AddCommand(cmd)
 }
 
+// newProjectClientCmd 注册 project client，根据 docs/openapi.json 生成 internal/pkg/apiclient/client.gen.go。
+// 生成时要求目标文件尚不存在。传入 --check 可核对已有文件与生成结果是否一致。
+//
+//	go run -tags scaffold . project client
+//	go run -tags scaffold . project client --check
 func newProjectClientCmd() *cobra.Command {
 	var check bool
 	cmd := &cobra.Command{Use: "client", Short: "Generate or verify the OpenAPI Go client", Args: cobra.NoArgs,
@@ -43,6 +50,10 @@ func newProjectClientCmd() *cobra.Command {
 	return cmd
 }
 
+// newProjectModuleCmd 注册 project module，生成按数据所有者隔离的 CRUD 模块，生成后需手动注册。
+// --name 指定模块名。以下示例只列出目标文件，去掉 --dry-run 即写入文件。
+//
+//	go run -tags scaffold . project module --name invoice --dry-run
 func newProjectModuleCmd() *cobra.Command {
 	var name string
 	var preview bool
@@ -75,6 +86,8 @@ func newProjectModuleCmd() *cobra.Command {
 // 有安全护栏：项目名与分支名先于任何文件改动被校验；已有 Git 仓库默认拒绝执行；
 // 工作区不干净时拒绝执行；拒绝在脚手架母版自身上运行；--dry-run 只预览不落盘。
 // --name 为必填 flag。
+//
+//	go run -tags scaffold . project init --name my_service --dry-run
 func newProjectInitCmd() *cobra.Command {
 	var (
 		name           string

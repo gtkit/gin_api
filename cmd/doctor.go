@@ -26,7 +26,10 @@ type configLoader func() (*config.Config, error)
 // 否则这条路径要么测不到、要么依赖一台真库。
 type probeBuilder func(ctx context.Context, cfg *config.Config) (diagnostics.Probes, func() error, error)
 
-// newDoctorCmd 构造 doctor 子命令，默认使用 config.Load 与真实资源探测。
+// newDoctorCmd 注册部署前自检命令。默认检查配置与文件元数据，--deep 会额外探测外部依赖和目录可写性。
+//
+//	./bin/gin_api doctor
+//	./bin/gin_api doctor --deep --json --check-timeout 3s
 func newDoctorCmd(_ *rootOptions) *cobra.Command {
 	return newDoctorCmdWithDeps(config.Load, buildRuntimeProbes)
 }

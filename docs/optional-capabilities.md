@@ -13,6 +13,21 @@
 
 `bootstrap/optional_enabled.go` 只聚合现有构造函数，资源关闭仍进入 providerCleanup，启动中途失败按取得逆序撤销。tasks 与 upload 启用都让 Redis 成为必需资源（upload.redis_db 必须在 redis.dbs 内）。审计 worker 在 HTTP drain 后停止；上传关闭沿用 SDK Close，级联关闭注入的 Redis 会话存储（不关借用的客户端）；这些所有权不转交给业务服务。代理路径的分片数据仍在 chunk_dir 本地磁盘，多实例部署需共享挂载或粘性路由。
 
+### 上传与文件恢复的接线
+
+启用 `-tags optional` 和 `upload.enabled` 后，HTTP 路由与恢复任务共用同一个文件服务。
+
+```mermaid
+flowchart TD
+    redis["upload.redis_db 指定的 Redis"] --> upload["构造 Uploader 与恢复会话"]
+    upload --> service["file.NewRecoverable"]
+    db["MySQL 文件仓储"] --> service
+    service --> http["注册上传、下载和分片路由"]
+    service --> worker["注册 file-recovery 后台任务"]
+```
+
+[上传器](../internal/bootstrap/upload.go) · [文件服务](../internal/runtime/module/file/module.go) · [路由注册](../internal/bootstrap/optional_enabled.go) · [恢复任务](../internal/bootstrap/file_recovery.go)
+
 ### 文件操作与请求预算
 
 启用新版上传前先应用 `file_operations` 迁移，再排空旧版写实例。新会话绑定其存储位置，旧版未完成会话应先在旧位置完成，否则重新初始化。Redis 保存会话，`chunk_dir` 保存代理分片。需要副本接管时也要共享对应持久卷。local 最终对象目录同样要能被接管副本访问。

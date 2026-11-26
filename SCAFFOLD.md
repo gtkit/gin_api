@@ -111,7 +111,7 @@ make project-init NAME=your_project
 
 ## 之后
 
-- 按业务需要实现模块，在 `internal/bootstrap/modules.go` 显式装配服务与路由，新增模型同步登记到 `cmd/migrate.go`。
+- 按业务需要实现模块，在 `internal/bootstrap/services.go` 构造服务，在 `internal/bootstrap/routes.go` 注册路由，新增模型同步登记到 `cmd/migrate.go`。
 - `user` 模块保留作为认证/参考起点（它是 `sharedauth.UserVerifier` 提供者），按新项目需要改造或替换。
 - 提交前跑 `make check`；CI 使用相同的 `make check-ci` 入口。部署脚本与部署 CI 配置是外部冻结方案，其中不含质量 job。
 
@@ -241,7 +241,7 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
    - `internal/pkg/jwtauth/laravel.go`
    - `internal/pkg/jwtauth/laravel_test.go`
    - `internal/middleware/auth_laravel_test.go`
-2. 简化 `internal/bootstrap/modules.go` 的 `newTokenParser`：去掉 Laravel 回退分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
+2. 简化 `internal/bootstrap/auth_middleware.go` 的 `newTokenParser`：去掉 Laravel 回退分支，直接 `return issuer, nil`（或让 `buildMiddlewares` 直接用 `runtime.TokenIssuer()`，并删除 `newTokenParser`）。
 3. 删除 `internal/platform/config/types.go` 中的 `LaravelJWTConfig` 类型、`JWT.Laravel` 字段及其校验分支。
 4. 清理相关测试用例：`internal/bootstrap/providers_token_test.go`、`internal/bootstrap/providers_phases_test.go` 中的 Laravel 回退开启态用例，`internal/platform/config/validation_test.go` 的 `TestValidateLaravelJWTConfig`。
 5. 跑 `make check` 确认全绿。
@@ -263,7 +263,7 @@ NTFS 使用 ACL，不能用 Unix 权限位证明访问控制已经收紧；Windo
    `validateTelemetryConfig` 的调用行。
 3. `internal/bootstrap/providers.go`：删 2a 步（`telemetry.New` 装配块，含
    `cleanup.push("telemetry", ...)` 与启用日志）和 2a' 步（`instrumentConnections` 调用）；
-   在 `internal/bootstrap/modules.go` 删 `buildEngine` 里 `TracingEnabled` /
+   在 `internal/bootstrap/routes.go` 删 `buildEngine` 里 `TracingEnabled` /
    `ServiceName` 两行接线。2b 步 `metrics.New(otel.GetMeterProvider().Meter(metricsScope))`
    保留原样——`otel` 的 API import 随之保留。
 4. 遥测的关闭已在 provider 构造成功处登记到统一清理器，随步骤 3 一并移除；
@@ -528,7 +528,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 写在 `g` 上就是所有已认证用户都能删——而编译、`go vet` 与全部测试都不会有任何异常。
 母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
-然后在 `internal/bootstrap/modules.go` 的 `opt.RegisterModules` 里加一行
+然后在 `internal/bootstrap/routes.go` 的 `opt.RegisterModules` 里加一行
 `xxxhttp.Register(v1, ...)`。
 
 **新增路由时必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
@@ -599,7 +599,7 @@ telemetry:
 
 | 能力 | 如何启用 |
 |------|---------|
-| 后台任务 | 在 `modules.go` 的 `buildWorkers` 中追加 `Worker` 构造 |
+| 后台任务 | 在 `internal/bootstrap/workers.go` 的 `buildWorkers` 中追加 `Worker` 构造 |
 | 具名授权实现 | 在 `buildEngine` 中按实际路由显式构造并注入；可直接使用 `newRoleAuthorizer` / `newVIPAuthorizer`，需要按 ID 共享时使用 `shared/auth.AuthorizerRegistry`，未知 ID 绑定 `DenyAll` |
 | `role.admin` 授权 | 查 `user_roles` 表这一权威角色源（**示例，可按需删除**，见下节）。**未建表或表为空时一律拒绝**，因此不接入角色数据时行为与此前的恒拒绝占位一致。刻意不采信 JWT 的 role claim：令牌寿命可达数十天，仅凭它放行等于把「一次签发」当成「持续有效的高权限」。换成 IAM / IdP 同步表时只改 `internal/runtime/module/account/module.go` 里的角色源构造，authorizer 与路由都不用动 |
 | 自定义校验规则 | 在 `internal/bootstrap/validation.go` 的 `validationOptions` 函数体内追加 `verify.WithTranslation`（新 tag + 校验函数 + 中文消息）/ `verify.WithValidationTranslation`（给既有 tag 配消息）/ `verify.WithStructValidation`（跨字段校验）。消息模板里的 `{0}` 是字段名占位符，**必须带**，否则对客消息里没有字段名。**只能在这里注册**：validator/v10 的注册与校验不能并发执行，handler 里注册是数据竞争。三条路径各有编译校验过的可复制模板见 `internal/bootstrap/validation_example_test.go` |
@@ -638,9 +638,9 @@ telemetry:
 | 内容 | 说明 |
 |------|------|
 | `auth` 模块 | 本地认证（注册/登录/刷新/登出）。`auth.mode: external` 使用外部身份来源；JWT 验签与账号状态校验独立保留 |
-| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② `internal/bootstrap/modules.go` 的 `entitlement.vip` 注册、`internal/bootstrap/authorizers.go` 的会员授权实现、`internal/shared/auth` 的 `VIPVerifier` 及 `internal/runtime/module/account/module.go` 的 `Assembly.VIP` 接线；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
+| `users` 表的业务字段 | `vip_status` / `vip_level` / `vip_expire_at` / `follow` 来自存量业务，**不是通用母版该有的**。删除清单：① `internal/models/user.go` 的这四个字段与 `VipStatus` 类型；② 已接入业务模块的 `entitlement.vip` 注册、`internal/bootstrap/authorizers.go` 的会员授权实现、`internal/shared/auth` 的 `VIPVerifier` 及 `internal/runtime/module/account/module.go` 的 `Assembly.VIP` 接线；③ `internal/repository/useraccount` 的 `ValidateVIP`；④ 基线迁移里的这四列。四处一起改——只删模型会让 authorizer 编译失败，只删 authorizer 会留下一套没人用的判定 |
 | `entitlement.vip` authorizer | 会员资格判定示例；无 VIP 概念的项目可连同 `VIPVerifier` 一起删 |
-| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `internal/runtime/module/account/module.go` 里的 `Assembly.Roles` 字段及角色源构造，并在 `internal/bootstrap/modules.go` 把 `role.admin` 改回 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
+| `role.admin` 的角色表实现 | 角色判定示例。删除清单：① `internal/models/user_role.go`；② `internal/repository/userrole/`；③ `internal/shared/auth` 的 `RoleVerifier`；④ `internal/bootstrap/authorizers.go` 的 `roleAuthorizer` 与 `adminRoleName`；⑤ `internal/runtime/module/account/module.go` 里的 `Assembly.Roles` 字段及角色源构造，若业务模块已注册 `role.admin`，将该注册改为 `sharedauth.DenyAll(...)`；⑥ `database/migrations/*_create_user_roles_table.sql`。**⑤ 不能省**——只删实现会让 `role.admin` 未注册，而未注册的标识由装配层兜底为恒拒绝并告警，那是可启动的，但你会失去「为什么全是 403」的线索。它**不做**三件事：不引入策略引擎（Casbin 等）、不做角色缓存、不做角色层级与通配 |
 | `users` 表的基线迁移 | 与 `auth` 模块配套；替换身份模型时一并重做 |
 
 ### 【内部支撑包 — 不构成能力，无需接线】

@@ -64,7 +64,7 @@ OneShot 完成后。
 
 ### 注册
 
-在 `internal/bootstrap/modules.go` 的 `buildWorkers` 中追加构造，
+在 `internal/bootstrap/workers.go` 的 `buildWorkers` 中追加构造，
 `buildWorkers` 的签名不需要改动。`WorkerManager` 的构造需要一个预算：
 
 ```go

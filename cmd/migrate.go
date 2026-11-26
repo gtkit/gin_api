@@ -98,6 +98,11 @@ func executeMigrationCommand(ctx context.Context, sub *cobra.Command, args []str
 // newMigrateCmd 构造 migrate 子命令：执行数据库迁移（up/down/status/lint/pretend）。
 // 关闭 cobra flag 解析，把全部参数透传给内层 migratex 的 Migrate 子树；
 // 仅在真正执行迁移子命令时才 bootstrap 运行时连库（help / 无参不连库）。
+// status 查看迁移状态，pretend 预览待执行的 SQL，up 执行待应用的迁移。
+//
+//	./bin/gin_api migrate status
+//	./bin/gin_api migrate pretend
+//	./bin/gin_api migrate up
 func newMigrateCmd(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:                "migrate",
@@ -112,6 +117,9 @@ func newMigrateCmd(opts *rootOptions) *cobra.Command {
 
 // newMakeCmd 构造 make 子命令：根据 GORM model 生成迁移文件（DDL 草稿）。
 // 与 migrate 一样关闭 flag 解析并透传给 migratex 的 Make 子树，写入 database/migrations。
+// 以下示例从已登记的 User 模型生成 users 表的建表迁移文件。
+//
+//	./bin/gin_api make migration create_users_table --from-model
 func newMakeCmd(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:                "make",

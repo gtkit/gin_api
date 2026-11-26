@@ -68,15 +68,13 @@ Redis 各能力的启动、故障和恢复语义见 [Redis 故障与恢复](SCAF
 ## 架构
 
 ```text
-cmd
-  -> internal/bootstrap
-  -> internal/runtime/module/<module>
-  -> internal/module/<module>/application
-  -> internal/repository/<table-or-aggregate>
+cmd → internal/bootstrap → internal/runtime/module/<module>
+                               ├─→ internal/module/<module>/application
+                               └─→ internal/repository/<table-or-aggregate>
 ```
 
 - `cmd/`：Cobra 命令入口，只负责参数解析和启动。
-- `internal/bootstrap/`：`providers.go` 负责进程级资源与启动阶段编排，`modules.go` 集中装配模块服务、鉴权、路由和后台任务。
+- `internal/bootstrap/`：从 [服务装配与启动总图](docs/architecture.md#bootstrap-的分阶段装配) 查看构造顺序、运行顺序和各组件的源码入口。
 - `internal/runtime/module/`：模块装配，将 DB、配置和外部客户端转换成 application port 实现。
 - `internal/module/`：业务模块，按 `application`、`dto`、`transport/http`、可选 `worker` 组织。
 - `internal/repository/`：GORM/Redis 数据访问实现。
@@ -143,7 +141,7 @@ make project-init NAME=my_service ARGS="--dry-run"
 `project init` 是开发期工具，由 `scaffold` 构建约束门控，不在服务二进制里。
 `make project-init` 已封装该标签，裸命令形式为
 `go run -tags scaffold . project init --name <name>`。
-业务模块按 [架构约束](docs/architecture.md) 实现，并在 `internal/bootstrap/modules.go` 显式接线。
+业务模块按 [架构约束](docs/architecture.md) 实现，在 [services.go](internal/bootstrap/services.go) 构造服务，在 [routes.go](internal/bootstrap/routes.go) 注册路由。
 
 Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录> <目标>`。不指定目标时仍执行 `dev`。根 `Makefile` 通过固定顺序的 `include` 加载以下分类文件；各文件共享同一套变量和目标，不作为独立入口。
 

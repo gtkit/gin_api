@@ -38,7 +38,7 @@
 | 契约显式且属于消费方 | port 接口定义在 application 侧，实现由装配层注入 | `internal/module/auth/application/ports.go` |
 | 模型在边界处翻译 | `Credential` 在 application 层重新声明，不引用仓储包同名类型 | 同上文件内的类型注释 |
 | 仓储在装配侧组合 | `internal/repository/authcredential/`服务本地认证；账号状态和角色由account装配提供，业务层不直接持有仓储 | `internal/runtime/module/auth/module.go`、`internal/runtime/module/account/module.go` |
-| 汇合点显式 | 模块产物通过组合根接入路由、鉴权和worker | `internal/bootstrap/modules.go`、`internal/bootstrap/providers.go` |
+| 汇合点显式 | 模块产物通过组合根接入路由、鉴权和worker | `internal/bootstrap/services.go`、`internal/bootstrap/providers.go` |
 
 模块内部的分层方向由传感器强制，不靠自觉：`application imports gin / gorm / repository`
 与 `worker imports gorm / repository` 挡住上层下钻，`repository imports gin / module`

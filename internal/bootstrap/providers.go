@@ -1,4 +1,4 @@
-// 进程级资源与启动阶段编排；模块服务、路由和后台任务装配见 modules.go。
+// newProvidersWithBudget 按启动顺序装配进程资源、业务服务、鉴权、Worker 和路由。
 package bootstrap
 
 import (

@@ -225,7 +225,7 @@ func Register(r *gin.RouterGroup, deps Deps) {
 写在 `g` 上就是所有已认证用户都能删——而编译、`go vet` 与全部测试都不会有任何异常。
 母版没有中央路由描述符来兜住这一点，新增路由时必须人工确认它在正确的组上。
 
-然后在 `internal/bootstrap/modules.go` 的 `buildEngine` 中调用
+然后在 `internal/bootstrap/routes.go` 的 `buildEngine` 中调用
 `xxxhttp.Register(v1, ...)`。
 
 **新增路由必须人工确认它挂到了正确的组上。** 写在 `g` 外面就是公开接口，
