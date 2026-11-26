@@ -9,20 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
-)
 
-// projectNamePattern 是项目名的唯一判据。
-//
-// 接受小写字母开头的字母、数字和下划线，长度上限 63 个字符。
-// 注意上界写作 {0,62} 而非 {1,63}：后者要求首字母之后至少还有一个字符，
-// 会把合法的单字符名（如 x）也拒掉——那是无意的收紧。
-//
-// 为什么必须校验：该值会同时插进 Go 字符串字面量与 project.mk（Make KV）。
-// 未经校验时，双引号/反斜杠/换行会破坏 meta.go，而 $(shell …)、反引号、`;`
-// 会升级为 Make 表达式注入，在 `make gen-appmeta` 时执行。
-var projectNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+	"github.com/gtkit/gin-api/internal/appmeta"
+)
 
 // defaultBranch 是省略 --branch 时的固定分支名。
 //
@@ -32,10 +22,8 @@ const defaultBranch = "main"
 
 // validateProjectName 校验项目名。
 func validateProjectName(name string) error {
-	if !projectNamePattern.MatchString(name) {
-		return fmt.Errorf(
-			"invalid project name %q: must match %s (lowercase letter first, then lowercase letters/digits/underscores, at most 63 chars)",
-			name, projectNamePattern.String())
+	if err := appmeta.ValidateCommandName(name); err != nil {
+		return fmt.Errorf("invalid project name %q: %w", name, err)
 	}
 	return nil
 }

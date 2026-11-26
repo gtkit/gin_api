@@ -63,7 +63,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Make从project.mk注入身份；未注入时由Dockerfile拒绝空名称。
+        # Make 从 internal/appmeta/identity.mk 注入名称，Dockerfile 验证两者一致。
         APP_NAME: ${DEV_APP_NAME:-}
         GOPROXY: ${DEV_GOPROXY:-https://proxy.golang.org,direct}
         BUILD_COMMIT: ${DEV_BUILD_COMMIT:-unknown}

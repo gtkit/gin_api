@@ -1,8 +1,7 @@
 # Scaffold Commands
 
-当前 root 命令由 Cobra 注册，命令名取自 `internal/appmeta.CommandName`，而后者由
-`project.mk` 的 `APP_NAME` 生成（母版当前值 `gin_api`）。使用 `go run .` 时命令保持一致。
-改命令名请改 `project.mk` 再跑 `make gen-appmeta`，不要直接改生成产物。
+Cobra 从嵌入的 `internal/appmeta/identity.mk` 读取命令名和帮助简介。修改其中的
+`APP_NAME` 或 `APP_DISPLAY_NAME` 后，重新构建或执行 `go run . --help` 即可看到新名称。
 
 ## server
 

@@ -3,13 +3,36 @@
 package projectinit
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/gtkit/gin-api/internal/appmeta"
 )
+
+// writeIdentity updates both assignments while preserving the file comments.
+func (i *Initializer) writeIdentity(name string) error {
+	path := filepath.Join(i.root, identityPath)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", identityPath, err)
+	}
+	if _, err := appmeta.ParseIdentity(string(content)); err != nil {
+		return fmt.Errorf("validate existing %s: %w", identityPath, err)
+	}
+	updated := setMakeVar(string(content), "APP_NAME", name)
+	updated = setMakeVar(updated, "APP_DISPLAY_NAME", displayNameFrom(name))
+	if _, err := appmeta.ParseIdentity(updated); err != nil {
+		return fmt.Errorf("validate updated %s: %w", identityPath, err)
+	}
+	return writeFileAtomic(path, []byte(updated), 0o644)
+}
 
 // setMakeVar 把 Make KV 文件中某个变量的值替换为 value。
 //
-// 只改赋值行的右侧，保留文件里的注释与其余内容——project.mk 的注释解释了取值约束与
+// 只改赋值行的右侧，保留文件里的注释与其余内容——identity.mk 的注释解释了取值约束与
 // 「什么不属于身份」，那些说明对派生项目同样有价值，不能被整文件重写抹掉。
 //
 // 变量不存在时追加一行，保证结果一定含该赋值。
@@ -29,7 +52,7 @@ func setMakeVar(content, key, value string) string {
 // 例：my_service -> My Service。
 //
 // 结果一定落在 APP_DISPLAY_NAME 的字符集 ^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$ 内——
-// 输入已通过 projectNamePattern（只含小写字母、数字、下划线，首字符为字母，≤63 字符），
+// 输入已通过 APP_NAME 规则（只含小写字母、数字、下划线，首字符为字母，≤63 字符），
 // 而本函数只做「下划线→空格」与大小写变换，既不引入新字符也不改变长度。
 func displayNameFrom(name string) string {
 	words := strings.Split(name, "_")

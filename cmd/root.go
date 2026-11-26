@@ -64,19 +64,19 @@ func newRootCmd(signals *signalSupervisor, info BuildInfo) *cobra.Command {
 	}
 
 	rootCmd := &cobra.Command{
-		Use:           appmeta.CommandName,
-		Short:         appmeta.RuntimeName + " runtime",
+		Use:           appmeta.CommandName(),
+		Short:         appmeta.RuntimeName() + " runtime",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       fmt.Sprintf("%s commit=%s build_time=%s", info.Version, info.Commit, info.BuildTime),
 	}
 
 	rootCmd.AddCommand(
-		newServerCmd(opts),
-		newMigrateCmd(opts),
-		newMakeCmd(opts),
-		newJWTCmd(opts),
-		newDoctorCmd(opts),
+		newServerCmd(opts),  // server 启动 HTTP 服务和后台 worker。
+		newMigrateCmd(opts), // migrate 执行或回滚数据库迁移，也可查看状态、检查迁移和预览 SQL。
+		newMakeCmd(opts),    // make 根据 GORM 模型生成数据库迁移文件草稿。
+		newJWTCmd(opts),     // jwt 生成 JWT 签名密钥对，或转换已有密钥的编码格式。
+		newDoctorCmd(opts),  // doctor 检查配置和文件，--deep 额外探测外部依赖。
 	)
 	addProjectCommand(rootCmd)
 

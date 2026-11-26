@@ -22,8 +22,5 @@ project-module: ## Generate a module in this project (NAME=note ARGS="--dry-run"
 	@ test -n "$(NAME)" || { echo "usage: make project-module NAME=<module-name> [ARGS=\"--dry-run\"]" >&2; exit 2; }
 	go run -trimpath -tags scaffold . project module --name "$(NAME)" $(ARGS)
 
-gen-appmeta: ## 由 project.mk 生成 internal/appmeta 身份常量（改身份先改 project.mk）
-	@ bash ./scripts/gen-appmeta.sh
-
-check-appmeta: ## 校验 internal/appmeta 与 project.mk 零差异（防身份漂移）
-	@ bash ./scripts/gen-appmeta.sh --check
+check-appmeta: ## 确认 Make 已校验并读取唯一身份文件
+	@ printf "check-appmeta OK: %s\n" "$(APP_NAME)"

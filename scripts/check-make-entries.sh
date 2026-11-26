@@ -25,12 +25,12 @@ WIRING_LINT_VERSION="$(awk '/^GOLANGCI_LINT_VERSION[[:space:]]*=/ { print $3; ex
 [ -n "$WIRING_LINT_VERSION" ] || { echo "missing declared lint version" >&2; exit 1; }
 export WIRING_LINT_VERSION
 fixture="$sandbox/work area"
-mkdir -p "$fixture/scripts" "$fixture/security" "$fixture/bin" "$fixture/.cache" "$sandbox/tools" "$sandbox/outside"
+mkdir -p "$fixture/scripts" "$fixture/internal/appmeta" "$fixture/security" "$fixture/bin" "$fixture/.cache" "$sandbox/tools" "$sandbox/outside"
 cp "$ROOT/Makefile" "$fixture/Makefile"
 cp -R "$ROOT/make" "$fixture/make"
 cp "$ROOT/security/toolchain.mk" "$fixture/security/toolchain.mk"
-cp "$ROOT/scripts/clean.go" "$ROOT/scripts/check-tool-version.sh" "$fixture/scripts/"
-printf 'APP_NAME = fixture\nAPP_DISPLAY_NAME = Fixture\n' > "$fixture/project.mk"
+cp "$ROOT/scripts/clean.go" "$ROOT/scripts/check-tool-version.sh" "$ROOT/scripts/check-appmeta.sh" "$fixture/scripts/"
+printf 'APP_NAME = fixture\nAPP_DISPLAY_NAME = Fixture\n' > "$fixture/internal/appmeta/identity.mk"
 printf 'module example.com/fixture\n\ngo 1.27.0\n' > "$fixture/go.mod"
 MAKE_WIRING_TRACE="$sandbox/trace"
 export MAKE_WIRING_TRACE
@@ -102,7 +102,7 @@ grep -Fq 'GO run -tags=sonic . migrate status' "$MAKE_WIRING_TRACE"
 # The expected assignments are the pre-split compatibility contract, including
 # recursive expansion and the conditional migration name.
 cat > "$sandbox/expected-vars.mk" <<'MAKE'
-include project.mk
+include internal/appmeta/identity.mk
 include security/toolchain.mk
 PORT ?= 8008
 ENV = $(firstword $(filter-out $@,$(MAKECMDGOALS)))

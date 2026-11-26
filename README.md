@@ -163,7 +163,7 @@ Make 命令统一从项目根目录执行，也可使用 `make -C <项目目录>
 
 1. 架构边界检查（`check-architecture`）。
 2. 依赖清单整洁（`check-tidy`）、包级变量重绑定认领（`check-package-vars`）。
-3. 镜像摘要固定（`check-image-digests`）、安全判定自检（`check-security-eval`）、发布接线（`check-release-wiring`）、应用身份零漂移（`check-appmeta`）、钩子安装语义（`check-hooks`）。
+3. 镜像摘要固定（`check-image-digests`）、安全判定自检（`check-security-eval`）、发布接线（`check-release-wiring`）、应用身份格式（`check-appmeta`）、钩子安装语义（`check-hooks`）。
 4. `golangci-lint run ./...`（`tool`）与 `go vet ./...`。
 5. race 测试并生成聚合 coverage profile。
 6. 校验全仓覆盖率不低于当前门禁（**以 `Makefile` 的 `COVERAGE_MIN` 为准**，本文不重复该数字——写死会与实际门禁分叉，而分叉时读者无从判断哪个是真的）。
@@ -222,7 +222,7 @@ make hooks
 | 二进制路径 | `deployment.sh` 要求 `<RootPath>/bin/gin_api` 可执行，缺失即中止 |
 | 进程管理 | supervisor 服务名 `gin_api` |
 
-产物名来自 `project.mk` 的 `APP_NAME`：`make build` 输出 `bin/$(APP_NAME)`，当前为 `bin/gin_api`，
+产物名来自 `internal/appmeta/identity.mk` 的 `APP_NAME`：`make build` 输出 `bin/$(APP_NAME)`，当前为 `bin/gin_api`，
 与上表一致。改 `APP_NAME` 需同步确认部署侧约定。
 
 **这条部署流水线中不含任何质量门禁 job**——它是外部冻结的部署契约，只负责发布。
@@ -254,7 +254,7 @@ make image    # 构建 $(APP_NAME):<当前commit短sha>，仅本地使用；服�
 
 镜像内不含 `config/env/env.yml`、PEM 私钥与 `.git`（`.dockerignore` 保证）；运行配置挂载注入。
 
-产物名由 `--build-arg APP_NAME` 决定（`make image` 从 `project.mk` 取），构建阶段显式断言其非空；
+产物名由 `--build-arg APP_NAME` 决定（`make image` 从 `internal/appmeta/identity.mk` 取），构建阶段核对它与文件一致。
 **容器内路径固定为 `/app/bin/server`，与 `APP_NAME` 无关**。镜像默认`ENTRYPOINT`为exec form，
 应用profile的入口先检查UID再exec原二进制，检查后的shell不常驻PID 1。
 宿主机侧的 `bin/$(APP_NAME)` 由冻结的部署脚本负责，与容器内路径互不牵连。
@@ -282,7 +282,7 @@ Docker Desktop复用已有服务可用host.docker.internal；其他环境须提�
 DEV_APP_DB_PASSWORD/DEV_APP_REDIS_PASSWORD未设置时继承依赖密码，显式空值则保留为空，仅用于确实无密码的本地测试服务。
 
 `dev-app-up`构建并启动应用及其健康依赖，`dev-app-up-existing`以--no-deps只启动应用；
-执行前须按AGENTS.md确认本地镜像/容器与授权，不隐式拉取缺失镜像。APP_NAME仍由project.mk注入，
+执行前须按AGENTS.md确认本地镜像/容器与授权，不隐式拉取缺失镜像。Make 从 `internal/appmeta/identity.mk` 读取应用名称，
 BUILD_COMMIT/BUILD_TIME可固定；COMPOSE_PROJECT默认APP_NAME，验收可指定独占项目名。
 `dev-app-down`只停止/移除app，保留依赖及数据卷；无其他服务的独占网络需确认无使用者后单独清理。
 容器以/ready作健康检查，SIGTERM宽限3分钟；它是本地默认，改变服务关停预算时须同步核对。

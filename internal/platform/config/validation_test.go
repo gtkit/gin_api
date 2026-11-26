@@ -17,7 +17,7 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 	cfg := &Config{
 		Env: "dev",
 		App: AppConfig{
-			Name:                     appmeta.CommandName,
+			Name:                     appmeta.CommandName(),
 			Host:                     "localhost",
 			Port:                     "not-a-port",
 			ReadHeaderTimeoutSeconds: -1,

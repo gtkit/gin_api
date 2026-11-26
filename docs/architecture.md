@@ -12,7 +12,7 @@
 cmd/                         → CLI 入口，选择 server/migration/doctor 等固定运行方式
 internal/
   core/                      → 资源状态错误，不持有具体基础设施实现
-  appmeta/                   → 应用级常量与路径元信息（由 make gen-appmeta 生成）
+  appmeta/                   → 应用身份与路径元信息（嵌入 identity.mk）
   bootstrap/                 → 进程级编排：拿资源、调模块装配、挂 router/worker、关停排序
   runtime/
     module/<module>/         → 模块装配层：config/db/cache → repo/client/adapter → application service

@@ -1,9 +1,13 @@
-.PHONY: check-optional-wiring check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset gen-appmeta tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
+.PHONY: check-optional-wiring check-compose-app dev-app-up dev-app-up-existing dev-app-down check-make-entries run lint clean dev build check check-ci hooks check-hooks check-build-context check-architecture check-image-digests check-security-eval check-release-wiring release-check check-coverage check-appmeta check-package-vars security-source security-release dev-up dev-down dev-reset tag test-race test-coverage test-integration image tool vet port kill-port migrate-migration migrate-lint migrate-pretend migrate-up migrate-status prod test
 
-## 应用身份的唯一来源。APP_NAME / APP_DISPLAY_NAME 由 project.mk 提供，
-## internal/appmeta 由 gen-appmeta 从同一来源生成，check-appmeta 保证二者零差异。
-## 注意：module path 与 COVERAGE_MIN 都不属于身份，不在 project.mk 里。
-include project.mk
+## Go 同时嵌入这份身份文件。校验字面量后再交给 Make 解析。
+ifeq ($(shell sh ./scripts/check-appmeta.sh),)
+$(error 无效的应用身份，请检查 internal/appmeta/identity.mk)
+endif
+include internal/appmeta/identity.mk
+ifneq ($(origin APP_NAME)/$(origin APP_DISPLAY_NAME),file/file)
+$(error 应用身份请在 internal/appmeta/identity.mk 中修改)
+endif
 # 供应链工具的固定版本与摘要（GOLANGCI_LINT_VERSION / *_IMAGE）。
 include security/toolchain.mk
 

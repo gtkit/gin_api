@@ -43,16 +43,12 @@ export GONOPROXY='none'
 
 ## 应用身份
 
-应用身份以 `project.mk` 为唯一来源；修改 `APP_NAME` 或 `APP_DISPLAY_NAME` 后执行：
+应用身份保存在 `internal/appmeta/identity.mk`。修改 `APP_NAME` 或 `APP_DISPLAY_NAME` 后，
+执行 `make build` 或 `go build` 即可。Make 读取这份文件，Go 将同一份文件嵌入二进制。
 
-```bash
-make gen-appmeta
-make check-appmeta
-```
-
-`APP_NAME` 须匹配 `^[a-z][a-z0-9_]{0,62}$`，
-`APP_DISPLAY_NAME` 须匹配 `^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$`，两者均必填。
-生成目标仍为 `internal/appmeta/meta.go`；校验失败返回非零，不自动改写产物。
+两项均必填，使用 `KEY = value` 格式。`APP_NAME` 须匹配 `^[a-z][a-z0-9_]{0,62}$`，
+`APP_DISPLAY_NAME` 须匹配 `^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$` 且末尾无空格。
+`make check-appmeta` 可以单独校验身份文件。
 Go module 路径由 `go.mod` 声明，与应用名相互独立。
 构建产物名由 `APP_NAME` 决定，调整时需核对既有部署约定。
 
@@ -316,7 +312,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 文档引用存在性检查 | `scripts/check-doc-refs.go` | 跟踪的 `*.md` 里的链接与反引号裸路径必须解析到真实路径；解析不到要么修好、要么在登记表中认领，失效的登记同样失败 |
-| 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
+| 应用身份单一来源 | `internal/appmeta/identity.mk` | Make 和 Go 使用同一文件，`check-appmeta` 校验格式 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | API默认30秒/写宽限2秒，auth仍10秒/2秒；按实际ctx期限保护完整响应；server的60秒仅是初始写期限 |
 | Panic 恢复 | `internal/middleware/recovery.go` | 全局第一道。普通 panic 返回统一 500；连接已断或响应已开始写出时只记日志不改写响应。**刻意不接告警**——请求级异常接告警会在一次流量异常里形成告警风暴，淹没进程级事件 |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |

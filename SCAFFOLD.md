@@ -72,9 +72,8 @@ make project-init NAME=your_project
 
 `project init` 会：
 
-- 把 `--name` 写入 `project.mk`（应用身份的**唯一来源**：`APP_NAME` / `APP_DISPLAY_NAME`），
-  再执行 `make gen-appmeta` 生成 `internal/appmeta`，并校验生成物与来源零差异——
-  不直接正则改写生成产物，否则会形成第二个身份来源；
+- 从 `--name` 获取命令名并派生展示名，校验后原子写入 `internal/appmeta/identity.mk`。
+  后续构建会将这份身份文件嵌入二进制；
 - 删除母版所属环境的专属部署入口（`.gitlab-ci.yml` 与 `deployment.sh`）。它们绑定母版环境的
   进程管理服务名、部署根路径与分支，不存在参数化后通用的形态，保留等于分发一条必然断裂的部署链——
   **派生项目需自备部署入口**；
@@ -374,7 +373,7 @@ dispatch 和 logging 借用发送能力，实际渠道由各自 Owner 释放。�
 | 分层架构传感器 | `scripts/check-architecture.sh` | `make check` 的第一步；含路由注册唯一入口、客户端 IP 唯一 accessor 等规则 |
 | 包级变量重绑定检查 | `scripts/check-package-vars.go` | 每处重绑定必须删除或在 `security`-风格的登记表中认领 |
 | 文档引用存在性检查 | `scripts/check-doc-refs.go` | 跟踪的 `*.md` 里的链接与反引号裸路径必须解析到真实路径；解析不到要么修好、要么在登记表中认领，失效的登记同样失败 |
-| 应用身份单一来源 | `project.mk` + `make gen-appmeta` | `check-appmeta` 保证生成物零漂移 |
+| 应用身份单一来源 | `internal/appmeta/identity.mk` | Make 和 Go 使用同一文件，`check-appmeta` 校验格式 |
 | 路由级超时 | `internal/middleware/routetimeout.go` | API默认30秒/写宽限2秒，auth仍10秒/2秒；按实际ctx期限保护完整响应；server的60秒仅是初始写期限 |
 | Panic 恢复 | `internal/middleware/recovery.go` | 全局第一道。普通 panic 返回统一 500；连接已断或响应已开始写出时只记日志不改写响应。**刻意不接告警**——请求级异常接告警会在一次流量异常里形成告警风暴，淹没进程级事件 |
 | 请求 ID | `internal/middleware/requestid.go` | 进程前缀 + 原子计数；**不采信客户端传入值** |

@@ -104,7 +104,7 @@ ssl:
   pem: temp/pem.pem
 news:
   fsurl: ""
-`, appmeta.CommandName)))
+`, appmeta.CommandName())))
 	if err != nil {
 		t.Fatalf("loadFromReader returned error: %v", err)
 	}
@@ -112,7 +112,7 @@ news:
 	if cfg.Env != "dev" {
 		t.Fatalf("cfg.Env = %q, want dev", cfg.Env)
 	}
-	if cfg.App.Name != appmeta.CommandName {
+	if cfg.App.Name != appmeta.CommandName() {
 		t.Fatalf("cfg.App.Name = %q", cfg.App.Name)
 	}
 	if len(cfg.Redis.DBs) != 3 {

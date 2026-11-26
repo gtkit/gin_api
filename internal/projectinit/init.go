@@ -8,7 +8,7 @@
 //
 //	⓪ 输入校验（项目名 / 分支名 / 母版自身检测 / .git 形态 / 脏树 / 本地工具）
 //	① 在项目根之外建立受影响文件与旧 Git 的快照
-//	② 文件变换（写 project.mk → make gen-appmeta → 校验零差异 → 删除母版部署入口）
+//	② 文件变换（更新唯一身份文件 → 删除母版部署入口）
 //	③ 收尾自检（go build + make check）
 //	④ git init -b → 恢复本地 exclude → git add → git commit
 //
@@ -35,11 +35,8 @@ import (
 // motherModulePath 是母版自身的模块路径；在其上直接运行 init 会误伤母版，故拒绝。
 const motherModulePath = "github.com/gtkit/gin-api"
 
-// projectMkPath 是应用身份的唯一来源。
-const projectMkPath = "project.mk"
-
-// appmetaPath 是由 project.mk 生成的身份常量文件。
-const appmetaPath = "internal/appmeta/meta.go"
+// identityPath 是应用身份的唯一来源。
+const identityPath = "internal/appmeta/identity.mk"
 
 // motherOnlyFiles 是派生项目须精确移除的母版部署入口与历史验收报告。
 //
@@ -62,7 +59,7 @@ const noCommitNote = "已初始化仓库并暂存全部文件，但未提交：�
 
 // Options 控制一次实例化。
 type Options struct {
-	// Name 是新项目身份名，写入 project.mk 并据以生成身份常量。
+	// Name 是新项目身份名，写入应用身份的唯一来源。
 	Name string
 	// Branch 是新仓库的初始分支名；为空时固定为 main（不读 init.defaultBranch）。
 	Branch string
@@ -86,11 +83,9 @@ type Result struct {
 // Initializer 在某个项目根目录上执行实例化收尾。
 type Initializer struct {
 	root string
-	// 下列注入点便于测试替换默认实现（git / 自检 / 生成器依赖外部环境）。
+	// 下列注入点便于测试替换默认实现（git 与自检依赖外部环境）。
 	workspaceClean func(root string) (bool, error)
 	selfCheck      func(root string) error
-	genAppmeta     func(root string) error
-	checkAppmeta   func(root string) error
 	lookPath       func(name string) (string, error)
 	commitIdentity func(root string) error
 	gitInit        func(root, branch string) error
@@ -118,8 +113,6 @@ func New(startDir string) (*Initializer, error) {
 		root:           root,
 		workspaceClean: gitWorkspaceClean,
 		selfCheck:      goBuildAndCheck,
-		genAppmeta:     runGenAppmeta,
-		checkAppmeta:   runCheckAppmeta,
 		lookPath:       exec.LookPath,
 		commitIdentity: checkCommitIdentity,
 		gitInit:        gitInitBranch,
@@ -262,7 +255,7 @@ func (i *Initializer) validateInputs(opts Options) (branch string, gitState gitE
 
 // planDryRun 只列出将发生的改动，不触碰磁盘。
 func (i *Initializer) planDryRun(opts Options, result *Result) error {
-	result.Rewritten = append(result.Rewritten, projectMkPath, appmetaPath)
+	result.Rewritten = append(result.Rewritten, identityPath)
 	for _, rel := range motherOnlyFiles {
 		if _, err := os.Lstat(filepath.Join(i.root, rel)); err == nil {
 			result.Deleted = append(result.Deleted, rel)
@@ -284,7 +277,7 @@ func (i *Initializer) takeSnapshot(gitState gitEntryState, opts Options) (*snaps
 		return nil, err
 	}
 
-	affected := append([]string{projectMkPath, appmetaPath}, motherOnlyFiles...)
+	affected := append([]string{identityPath}, motherOnlyFiles...)
 	for _, rel := range affected {
 		if err := snap.capture(rel); err != nil {
 			return nil, errors.Join(err, snap.cleanup())
@@ -303,24 +296,13 @@ func (i *Initializer) takeSnapshot(gitState gitEntryState, opts Options) (*snaps
 	return snap, nil
 }
 
-// ② transformFiles 写入身份来源、重新生成身份常量、删除母版部署入口。
-//
-// 身份改写走「写 project.mk → make gen-appmeta → 校验零差异」，不再正则重写 meta.go：
-// 后者会形成第二个身份来源，且两者可以不一致。
+// ② transformFiles 写入身份文件并删除母版部署入口。
 func (i *Initializer) transformFiles(opts Options, result *Result) error {
 	name := strings.TrimSpace(opts.Name)
-	if err := i.writeProjectMk(name); err != nil {
+	if err := i.writeIdentity(name); err != nil {
 		return err
 	}
-	result.Rewritten = append(result.Rewritten, projectMkPath)
-
-	if err := i.genAppmeta(i.root); err != nil {
-		return fmt.Errorf("generate appmeta from %s: %w", projectMkPath, err)
-	}
-	if err := i.checkAppmeta(i.root); err != nil {
-		return fmt.Errorf("generated appmeta does not match %s: %w", projectMkPath, err)
-	}
-	result.Rewritten = append(result.Rewritten, appmetaPath)
+	result.Rewritten = append(result.Rewritten, identityPath)
 
 	for _, rel := range motherOnlyFiles {
 		full := filepath.Join(i.root, rel)
@@ -336,21 +318,6 @@ func (i *Initializer) transformFiles(opts Options, result *Result) error {
 		result.Deleted = append(result.Deleted, rel)
 	}
 	return nil
-}
-
-// writeProjectMk 用新项目名重写身份来源文件的 APP_NAME 与 APP_DISPLAY_NAME。
-//
-// 值本身已在 ⓪ 阶段通过 projectNamePattern 校验，字符集内不含引号、反斜杠、换行
-// 与 Make 元字符，因此写入是安全的；gen-appmeta 还会再校验一次。
-func (i *Initializer) writeProjectMk(name string) error {
-	path := filepath.Join(i.root, projectMkPath)
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", projectMkPath, err)
-	}
-	updated := setMakeVar(string(content), "APP_NAME", name)
-	updated = setMakeVar(updated, "APP_DISPLAY_NAME", displayNameFrom(name))
-	return writeFileAtomic(path, []byte(updated), 0o644)
 }
 
 // ④ rebuildGit 初始化新仓库、恢复本地忽略文件、暂存并（可选）提交。
@@ -447,18 +414,6 @@ func readModulePath(root string) (string, error) {
 	return "", errors.New("module path not found in go.mod")
 }
 
-// runGenAppmeta 调用 make 的身份生成入口。
-//
-// 走 make 而非直接调脚本：make 是身份生成的对外契约，派生项目改生成方式时
-// 只需改 Makefile，实例化流程不必跟着改。
-func runGenAppmeta(root string) error {
-	return runMake(root, "gen-appmeta")
-}
-
-func runCheckAppmeta(root string) error {
-	return runMake(root, "check-appmeta")
-}
-
 // isolatedEnv 是派生项目验证子命令的环境。
 //
 // **显式关闭 workspace**：父目录若存在 go.work（或其中的本地 replace），
@@ -466,16 +421,6 @@ func runCheckAppmeta(root string) error {
 // 而失败时人会去查派生项目的代码，实际问题在上层目录。
 func isolatedEnv() []string {
 	return append(os.Environ(), "GOWORK=off")
-}
-
-func runMake(root, target string) error {
-	cmd := exec.Command("make", target)
-	cmd.Dir = root
-	cmd.Env = isolatedEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("make %s: %w: %s", target, err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // goBuildAndCheck 收尾自检：先 go build，再 make check。

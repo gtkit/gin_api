@@ -25,8 +25,7 @@ TRIVY_IMAGE="$(sed -n -E 's/^TRIVY_IMAGE[[:space:]]*=[[:space:]]*(.+)$/\1/p' sec
 
 # APP_NAME 取自应用身份的唯一来源，与 `make image` 用同一个值——
 # 两处各写各的会让门禁扫的镜像和实际交付的镜像不是同一个。
-APP_NAME="$(sed -n -E 's/^APP_NAME[[:space:]]*=[[:space:]]*(.+)$/\1/p' project.mk)"
-[ -n "$APP_NAME" ] || fail "project.mk 缺少 APP_NAME"
+APP_NAME="$(sh ./scripts/check-appmeta.sh)"
 
 # IMAGE_DIGEST 由 build_release_image 填充，manifest 据此绑定被扫镜像。
 IMAGE_DIGEST=""

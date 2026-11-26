@@ -39,7 +39,7 @@ func TestValidateProjectName(t *testing.T) {
 		{name: "leading digit", input: "1abc", wantErr: true},
 		{name: "leading underscore", input: "_abc", wantErr: true},
 		{name: "hyphen", input: "my-service", wantErr: true},
-		// 以下六条是注入面：会破坏 Go 字面量或成为 Make 表达式。
+		// 这些值可能被 Make 或打包入口解释为表达式或路径。
 		{name: "double quote", input: `a"b`, wantErr: true},
 		{name: "backslash", input: `a\b`, wantErr: true},
 		{name: "make expression", input: "a$(shell echo x)", wantErr: true},
@@ -232,13 +232,17 @@ func TestTransformFailureRestoresFiles(t *testing.T) {
 	t.Parallel()
 
 	root := newFixture(t, "example.com/newproj")
+	blockedPath := filepath.Join(root, "REVIEW-my.md")
+	if err := os.Remove(blockedPath); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(blockedPath, "keep.txt"), "prevent directory removal")
 	before := snapshotTree(t, root)
 
 	init := newStubbedInitializer(root)
-	init.genAppmeta = func(string) error { return errors.New("generator exploded") }
 
 	_, err := init.Run(Options{Name: "my_service"})
-	if err == nil || !strings.Contains(err.Error(), "file transformation") {
+	if pathErr, ok := errors.AsType[*os.PathError](err); !ok || pathErr.Path != blockedPath {
 		t.Fatalf("expected transform failure, got %v", err)
 	}
 	assertTreeUnchanged(t, root, before)
@@ -336,16 +340,16 @@ func TestRunStandardInstantiation(t *testing.T) {
 	}
 
 	// 身份写进了唯一来源。
-	mk := readFile(t, filepath.Join(root, projectMkPath))
+	mk := readFile(t, filepath.Join(root, identityPath))
 	if !strings.Contains(mk, "APP_NAME = my_service") {
-		t.Fatalf("project.mk identity not written:\n%s", mk)
+		t.Fatalf("identity.mk identity not written:\n%s", mk)
 	}
 	if !strings.Contains(mk, "APP_DISPLAY_NAME = My Service") {
-		t.Fatalf("project.mk display name not derived:\n%s", mk)
+		t.Fatalf("identity.mk display name not derived:\n%s", mk)
 	}
-	// project.mk 的注释解释了取值约束与「什么不属于身份」，必须保留而非整文件重写。
+	// identity.mk 的注释解释了取值约束与「什么不属于身份」，必须保留而非整文件重写。
 	if !strings.Contains(mk, "唯一来源") {
-		t.Fatalf("project.mk comments must be preserved:\n%s", mk)
+		t.Fatalf("identity.mk comments must be preserved:\n%s", mk)
 	}
 
 	// 母版专属部署入口已删除，且给出了自备部署入口的提示。
@@ -497,7 +501,6 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	init := newStubbedInitializer(root)
 	init.gitInit = func(string, string) error { t.Fatal("gitInit called in dry-run"); return nil }
 	init.selfCheck = func(string) error { t.Fatal("selfCheck called in dry-run"); return nil }
-	init.genAppmeta = func(string) error { t.Fatal("genAppmeta called in dry-run"); return nil }
 
 	result, err := init.Run(Options{Name: "my_service", DryRun: true})
 	if err != nil {
@@ -506,7 +509,7 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	if !result.DryRun {
 		t.Fatal("result.DryRun = false, want true")
 	}
-	if len(result.Rewritten) == 0 || len(result.Deleted) == 0 {
+	if !slices.Equal(result.Rewritten, []string{identityPath}) || len(result.Deleted) == 0 {
 		t.Fatalf("dry-run should report planned changes, got rewritten=%v deleted=%v", result.Rewritten, result.Deleted)
 	}
 	for _, name := range []string{"REVIEW.md", "REVIEW-my.md"} {
@@ -730,8 +733,6 @@ func newStubbedInitializer(root string) *Initializer {
 		root:           root,
 		workspaceClean: func(string) (bool, error) { return true, nil },
 		selfCheck:      func(string) error { return nil },
-		genAppmeta:     func(string) error { return nil },
-		checkAppmeta:   func(string) error { return nil },
 		lookPath:       func(string) (string, error) { return "/usr/bin/stub", nil },
 		commitIdentity: func(string) error { return nil },
 		gitInit:        func(string, string) error { return nil },
@@ -740,7 +741,7 @@ func newStubbedInitializer(root string) *Initializer {
 	}
 }
 
-// newRealGitInitializer 用真实 git 命令，但仍打桩生成器与自检（它们需要完整仓库与工具链）。
+// newRealGitInitializer 用真实 git 命令，但仍打桩自检（自检需要完整仓库与工具链）。
 func newRealGitInitializer(t *testing.T, root string) *Initializer {
 	t.Helper()
 	init := newStubbedInitializer(root)
@@ -756,7 +757,7 @@ func newRealGitInitializer(t *testing.T, root string) *Initializer {
 
 const fixtureMakefile = "COVERAGE_MIN ?= 62.0\n\ncheck:\n\t@echo check\n"
 
-const fixtureProjectMk = `# project.mk —— 应用身份的唯一来源
+const fixtureIdentity = `# identity.mk —— 应用身份的唯一来源
 APP_NAME = gin_api
 APP_DISPLAY_NAME = Gin API
 `
@@ -766,15 +767,8 @@ func newFixture(t *testing.T, modulePath string) string {
 
 	root := t.TempDir()
 	files := map[string]string{
-		"go.mod":      "module " + modulePath + "\n\ngo 1.26\n",
-		projectMkPath: fixtureProjectMk,
-		appmetaPath: `package appmeta
-
-const (
-	CommandName = "gin_api"
-	RuntimeName = "Gin API"
-)
-`,
+		"go.mod":         "module " + modulePath + "\n\ngo 1.26\n",
+		identityPath:     fixtureIdentity,
 		"Makefile":       fixtureMakefile,
 		".gitlab-ci.yml": "stages:\n  - deploy\n",
 		"deployment.sh":  "#!/bin/bash\necho deploy\n",
@@ -979,7 +973,7 @@ func TestFailedRollbackRetainsOriginalBytesAndGit(t *testing.T) {
 	requireGit(t)
 	root := newFixture(t, "example.com/incomplete-recovery")
 	makeRealRepoWithHistory(t, root)
-	original := readFile(t, filepath.Join(root, projectMkPath))
+	original := readFile(t, filepath.Join(root, identityPath))
 	initializer := newRealGitInitializer(t, root)
 	moved := root + "-test-owned-moved"
 	t.Cleanup(func() {
@@ -1030,7 +1024,7 @@ func TestFailedRollbackRetainsOriginalBytesAndGit(t *testing.T) {
 	}
 	found := false
 	for _, entry := range recovery.Entries {
-		if entry.Path == projectMkPath {
+		if entry.Path == identityPath {
 			found = true
 			if string(entry.Content) != original || entry.Kind != entryRegular {
 				t.Fatal("original bytes or presence changed")

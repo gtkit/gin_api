@@ -4,7 +4,7 @@
 # ============================================================================
 FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
-# APP_NAME 决定 builder 阶段的产物名，来源是 project.mk（应用身份的唯一来源），
+# APP_NAME 决定 builder 阶段的产物名，来源是 internal/appmeta/identity.mk，
 # 由 `make image` 经 --build-arg 传入。它只在本阶段生效——容器内路径固定，见 stage 2。
 ARG APP_NAME
 # GOPROXY 可覆盖：容器内默认 proxy.golang.org 在部分网络不可达，Go 会回退 direct，
@@ -24,10 +24,9 @@ RUN --mount=type=secret,id=netrc,target=/root/.netrc,mode=0600 \
 
 COPY . .
 
-# 必须显式断言 APP_NAME 非空，不能指望 `-o /out/${APP_NAME}` 在变量为空时自然失败：
-# 实测 `go build -o out/ .`（即变量为空时的展开结果）exit=0——Go 把结尾为 `/` 的路径
-# 当目录处理并生成默认名二进制。少了这条断言，"参数为空则构建失败" 就是假门禁。
-RUN test -n "$APP_NAME" || { echo "APP_NAME build-arg is required (see project.mk)" >&2; exit 1; }
+# 构建产物名与 Go 嵌入的身份必须一致。空参数也会在此失败。
+RUN identity_name="$(sh ./scripts/check-appmeta.sh)" \
+    && { test "$APP_NAME" = "$identity_name" || { echo "APP_NAME build arg must match internal/appmeta/identity.mk" >&2; exit 1; }; }
 
 # CGO_ENABLED=0：纯 Go 依赖（gorm mysql 驱动无 cgo），产出静态二进制；
 # -trimpath 去除构建机路径，-s -w 去符号表减小体积。

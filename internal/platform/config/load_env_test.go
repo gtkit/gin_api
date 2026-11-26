@@ -100,7 +100,7 @@ ssl:
   pem: temp/pem.pem
 news:
   fsurl: ""
-`, appmeta.CommandName)
+`, appmeta.CommandName())
 }
 
 // 以下用例一律不加 t.Parallel()：t.Setenv 与并行测试互斥（会 panic），
